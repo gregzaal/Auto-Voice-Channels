@@ -1,0 +1,15 @@
+__pycache__
+/.vscode
+/bot-env
+/guilds
+/logo
+/utils
+analytics.json
+config.json
+log*.txt
+patreon_config.json
+patreon_data.json
+patron_auths.json
+push.bat
+secondaries.txt
+venv.bat
