@@ -6,7 +6,8 @@ import sys
 from datetime import datetime
 from pprint import pformat
 from time import time
-
+import asyncio
+import concurrent.futures
 import cfg
 from commands import admin_commands
 import commands
@@ -56,39 +57,75 @@ utils.clean_permastore()
 utils.update_server_location()
 
 
-@loop(seconds=1)
-async def cleanup(client):
-    if client.is_ready():
-        # TODO probably possible to run into race conditions
-        t = time()
+class LoopChecks:
+    def __init__(self, client, tick):
+        self._client = client
+        self._time = time()
+        self._loop = asyncio.get_event_loop()
+        self._tick = tick
 
-        tmp = {}
-        for c, v in cfg.CURRENT_REQUESTS.items():
-            if t - v < 5:
-                tmp[c] = v
-        cfg.CURRENT_REQUESTS = tmp
+    async def Waiting_Loop(self):
+        print("Starting Waiting Loop")
+        while True:
+            tmp = {}
+            for c, v in cfg.CURRENT_REQUESTS.items():
+                print("Wew")
+                if self._time - v < 5:
+                    tmp[c] = v
+            cfg.CURRENT_REQUESTS = tmp
+            await asyncio.sleep(self._tick)
 
-        tmp = {}
-        for u, v in cfg.USER_REQUESTS.items():
-            if t - v < 15:
-                tmp[u] = v
-            else:
-                if u in cfg.USER_ABUSE_EVENTS:
-                    del(cfg.USER_ABUSE_EVENTS[u])
-        cfg.USER_REQUESTS = tmp
+    async def Active_Loop(self):
+        print("Starting Active Loop")
+        while True:
+            tmp = {}
+            for u, v in cfg.USER_REQUESTS.items():
+                print("Boo")
+                if self._time - v < 15:
+                    tmp[u] = v
+                else:
+                    if u in cfg.USER_ABUSE_EVENTS:
+                        del (cfg.USER_ABUSE_EVENTS[u])
+            cfg.USER_REQUESTS = tmp
+            await asyncio.sleep(self._tick)
 
-        tmp = {}
-        for e, v in cfg.ERROR_MESSAGES.items():
-            if t - v < (60 * 5):  # Forget messages older than 5 minutes
-                tmp[e] = v
-        cfg.ERROR_MESSAGES = tmp
+    async def Other_Loops(self):
+        print("Starting Other Loops")
+        while True:
+            tmp = {}
+            for e, v in cfg.ERROR_MESSAGES.items():
+                if self._time - v < (60 * 5):  # Forget messages older than 5 minutes
+                    tmp[e] = v
+            cfg.ERROR_MESSAGES = tmp
 
-        tmp = {}
-        for e, v in cfg.DM_ERROR_MESSAGES.items():
-            if t - v < 15:
-                tmp[e] = v
-        cfg.DM_ERROR_MESSAGES = tmp
+            tmp = {}
+            for e, v in cfg.DM_ERROR_MESSAGES.items():
+                if self._time - v < 15:
+                    tmp[e] = v
+            cfg.DM_ERROR_MESSAGES = tmp
+            await asyncio.sleep(self._tick)
 
+    async def timer(self):
+        print("Starting Timer")
+        while True:
+            self._time = time()
+            await asyncio.sleep(self._tick)
+
+    def start_loops(self):
+        self._loop.create_task(self.timer())
+        self._loop.create_task(self.Waiting_Loop())
+        self._loop.create_task(self.Active_Loop())
+        self._loop.create_task(self.Other_Loops())
+
+
+def cleanup(client, tick_):
+    # TODO probably possible to run into race conditions
+
+    LoopSystem = LoopChecks(client=client, tick=tick_)
+    LoopSystem.start_loops()
+
+    async def first_start(client):
+        while not client.is_ready(): await asyncio.sleep(1)
         if not cfg.FIRST_RUN_COMPLETE:
             cfg.FIRST_RUN_COMPLETE = True
             guilds = func.get_guilds(client)
@@ -100,13 +137,19 @@ async def cleanup(client):
                 text = "🚧Nothing🚧"
             await client.change_presence(activity=discord.Activity(name=text, type=discord.ActivityType.watching))
 
+    asyncio.get_event_loop().create_task(first_start(client))
+
 
 @loop(seconds=cfg.CONFIG['loop_interval'])
 async def main_loop(client):
     start_time = time()
     if client.is_ready():
         tt = {}  # Sum of all timings
-        for guild in func.get_guilds(client):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            thread_ = executor.submit(func.get_guilds, client)
+        while not thread_.done(): await asyncio.sleep(0.1)
+        guilds = thread_.result()
+        for guild in guilds:
             if not func.is_gold(guild):
                 settings = utils.get_serv_settings(guild)
                 if settings['enabled'] and settings['auto_channels']:
@@ -125,7 +168,6 @@ async def main_loop(client):
             await func.admin_log(
                 ":exclamation:" * round(min(max((cfg.TICK_TIME - 5) / 2, 1), 10)) +
                 text, client, important=cfg.TICK_TIME > 40)
-        # print("    TICK", '{0:.3f}s'.format(cfg.TICK_TIME))
 
         # Check for new patrons using gold role in support server
         if cfg.SAPPHIRE_ID is None:
@@ -139,7 +181,7 @@ async def main_loop(client):
                         await func.check_patreon(force_update=TOKEN != cfg.CONFIG['token_dev'], client=client)
                     cfg.NUM_PATRONS = num_patrons
 
-
+"""
 @loop(seconds=cfg.CONFIG['gold_interval'])
 async def gold_loop(client):
     start_time = time()
@@ -156,43 +198,48 @@ async def gold_loop(client):
                 ":exclamation:" * round(min(max((cfg.G_TICK_TIME - 5) / 2, 1), 10)) +
                 " 💳 TICK time was {0:.3f}s".format(cfg.G_TICK_TIME), client, important=cfg.G_TICK_TIME > 10)
         # print("    GOLD TICK", '{0:.3f}s'.format(cfg.G_TICK_TIME))
+"""
+
+
+def for_looper(client):
+    for guild in func.get_guilds(client):
+        settings = utils.get_serv_settings(guild)  # Need fresh in case some were deleted
+        dead_secondaries = []
+        for p in settings['auto_channels']:
+            for sid, sv in settings['auto_channels'][p]['secondaries'].items():
+                s = client.get_channel(sid)
+                if s is None:
+                    dying = sv['dying'] + 1 if 'dying' in sv else 1
+                    settings['auto_channels'][p]['secondaries'][sid]['dying'] = dying
+                    cfg.GUILD_SETTINGS[guild.id] = settings  # Temporarily settings, no need to write to disk.
+                    log("{} is dead ({})".format(sid, dying), guild)
+                    if dying >= 3:
+                        dead_secondaries.append(sid)
+                else:
+                    if 'dying' in sv:
+                        settings['auto_channels'][p]['secondaries'][sid]['dying'] = 0
+                        cfg.GUILD_SETTINGS[guild.id] = settings  # Temporarily settings, no need to write to disk.
+
+        if dead_secondaries:
+            for p, pv in settings['auto_channels'].items():
+                tmp = {}
+                for s, sv in pv['secondaries'].items():
+                    if s not in dead_secondaries:
+                        tmp[s] = sv
+                settings['auto_channels'][p]['secondaries'] = tmp
+
+            utils.set_serv_settings(guild, settings)
+
+            for s in dead_secondaries:
+                if s in cfg.ATTEMPTED_CHANNEL_NAMES:
+                    del cfg.ATTEMPTED_CHANNEL_NAMES[s]
 
 
 @loop(minutes=2)
 async def check_dead(client):
     if client.is_ready():
-        # Channel already deleted, remove from settings
-        for guild in func.get_guilds(client):
-            settings = utils.get_serv_settings(guild)  # Need fresh in case some were deleted
-            dead_secondaries = []
-            for p in settings['auto_channels']:
-                for sid, sv in settings['auto_channels'][p]['secondaries'].items():
-                    s = client.get_channel(sid)
-                    if s is None:
-                        dying = sv['dying'] + 1 if 'dying' in sv else 1
-                        settings['auto_channels'][p]['secondaries'][sid]['dying'] = dying
-                        cfg.GUILD_SETTINGS[guild.id] = settings  # Temporarily settings, no need to write to disk.
-                        log("{} is dead ({})".format(sid, dying), guild)
-                        if dying >= 3:
-                            dead_secondaries.append(sid)
-                    else:
-                        if 'dying' in sv:
-                            settings['auto_channels'][p]['secondaries'][sid]['dying'] = 0
-                            cfg.GUILD_SETTINGS[guild.id] = settings  # Temporarily settings, no need to write to disk.
-
-            if dead_secondaries:
-                for p, pv in settings['auto_channels'].items():
-                    tmp = {}
-                    for s, sv in pv['secondaries'].items():
-                        if s not in dead_secondaries:
-                            tmp[s] = sv
-                    settings['auto_channels'][p]['secondaries'] = tmp
-
-                utils.set_serv_settings(guild, settings)
-
-                for s in dead_secondaries:
-                    if s in cfg.ATTEMPTED_CHANNEL_NAMES:
-                        del cfg.ATTEMPTED_CHANNEL_NAMES[s]
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            await client.loop.run_in_executor(pool, for_looper, (client))
 
 
 @loop(seconds=2)
@@ -361,13 +408,19 @@ async def dynamic_tickrate(client):
         cfg.TICK_RATE = new_tickrate
 
 
+def get_potentials():
+    with open(os.path.join(cfg.SCRIPT_DIR, "secondaries.txt"), 'r') as f:
+        potentials = f.read()
+    return potentials
+
+
 @loop(minutes=5.22)
 async def lingering_secondaries(client):
     if client.is_ready():
         start_time = time()
         potentials = None
-        with open(os.path.join(cfg.SCRIPT_DIR, "secondaries.txt"), 'r') as f:
-            potentials = f.read()
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            potentials = await client.loop.run_in_executor(pool, get_potentials)
         potentials = potentials.split('\n')
         if potentials:
             potentials = set(potentials[-10000:])  # Sets apparently give better performance. Discard all but last 10k.
@@ -410,7 +463,9 @@ async def analytics(client):
             'ng': len(guilds),
             'm': round(psutil.virtual_memory().used / 1024 / 1024 / 1024, 2),
         }
-        utils.write_json(fp, analytics, indent=None)
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            await client.loop.run_in_executor(
+                pool, utils.write_json, (fp, analytics, None))
 
 
 @loop(minutes=2)
@@ -533,7 +588,7 @@ class MyClient(discord.AutoShardedClient):
 
     async def on_ready(self):
         print('=' * 24)
-        curtime = datetime.now(pytz.timezone(cfg.CONFIG['log_timezone'])).strftime("%Y-%m-%d %H:%M")
+        curtime = datetime.now().strftime("%Y-%m-%d %H:%M")
         print(curtime)
         print('Logged in as')
         print(self.user.name)
@@ -561,7 +616,7 @@ class MyClient(discord.AutoShardedClient):
 
 
 if USE_SHARDS:
-    client = MyClient(shard_count=6)
+    client = MyClient(shard_count=1)
 else:
     client = MyClient()
 
@@ -960,9 +1015,9 @@ async def on_guild_remove(guild):
         client)
 
 
-cleanup.start(client)
+cleanup(client=client, tick_=1)
 main_loop.start(client)
-gold_loop.start(client)
+#gold_loop.start(client)
 check_dead.start(client)
 check_votekicks.start(client)
 create_join_channels.start(client)
