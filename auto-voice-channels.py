@@ -181,12 +181,16 @@ async def main_loop(client):
                         await func.check_patreon(force_update=TOKEN != cfg.CONFIG['token_dev'], client=client)
                     cfg.NUM_PATRONS = num_patrons
 
-"""
+
 @loop(seconds=cfg.CONFIG['gold_interval'])
 async def gold_loop(client):
     start_time = time()
     if client.is_ready():
-        for guild in func.get_guilds(client):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            thread_ = executor.submit(func.get_guilds, client)
+        while not thread_.done(): await asyncio.sleep(0.1)
+        guilds = thread_.result()
+        for guild in guilds:
             if func.is_gold(guild):
                 settings = utils.get_serv_settings(guild)
                 if settings['enabled'] and settings['auto_channels']:
@@ -198,7 +202,7 @@ async def gold_loop(client):
                 ":exclamation:" * round(min(max((cfg.G_TICK_TIME - 5) / 2, 1), 10)) +
                 " 💳 TICK time was {0:.3f}s".format(cfg.G_TICK_TIME), client, important=cfg.G_TICK_TIME > 10)
         # print("    GOLD TICK", '{0:.3f}s'.format(cfg.G_TICK_TIME))
-"""
+
 
 
 def for_looper(client):
@@ -1017,7 +1021,7 @@ async def on_guild_remove(guild):
 
 cleanup(client=client, tick_=1)
 main_loop.start(client)
-#gold_loop.start(client)
+gold_loop.start(client)
 check_dead.start(client)
 check_votekicks.start(client)
 create_join_channels.start(client)
