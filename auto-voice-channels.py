@@ -243,7 +243,7 @@ def for_looper(client):
 async def check_dead(client):
     if client.is_ready():
         with concurrent.futures.ThreadPoolExecutor() as pool:
-            await client.loop.run_in_executor(pool, for_looper, (client))
+            await client.loop.run_in_executor(pool, for_looper, client)
 
 
 @loop(seconds=2)
@@ -469,7 +469,7 @@ async def analytics(client):
         }
         with concurrent.futures.ThreadPoolExecutor() as pool:
             await client.loop.run_in_executor(
-                pool, utils.write_json, (fp, analytics, None))
+                pool, utils.write_json, fp, analytics)
 
 
 @loop(minutes=2)
