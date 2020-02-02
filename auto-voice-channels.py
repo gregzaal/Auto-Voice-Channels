@@ -69,7 +69,7 @@ class LoopChecks:
         while True:
             tmp = {}
             for c, v in cfg.CURRENT_REQUESTS.items():
-                print("Wew")
+                
                 if self._time - v < 5:
                     tmp[c] = v
             cfg.CURRENT_REQUESTS = tmp
@@ -80,7 +80,7 @@ class LoopChecks:
         while True:
             tmp = {}
             for u, v in cfg.USER_REQUESTS.items():
-                print("Boo")
+       
                 if self._time - v < 15:
                     tmp[u] = v
                 else:
