@@ -13,6 +13,7 @@ Requires:
 
 * Clone: `git clone git@github.com:gregzaal/Auto-Voice-Channels.git`
 * `cd Auto-Voice-Channels`
+* Make folder to store guild settings: `mkdir guilds`
 * Install pip: `sudo apt-get -y install python3-pip`
 * Install venv: `pip3 install virtualenv`
 * Make venv: `python3 -m virtualenv bot-env`
