@@ -1,0 +1,7 @@
+{
+    "aliases": {},
+    "enabled": true,
+    "requiredrole": "",
+    "auto_channels": {},
+    "channel_name_template": "## [@@game_name@@]"
+}

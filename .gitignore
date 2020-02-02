@@ -9,6 +9,7 @@ config.json
 log*.txt
 patreon_config.json
 patreon_data.json
+patreon_info.py
 patron_auths.json
 push.bat
 secondaries.txt
