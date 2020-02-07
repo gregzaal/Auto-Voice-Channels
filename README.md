@@ -1,4 +1,12 @@
-# Auto-Voice-Channels
+# Auto-Voice-Channels - BETA BUILD
+
+
+----------------------------------
+
+This build is highly unstable
+
+----------------------------------
+
 A Discord bot that automatically creates voice channels as they are needed.
 
 Public bot invite link: <https://discordapp.com/api/oauth2/authorize?client_id=479393422705426432&permissions=286280784&scope=bot>
