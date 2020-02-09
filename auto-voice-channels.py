@@ -28,7 +28,6 @@ if os.path.exists(os.path.join(cfg.SCRIPT_DIR, 'venv.bat')):
     # Working locally, use dev bot
     print("DEV")
     TOKEN = cfg.CONFIG['token_dev']
-    USE_SHARDS = True
 else:
     TOKEN = cfg.CONFIG['token']
     USE_SHARDS = True
