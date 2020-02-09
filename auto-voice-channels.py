@@ -21,12 +21,11 @@ from discord.ext.tasks import loop
 
 logging.basicConfig(level=logging.INFO)
 
+DEV_BOT = cfg.CONFIG['DEV'] if 'DEV' in cfg.CONFIG else False
 USE_SHARDS = False
-if os.path.exists(os.path.join(cfg.SCRIPT_DIR, 'venv.bat')):
-    # Working locally, use dev bot
-    print("DEV")
+if DEV_BOT:
+    print("DEV BOT")
     TOKEN = cfg.CONFIG['token_dev']
-    USE_SHARDS = True
 else:
     TOKEN = cfg.CONFIG['token']
     USE_SHARDS = True
