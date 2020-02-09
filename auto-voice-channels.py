@@ -1,24 +1,26 @@
-import os
+import asyncio
+import commands
+import concurrent.futures
 import logging
-import traceback
+import os
 import subprocess
 import sys
+import traceback
+from commands import admin_commands
 from datetime import datetime
 from pprint import pformat
 from time import time
-import asyncio
-import concurrent.futures
-import cfg
-from commands import admin_commands
-import commands
+
 import discord
+from discord.ext.tasks import loop
+
+import cfg
+import functions as func
 import psutil
 import pytz
 import translate
 import utils
-import functions as func
-from functions import log, echo
-from discord.ext.tasks import loop
+from functions import echo, log
 
 logging.basicConfig(level=logging.INFO)
 
