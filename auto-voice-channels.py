@@ -594,7 +594,7 @@ class MyClient(discord.AutoShardedClient):
 
     async def on_ready(self):
         print('=' * 24)
-        curtime = datetime.now().strftime("%Y-%m-%d %H:%M")
+        curtime = datetime.now(pytz.timezone(cfg.CONFIG['log_timezone'])).strftime("%Y-%m-%d %H:%M")
         print(curtime)
         print('Logged in as')
         print(self.user.name)
@@ -622,7 +622,7 @@ class MyClient(discord.AutoShardedClient):
 
 
 if USE_SHARDS:
-    client = MyClient(shard_count=1)
+    client = MyClient(shard_count=6)
 else:
     client = MyClient()
 
