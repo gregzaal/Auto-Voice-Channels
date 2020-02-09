@@ -64,23 +64,23 @@ class LoopChecks:
         self._loop = asyncio.get_event_loop()
         self._tick = tick
 
-    async def Waiting_Loop(self):
+    async def waiting_loop(self):
         print("Starting Waiting Loop")
         while True:
             tmp = {}
             for c, v in cfg.CURRENT_REQUESTS.items():
-                
+
                 if self._time - v < 5:
                     tmp[c] = v
             cfg.CURRENT_REQUESTS = tmp
             await asyncio.sleep(self._tick)
 
-    async def Active_Loop(self):
+    async def active_loop(self):
         print("Starting Active Loop")
         while True:
             tmp = {}
             for u, v in cfg.USER_REQUESTS.items():
-       
+
                 if self._time - v < 15:
                     tmp[u] = v
                 else:
@@ -89,7 +89,7 @@ class LoopChecks:
             cfg.USER_REQUESTS = tmp
             await asyncio.sleep(self._tick)
 
-    async def Other_Loops(self):
+    async def other_loops(self):
         print("Starting Other Loops")
         while True:
             tmp = {}
@@ -113,9 +113,9 @@ class LoopChecks:
 
     def start_loops(self):
         self._loop.create_task(self.timer())
-        self._loop.create_task(self.Waiting_Loop())
-        self._loop.create_task(self.Active_Loop())
-        self._loop.create_task(self.Other_Loops())
+        self._loop.create_task(self.waiting_loop())
+        self._loop.create_task(self.active_loop())
+        self._loop.create_task(self.other_loops())
 
 
 def cleanup(client, tick_):
@@ -125,7 +125,8 @@ def cleanup(client, tick_):
     LoopSystem.start_loops()
 
     async def first_start(client):
-        while not client.is_ready(): await asyncio.sleep(1)
+        while not client.is_ready():
+            await asyncio.sleep(1)
         if not cfg.FIRST_RUN_COMPLETE:
             cfg.FIRST_RUN_COMPLETE = True
             guilds = func.get_guilds(client)
@@ -147,7 +148,8 @@ async def main_loop(client):
         tt = {}  # Sum of all timings
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             thread_ = executor.submit(func.get_guilds, client)
-        while not thread_.done(): await asyncio.sleep(0.1)
+        while not thread_.done():
+            await asyncio.sleep(0.1)
         guilds = thread_.result()
         for guild in guilds:
             if not func.is_gold(guild):
@@ -188,7 +190,8 @@ async def gold_loop(client):
     if client.is_ready():
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             thread_ = executor.submit(func.get_guilds, client)
-        while not thread_.done(): await asyncio.sleep(0.1)
+        while not thread_.done():
+            await asyncio.sleep(0.1)
         guilds = thread_.result()
         for guild in guilds:
             if func.is_gold(guild):
@@ -202,7 +205,6 @@ async def gold_loop(client):
                 ":exclamation:" * round(min(max((cfg.G_TICK_TIME - 5) / 2, 1), 10)) +
                 " 💳 TICK time was {0:.3f}s".format(cfg.G_TICK_TIME), client, important=cfg.G_TICK_TIME > 10)
         # print("    GOLD TICK", '{0:.3f}s'.format(cfg.G_TICK_TIME))
-
 
 
 def for_looper(client):
