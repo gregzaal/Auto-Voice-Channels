@@ -452,7 +452,12 @@ async def admin_log(msg, client, important=False):
     mention = admin.mention
     if important and len(msg + "\n" + mention) <= 2000:
         msg = msg + "\n" + mention
-    await admin.dm_channel.send(msg)
+
+    admin_channel = admin.dm_channel
+    if 'admin_channel' in cfg.CONFIG:
+        admin_channel = client.get_channel(cfg.CONFIG['admin_channel'])
+
+    await admin_channel.send(msg)
 
 
 @utils.func_timer()
