@@ -305,56 +305,6 @@ async def admin_command(cmd, ctx):
             await channel.send(traceback.format_exc())
             await func.react(message, '❌')
 
-    if cmd == 'addsapphire':
-        if cfg.SAPPHIRE_ID is not None:
-            await channel.send("You need to DM the main public bot for this.")
-            await func.react(message, '❌')
-            return
-        params = params_str.split('\n')
-        sapphire = {}
-        try:
-            for l in params:
-                if l.startswith('server:'):
-                    l = l.split(':', 1)[1]
-                    sapphire['servers'] = [int(l.strip())]
-                elif l.startswith('initiator:'):
-                    l = l.split(':', 1)[1]
-                    sapphire['initiator'] = int(l.strip())
-                elif l.startswith('client_id:'):
-                    l = l.split(':', 1)[1]
-                    sapphire['client_id'] = int(l.strip())
-                elif l.startswith('token:'):
-                    l = l.split(':', 1)[1]
-                    sapphire['token'] = l.strip()
-        except:
-            await channel.send(traceback.format_exc())
-            await func.react(message, '❌')
-            return
-        required_params = ['servers', 'client_id', 'token', 'initiator']
-        for p in required_params:
-            if p not in sapphire:
-                await channel.send(
-                    "Missing required parameter: `{}`\n\nExpected syntax:\n```\n"
-                    "addsapphire\n"
-                    "server: 332246283601313794\n"
-                    "initiator: 291185187105275904\n"
-                    "client_id: 615868995668672532\n"
-                    "token: XXXXXXXXXXXXXXXXXXXXXXXX.XXXXXX.XXXXXXXXXXXXXXXXXXXXXXXXXXX\n"
-                    "```".format(p))
-                await func.react(message, '❌')
-                return
-        new_sapphire_id = str(len(cfg.CONFIG['sapphires']) - 1)
-        new_config = deepcopy(cfg.CONFIG)
-        new_config['sapphires'][new_sapphire_id] = sapphire
-        cfg.CONFIG = utils.get_config()
-        utils.write_json(os.path.join(cfg.SCRIPT_DIR, 'config.json'), new_config, indent=4)
-        await channel.send("New sapphire added (#{}), now do `reload` here, and for the new bot.\n"
-                           "Invite link for the bot is: <{}>".format(
-                               new_sapphire_id,
-                               cfg.INVITE_LINK.replace('@@CID@@', str(sapphire['client_id']))
-                           ))
-        await func.react(message, '✅')
-
     if cmd == 'exit':
         attempts = 0
         while attempts < 100:
