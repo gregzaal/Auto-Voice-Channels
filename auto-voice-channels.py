@@ -655,14 +655,6 @@ async def on_message(message):
     if not client.is_ready():
         return
 
-    if message.channel.id == 601348321566654475:  # Message in #admin channel of support server
-        if message.author.name == "Zapier" and (
-            "Gold" in message.content or
-            "Sapphire" in message.content or
-            "Diamond" in message.content
-        ):
-            await func.check_patreon(force_update=True)
-
     if message.author.bot:
         # Don't respond to self or bots
         return
