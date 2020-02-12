@@ -91,15 +91,15 @@ async def admin_command(cmd, ctx):
         mem = psutil.virtual_memory()
         disk = psutil.disk_usage('/')
         await r.edit(content=(
-            "Servers: **{active_servs}** (T:{tot_servs} S:{shards}) \t "
+            "Servers: **{tot_servs}** (A:{active_servs} S:{shards}) \t "
             "Users: **{users}** \t Channels: **{channels}** \n"
             "Response time: **{rt}** \t Tick rate: **{tr}** \t Tick time: **{tt}** | **{gtt}**\n"
             "CPU: **{cpu}%** \t MEM: **{memg} ({memp}%)** \t DISK: **{diskg} ({diskp}%)**\n"
             "**Last commit:** {commit}\n"
             "**Lines of code:** {lines}\n"
             "**Timings:** {timings}".format(
-                active_servs=utils.num_active_guilds(guilds),
                 tot_servs=len(guilds),
+                active_servs=utils.num_active_guilds(guilds),
                 shards=utils.num_shards(guilds),
                 users=num_users,
                 channels=utils.num_active_channels(guilds),
