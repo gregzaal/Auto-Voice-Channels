@@ -22,6 +22,8 @@ from functions import log, echo
 from discord.ext.tasks import loop
 
 logging.basicConfig(level=logging.INFO)
+ADMIN_CHANNEL = None
+ADMIN = None
 
 DEV_BOT = cfg.CONFIG['DEV'] if 'DEV' in cfg.CONFIG else False
 NUM_SHARDS = cfg.CONFIG['num_shards'] if 'num_shards' in cfg.CONFIG else 0
@@ -124,6 +126,9 @@ def cleanup(client, tick_):
     LoopSystem.start_loops()
 
     async def first_start(client):
+        global ADMIN_CHANNEL
+        global ADMIN
+
         while not client.is_ready():
             await asyncio.sleep(1)
         if not cfg.FIRST_RUN_COMPLETE:
@@ -136,6 +141,8 @@ def cleanup(client, tick_):
             else:
                 text = "🚧Nothing🚧"
             await client.change_presence(activity=discord.Activity(name=text, type=discord.ActivityType.watching))
+            ADMIN_CHANNEL = client.get_channel(cfg.CONFIG['admin_channel'])
+            ADMIN = client.get_user(cfg.CONFIG['admin_id'])
 
     asyncio.get_event_loop().create_task(first_start(client))
 
@@ -662,43 +669,44 @@ async def on_message(message):
 
     guilds = func.get_guilds(client)
 
-    if not message.guild:  # DM
-        if message.author.bot:
-            return
+    admin = ADMIN
+    admin_channels = [admin.dm_channel]
+    if 'admin_channel' in cfg.CONFIG:
+        admin_channels.append(ADMIN_CHANNEL)
+    if message.channel in admin_channels:
+        split = message.content.split(' ')
+        cmd = split[0].split('\n')[0].lower()
+        params_str = message.content[len(cmd):].strip()
+        params = params_str.split(' ')
 
-        admin = client.get_user(cfg.CONFIG['admin_id'])
-        if message.author.id == cfg.CONFIG['admin_id'] and message.channel == admin.dm_channel:
-            split = message.content.split(' ')
-            cmd = split[0].split('\n')[0].lower()
-            params_str = message.content[len(cmd):].strip()
-            params = params_str.split(' ')
-
-            if cmd == 'reload':
-                m = utils.strip_quotes(params_str)
-                success = await reload_modules(m)
-                await func.react(message, '✅' if success else '❌')
-            else:
-                ctx = {
-                    'client': client,
-                    'admin': admin,
-                    'message': message,
-                    'params': params,
-                    'params_str': params_str,
-                    'guilds': guilds,
-                    'LAST_COMMIT': LAST_COMMIT,
-                }
-                await admin_commands.admin_command(cmd, ctx)
+        if cmd == 'reload':
+            m = utils.strip_quotes(params_str)
+            success = await reload_modules(m)
+            await func.react(message, '✅' if success else '❌')
         else:
-            if 'help' in message.content and len(message.content) <= len("@Auto Voice Channels help"):
-                await message.channel.send("Sorry I don't respond to commands in DMs, "
-                                           "you need to type the commands in a channel in your server.\n"
-                                           "If you've tried that already, then make sure I have the right permissions "
-                                           "to see and reply to your commands in that channel.")
-            else:
-                await admin.dm_channel.send(embed=discord.Embed(
-                    title="DM from **{}** [`{}`]:".format(message.author.name, message.author.id),
-                    description=message.content
-                ))
+            ctx = {
+                'client': client,
+                'admin': admin,
+                'message': message,
+                'params': params,
+                'params_str': params_str,
+                'guilds': guilds,
+                'LAST_COMMIT': LAST_COMMIT,
+            }
+            await admin_commands.admin_command(cmd, ctx)
+        return
+
+    if not message.guild:  # DM
+        if 'help' in message.content and len(message.content) <= len("@Auto Voice Channels help"):
+            await message.channel.send("Sorry I don't respond to commands in DMs, "
+                                       "you need to type the commands in a channel in your server.\n"
+                                       "If you've tried that already, then make sure I have the right permissions "
+                                       "to see and reply to your commands in that channel.")
+        else:
+            await admin_channels[-1].send(embed=discord.Embed(
+                title="DM from **{}** [`{}`]:".format(message.author.name, message.author.id),
+                description=message.content
+            ))
         return
 
     if message.guild not in guilds:
