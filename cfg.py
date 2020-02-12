@@ -63,3 +63,12 @@ SEED = int(time())
 
 CONFIG = get_config()
 TICK_RATE = CONFIG['loop_interval']
+
+defaults = {
+    'loop_interval': 7,
+    'gold_interval': 3,
+    'sapphires': {}
+}
+for d, dv in defaults.items():
+    if d not in CONFIG:
+        CONFIG[d] = dv
