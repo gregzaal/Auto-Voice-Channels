@@ -536,6 +536,9 @@ async def check_patreon(force_update=False, client=None):
 
 @utils.func_timer()
 def is_gold(guild):
+    if patreon_info is None:
+        return True
+
     gold_servers = [
         607246684367618049,  # T4
     ]
@@ -549,6 +552,9 @@ def is_gold(guild):
 
 @utils.func_timer()
 def is_sapphire(guild):
+    if patreon_info is None:
+        return True
+
     sapphire_servers = [
         332246283601313794,  # Salt Sanc
         601015720200896512,  # Dots Bots

@@ -23,20 +23,19 @@ from discord.ext.tasks import loop
 
 logging.basicConfig(level=logging.INFO)
 
-USE_SHARDS = False
-if os.path.exists(os.path.join(cfg.SCRIPT_DIR, 'venv.bat')):
-    # Working locally, use dev bot
-    print("DEV")
+DEV_BOT = cfg.CONFIG['DEV'] if 'DEV' in cfg.CONFIG else False
+NUM_SHARDS = cfg.CONFIG['num_shards'] if 'num_shards' in cfg.CONFIG else 0
+if DEV_BOT:
+    print("DEV BOT")
     TOKEN = cfg.CONFIG['token_dev']
 else:
     TOKEN = cfg.CONFIG['token']
-    USE_SHARDS = True
 try:
     sid = int(sys.argv[1])
     if str(sid) in cfg.CONFIG["sapphires"]:
         cfg.SAPPHIRE_ID = sid
         TOKEN = cfg.CONFIG["sapphires"][str(sid)]['token']
-        USE_SHARDS = False
+        NUM_SHARDS = 1
     else:
         print("NO SAPPHIRE WITH ID " + str(sid))
         sys.exit()
@@ -621,8 +620,8 @@ class MyClient(discord.AutoShardedClient):
         await func.admin_log("🟥🟧🟨🟩   **Ready**   🟩🟨🟧🟥", self)
 
 
-if USE_SHARDS:
-    client = MyClient(shard_count=6)
+if NUM_SHARDS > 1:
+    client = MyClient(shard_count=NUM_SHARDS)
 else:
     client = MyClient()
 
