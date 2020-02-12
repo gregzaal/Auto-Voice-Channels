@@ -701,18 +701,6 @@ async def on_message(message):
                 ))
         return
 
-    if message.channel.id == 615908341364949001:  # Message in #avc-bot-commands channel of T1
-        if message.author.id == cfg.CONFIG['admin_id']:
-            split = message.content.split(' ')
-            cmd = split[0].lower()
-            params = split[1:]
-            params_str = ' '.join(params)
-            if cmd == 'reload':
-                m = utils.strip_quotes(params_str)
-                success = await reload_modules(m)
-                await message.channel.send("{} {}".format("✅ Reloaded" if success else "❌ Failed to load", m))
-                return
-
     if message.guild not in guilds:
         return
 
