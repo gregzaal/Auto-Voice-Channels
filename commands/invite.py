@@ -16,7 +16,12 @@ help_text = [
 async def execute(ctx, params):
     channel = ctx['channel']
     t = ":mailbox: Invite me to another server!"
-    l = cfg.INVITE_LINK.replace('@@CID@@', "479393422705426432")
+    bot_id = ctx['client'].user.id
+    if cfg.SAPPHIRE_ID is not None:
+        bot_id = 479393422705426432
+    beta_id = 675405085752164372
+    invite_id = bot_id if bot_id != beta_id else beta_id
+    l = cfg.INVITE_LINK.replace('@@CID@@', str(invite_id))
     can_embed = channel.permissions_for(ctx['guild'].me).embed_links
     if can_embed:
         try:
