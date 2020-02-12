@@ -1,7 +1,7 @@
 import discord
 import utils
 from difflib import SequenceMatcher
-from functions import admin_log, get_secondaries
+from functions import admin_log, get_secondaries, log
 
 from . import (
     alias,
@@ -161,13 +161,16 @@ async def run(c, ctx, params):
     except discord.errors.Forbidden:
         return False, "I don't have permission to do that :("
     except Exception as e:
-        await admin_log("Server: `{}`\n`{}` with command `{}`, params_str: `{}`".format(ctx['guild'].id,
-                                                                                        type(e).__name__,
-                                                                                        c,
-                                                                                        ' '.join(params)),
-                        ctx['client'])
+        error_text = "Server: `{}`\n`{}` with command `{}`, params_str: `{}`".format(ctx['guild'].id,
+                                                                                     type(e).__name__,
+                                                                                     c,
+                                                                                     ' '.join(params))
+        await admin_log(error_text, ctx['client'])
+        log(error_text)
         import traceback
-        await admin_log(traceback.format_exc(), ctx['client'])
+        error_text = traceback.format_exc()
+        await admin_log(error_text, ctx['client'])
+        log(error_text)
         return False, ("A `{}` error occured :(\n"
                        "Please ensure I have the correct permissions, check `{}help {}` for the correct command usage, "
                        "and then try again. \nIf that still doesn't help, try asking in the support server: "
