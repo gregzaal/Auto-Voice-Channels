@@ -1,12 +1,5 @@
 # Auto-Voice-Channels - BETA BUILD
 
-
-----------------------------------
-
-This build is highly unstable
-
-----------------------------------
-
 A Discord bot that automatically creates voice channels as they are needed.
 
 Public bot invite link: <https://discordapp.com/api/oauth2/authorize?client_id=479393422705426432&permissions=286280784&scope=bot>
@@ -39,7 +32,6 @@ pip install psutil
   * `admin_id` is your ID, for the bot to DM you when it logs on, joins servers, gets errors, etc.
   * `client_id` is the bot ID.
   * `log_timezone` is for the time displayed in logs, see [this list](https://stackoverflow.com/questions/13866926/is-there-a-list-of-pytz-timezones).
-  * `loop_interval` is the default interval of the main loop that renames channels. This gets increased/decreased dynamically depending on the number of active channels.
   * `token` is your bot's private token you can find [here](https://discordapp.com/developers/applications) - do not share it with anyone else.
 
 ```json
@@ -47,7 +39,6 @@ pip install psutil
     "admin_id":123456789012345678,
     "client_id":987654321098765432,
     "log_timezone":"Africa/Johannesburg",
-    "loop_interval":7,
     "token":"XXXXXXXXXXXXXXXXXXXXXXXX.XXXXXX.XXXXXXXXXXXXXXXXXXXXXXXXXXX"
 }
 ```
