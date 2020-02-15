@@ -142,6 +142,8 @@ def cleanup(client, tick_):
                 text = "🚧Nothing🚧"
             await client.change_presence(activity=discord.Activity(name=text, type=discord.ActivityType.watching))
             ADMIN_CHANNEL = client.get_channel(cfg.CONFIG['admin_channel'])
+
+        if ADMIN is None:
             ADMIN = client.get_user(cfg.CONFIG['admin_id'])
 
     asyncio.get_event_loop().create_task(first_start(client))
@@ -628,7 +630,7 @@ class MyClient(discord.AutoShardedClient):
 
 
 if NUM_SHARDS > 1:
-    client = MyClient(shard_count=NUM_SHARDS)
+    client = MyClient(shard_count=NUM_SHARDS, fetch_offline_members=False)
 else:
     client = MyClient()
 
@@ -662,7 +664,9 @@ async def on_message(message):
     guilds = func.get_guilds(client)
 
     admin = ADMIN
-    admin_channels = [admin.dm_channel]
+    admin_channels = []
+    if admin is not None:
+        admin_channels = [admin.dm_channel]
     if 'admin_channel' in cfg.CONFIG:
         admin_channels.append(ADMIN_CHANNEL)
     if message.channel in admin_channels:
