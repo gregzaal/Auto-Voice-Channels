@@ -15,7 +15,7 @@ help_text = [
 
 async def execute(ctx, params):
     channel = ctx['channel']
-    t = ":mailbox: Invite me to another server!"
+    t = "📫 Invite me to another server!"
     bot_id = ctx['client'].user.id
     if cfg.SAPPHIRE_ID is not None:
         bot_id = 479393422705426432
