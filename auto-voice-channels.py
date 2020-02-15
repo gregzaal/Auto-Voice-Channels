@@ -141,7 +141,9 @@ def cleanup(client, tick_):
             else:
                 text = "🚧Nothing🚧"
             await client.change_presence(activity=discord.Activity(name=text, type=discord.ActivityType.watching))
-            ADMIN_CHANNEL = client.get_channel(cfg.CONFIG['admin_channel'])
+
+            if 'admin_channel' in cfg.CONFIG:
+                ADMIN_CHANNEL = client.get_channel(cfg.CONFIG['admin_channel'])
 
         if ADMIN is None:
             ADMIN = client.get_user(cfg.CONFIG['admin_id'])
