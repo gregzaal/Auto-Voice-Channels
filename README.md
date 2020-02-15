@@ -2,17 +2,17 @@
 
 ### A Discord bot that automatically creates voice channels as they are needed.
 
-Public bot invite link: <https://discordapp.com/api/oauth2/authorize?client_id=479393422705426432&permissions=286280784&scope=bot>  
-Beta bot invite link: <https://discordapp.com/api/oauth2/authorize?client_id=675405085752164372&permissions=286280784&scope=bot>  
-Discord server: <https://discord.gg/HT6GNhJ>  
-Patreon: <https://www.patreon.com/pixaal>  
+- [Public bot invite link](https://discordapp.com/api/oauth2/authorize?client_id=479393422705426432&permissions=286280784&scope=bot)
+- [Beta bot invite link](https://discordapp.com/api/oauth2/authorize?client_id=675405085752164372&permissions=286280784&scope=bot)
+- [Discord server](https://discord.gg/HT6GNhJ)
+- [Patreon](https://www.patreon.com/pixaal)
 
 ## Requires:
 
 * [Python 3.5.3+](https://www.python.org/downloads/)
-* [discord.py](https://pypi.org/project/discord.py/) `pip install discord.py`
-* [pytz](https://pypi.org/project/pytz/) `pip install discord.py`
-* [psutil](https://pypi.org/project/psutil/) `pip install psutil`
+* [discord.py](https://pypi.org/project/discord.py/) (`pip install discord.py`)
+* [pytz](https://pypi.org/project/pytz/) (`pip install discord.py`)
+* [psutil](https://pypi.org/project/psutil/) (`pip install psutil`)
 
 ## Quick start:
 
@@ -44,4 +44,4 @@ Patreon: <https://www.patreon.com/pixaal>
 
 ## Help:
 
-[Join the support server](https://discord.gg/HT6GNhJ).
+[Join the support server](https://discord.gg/HT6GNhJ) and ask, or [open an issue](https://github.com/gregzaal/Auto-Voice-Channels/issues).
