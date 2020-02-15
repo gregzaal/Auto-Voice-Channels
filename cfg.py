@@ -62,7 +62,6 @@ TIMING_LOG = 0
 SEED = int(time())
 
 CONFIG = get_config()
-TICK_RATE = CONFIG['loop_interval']
 
 defaults = {
     'loop_interval': 7,
@@ -72,3 +71,5 @@ defaults = {
 for d, dv in defaults.items():
     if d not in CONFIG:
         CONFIG[d] = dv
+
+TICK_RATE = CONFIG['loop_interval']
