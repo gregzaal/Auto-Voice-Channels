@@ -23,7 +23,6 @@ Patreon: <https://www.patreon.com/pixaal>
 * Install venv: `pip3 install virtualenv`
 * Make venv: `python3 -m virtualenv bot-env`
 * Use venv: `. bot-env/bin/activate`
-* Install dependencies:
 * Create your application + bot here: <https://discordapp.com/developers/applications>
 * Set up `config.json`:
   * `admin_id` is your ID, for the bot to DM you when it logs on, joins servers, gets errors, etc.
