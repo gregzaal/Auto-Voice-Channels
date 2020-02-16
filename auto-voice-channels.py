@@ -632,7 +632,7 @@ class MyClient(discord.AutoShardedClient):
 
 
 if NUM_SHARDS > 1:
-    client = MyClient(shard_count=NUM_SHARDS, fetch_offline_members=False)
+    client = MyClient(shard_count=NUM_SHARDS)
 else:
     client = MyClient()
 
