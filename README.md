@@ -10,10 +10,10 @@
 ## Requires:
 
 * [Python 3.5.3+](https://www.python.org/downloads/)
-* [discord.py](https://pypi.org/project/discord.py/) (`pip install discord.py`)
-* [pytz](https://pypi.org/project/pytz/) (`pip install pytz`)
-* [psutil](https://pypi.org/project/psutil/) (`pip install psutil`)
-* [Requests](https://pypi.org/project/requests/) (`pip install requests`)
+* [discord.py](https://pypi.org/project/discord.py/) (`pip3 install discord.py`)
+* [pytz](https://pypi.org/project/pytz/) (`pip3 install pytz`)
+* [psutil](https://pypi.org/project/psutil/) (`pip3 install psutil`)
+* [Requests](https://pypi.org/project/requests/) (`pip3 install requests`)
 
 ## Quick start:
 
@@ -23,7 +23,7 @@
 * Install pip: `sudo apt-get -y install python3-pip`
 * Install venv: `pip3 install virtualenv`
 * Make venv: `python3 -m virtualenv bot-env`
-* Use venv: `. bot-env/bin/activate`
+* Use venv: `source ./bot-env/bin/activate`
 * Create your application + bot here: <https://discordapp.com/developers/applications>
 * Set up `config.json`:
   * `admin_id` is your ID, for the bot to DM you when it logs on, joins servers, gets errors, etc.
