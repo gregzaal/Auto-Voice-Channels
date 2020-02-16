@@ -669,7 +669,7 @@ async def on_message(message):
     admin_channels = []
     if admin is not None:
         admin_channels = [admin.dm_channel]
-    if 'admin_channel' in cfg.CONFIG:
+    if 'admin_channel' in cfg.CONFIG and ADMIN_CHANNEL is not None:
         admin_channels.append(ADMIN_CHANNEL)
     if message.channel in admin_channels:
         split = message.content.split(' ')
