@@ -538,28 +538,45 @@ async def check_all_channels(guild, settings):
                     if not v.members:
                         await func.delete_secondary(guild, v)
 
-    async def check_rename(guild, settings):
+    """ Threading Shit show """
+
+    async def threaded_check_rename(guild_, settings_):
         # Update secondary channel names
-        settings = utils.get_serv_settings(guild)  # Need fresh in case some were deleted
+        settings_ = utils.get_serv_settings(guild_)  # Need fresh in case some were deleted
         templates = {'0': 0}  # Initialize with 0's to prevent checking again if empty
-        for p in settings['auto_channels']:
+        for p in settings_['auto_channels']:
             secondaries = []
-            for sid, sv in settings['auto_channels'][p]['secondaries'].items():
+            for sid, sv in settings_['auto_channels'][p]['secondaries'].items():
                 s = client.get_channel(sid)
                 if s is not None:
                     secondaries.append(s)
-                    if "template" in settings['auto_channels'][p]:
-                        templates[s.id] = settings['auto_channels'][p]['template']
+                    if "template" in settings_['auto_channels'][p]:
+                        templates[s.id] = settings_['auto_channels'][p]['template']
                     if "name" in sv:
                         templates[s.id] = sv['name']
             secondaries = sorted(secondaries, key=lambda x: x.position)
             for i, s in enumerate(secondaries):
-                await func.rename_channel(guild=guild,
+                await func.rename_channel(guild=guild_,
                                           channel=s,
-                                          settings=settings,
+                                          settings=settings_,
                                           primary_id=None,
                                           templates=templates,
                                           i=i)
+
+    def generate_thread(guild, settings_):
+        thread_loop = asyncio.get_event_loop()
+        if not thread_loop.is_running():
+            thread_loop.run_forever()
+        asyncio.run_coroutine_threadsafe(coro=threaded_check_rename(guild_=guild,
+                                                                    settings_=settings_),
+                                         loop=thread_loop)
+
+    async def check_rename(guild, settings):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            thread_ = executor.submit(generate_thread, guild, settings)
+            while not thread_.done():
+                await asyncio.sleep(0.1)
+            print("Successful async thread")
 
     if guild is None or guild.name is None:
         # Weird ghostly disconnect where things that shouldn't be possible happen.
