@@ -586,10 +586,14 @@ def get_sapphire_id(guild):
 def get_guilds(client):
     guilds = []
     am_sapphire_bot = cfg.SAPPHIRE_ID is not None
+    am_gold_bot = 'gold_id' in cfg.CONFIG and client.user.id == cfg.CONFIG['gold_id']
     for g in client.guilds:
         if g is not None and g.name is not None:
             if am_sapphire_bot:
                 if is_sapphire(g) and g.id in cfg.CONFIG["sapphires"][str(cfg.SAPPHIRE_ID)]["servers"]:
+                    guilds.append(g)
+            elif am_gold_bot:
+                if is_gold(g):
                     guilds.append(g)
             else:
                 if not is_sapphire(g) or get_sapphire_id(g) is None:

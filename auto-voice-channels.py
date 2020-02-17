@@ -38,6 +38,9 @@ try:
         cfg.SAPPHIRE_ID = sid
         TOKEN = cfg.CONFIG["sapphires"][str(sid)]['token']
         NUM_SHARDS = 1
+    elif 'gold_id' in cfg.CONFIG and sid == 6666:
+        TOKEN = cfg.CONFIG["token_gold"]
+        NUM_SHARDS = 1
     else:
         print("NO SAPPHIRE WITH ID " + str(sid))
         sys.exit()
