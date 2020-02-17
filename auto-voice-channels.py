@@ -181,8 +181,7 @@ async def main_loop(client):
             text = "TICK time was: {0:.3f}s\n{1}".format(cfg.TICK_TIME, timing_log)
             log(text)
             await func.admin_log(
-                ":exclamation:" * round(min(max((cfg.TICK_TIME - 5) / 2, 1), 10)) +
-                text, client, important=cfg.TICK_TIME > 40)
+                ":exclamation:" * round(min(max((cfg.TICK_TIME - 5) / 2, 1), 10)) + text, client)
 
         # Check for new patrons using gold role in support server
         if cfg.SAPPHIRE_ID is None:
@@ -216,7 +215,7 @@ async def gold_loop(client):
         if cfg.G_TICK_TIME > 10:
             await func.admin_log(
                 ":exclamation:" * round(min(max((cfg.G_TICK_TIME - 5) / 2, 1), 10)) +
-                " 💳 TICK time was {0:.3f}s".format(cfg.G_TICK_TIME), client, important=cfg.G_TICK_TIME > 10)
+                " 💳 TICK time was {0:.3f}s".format(cfg.G_TICK_TIME), client)
         # print("    GOLD TICK", '{0:.3f}s'.format(cfg.G_TICK_TIME))
 
 
