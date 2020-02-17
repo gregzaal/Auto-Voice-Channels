@@ -694,7 +694,10 @@ async def rename_channel(guild, channel, settings, primary_id, templates=None, i
         if '@@party_' in cname or '@@num_playing@@' in cname or has_expression:
             party = get_party_info(channel, gname, settings['asip'] if 'asip' in settings else False)
 
-        if ('@@creator@@' in cname or '@@num_others@@' in cname or '@@stream_name@@' in cname or
+        if ('@@creator@@' in cname or
+                ('general' in settings and '@@creator@@' in settings['general']) or
+                '@@num_others@@' in cname or
+                '@@stream_name@@' in cname or
                 has_expression or is_private):
             creator = None
             creator_name = "Unknown"
