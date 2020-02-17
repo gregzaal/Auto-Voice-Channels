@@ -9,8 +9,8 @@
 
 ## Requires:
 
-* [Python 3.5.3+](https://www.python.org/downloads/)
-* [discord.py](https://pypi.org/project/discord.py/) (`pip install discord.py`)
+* [Python 3.8.1+](https://www.python.org/downloads/)
+* [discord.py 1.3.1+](https://pypi.org/project/discord.py/) (`pip install discord.py`)
 * [pytz](https://pypi.org/project/pytz/) (`pip install pytz`)
 * [psutil](https://pypi.org/project/psutil/) (`pip install psutil`)
 * [Requests](https://pypi.org/project/requests/) (`pip install requests`)
