@@ -518,19 +518,19 @@ async def check_patreon():
     await func.check_patreon(force_update=cfg.SAPPHIRE_ID in [None, 0] and TOKEN != cfg.CONFIG['token_dev'])
 
 
-async def check_all_channels(guild, settings):
+async def check_all_channels(guild, settings):  # todo this has an insanely long tick time
 
-    async def check_create(guild, settings):
-        for pid in settings['auto_channels']:
+    async def check_create(guild_, settings_):
+        for pid in settings_['auto_channels']:
             p = client.get_channel(int(pid))
             if p is not None:
                 users_waiting = [m for m in p.members if not func.user_request_is_locked(m)]
                 for u in users_waiting:
-                    await func.create_secondary(guild, p, u)
+                    await func.create_secondary(guild_, p, u)
 
-    async def check_empty(guild, settings):
+    async def check_empty(guild_, settings_):
         # Delete empty secondaries, in case they didn't get caught somehow (e.g. errors, downtime)
-        secondaries = func.get_secondaries(guild, settings)
+        secondaries = func.get_secondaries(guild_, settings_)
         voice_channels = [x for x in guild.channels if isinstance(x, discord.VoiceChannel)]
         for v in voice_channels:
             if v.name != "⌛":  # Ignore secondary channels that are currently being created
@@ -540,9 +540,8 @@ async def check_all_channels(guild, settings):
 
     """ Threading Shit show """
 
-    async def threaded_check_rename(guild_, settings_):
-        # Update secondary channel names
-        settings_ = utils.get_serv_settings(guild_)  # Need fresh in case some were deleted
+    async def check_rename(guild_, settings_):
+        print("Running attempt to check rename")
         templates = {'0': 0}  # Initialize with 0's to prevent checking again if empty
         for p in settings_['auto_channels']:
             secondaries = []
@@ -563,19 +562,18 @@ async def check_all_channels(guild, settings):
                                           templates=templates,
                                           i=i)
 
-    def generate_thread(guild, settings_):
-        thread_loop = asyncio.get_event_loop()
-        if not thread_loop.is_running():
-            thread_loop.run_forever()
-        asyncio.run_coroutine_threadsafe(coro=threaded_check_rename(guild_=guild,
-                                                                    settings_=settings_),
-                                         loop=thread_loop)
+    def generate_thread(guild_, settings_, toggle):
+        thread_loop = asyncio.new_event_loop()
+        if toggle == 1:
+            thread_loop.run_until_complete(check_create(guild_=guild_, settings_=settings_))
+        elif toggle == 2:
+            thread_loop.run_until_complete(check_empty(guild_=guild_, settings_=settings_))
+        elif toggle == 3:
+            thread_loop.run_until_complete(check_rename(guild_=guild_, settings_=settings_))
 
-    async def check_rename(guild, settings):
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            thread_ = executor.submit(generate_thread, guild, settings)
-            while not thread_.done():
-                await asyncio.sleep(0.1)
+    async def check_handler(guild_, settings, toggle):
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            executor.submit(generate_thread, guild_, settings, toggle)
             print("Successful async thread")
 
     if guild is None or guild.name is None:
@@ -591,17 +589,17 @@ async def check_all_channels(guild, settings):
 
     try:
         st = time()
-        await check_create(guild, settings)
+        await check_handler(guild, settings, toggle=1)
         et = time()
         timings['check_create'] = et - st
 
         st = time()
-        await check_empty(guild, settings)
+        await check_handler(guild, settings, toggle=2)
         et = time()
         timings['check_empty'] = et - st
 
         st = time()
-        await check_rename(guild, settings)
+        await check_handler(guild, settings, toggle=3)
         et = time()
         timings['check_rename'] = et - st
 
