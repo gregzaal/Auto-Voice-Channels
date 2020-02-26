@@ -45,6 +45,16 @@ def func_timer(threshold=0.5):
 
 
 @func_timer()
+def format_timings():
+    s = ""
+    l = [[k, cfg.TIMINGS[k]] for k in cfg.TIMINGS]
+    l.sort(key=lambda k: k[1], reverse=True)
+    for t in l:
+        s += "`{0}`: {1:.2f}\n".format(t[0], t[1])
+    return s.strip()
+
+
+@func_timer()
 def log(msg, guild=None):
     text = datetime.now(pytz.timezone(cfg.CONFIG['log_timezone'])).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
     if guild:
