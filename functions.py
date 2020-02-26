@@ -1307,22 +1307,22 @@ async def remove_broken_channels(guild):
                     print(traceback.format_exc())
                 unlock_channel_request(v)
 
-    # TODO gold only
-    text_channels = [x for x in guild.channels if isinstance(x, discord.TextChannel)]
-    for c in text_channels:
-        front = (":eye: This channel is only visible to members of your voice channel, "
-                 "and admins of this server. It will be deleted when everyone leaves. VC ID: ")
-        if c.topic and c.topic.startswith(front):
-            try:
-                vcid = int(c.topic.split(front)[1])
-            except ValueError:
-                continue
-            vc = guild.get_channel(vcid)
-            if not vc:
+    if is_gold(guild):
+        text_channels = [x for x in guild.channels if isinstance(x, discord.TextChannel)]
+        for c in text_channels:
+            front = (":eye: This channel is only visible to members of your voice channel, "
+                     "and admins of this server. It will be deleted when everyone leaves. VC ID: ")
+            if c.topic and c.topic.startswith(front):
                 try:
-                    await c.delete()
-                except discord.errors.NotFound:
-                    pass
+                    vcid = int(c.topic.split(front)[1])
+                except ValueError:
+                    continue
+                vc = guild.get_channel(vcid)
+                if not vc:
+                    try:
+                        await c.delete()
+                    except discord.errors.NotFound:
+                        pass
 
     for r in guild.roles:
         front = "🎤🤖vc "
