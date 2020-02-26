@@ -6,7 +6,6 @@ import traceback
 import subprocess
 import sys
 from datetime import datetime
-from pprint import pformat
 from time import time
 
 import cfg
@@ -158,7 +157,6 @@ def cleanup(client, tick_):
 async def main_loop(client):
     start_time = time()
     if client.is_ready():
-        tt = {}  # Sum of all timings
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             thread_ = executor.submit(func.get_guilds, client)
         while not thread_.done():
@@ -167,20 +165,11 @@ async def main_loop(client):
         for guild in guilds:
             settings = utils.get_serv_settings(guild)
             if settings['enabled'] and settings['auto_channels']:
-                timings = await check_all_channels(guild, settings)
-                tt = {k: timings.get(k, 0) + tt.get(k, 0) for k in set(timings) | set(tt)}
+                await check_all_channels(guild, settings)
         end_time = time()
-        cfg.TICK_TIME = end_time - start_time
-        timing_log = ("Total: {0:.2f}s\n```py\n{1}\n```".format(
-            sum(tt.values()),
-            pformat(tt, indent=4)
-        ))
-        cfg.TIMING_LOG = timing_log
-        if cfg.TICK_TIME > 20:
-            text = "TICK time was: {0:.3f}s\n{1}".format(cfg.TICK_TIME, timing_log)
-            log(text)
-            await func.admin_log(
-                ":exclamation:" * round(min(max((cfg.TICK_TIME - 5) / 2, 1), 10)) + text, client)
+        cfg.TIMINGS['main_loop'] = end_time - start_time
+        if cfg.TIMINGS['main_loop'] > 20:
+            await func.log_timings('main_loop')
 
         # Check for new patrons using patron role in support server
         if cfg.SAPPHIRE_ID is None:
@@ -195,45 +184,111 @@ async def main_loop(client):
                     cfg.NUM_PATRONS = num_patrons
 
 
-def for_looper(client):
-    for guild in func.get_guilds(client):
-        settings = utils.get_serv_settings(guild)  # Need fresh in case some were deleted
-        dead_secondaries = []
-        for p in settings['auto_channels']:
-            for sid, sv in settings['auto_channels'][p]['secondaries'].items():
-                s = client.get_channel(sid)
-                if s is None:
-                    dying = sv['dying'] + 1 if 'dying' in sv else 1
-                    settings['auto_channels'][p]['secondaries'][sid]['dying'] = dying
-                    cfg.GUILD_SETTINGS[guild.id] = settings  # Temporarily settings, no need to write to disk.
-                    log("{} is dead ({})".format(sid, dying), guild)
-                    if dying >= 3:
-                        dead_secondaries.append(sid)
-                else:
-                    if 'dying' in sv:
-                        settings['auto_channels'][p]['secondaries'][sid]['dying'] = 0
-                        cfg.GUILD_SETTINGS[guild.id] = settings  # Temporarily settings, no need to write to disk.
+@loop(seconds=cfg.CONFIG['loop_interval'])
+async def creation_loop(client):
 
-        if dead_secondaries:
-            for p, pv in settings['auto_channels'].items():
-                tmp = {}
-                for s, sv in pv['secondaries'].items():
-                    if s not in dead_secondaries:
-                        tmp[s] = sv
-                settings['auto_channels'][p]['secondaries'] = tmp
+    @utils.func_timer()
+    async def check_create(guild, settings):
+        for pid in settings['auto_channels']:
+            p = client.get_channel(int(pid))
+            if p is not None:
+                users_waiting = [m for m in p.members if not func.user_request_is_locked(m)]
+                for u in users_waiting:
+                    await func.create_secondary(guild, p, u)
 
-            utils.set_serv_settings(guild, settings)
+    start_time = time()
+    if client.is_ready():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            thread_ = executor.submit(func.get_guilds, client)
+        while not thread_.done():
+            await asyncio.sleep(0.1)
+        guilds = thread_.result()
+        for guild in guilds:
+            settings = utils.get_serv_settings(guild)
+            if settings['enabled'] and settings['auto_channels']:
+                await check_create(guild, settings)
+        end_time = time()
+        cfg.TIMINGS['creation_loop'] = end_time - start_time
+        if cfg.TIMINGS['creation_loop'] > 20:
+            await func.log_timings('creation_loop')
 
-            for s in dead_secondaries:
-                if s in cfg.ATTEMPTED_CHANNEL_NAMES:
-                    del cfg.ATTEMPTED_CHANNEL_NAMES[s]
+
+@loop(seconds=cfg.CONFIG['loop_interval'] * 2)
+async def deletion_loop(client):
+
+    @utils.func_timer()
+    async def check_empty(guild, settings):
+        # Delete empty secondaries, in case they didn't get caught somehow (e.g. errors, downtime)
+        secondaries = func.get_secondaries(guild, settings)
+        voice_channels = [x for x in guild.channels if isinstance(x, discord.VoiceChannel)]
+        for v in voice_channels:
+            if v.name != "⌛":  # Ignore secondary channels that are currently being created
+                if v.id in secondaries:
+                    if not v.members:
+                        await func.delete_secondary(guild, v)
+
+    start_time = time()
+    if client.is_ready():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            thread_ = executor.submit(func.get_guilds, client)
+        while not thread_.done():
+            await asyncio.sleep(0.1)
+        guilds = thread_.result()
+        for guild in guilds:
+            settings = utils.get_serv_settings(guild)
+            if settings['enabled'] and settings['auto_channels']:
+                await check_empty(guild, settings)
+                await func.remove_broken_channels(guild)
+        end_time = time()
+        cfg.TIMINGS['deletion_loop'] = end_time - start_time
+        if cfg.TIMINGS['deletion_loop'] > 20:
+            await func.log_timings('deletion_loop')
 
 
 @loop(minutes=2)
 async def check_dead(client):
+
+    def for_looper(client):
+        for guild in func.get_guilds(client):
+            settings = utils.get_serv_settings(guild)  # Need fresh in case some were deleted
+            dead_secondaries = []
+            for p in settings['auto_channels']:
+                for sid, sv in settings['auto_channels'][p]['secondaries'].items():
+                    s = client.get_channel(sid)
+                    if s is None:
+                        dying = sv['dying'] + 1 if 'dying' in sv else 1
+                        settings['auto_channels'][p]['secondaries'][sid]['dying'] = dying
+                        cfg.GUILD_SETTINGS[guild.id] = settings  # Temporarily settings, no need to write to disk.
+                        log("{} is dead ({})".format(sid, dying), guild)
+                        if dying >= 3:
+                            dead_secondaries.append(sid)
+                    else:
+                        if 'dying' in sv:
+                            settings['auto_channels'][p]['secondaries'][sid]['dying'] = 0
+                            cfg.GUILD_SETTINGS[guild.id] = settings  # Temporarily settings, no need to write to disk.
+
+            if dead_secondaries:
+                for p, pv in settings['auto_channels'].items():
+                    tmp = {}
+                    for s, sv in pv['secondaries'].items():
+                        if s not in dead_secondaries:
+                            tmp[s] = sv
+                    settings['auto_channels'][p]['secondaries'] = tmp
+
+                utils.set_serv_settings(guild, settings)
+
+                for s in dead_secondaries:
+                    if s in cfg.ATTEMPTED_CHANNEL_NAMES:
+                        del cfg.ATTEMPTED_CHANNEL_NAMES[s]
+
+    start_time = time()
     if client.is_ready():
         with concurrent.futures.ThreadPoolExecutor() as pool:
             await client.loop.run_in_executor(pool, for_looper, client)
+        end_time = time()
+        cfg.TIMINGS['check_dead'] = end_time - start_time
+        if cfg.TIMINGS['check_dead'] > 20:
+            await func.log_timings('check_dead')
 
 
 @loop(seconds=2)
@@ -398,6 +453,8 @@ async def dynamic_tickrate(client):
         if cfg.SAPPHIRE_ID is None:
             print("New tickrate is {0:.1f}s, seed interval is {1:.2f}m".format(new_tickrate, new_seed_interval))
         main_loop.change_interval(seconds=new_tickrate)
+        creation_loop.change_interval(seconds=new_tickrate)
+        deletion_loop.change_interval(seconds=new_tickrate * 2)
         update_seed.change_interval(minutes=new_seed_interval)
         cfg.TICK_RATE = new_tickrate
 
@@ -496,24 +553,7 @@ async def check_patreon():
 
 async def check_all_channels(guild, settings):
 
-    async def check_create(guild, settings):
-        for pid in settings['auto_channels']:
-            p = client.get_channel(int(pid))
-            if p is not None:
-                users_waiting = [m for m in p.members if not func.user_request_is_locked(m)]
-                for u in users_waiting:
-                    await func.create_secondary(guild, p, u)
-
-    async def check_empty(guild, settings):
-        # Delete empty secondaries, in case they didn't get caught somehow (e.g. errors, downtime)
-        secondaries = func.get_secondaries(guild, settings)
-        voice_channels = [x for x in guild.channels if isinstance(x, discord.VoiceChannel)]
-        for v in voice_channels:
-            if v.name != "⌛":  # Ignore secondary channels that are currently being created
-                if v.id in secondaries:
-                    if not v.members:
-                        await func.delete_secondary(guild, v)
-
+    @utils.func_timer()
     async def check_rename(guild, settings):
         # Update secondary channel names
         settings = utils.get_serv_settings(guild)  # Need fresh in case some were deleted
@@ -549,25 +589,7 @@ async def check_all_channels(guild, settings):
     timings = {}
 
     try:
-        st = time()
-        await check_create(guild, settings)
-        et = time()
-        timings['check_create'] = et - st
-
-        st = time()
-        await check_empty(guild, settings)
-        et = time()
-        timings['check_empty'] = et - st
-
-        st = time()
         await check_rename(guild, settings)
-        et = time()
-        timings['check_rename'] = et - st
-
-        st = time()
-        await func.remove_broken_channels(guild)
-        et = time()
-        timings['remove_broken_channels'] = et - st
 
     except Exception:
         traceback.print_exc()
@@ -994,6 +1016,8 @@ async def on_guild_remove(guild):
 
 cleanup(client=client, tick_=1)
 main_loop.start(client)
+creation_loop.start(client)
+deletion_loop.start(client)
 check_dead.start(client)
 check_votekicks.start(client)
 create_join_channels.start(client)
