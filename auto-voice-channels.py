@@ -165,11 +165,10 @@ async def main_loop(client):
             await asyncio.sleep(0.1)
         guilds = thread_.result()
         for guild in guilds:
-            if not func.is_gold(guild):
-                settings = utils.get_serv_settings(guild)
-                if settings['enabled'] and settings['auto_channels']:
-                    timings = await check_all_channels(guild, settings)
-                    tt = {k: timings.get(k, 0) + tt.get(k, 0) for k in set(timings) | set(tt)}
+            settings = utils.get_serv_settings(guild)
+            if settings['enabled'] and settings['auto_channels']:
+                timings = await check_all_channels(guild, settings)
+                tt = {k: timings.get(k, 0) + tt.get(k, 0) for k in set(timings) | set(tt)}
         end_time = time()
         cfg.TICK_TIME = end_time - start_time
         timing_log = ("Total: {0:.2f}s\n```py\n{1}\n```".format(
@@ -194,29 +193,6 @@ async def main_loop(client):
                     if cfg.NUM_PATRONS != -1:  # Skip first run, since patrons are fetched on startup already.
                         await func.check_patreon(force_update=TOKEN != cfg.CONFIG['token_dev'], client=client)
                     cfg.NUM_PATRONS = num_patrons
-
-
-@loop(seconds=cfg.CONFIG['gold_interval'])
-async def gold_loop(client):
-    start_time = time()
-    if client.is_ready():
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            thread_ = executor.submit(func.get_guilds, client)
-        while not thread_.done():
-            await asyncio.sleep(0.1)
-        guilds = thread_.result()
-        for guild in guilds:
-            if func.is_gold(guild):
-                settings = utils.get_serv_settings(guild)
-                if settings['enabled'] and settings['auto_channels']:
-                    await check_all_channels(guild, settings)
-        end_time = time()
-        cfg.G_TICK_TIME = end_time - start_time
-        if cfg.G_TICK_TIME > 10:
-            await func.admin_log(
-                ":exclamation:" * round(min(max((cfg.G_TICK_TIME - 5) / 2, 1), 10)) +
-                " 💳 TICK time was {0:.3f}s".format(cfg.G_TICK_TIME), client)
-        # print("    GOLD TICK", '{0:.3f}s'.format(cfg.G_TICK_TIME))
 
 
 def for_looper(client):
@@ -1018,7 +994,6 @@ async def on_guild_remove(guild):
 
 cleanup(client=client, tick_=1)
 main_loop.start(client)
-gold_loop.start(client)
 check_dead.start(client)
 check_votekicks.start(client)
 create_join_channels.start(client)
