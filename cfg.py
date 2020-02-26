@@ -58,6 +58,7 @@ SERVER_LOCATION = 'Unknown'
 TICK_TIME = 0
 G_TICK_TIME = 0
 TIMING_LOG = 0
+TIMINGS = {}
 
 SEED = int(time())
 

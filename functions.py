@@ -3,6 +3,7 @@ import traceback
 from datetime import datetime
 from copy import deepcopy
 from math import ceil
+from pprint import pformat
 from random import choice, seed
 from statistics import mean
 from time import time
@@ -458,6 +459,16 @@ async def admin_log(msg, client, important=False):
         admin_channel = client.get_channel(cfg.CONFIG['admin_channel'])
 
     await admin_channel.send(msg)
+
+
+@utils.func_timer()
+async def log_timings(highlight=None):
+    text = ""
+    if highlight is not None:
+        text = "**{}** took {}\n"
+    text += "```{}```".format(pformat(cfg.TIMINGS, indent=4))
+    log(text.replace("```", ""))
+    await admin_log(text)
 
 
 @utils.func_timer()

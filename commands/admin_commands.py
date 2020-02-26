@@ -1,8 +1,8 @@
 import os
 import sys
 import traceback
-from copy import deepcopy
 from datetime import datetime
+from pprint import pformat
 
 import cfg
 import discord
@@ -111,7 +111,7 @@ async def admin_command(cmd, ctx):
                 diskg="{0:.1f}GB".format(disk.used / 1024 / 1024 / 1024), diskp=round(disk.percent),
                 commit=LAST_COMMIT,
                 lines=lines_of_code,
-                timings=cfg.TIMING_LOG
+                timings="\n```{}```".format(pformat(cfg.TIMINGS, indent=4))
             )
         ))
 
