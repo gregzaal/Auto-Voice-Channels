@@ -182,10 +182,10 @@ async def main_loop(client):
             await func.admin_log(
                 ":exclamation:" * round(min(max((cfg.TICK_TIME - 5) / 2, 1), 10)) + text, client)
 
-        # Check for new patrons using gold role in support server
+        # Check for new patrons using patron role in support server
         if cfg.SAPPHIRE_ID is None:
             try:
-                num_patrons = len(client.get_guild(601015720200896512).get_role(607911570046976002).members)
+                num_patrons = len(client.get_guild(601015720200896512).get_role(606482184043364373).members)
             except AttributeError:
                 pass
             else:
