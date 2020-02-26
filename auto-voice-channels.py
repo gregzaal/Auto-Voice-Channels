@@ -124,6 +124,8 @@ class LoopChecks:
 def cleanup(client, tick_):
     # TODO probably possible to run into race conditions
 
+    start_time = time()
+
     LoopSystem = LoopChecks(client=client, tick=tick_)
     LoopSystem.start_loops()
 
@@ -152,6 +154,10 @@ def cleanup(client, tick_):
 
     asyncio.get_event_loop().create_task(first_start(client))
 
+    end_time = time()
+    fn_name = "cleanup"
+    cfg.TIMINGS[fn_name] = end_time - start_time
+
 
 @loop(seconds=cfg.CONFIG['loop_interval'])
 async def main_loop(client):
@@ -167,9 +173,10 @@ async def main_loop(client):
             if settings['enabled'] and settings['auto_channels']:
                 await check_all_channels(guild, settings)
         end_time = time()
-        cfg.TIMINGS['main_loop'] = end_time - start_time
-        if cfg.TIMINGS['main_loop'] > 20:
-            await func.log_timings('main_loop')
+        fn_name = "main_loop"
+        cfg.TIMINGS[fn_name] = end_time - start_time
+        if cfg.TIMINGS[fn_name] > 20:
+            await func.log_timings(client, fn_name)
 
         # Check for new patrons using patron role in support server
         if cfg.SAPPHIRE_ID is None:
@@ -208,9 +215,10 @@ async def creation_loop(client):
             if settings['enabled'] and settings['auto_channels']:
                 await check_create(guild, settings)
         end_time = time()
-        cfg.TIMINGS['creation_loop'] = end_time - start_time
-        if cfg.TIMINGS['creation_loop'] > 20:
-            await func.log_timings('creation_loop')
+        fn_name = "creation_loop"
+        cfg.TIMINGS[fn_name] = end_time - start_time
+        if cfg.TIMINGS[fn_name] > 20:
+            await func.log_timings(client, fn_name)
 
 
 @loop(seconds=cfg.CONFIG['loop_interval'] * 2)
@@ -240,9 +248,10 @@ async def deletion_loop(client):
                 await check_empty(guild, settings)
                 await func.remove_broken_channels(guild)
         end_time = time()
-        cfg.TIMINGS['deletion_loop'] = end_time - start_time
-        if cfg.TIMINGS['deletion_loop'] > 20:
-            await func.log_timings('deletion_loop')
+        fn_name = "deletion_loop"
+        cfg.TIMINGS[fn_name] = end_time - start_time
+        if cfg.TIMINGS[fn_name] > 20:
+            await func.log_timings(client, fn_name)
 
 
 @loop(minutes=2)
@@ -286,13 +295,15 @@ async def check_dead(client):
         with concurrent.futures.ThreadPoolExecutor() as pool:
             await client.loop.run_in_executor(pool, for_looper, client)
         end_time = time()
-        cfg.TIMINGS['check_dead'] = end_time - start_time
-        if cfg.TIMINGS['check_dead'] > 20:
-            await func.log_timings('check_dead')
+        fn_name = "check_dead"
+        cfg.TIMINGS[fn_name] = end_time - start_time
+        if cfg.TIMINGS[fn_name] > 20:
+            await func.log_timings(client, fn_name)
 
 
 @loop(seconds=2)
 async def check_votekicks(client):
+    start_time = time()
     if client.is_ready():
         to_remove = []
         votekicks = list(cfg.VOTEKICKS.keys())
@@ -349,9 +360,16 @@ async def check_votekicks(client):
         for mid in to_remove:
             del cfg.VOTEKICKS[mid]
 
+        end_time = time()
+        fn_name = "check_votekicks"
+        cfg.TIMINGS[fn_name] = end_time - start_time
+        if cfg.TIMINGS[fn_name] > 20:
+            await func.log_timings(client, fn_name)
+
 
 @loop(seconds=3)
 async def create_join_channels(client):
+    start_time = time()
     if not client.is_ready():
         return
 
@@ -435,6 +453,12 @@ async def create_join_channels(client):
             traceback.print_exc()
             pass
 
+    end_time = time()
+    fn_name = "create_join_channels"
+    cfg.TIMINGS[fn_name] = end_time - start_time
+    if cfg.TIMINGS[fn_name] > 10:
+        await func.log_timings(client, fn_name)
+
 
 @loop(minutes=3)
 async def update_seed(client):
@@ -444,6 +468,7 @@ async def update_seed(client):
 
 @loop(minutes=5)
 async def dynamic_tickrate(client):
+    start_time = time()
     if client.is_ready():
         current_channels = utils.num_active_channels(func.get_guilds(client))
         new_tickrate = current_channels / 7
@@ -458,6 +483,12 @@ async def dynamic_tickrate(client):
         update_seed.change_interval(minutes=new_seed_interval)
         cfg.TICK_RATE = new_tickrate
 
+        end_time = time()
+        fn_name = "dynamic_tickrate"
+        cfg.TIMINGS[fn_name] = end_time - start_time
+        if cfg.TIMINGS[fn_name] > 20:
+            await func.log_timings(client, fn_name)
+
 
 def get_potentials():
     with open(os.path.join(cfg.SCRIPT_DIR, "secondaries.txt"), 'r') as f:
@@ -467,8 +498,8 @@ def get_potentials():
 
 @loop(minutes=5.22)
 async def lingering_secondaries(client):
+    start_time = time()
     if client.is_ready():
-        start_time = time()
         potentials = None
         with concurrent.futures.ThreadPoolExecutor() as pool:
             potentials = await client.loop.run_in_executor(pool, get_potentials)
@@ -495,11 +526,15 @@ async def lingering_secondaries(client):
                             except Exception:
                                 traceback.print_exc()
         end_time = time()
-        print("Permastore took {0:.3f}s to check ({1}).".format(end_time - start_time, len(potentials)))
+        fn_name = "lingering_secondaries"
+        cfg.TIMINGS[fn_name] = end_time - start_time
+        if cfg.TIMINGS[fn_name] > 5:
+            await func.log_timings(client, fn_name)
 
 
 @loop(minutes=30)
 async def analytics(client):
+    start_time = time()
     if client.is_ready() and cfg.SAPPHIRE_ID is None:
         fp = os.path.join(cfg.SCRIPT_DIR, "analytics.json")
         guilds = func.get_guilds(client)
@@ -517,6 +552,11 @@ async def analytics(client):
         with concurrent.futures.ThreadPoolExecutor() as pool:
             await client.loop.run_in_executor(
                 pool, utils.write_json, fp, analytics)
+        end_time = time()
+        fn_name = "analytics"
+        cfg.TIMINGS[fn_name] = end_time - start_time
+        if cfg.TIMINGS[fn_name] > 10:
+            await func.log_timings(client, fn_name)
 
 
 @loop(minutes=2)

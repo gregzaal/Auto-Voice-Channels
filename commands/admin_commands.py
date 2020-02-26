@@ -2,7 +2,6 @@ import os
 import sys
 import traceback
 from datetime import datetime
-from pprint import pformat
 
 import cfg
 import discord
@@ -97,7 +96,7 @@ async def admin_command(cmd, ctx):
             "CPU: **{cpu}%** \t MEM: **{memg} ({memp}%)** \t DISK: **{diskg} ({diskp}%)**\n"
             "**Last commit:** {commit}\n"
             "**Lines of code:** {lines}\n"
-            "**Timings:** {timings}".format(
+            "**Timings:** \n{timings}".format(
                 tot_servs=len(guilds),
                 active_servs=utils.num_active_guilds(guilds),
                 shards=utils.num_shards(guilds),
@@ -111,7 +110,7 @@ async def admin_command(cmd, ctx):
                 diskg="{0:.1f}GB".format(disk.used / 1024 / 1024 / 1024), diskp=round(disk.percent),
                 commit=LAST_COMMIT,
                 lines=lines_of_code,
-                timings="\n```{}```".format(pformat(cfg.TIMINGS, indent=4))
+                timings=utils.format_timings()
             )
         ))
 

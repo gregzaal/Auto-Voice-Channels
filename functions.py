@@ -462,13 +462,13 @@ async def admin_log(msg, client, important=False):
 
 
 @utils.func_timer()
-async def log_timings(highlight=None):
+async def log_timings(client, highlight):
     text = ""
     if highlight is not None:
-        text = "**{}** took {}\n"
-    text += "```{}```".format(pformat(cfg.TIMINGS, indent=4))
-    log(text.replace("```", ""))
-    await admin_log(text)
+        text = "**{0}** took {1:.2f}s\n".format(highlight, cfg.TIMINGS[highlight])
+    log(text.replace("**", ""))
+    text += utils.format_timings()
+    await admin_log(text, client)
 
 
 @utils.func_timer()
