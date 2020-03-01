@@ -25,6 +25,7 @@ ADMIN_CHANNEL = None
 ADMIN = None
 
 DEV_BOT = cfg.CONFIG['DEV'] if 'DEV' in cfg.CONFIG else False
+GOLD_BOT = False
 NUM_SHARDS = cfg.CONFIG['num_shards'] if 'num_shards' in cfg.CONFIG else 0
 if DEV_BOT:
     print("DEV BOT")
@@ -38,6 +39,7 @@ try:
         TOKEN = cfg.CONFIG["sapphires"][str(sid)]['token']
         NUM_SHARDS = 1
     elif 'gold_id' in cfg.CONFIG and sid == 6666:
+        GOLD_BOT = True
         TOKEN = cfg.CONFIG["token_gold"]
         NUM_SHARDS = 1
     else:
@@ -740,6 +742,51 @@ async def on_message(message):
                                        "you need to type the commands in a channel in your server.\n"
                                        "If you've tried that already, then make sure I have the right permissions "
                                        "to see and reply to your commands in that channel.")
+        elif message.content.lower().startswith("power-overwhelming"):
+            auth_guild = message.content[len("power-overwhelming"):].strip()
+            try:
+                auth_guild = int(auth_guild)
+            except ValueError:
+                await message.channel.send("`{}` is not a valid guild ID, try typing "
+                                           "`who am I` to get a list of guilds we're both in.".format(auth_guild))
+                return
+            else:
+                channel = message.channel
+                g = client.get_guild(auth_guild)
+                if g is None:
+                    await channel.send("`{}` is not a guild I know about, "
+                                       "maybe you need to invite me there first?".format(auth_guild))
+                    return
+                ctx = {
+                    'message': message,
+                    'channel': channel,
+                    'client': client,
+                }
+                success, response = await func.power_overwhelming(ctx, g)
+
+                if success or response != "NO RESPONSE":
+                    log("DM CMD {}: {}".format("Y" if success else "F", message.content))
+
+                if success:
+                    if response:
+                        if response != "NO RESPONSE":
+                            await echo(response, channel, message.author)
+                    else:
+                        await func.react(message, '✅')
+                else:
+                    if response != "NO RESPONSE":
+                        await func.react(message, '❌')
+                        if response:
+                            await echo(response, channel, message.author)
+        elif message.content.lower() == "who am i":
+            in_guilds = []
+            for g in client.guilds:
+                if message.author in g.members:
+                    in_guilds.append("**{}** `{}`".format(g.name, g.id))
+            if in_guilds:
+                await message.channel.send("We're both in the following guilds:\n{}".format('\n'.join(in_guilds)))
+            else:
+                await message.channel.send("I'm not in any of the same guilds as you.")
         else:
             await admin_channels[-1].send(embed=discord.Embed(
                 title="DM from **{}** [`{}`]:".format(message.author.name, message.author.id),
