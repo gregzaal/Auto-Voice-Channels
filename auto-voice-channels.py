@@ -1,24 +1,24 @@
 import asyncio
 import concurrent.futures
-import os
+import discord
 import logging
-import traceback
+import os
+import psutil
+import pytz
 import subprocess
 import sys
+import traceback
 from datetime import datetime
+from discord.ext.tasks import loop
 from time import time
 
 import cfg
-from commands import admin_commands
 import commands
-import discord
-import psutil
-import pytz
+import functions as func
 import translate
 import utils
-import functions as func
+from commands import admin_commands
 from functions import log, echo
-from discord.ext.tasks import loop
 
 logging.basicConfig(level=logging.INFO)
 ADMIN_CHANNEL = None
@@ -643,10 +643,19 @@ class MyClient(discord.AutoShardedClient):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.last_ready = None
+
+    def up_time(self):
+        time_delta = datetime.now() - self.last_ready
+        days = time_delta.days
+        hours, remainder = divmod(time_delta.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return days, hours, minutes, seconds
 
     async def on_ready(self):
         print('=' * 24)
         curtime = datetime.now(pytz.timezone(cfg.CONFIG['log_timezone'])).strftime("%Y-%m-%d %H:%M")
+        self.last_ready = datetime.now()
         print(curtime)
         print('Logged in as')
         print(self.user.name)
