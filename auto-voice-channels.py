@@ -163,7 +163,7 @@ def cleanup(client, tick_):
 
 class MainLoop:
     def __init__(self):
-        pass
+        self.change_interval = cfg.CONFIG['loop_interval']
 
     async def main_loop(self):
         """
@@ -198,7 +198,7 @@ class MainLoop:
                             if cfg.NUM_PATRONS != -1:  # Skip first run, since patrons are fetched on startup already.
                                 await func.check_patreon(force_update=TOKEN != cfg.CONFIG['token_dev'], client=client)
                             cfg.NUM_PATRONS = num_patrons
-            await asyncio.sleep(cfg.CONFIG['loop_interval'])
+            await asyncio.sleep(self.change_interval)
 
     async def main_loop_manager(self):
         """
