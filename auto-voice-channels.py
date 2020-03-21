@@ -161,36 +161,68 @@ def cleanup(client, tick_):
     cfg.TIMINGS[fn_name] = end_time - start_time
 
 
-@loop(seconds=cfg.CONFIG['loop_interval'])
-async def main_loop(client):
-    start_time = time()
-    if client.is_ready():
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            thread_ = executor.submit(func.get_guilds, client)
-        while not thread_.done():
-            await asyncio.sleep(0.1)
-        guilds = thread_.result()
-        for guild in guilds:
-            settings = utils.get_serv_settings(guild)
-            if settings['enabled'] and settings['auto_channels']:
-                await check_all_channels(guild, settings)
-        end_time = time()
-        fn_name = "main_loop"
-        cfg.TIMINGS[fn_name] = end_time - start_time
-        if cfg.TIMINGS[fn_name] > 20:
-            await func.log_timings(client, fn_name)
+class MainLoop:
+    def __init__(self):
+        pass
 
-        # Check for new patrons using patron role in support server
-        if cfg.SAPPHIRE_ID is None:
-            try:
-                num_patrons = len(client.get_guild(601015720200896512).get_role(606482184043364373).members)
-            except AttributeError:
-                pass
+    async def main_loop(self):
+        """
+        Main loop, this gets called from main_loop_manager
+        """
+        while True:
+            start_time = time()
+            if client.is_ready():
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    thread_ = executor.submit(func.get_guilds, client)
+                while not thread_.done():
+                    await asyncio.sleep(0.1)
+                guilds = thread_.result()
+                for guild in guilds:
+                    settings = utils.get_serv_settings(guild)
+                    if settings['enabled'] and settings['auto_channels']:
+                        await check_all_channels(guild, settings)
+                end_time = time()
+                fn_name = "main_loop"
+                cfg.TIMINGS[fn_name] = end_time - start_time
+                if cfg.TIMINGS[fn_name] > 20:
+                    await func.log_timings(client, fn_name)
+
+                # Check for new patrons using patron role in support server
+                if cfg.SAPPHIRE_ID is None:
+                    try:
+                        num_patrons = len(client.get_guild(601015720200896512).get_role(606482184043364373).members)
+                    except AttributeError:
+                        pass
+                    else:
+                        if cfg.NUM_PATRONS != num_patrons:
+                            if cfg.NUM_PATRONS != -1:  # Skip first run, since patrons are fetched on startup already.
+                                await func.check_patreon(force_update=TOKEN != cfg.CONFIG['token_dev'], client=client)
+                            cfg.NUM_PATRONS = num_patrons
+            await asyncio.sleep(cfg.CONFIG['loop_interval'])
+
+    async def main_loop_manager(self):
+        """
+        This function calls the main loop and checks if the
+        loop has finished / crashed. If its crashed restart loop.
+        """
+        while not client.is_ready():
+            await asyncio.sleep(2)
+        print("Starting Main loop")
+        task = asyncio.get_event_loop().create_task(self.main_loop())  # starts task
+        while True:
+            if task.done():  # Checking if task finished (crashed)
+                await func.admin_log("**ALERT:** Main loop has crashed.\n"
+                                     "**Exception:**\n"
+                                     "```\n"
+                                     f"{task.exception()}"
+                                     f"```"
+                                     "Attempting to restart...\n", client=client)
+                task = asyncio.get_event_loop().create_task(self.main_loop())  # try start it again
             else:
-                if cfg.NUM_PATRONS != num_patrons:
-                    if cfg.NUM_PATRONS != -1:  # Skip first run, since patrons are fetched on startup already.
-                        await func.check_patreon(force_update=TOKEN != cfg.CONFIG['token_dev'], client=client)
-                    cfg.NUM_PATRONS = num_patrons
+                await asyncio.sleep(60)  # suspend task for 2 minutes to save resources
+
+    def start(self):
+        asyncio.get_event_loop().create_task(self.main_loop_manager())
 
 
 @loop(seconds=cfg.CONFIG['loop_interval'])
@@ -1102,7 +1134,8 @@ async def on_guild_remove(guild):
 
 
 cleanup(client=client, tick_=1)
-main_loop.start(client)
+main_loop = MainLoop()
+main_loop.start()
 creation_loop.start(client)
 deletion_loop.start(client)
 check_dead.start(client)
