@@ -511,7 +511,7 @@ async def dynamic_tickrate(client):
         new_seed_interval = max(1.5, min(15, new_seed_interval))
         if cfg.SAPPHIRE_ID is None:
             print("New tickrate is {0:.1f}s, seed interval is {1:.2f}m".format(new_tickrate, new_seed_interval))
-        main_loop.change_interval(seconds=new_tickrate)
+        main_loop.change_interval = new_tickrate
         creation_loop.change_interval(seconds=new_tickrate)
         deletion_loop.change_interval(seconds=new_tickrate * 2)
         update_seed.change_interval(minutes=new_seed_interval)
