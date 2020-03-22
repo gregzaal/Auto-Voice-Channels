@@ -32,6 +32,7 @@ async def execute(ctx, params):
         return False, "NO RESPONSE"
     t1 = ctx['message'].created_at
     t2 = r.created_at
+    up_time = ctx['client'].up_time()
     embed = discord.Embed(color=discord.Color.from_rgb(205, 220, 57))
     embed.title = "Pong!"
     rc = (t2 - t1).total_seconds()
@@ -44,6 +45,11 @@ async def execute(ctx, params):
     embed.add_field(name="Shard:", value=guild.shard_id)
     embed.add_field(name="Guild region:", value=guild.region)
     embed.add_field(name="Bot region:", value=cfg.SERVER_LOCATION)
+    embed.add_field(name="Up time", value="{} Days, {} Hours\n {} Minutes, {} Seconds\n".format(up_time[0],
+                                                                                                up_time[1],
+                                                                                                up_time[2],
+                                                                                                up_time[3]))
+
     await r.edit(content=None, embed=embed)
     return True, "NO RESPONSE"
 

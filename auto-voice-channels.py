@@ -219,7 +219,7 @@ class MainLoop:
                                      "Attempting to restart...\n", client=client)
                 task = asyncio.get_event_loop().create_task(self.main_loop())  # try start it again
             else:
-                await asyncio.sleep(60)  # suspend task for 2 minutes to save resources
+                await asyncio.sleep(60)  # suspend task for 1 minute to save resources
 
     def start(self):
         asyncio.get_event_loop().create_task(self.main_loop_manager())
@@ -675,8 +675,24 @@ class MyClient(discord.AutoShardedClient):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.ready_already = False
+        self.start_time = None
 
-    async def on_ready(self):
+    def up_time(self):
+        time_delta = datetime.now() - self.start_time   # Gives us a time delta object
+        days = time_delta.days
+        hours, remainder = divmod(time_delta.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return days, hours, minutes, seconds
+
+    async def on_ready_once(self):
+        self.ready_already = True  # we only want this firing once on initial start
+        self.start_time = datetime.now()   # The bot is only really started when its fully connected.
+
+    async def on_shard_ready(self, shard_id):
+        if (shard_id == (self.shard_count - 1)) and not self.ready_already:
+            await self.on_ready_once()  # This can be used for connecting to databases, starting times etc...
+
         print('=' * 24)
         curtime = datetime.now(pytz.timezone(cfg.CONFIG['log_timezone'])).strftime("%Y-%m-%d %H:%M")
         print(curtime)
