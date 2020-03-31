@@ -21,6 +21,7 @@
 * Go to the directory: `cd Auto-Voice-Channels`
 * Make folder to store guild settings: `mkdir guilds`
 * Install pip: `sudo apt-get -y install python3-pip`
+* Install requirements: `python3 -m pip install -r requirements.txt`
 * Install venv: `pip3 install virtualenv`
 * Make venv: `python3 -m virtualenv bot-env`
 * Use venv: `. bot-env/bin/activate`
