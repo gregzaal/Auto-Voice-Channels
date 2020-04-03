@@ -670,7 +670,7 @@ class MyClient(discord.AutoShardedClient):
             print("s{}: {} guilds".format(s, shards[s]))
         print('=' * 24)
 
-        await func.admin_log("🟥🟧🟨🟩   **Ready**   🟩🟨🟧🟥", self)
+        await func.admin_log("⬛🟥🟨🟩   **Ready**   🟩🟨🟥⬛", self)
 
 
 if NUM_SHARDS > 1:
