@@ -309,7 +309,7 @@ async def admin_command(cmd, ctx):
         while attempts < 100:
             attempts += 1
             if not cfg.WRITES_IN_PROGRESS:
-                print("Exiting!")
+                await func.react(message, '🛑')
                 await client.close()
                 sys.exit()
                 break
