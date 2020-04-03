@@ -23,7 +23,7 @@ help_text = [
 
 async def execute(ctx, params):
     guild = ctx['guild']
-    default_name = "➕ New Session"
+    default_name = "🔰 Channel Creator"
 
     try:
         await func.create_primary(guild, default_name, ctx['message'].author)
