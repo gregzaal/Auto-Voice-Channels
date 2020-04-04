@@ -1106,6 +1106,7 @@ async def create_secondary(guild, primary, creator, private=False):
     c_position = primary.position
     if above:
         c_position -= 1
+    c_position = max(c_position, 0)
 
     # Copy stuff from primary channel
     user_limit = 0
