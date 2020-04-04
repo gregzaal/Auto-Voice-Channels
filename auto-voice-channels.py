@@ -610,7 +610,7 @@ async def check_all_channels(guild, settings):
                         templates[s.id] = settings['auto_channels'][p]['template']
                     if "name" in sv:
                         templates[s.id] = sv['name']
-            secondaries = sorted(secondaries, key=lambda x: x.position)
+            secondaries = sorted(secondaries, key=lambda x: discord.utils.snowflake_time(x.id))
             for i, s in enumerate(secondaries):
                 await func.rename_channel(guild=guild,
                                           channel=s,
