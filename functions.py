@@ -1103,23 +1103,9 @@ async def create_secondary(guild, primary, creator, private=False):
     if ('above' in settings['auto_channels'][primary.id] and
             settings['auto_channels'][primary.id]['above'] is False):
         above = False
+    c_position = primary.position
     if above:
-        for x in voice_channels:
-            if x.id == primary.id:
-                break
-            c_position += 1
-    else:
-        secondaries = []
-        for p in settings['auto_channels']:
-            for s in settings['auto_channels'][primary.id]['secondaries']:
-                secondaries.append(s)
-        past_primary = False
-        for x in voice_channels:
-            if x.id == primary.id:
-                past_primary = True
-            elif past_primary and x.id not in secondaries:
-                break
-            c_position += 1
+        c_position -= 1
 
     # Copy stuff from primary channel
     user_limit = 0
@@ -1189,12 +1175,6 @@ async def create_secondary(guild, primary, creator, private=False):
     settings['left'] = False  # Just in case a returning guild's "on_guild_join" call wasn't caught.
     settings['last_activity'] = int(time())
     utils.set_serv_settings(guild, settings)
-
-    try:
-        await c.edit(position=c_position)  # Set position again, sometimes create_voice_channel gets it wrong.
-    except discord.errors.Forbidden:
-        # Harmless error, no idea why it sometimes throws this, seems like a bug.
-        pass
 
     # Move user
     try:
