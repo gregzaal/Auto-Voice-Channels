@@ -89,6 +89,8 @@ async def admin_command(cmd, ctx):
         cpu = psutil.cpu_percent()
         mem = psutil.virtual_memory()
         disk = psutil.disk_usage('/')
+        days, hours, minutes, seconds = ctx['client'].up_time()  # returns Days, Hours, Minutes, Seconds (Tuple)
+
         await r.edit(content=(
             "Servers: **{tot_servs}** (A:{active_servs} S:{shards}) \t "
             "Users: **{users}** \t Channels: **{channels}** \n"
@@ -96,6 +98,7 @@ async def admin_command(cmd, ctx):
             "CPU: **{cpu}%** \t MEM: **{memg} ({memp}%)** \t DISK: **{diskg} ({diskp}%)**\n"
             "**Last commit:** {commit}\n"
             "**Lines of code:** {lines}\n"
+            "**Up time:** {days} Days, {hours} Hours, {minutes} Minutes, {seconds} Seconds\n"
             "**Timings:** \n{timings}".format(
                 tot_servs=len(guilds),
                 active_servs=utils.num_active_guilds(guilds),
@@ -110,8 +113,11 @@ async def admin_command(cmd, ctx):
                 diskg="{0:.1f}GB".format(disk.used / 1024 / 1024 / 1024), diskp=round(disk.percent),
                 commit=LAST_COMMIT,
                 lines=lines_of_code,
-                timings=utils.format_timings()
-            )
+                days=days,
+                hours=hours,
+                minutes=minutes,
+                seconds=seconds,
+                timings=utils.format_timings())
         ))
 
     if cmd == 'top':

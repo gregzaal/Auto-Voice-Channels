@@ -161,36 +161,68 @@ def cleanup(client, tick_):
     cfg.TIMINGS[fn_name] = end_time - start_time
 
 
-@loop(seconds=cfg.CONFIG['loop_interval'])
-async def main_loop(client):
-    start_time = time()
-    if client.is_ready():
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            thread_ = executor.submit(func.get_guilds, client)
-        while not thread_.done():
-            await asyncio.sleep(0.1)
-        guilds = thread_.result()
-        for guild in guilds:
-            settings = utils.get_serv_settings(guild)
-            if settings['enabled'] and settings['auto_channels']:
-                await check_all_channels(guild, settings)
-        end_time = time()
-        fn_name = "main_loop"
-        cfg.TIMINGS[fn_name] = end_time - start_time
-        if cfg.TIMINGS[fn_name] > 20:
-            await func.log_timings(client, fn_name)
+class MainLoop:
+    def __init__(self):
+        self.change_interval = cfg.CONFIG['loop_interval']
 
-        # Check for new patrons using patron role in support server
-        if cfg.SAPPHIRE_ID is None:
-            try:
-                num_patrons = len(client.get_guild(601015720200896512).get_role(606482184043364373).members)
-            except AttributeError:
-                pass
+    async def main_loop(self):
+        """
+        Main loop, this gets called from main_loop_manager
+        """
+        while True:
+            start_time = time()
+            if client.is_ready():
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    thread_ = executor.submit(func.get_guilds, client)
+                while not thread_.done():
+                    await asyncio.sleep(0.1)
+                guilds = thread_.result()
+                for guild in guilds:
+                    settings = utils.get_serv_settings(guild)
+                    if settings['enabled'] and settings['auto_channels']:
+                        await check_all_channels(guild, settings)
+                end_time = time()
+                fn_name = "main_loop"
+                cfg.TIMINGS[fn_name] = end_time - start_time
+                if cfg.TIMINGS[fn_name] > 20:
+                    await func.log_timings(client, fn_name)
+
+                # Check for new patrons using patron role in support server
+                if cfg.SAPPHIRE_ID is None:
+                    try:
+                        num_patrons = len(client.get_guild(601015720200896512).get_role(606482184043364373).members)
+                    except AttributeError:
+                        pass
+                    else:
+                        if cfg.NUM_PATRONS != num_patrons:
+                            if cfg.NUM_PATRONS != -1:  # Skip first run, since patrons are fetched on startup already.
+                                await func.check_patreon(force_update=TOKEN != cfg.CONFIG['token_dev'], client=client)
+                            cfg.NUM_PATRONS = num_patrons
+            await asyncio.sleep(self.change_interval)
+
+    async def main_loop_manager(self):
+        """
+        This function calls the main loop and checks if the
+        loop has finished / crashed. If its crashed restart loop.
+        """
+        while not client.is_ready():
+            await asyncio.sleep(2)
+        print("Starting Main loop")
+        task = asyncio.get_event_loop().create_task(self.main_loop())  # starts task
+        while True:
+            if task.done():  # Checking if task finished (crashed)
+                await func.admin_log("**ALERT:** Main loop has crashed.\n"
+                                     "**Exception:**\n"
+                                     "```\n"
+                                     f"{task.exception()}"
+                                     f"```"
+                                     "Attempting to restart...\n", client=client)
+                task = asyncio.get_event_loop().create_task(self.main_loop())  # try start it again
             else:
-                if cfg.NUM_PATRONS != num_patrons:
-                    if cfg.NUM_PATRONS != -1:  # Skip first run, since patrons are fetched on startup already.
-                        await func.check_patreon(force_update=TOKEN != cfg.CONFIG['token_dev'], client=client)
-                    cfg.NUM_PATRONS = num_patrons
+                await asyncio.sleep(60)  # suspend task for 1 minute to save resources
+
+    def start(self):
+        asyncio.get_event_loop().create_task(self.main_loop_manager())
 
 
 @loop(seconds=cfg.CONFIG['loop_interval'])
@@ -479,7 +511,7 @@ async def dynamic_tickrate(client):
         new_seed_interval = max(1.5, min(15, new_seed_interval))
         if cfg.SAPPHIRE_ID is None:
             print("New tickrate is {0:.1f}s, seed interval is {1:.2f}m".format(new_tickrate, new_seed_interval))
-        main_loop.change_interval(seconds=new_tickrate)
+        main_loop.change_interval = new_tickrate
         creation_loop.change_interval(seconds=new_tickrate)
         deletion_loop.change_interval(seconds=new_tickrate * 2)
         update_seed.change_interval(minutes=new_seed_interval)
@@ -643,8 +675,24 @@ class MyClient(discord.AutoShardedClient):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.ready_already = False
+        self.start_time = None
 
-    async def on_ready(self):
+    def up_time(self):
+        time_delta = datetime.now() - self.start_time   # Gives us a time delta object
+        days = time_delta.days
+        hours, remainder = divmod(time_delta.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return days, hours, minutes, seconds
+
+    async def on_ready_once(self):
+        self.ready_already = True  # we only want this firing once on initial start
+        self.start_time = datetime.now()   # The bot is only really started when its fully connected.
+
+    async def on_shard_ready(self, shard_id):
+        if (shard_id == (self.shard_count - 1)) and not self.ready_already:
+            await self.on_ready_once()  # This can be used for connecting to databases, starting times etc...
+
         print('=' * 24)
         curtime = datetime.now(pytz.timezone(cfg.CONFIG['log_timezone'])).strftime("%Y-%m-%d %H:%M")
         print(curtime)
@@ -1102,7 +1150,8 @@ async def on_guild_remove(guild):
 
 
 cleanup(client=client, tick_=1)
-main_loop.start(client)
+main_loop = MainLoop()
+main_loop.start()
 creation_loop.start(client)
 deletion_loop.start(client)
 check_dead.start(client)
