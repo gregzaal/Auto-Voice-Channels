@@ -145,7 +145,7 @@ def cleanup(client, tick_):
                 if len(guilds) == 1 and guilds[0].id in cfg.PREFIXES:
                     text = cfg.PREFIXES[guilds[0].id] + 'help'
             else:
-                text = "🚧Nothing🚧"
+                text = "⛔No guilds⛔"
             await client.change_presence(activity=discord.Activity(name=text, type=discord.ActivityType.watching))
 
             if 'admin_channel' in cfg.CONFIG:
@@ -572,7 +572,7 @@ async def update_status(client):
             nc = utils.num_active_channels(guilds)
             text = "{}help | {} channel{}".format(prefix, nc, ("s" if nc != 1 else ""))
         else:
-            text = "🚧Nothing🚧"
+            text = "⛔No guilds⛔"
 
         old_text = ""
         try:
@@ -610,7 +610,7 @@ async def check_all_channels(guild, settings):
                         templates[s.id] = settings['auto_channels'][p]['template']
                     if "name" in sv:
                         templates[s.id] = sv['name']
-            secondaries = sorted(secondaries, key=lambda x: x.position)
+            secondaries = sorted(secondaries, key=lambda x: discord.utils.snowflake_time(x.id))
             for i, s in enumerate(secondaries):
                 await func.rename_channel(guild=guild,
                                           channel=s,
