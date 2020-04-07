@@ -145,7 +145,7 @@ def cleanup(client, tick_):
                 if len(guilds) == 1 and guilds[0].id in cfg.PREFIXES:
                     text = cfg.PREFIXES[guilds[0].id] + 'help'
             else:
-                text = "🚧No guilds🚧"
+                text = "⛔No guilds⛔"
             await client.change_presence(activity=discord.Activity(name=text, type=discord.ActivityType.watching))
 
             if 'admin_channel' in cfg.CONFIG:
@@ -572,7 +572,7 @@ async def update_status(client):
             nc = utils.num_active_channels(guilds)
             text = "{}help | {} channel{}".format(prefix, nc, ("s" if nc != 1 else ""))
         else:
-            text = "🚧No guilds🚧"
+            text = "⛔No guilds⛔"
 
         old_text = ""
         try:
