@@ -66,7 +66,7 @@ CONFIG = get_config()
 
 defaults = {
     'loop_interval': 3,
-    'gold_interval': 2,
+    'gold_interval': 3,
     'sapphires': {}
 }
 for d, dv in defaults.items():
