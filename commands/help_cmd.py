@@ -36,7 +36,7 @@ async def execute(ctx, params):
                 "Use **<PREFIX>unlock** to remove the limit.\n\n"
                 " ·  **<PREFIX>private** - "
                 "Make your voice channel private, preventing anyone from joining you directly. "
-                "Creates a \"⇧ Join {}\" channel below yours so people can request to join you.\n\n"
+                "Creates a \"⇩ Join {}\" channel above yours so people can request to join you.\n\n"
                 " ·  **<PREFIX>kick `@USER`** - "
                 "Start a votekick to remove someone from your channel.\n\n"
                 " ·  **<PREFIX>transfer `@USER`** - "

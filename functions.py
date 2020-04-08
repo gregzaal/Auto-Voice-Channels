@@ -696,7 +696,7 @@ async def set_creator(guild, cid, creator):
                 settings['auto_channels'][p]['secondaries'][s]['creator'] = creator.id
                 try:
                     jc = guild.get_channel(settings['auto_channels'][p]['secondaries'][s]['jc'])
-                    await jc.edit(name="⇧ Join {}".format(creator.display_name))
+                    await jc.edit(name="⇩ Join {}".format(creator.display_name))
                 except (KeyError, AttributeError):
                     pass
                 if s in cfg.PRIV_CHANNELS:
