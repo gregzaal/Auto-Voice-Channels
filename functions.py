@@ -1094,8 +1094,7 @@ async def create_secondary(guild, primary, creator, private=False):
     lock_user_request(creator, offset=20)  # Add offset in case creating the channel takes more than 3s
 
     # Find what the channel position is supposed to be
-    # Channel.position is relative to channels of any type, but Channel.edit(position) is relative to
-    # channels of that type. So we need to find that first.
+    # Channel.position is unreliable, so we have to find it manually.
     c_position = 0
     voice_channels = [x for x in guild.channels if isinstance(x, type(primary))]
     voice_channels.sort(key=lambda ch: ch.position)
@@ -1104,9 +1103,9 @@ async def create_secondary(guild, primary, creator, private=False):
             settings['auto_channels'][primary.id]['above'] is False):
         above = False
     c_position = primary.position
-    if above:
-        c_position -= 1
-    c_position = max(c_position, 0)
+    if not above:
+        secondaries = settings['auto_channels'][primary.id]['secondaries'].keys()
+        c_position += 1 + len([v for v in voice_channels if v.id in secondaries and v.position > primary.position])
 
     # Copy stuff from primary channel
     user_limit = 0
@@ -1147,7 +1146,6 @@ async def create_secondary(guild, primary, creator, private=False):
         c = await guild.create_voice_channel(
             "⌛",
             category=primary.category,
-            position=c_position,
             bitrate=bitrate,
             user_limit=user_limit,
             overwrites=overwrites
@@ -1176,6 +1174,13 @@ async def create_secondary(guild, primary, creator, private=False):
     settings['left'] = False  # Just in case a returning guild's "on_guild_join" call wasn't caught.
     settings['last_activity'] = int(time())
     utils.set_serv_settings(guild, settings)
+
+    try:
+        await c.edit(position=c_position)
+    except discord.errors.Forbidden:
+        # No idea why it sometimes throws this, seems like a bug.
+        # If it can create channels, it certainly has permission to move them.
+        log("Warning: Unable to set channel position. C: {} G: {}".format(c.id, guild.id))
 
     # Move user
     try:
