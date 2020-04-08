@@ -1180,7 +1180,7 @@ async def create_secondary(guild, primary, creator, private=False):
     except discord.errors.Forbidden:
         # No idea why it sometimes throws this, seems like a bug.
         # If it can create channels, it certainly has permission to move them.
-        log("Warning: Unable to set channel position. C: {} G: {}".format(c.id, guild.id))
+        log("Warning: Unable to set channel position {}".format(c.id), guild)
 
     # Move user
     try:
