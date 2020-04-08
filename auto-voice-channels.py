@@ -322,6 +322,7 @@ async def check_votekicks(client):
                 return
 
             in_favor = len(vk['in_favor'])
+            print("TESTVOTEKICK: {} ({}/{})".format(vk['offender'].display_name, in_favor, vk['required_votes']))
             if in_favor >= vk['required_votes']:
                 to_remove.append(mid)
                 log("Kicked {} from {} ({}/{})".format(vk['offender'].display_name,
@@ -885,6 +886,7 @@ async def on_reaction_add(reaction, user):
             if time() < vk['end_time']:
                 if user not in vk['in_favor'] and user in vk['participants']:
                     vk['in_favor'].append(user)
+                    log("{} voted to kick {}".format(user.display_name, vk['offender'].display_name), guild)
         return
 
     to_delete = []
