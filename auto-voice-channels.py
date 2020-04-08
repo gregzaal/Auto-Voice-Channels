@@ -944,7 +944,10 @@ async def on_reaction_add(reaction, user):
                 except discord.errors.NotFound:
                     pass
     for uid in to_delete:
-        del cfg.JOINS_IN_PROGRESS[uid]
+        try:
+            del cfg.JOINS_IN_PROGRESS[uid]
+        except KeyError:
+            pass  # Already deleted
 
 
 @client.event
