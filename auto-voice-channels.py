@@ -322,6 +322,7 @@ async def check_votekicks(client):
                 return
 
             in_favor = len(vk['in_favor'])
+            print("TESTVOTEKICK: {} ({}/{})".format(vk['offender'].display_name, in_favor, vk['required_votes']))
             if in_favor >= vk['required_votes']:
                 to_remove.append(mid)
                 log("Kicked {} from {} ({}/{})".format(vk['offender'].display_name,
@@ -389,7 +390,7 @@ async def create_join_channels(client):
             # Unable to create join channel for 120s
             to_remove.append(pc)
             await pcv['text_channel'].send(
-                ":warning: {} For some reason I was unable to create your \"⇧ Join\" channel, please try again later. "
+                ":warning: {} For some reason I was unable to create your \"⇩ Join\" channel, please try again later. "
                 "Your channel is still private, but there's now no way for anyone to join you. "
                 "Use `{}public` to make it public again."
                 "".format(pcv['creator'].mention, pcv['prefix']))
@@ -406,13 +407,7 @@ async def create_join_channels(client):
                     creator = pcv['creator'].display_name
                     vc = pcv['voice_channel']
 
-                    c_position = 0
-                    voice_channels = [x for x in guild.channels if isinstance(x, type(vc))]
-                    voice_channels.sort(key=lambda ch: ch.position)
-                    for x in voice_channels:
-                        c_position += 1
-                        if x.id == vc.id:
-                            break
+                    c_position = vc.position
 
                     overwrites = vc.overwrites
                     k = guild.default_role
@@ -421,15 +416,14 @@ async def create_join_channels(client):
                     overwrites[k] = v
 
                     try:
-                        jc = await guild.create_voice_channel("⇧ Join {}".format(creator),  # TODO creator can change
-                                                              position=c_position,
+                        jc = await guild.create_voice_channel("⇩ Join {}".format(creator),  # TODO creator can change
                                                               category=vc.category,
                                                               overwrites=overwrites)
                     except discord.errors.Forbidden:
                         to_remove.append(pc)
                         try:
                             await pcv['text_channel'].send(
-                                ":warning: {} I don't have permission to make the \"⇧ Join\" channel for you anymore."
+                                ":warning: {} I don't have permission to make the \"⇩ Join\" channel for you anymore."
                                 "".format(pcv['creator'].mention))
                         except:
                             log("Failed to create join-channel, and failed to notify {}".format(creator))
@@ -892,6 +886,7 @@ async def on_reaction_add(reaction, user):
             if time() < vk['end_time']:
                 if user not in vk['in_favor'] and user in vk['participants']:
                     vk['in_favor'].append(user)
+                    log("{} voted to kick {}".format(user.display_name, vk['offender'].display_name), guild)
         return
 
     to_delete = []
@@ -951,7 +946,10 @@ async def on_reaction_add(reaction, user):
                 except discord.errors.NotFound:
                     pass
     for uid in to_delete:
-        del cfg.JOINS_IN_PROGRESS[uid]
+        try:
+            del cfg.JOINS_IN_PROGRESS[uid]
+        except KeyError:
+            pass  # Already deleted
 
 
 @client.event

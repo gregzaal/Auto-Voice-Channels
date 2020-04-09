@@ -58,7 +58,7 @@ All the above commands are restricted to admin users. The commands below can be 
 
 `kick` - Start a votekick to remove someone from your channel.
 
-`private` - Make your voice channel private, preventing anyone from joining you directly. Creates a "⇧ Join (username)" channel below yours so people can request to join you.
+`private` - Make your voice channel private, preventing anyone from joining you directly. Creates a "⇩ Join (username)" channel above yours so people can request to join you.
 
 `transfer` - Make someone else the owner of your channel, treating them as the original creator who can run restricted commands.
 

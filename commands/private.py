@@ -10,7 +10,7 @@ help_text = [
         ("Usage:", "<PREFIX><COMMAND>"),
         ("Description:",
          "Make your voice channel private, preventing anyone from joining you directly.\n\n"
-         "Creates a \"⇧ Join (username)\" channel below yours so people can request to join you. "
+         "Creates a \"⇩ Join (username)\" channel above yours so people can request to join you. "
          "When someone joins that channel, I'll send you a message asking you to "
          "approve/deny/block their request."),
     ]
@@ -48,7 +48,7 @@ async def execute(ctx, params):
                     'prefix': ctx['print_prefix'],
                 }
                 return True, ("Your channel is now private!\n"
-                              "A \"**⇧ Join {}**\" channel will appear below your one shortly. "
+                              "A \"**⇩ Join {}**\" channel will appear above your one shortly. "
                               "When someone enters this channel to request to join you, "
                               "I'll send a message here asking you to approve or deny their request.\n"
                               "Use `{}public` to make it public again."

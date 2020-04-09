@@ -42,7 +42,7 @@ async def execute(ctx, params):
                     if jc:
                         await jc.delete()
                 except discord.errors.Forbidden:
-                    return False, "You channel is now public, but I'm not allowed to delete your **⇧ Join** channel."
+                    return False, "You channel is now public, but I'm not allowed to delete your **⇩ Join** channel."
                 return True, "Your channel is now public!"
     return False, "It doesn't seem like you're in a voice channel anymore."
 
