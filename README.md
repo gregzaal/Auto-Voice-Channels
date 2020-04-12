@@ -47,6 +47,11 @@
 
 # Running with Docker
 
+## Requires:
+* [Docker](https://www.docker.com/products/docker-desktop)
+* [Python 3.7+ (Must accessable via PATH)](https://www.python.org/downloads/release/python-370/)
+
+## Quick start:
 * Set up `config.json`:
   * `admin_id` is your ID, for the bot to DM you when it logs on, joins servers, gets errors, etc.
   * `client_id` is the bot ID.
