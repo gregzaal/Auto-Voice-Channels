@@ -7,6 +7,7 @@ import subprocess
 import sys
 from datetime import datetime
 from time import time
+import itertools
 
 import cfg
 from commands import admin_commands
@@ -23,10 +24,17 @@ from discord.ext.tasks import loop
 logging.basicConfig(level=logging.INFO)
 ADMIN_CHANNEL = None
 ADMIN = None
-
+PRODUCTION_BUILD = False    # IMPORTANT! ---> SET THIS TO FALSE IF NOT CLUSTERING
 DEV_BOT = cfg.CONFIG['DEV'] if 'DEV' in cfg.CONFIG else False
 GOLD_BOT = False
-NUM_SHARDS = cfg.CONFIG['num_shards'] if 'num_shards' in cfg.CONFIG else 0
+
+if PRODUCTION_BUILD:    # Only used in clustering
+    starting_args = sys.argv
+    CLUSTER_ID, SHARDS, TOTAL_SHARDS = starting_args[1:]
+    NUM_SHARDS = int(TOTAL_SHARDS)
+else:
+    NUM_SHARDS = cfg.CONFIG['num_shards'] if 'num_shards' in cfg.CONFIG else 0
+
 if DEV_BOT:
     print("DEV BOT")
     TOKEN = cfg.CONFIG['token_dev']
@@ -124,8 +132,6 @@ class LoopChecks:
 
 
 def cleanup(client, tick_):
-    # TODO probably possible to run into race conditions
-
     start_time = time()
 
     LoopSystem = LoopChecks(client=client, tick=tick_)
@@ -677,6 +683,7 @@ class MyClient(discord.AutoShardedClient):
         super().__init__(*args, **kwargs)
         self.ready_already = False
         self.start_time = None
+        self.shard_id_ = itertools.count(0, 1)
 
     def up_time(self):
         time_delta = datetime.now() - self.start_time   # Gives us a time delta object
@@ -688,10 +695,6 @@ class MyClient(discord.AutoShardedClient):
     async def on_ready_once(self):
         self.ready_already = True  # we only want this firing once on initial start
         self.start_time = datetime.now()   # The bot is only really started when its fully connected.
-
-    async def on_shard_ready(self, shard_id):
-        if (shard_id == (self.shard_count - 1)) and not self.ready_already:
-            await self.on_ready_once()  # This can be used for connecting to databases, starting times etc...
 
         print('=' * 24)
         curtime = datetime.now(pytz.timezone(cfg.CONFIG['log_timezone'])).strftime("%Y-%m-%d %H:%M")
@@ -720,11 +723,25 @@ class MyClient(discord.AutoShardedClient):
 
         await func.admin_log("🟥🟧🟨🟩   **Ready**   🟩🟨🟧🟥", self)
 
+    async def on_ready(self):
+        if (next(self.shard_id_) == (self.shard_count - 1)) and not self.ready_already:
+            await self.on_ready_once()  # This can be used for connecting to databases, starting times etc...
 
-if NUM_SHARDS > 1:
-    client = MyClient(shard_count=NUM_SHARDS)
+    async def on_shard_ready(self, shard_id):
+        if (shard_id == (self.shard_count - 1)) and not self.ready_already:
+            await self.on_ready_once()  # This can be used for connecting to databases, starting times etc...
+
+
+if PRODUCTION_BUILD:
+    def shard_ids_from_cluster(cluster, per):
+        return list(range(per * cluster, per * cluster + per))
+    client = MyClient(shard_count=NUM_SHARDS, shard_ids=shard_ids_from_cluster(CLUSTER_ID, SHARDS))
+
 else:
-    client = MyClient()
+    if NUM_SHARDS > 1:
+        client = MyClient(shard_count=NUM_SHARDS)
+    else:
+        client = MyClient()
 
 
 async def reload_modules(m):
@@ -1148,19 +1165,19 @@ async def on_guild_remove(guild):
             num_members),
         client)
 
-
-cleanup(client=client, tick_=1)
-main_loop = MainLoop()
-main_loop.start()
-creation_loop.start(client)
-deletion_loop.start(client)
-check_dead.start(client)
-check_votekicks.start(client)
-create_join_channels.start(client)
-dynamic_tickrate.start(client)
-lingering_secondaries.start(client)
-update_seed.start(client)
-analytics.start(client)
-update_status.start(client)
-check_patreon.start()
-client.run(TOKEN)
+if __name__ == "__main__":
+    cleanup(client=client, tick_=1)
+    main_loop = MainLoop()
+    main_loop.start()
+    creation_loop.start(client)
+    deletion_loop.start(client)
+    check_dead.start(client)
+    check_votekicks.start(client)
+    create_join_channels.start(client)
+    dynamic_tickrate.start(client)
+    lingering_secondaries.start(client)
+    update_seed.start(client)
+    analytics.start(client)
+    update_status.start(client)
+    check_patreon.start()
+    client.run(TOKEN)

@@ -1,0 +1,17 @@
+version: '3'
+
+services:
+  avc_cluster:
+    build: .
+    container_name: avc_cluster
+    image: avc_cluster
+    command: python cluster.py
+    volumes:
+      - .:/code
+  avc:
+    build: .
+    container_name: avc
+    image: avc
+    command: python auto-voice-channels.py
+    volumes:
+      - .:/code
