@@ -7,6 +7,8 @@
 - [Discord server](https://discord.gg/HT6GNhJ)
 - [Patreon](https://www.patreon.com/pixaal)
 
+# Standard running
+
 ## Requires:
 
 * [Python 3.5.3+](https://www.python.org/downloads/)
@@ -42,6 +44,29 @@
 
 * Invite the bot to your own server, replacing `<YOUR BOT ID>` with... your bot ID: `https://discordapp.com/api/oauth2/authorize?client_id=<YOUR BOT ID>&permissions=286280784&scope=bot`
 * Start your bot: `python3 auto-voice-channels.py`
+
+# Running with Docker
+
+* Set up `config.json`:
+  * `admin_id` is your ID, for the bot to DM you when it logs on, joins servers, gets errors, etc.
+  * `client_id` is the bot ID.
+  * `log_timezone` is for the time displayed in logs, see [this list](https://stackoverflow.com/questions/13866926/is-there-a-list-of-pytz-timezones).
+  * `token` is your bot's private token you can find [here](https://discordapp.com/developers/applications) - do not share it with anyone else.
+
+```json
+{
+    "admin_id":123456789012345678,
+    "client_id":987654321098765432,
+    "log_timezone":"Africa/Johannesburg",
+    "token":"XXXXXXXXXXXXXXXXXXXXXXXX.XXXXXX.XXXXXXXXXXXXXXXXXXXXXXXXXXX"
+}
+```
+
+* Open up a shell terminal in the main directory.
+* Run `docker-compose build avc`
+* Invite the bot to your own server, replacing `<YOUR BOT ID>` with... your bot ID: `https://discordapp.com/api/oauth2/authorize?client_id=<YOUR BOT ID>&permissions=286280784&scope=bot`
+* Run `docker-compose up` to start and run the bot.
+
 
 ## Help:
 
