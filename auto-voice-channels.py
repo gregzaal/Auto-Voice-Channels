@@ -21,17 +21,17 @@ import functions as func
 from functions import log, echo
 from discord.ext.tasks import loop
 
-logging.basicConfig(level=logging.INFO)
+#logging.basicConfig(level=logging.INFO)
 ADMIN_CHANNEL = None
 ADMIN = None
-PRODUCTION_BUILD = False    # IMPORTANT! ---> SET THIS TO FALSE IF NOT CLUSTERING
+PRODUCTION_BUILD = True    # IMPORTANT! ---> SET THIS TO FALSE IF NOT CLUSTERING
 DEV_BOT = cfg.CONFIG['DEV'] if 'DEV' in cfg.CONFIG else False
 GOLD_BOT = False
 
 if PRODUCTION_BUILD:    # Only used in clustering
     starting_args = sys.argv
     CLUSTER_ID, SHARDS, TOTAL_SHARDS = starting_args[1:]
-    NUM_SHARDS = int(TOTAL_SHARDS)
+    CLUSTER_ID, SHARDS, NUM_SHARDS = int(CLUSTER_ID), int(SHARDS), int(TOTAL_SHARDS)
 else:
     NUM_SHARDS = cfg.CONFIG['num_shards'] if 'num_shards' in cfg.CONFIG else 0
 
@@ -52,7 +52,7 @@ try:
         NUM_SHARDS = 1
     else:
         print("NO SAPPHIRE WITH ID " + str(sid))
-        sys.exit()
+        # sys.exit() todo add compat with shell exe
 except IndexError:
     pass
 except ValueError:
@@ -696,6 +696,11 @@ class MyClient(discord.AutoShardedClient):
         self.ready_already = True  # we only want this firing once on initial start
         self.start_time = datetime.now()   # The bot is only really started when its fully connected.
 
+    async def on_ready(self):
+        print("Shard connected")
+        if (next(self.shard_id_) == (self.shard_count - 1)) and not self.ready_already:
+            await self.on_ready_once()  # This can be used for connecting to databases, starting times etc...
+
         print('=' * 24)
         curtime = datetime.now(pytz.timezone(cfg.CONFIG['log_timezone'])).strftime("%Y-%m-%d %H:%M")
         print(curtime)
@@ -716,16 +721,12 @@ class MyClient(discord.AutoShardedClient):
             settings = utils.get_serv_settings(g)
             if 'prefix' in settings:
                 cfg.PREFIXES[g.id] = settings['prefix']
-        print("Shards:", len(shards))
+        print("Shards:", len(self.shards))
         for s in shards:
             print("s{}: {} guilds".format(s, shards[s]))
         print('=' * 24)
 
         await func.admin_log("🟥🟧🟨🟩   **Ready**   🟩🟨🟧🟥", self)
-
-    async def on_ready(self):
-        if (next(self.shard_id_) == (self.shard_count - 1)) and not self.ready_already:
-            await self.on_ready_once()  # This can be used for connecting to databases, starting times etc...
 
     async def on_shard_ready(self, shard_id):
         if (shard_id == (self.shard_count - 1)) and not self.ready_already:

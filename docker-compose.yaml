@@ -8,10 +8,10 @@ services:
     command: python cluster.py
     volumes:
       - .:/code
-  avc:
-    build: .
-    container_name: avc
-    image: avc
-    command: python auto-voice-channels.py
-    volumes:
-      - .:/code
+  #avc:
+  #  build: .
+  #  container_name: avc
+  #  image: avc
+  #  command: python auto-voice-channels.py
+  #  volumes:
+  #    - .:/code
