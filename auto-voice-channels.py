@@ -322,7 +322,7 @@ async def check_votekicks(client):
                 return
 
             in_favor = len(vk['in_favor'])
-            print("TESTVOTEKICK: {} ({}/{})".format(vk['offender'].display_name, in_favor, vk['required_votes']))
+            log("TESTVOTEKICK: {} ({}/{})".format(vk['offender'].display_name, in_favor, vk['required_votes']), guild)
             if in_favor >= vk['required_votes']:
                 to_remove.append(mid)
                 log("Kicked {} from {} ({}/{})".format(vk['offender'].display_name,
@@ -356,6 +356,8 @@ async def check_votekicks(client):
                 )
             elif time() > vk['end_time'] + 5:
                 to_remove.append(mid)
+                log("VOTEKICK TIMED OUT: {} ({}/{})".format(
+                    vk['offender'].display_name, in_favor, vk['required_votes']), guild)
                 await vk['message'].edit(content="‼ **Votekick** timed out: Insufficient votes received "
                                                  "({0}/{1}), required: {2}/{1}.".format(in_favor,
                                                                                         len(vk['participants']) + 1,

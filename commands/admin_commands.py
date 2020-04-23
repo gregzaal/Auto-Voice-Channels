@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import traceback
@@ -300,6 +301,32 @@ async def admin_command(cmd, ctx):
                 await echo(s, channel)
             else:
                 await channel.send("¯\\_(ツ)_/¯")
+        except:
+            await channel.send(traceback.format_exc())
+            await func.react(message, '❌')
+
+    if cmd == 'votekicks':
+        try:
+            readable = {}
+            for k, kv in cfg.VOTEKICKS.items():
+                readable[k] = {
+                    "initiator": kv['initiator'].display_name,
+                    "participants": [m.display_name for m in kv['participants']],
+                    "required_votes": kv['required_votes'],
+                    "offender": kv['offender'].display_name,
+                    "reason": kv['reason'],
+                    "in_favor": [m.display_name for m in kv['in_favor']],
+                    "voice_channel": kv['voice_channel'].id,
+                    "message": kv['message'].id,
+                    "end_time": datetime.fromtimestamp(kv['end_time']).strftime("%Y-%m-%d %H:%M")
+                }
+            s = "```json\n" + json.dumps(readable, indent=1, sort_keys=True) + "```"
+            try:
+                await channel.send(s)
+            except discord.errors.HTTPException:
+                # Usually because message is over character limit
+                haste_url = await utils.hastebin(file_content)
+                await channel.send(haste_url)
         except:
             await channel.send(traceback.format_exc())
             await func.react(message, '❌')
