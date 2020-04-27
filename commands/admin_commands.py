@@ -212,21 +212,21 @@ async def admin_command(cmd, ctx):
             await func.react(message, '❌')
 
     if cmd == 'settings':
-        g = utils.strip_quotes(params_str)
+        gid = utils.strip_quotes(params_str)
         try:
-            int(g)
+            int(gid)
         except ValueError:
             for x in guilds:
-                if x.name == g:
-                    g = str(x.id)
+                if x.name == gid:
+                    gid = str(x.id)
                     break
-        fname = g + '.json'
+        fname = gid + '.json'
         fp = os.path.join(cfg.SCRIPT_DIR, "guilds", fname)
         if os.path.exists(fp):
-            g = int(g)
-            gn = client.get_guild(g).name
-            head = "**{}** `{}`".format(gn, g)
-            head += "💎" if func.is_sapphire(g) else ("💳" if func.is_gold(g) else "")
+            gid = int(gid)
+            g = client.get_guild(gid)
+            head = "**{}** `{}`{}".format(g.name, gid, ("✅" if g in func.get_guilds(client) else "❌"))
+            head += "💎" if func.is_sapphire(gid) else ("💳" if func.is_gold(gid) else "")
             s = head
             s += "\n```json\n"
             with open(fp, 'r') as f:
