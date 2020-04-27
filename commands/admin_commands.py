@@ -171,6 +171,31 @@ async def admin_command(cmd, ctx):
             await channel.send(traceback.format_exc())
             await func.react(message, '❌')
 
+    if cmd == 'sapphiredebug':
+        if cfg.SAPPHIRE_ID is None:
+            await channel.send(content='❌ Not a sapphire')
+            return
+
+        if patreon_info is None:
+            await channel.send(content='❌ No patreon_info')
+            return
+
+        auths = utils.read_json(os.path.join(cfg.SCRIPT_DIR, "patron_auths.json"))
+        initiator_id = cfg.CONFIG["sapphires"][str(cfg.SAPPHIRE_ID)]['initiator']
+        msg = ("Sapphire ID: {}\n"
+               "User: {} `{}`\n"
+               "Actual guilds: {}\n"
+               "Config guilds: {}\n"
+               "Authenticated guilds: {}\n"
+               "get_guilds: {}".format(
+                   cfg.SAPPHIRE_ID,
+                   initiator_id,
+                   ", ".join(['`' + str(g.id) + '`' for g in client.guilds]),
+                   ", ".join(['`' + str(g) + '`' for g in cfg.CONFIG["sapphires"][str(cfg.SAPPHIRE_ID)]['servers']]),
+                   ", ".join(['`' + str(g) + '`' for g in auths[str(initiator_id)]['servers']]),
+                   ", ".join(['`' + str(g.id) + '`' for g in func.get_guilds(client)]),
+        ))
+
     if cmd == 'status':
         g = utils.strip_quotes(params_str)
         if not g:
