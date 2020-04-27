@@ -537,7 +537,7 @@ async def check_patreon(force_update=False, client=None):
                 await dm_user(pu, msg)
 
         for p, r in previous_patrons.items():
-            if p not in patrons:
+            if p not in patrons and p != cfg.CONFIG['admin_id']:
                 pu = client.get_user(p)
                 try:
                     pn = pu.display_name
