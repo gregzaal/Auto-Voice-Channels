@@ -44,7 +44,7 @@ async def execute(ctx, params):
     r += "Game activity:"
     games = []
     for m in c.members:
-        if m.activity and not m.bot:
+        if m.activity and m.activity.name and not m.bot:
             act = m.activity
             games.append(act.name)
             r += "\n:white_small_square: {}: **{}**".format(
