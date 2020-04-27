@@ -183,7 +183,7 @@ async def admin_command(cmd, ctx):
         auths = utils.read_json(os.path.join(cfg.SCRIPT_DIR, "patron_auths.json"))
         initiator_id = cfg.CONFIG["sapphires"][str(cfg.SAPPHIRE_ID)]['initiator']
         msg = ("Sapphire ID: {}\n"
-               "User: {} `{}`\n"
+               "User: `{}`\n"
                "Actual guilds: {}\n"
                "Config guilds: {}\n"
                "Authenticated guilds: {}\n"
