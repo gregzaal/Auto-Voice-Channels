@@ -193,8 +193,9 @@ async def admin_command(cmd, ctx):
                    ", ".join(['`' + str(g.id) + '`' for g in client.guilds]),
                    ", ".join(['`' + str(g) + '`' for g in cfg.CONFIG["sapphires"][str(cfg.SAPPHIRE_ID)]['servers']]),
                    ", ".join(['`' + str(g) + '`' for g in auths[str(initiator_id)]['servers']]),
-                   ", ".join(['`' + str(g.id) + '`' for g in func.get_guilds(client)]),
-        ))
+                   ", ".join(['`' + str(g.id) + '`' for g in func.get_guilds(client)]))
+               )
+        await channel.send(msg)
 
     if cmd == 'status':
         g = utils.strip_quotes(params_str)
