@@ -14,8 +14,8 @@ help_text = [
 
 async def execute(ctx, params):
     channel = ctx['channel']
-    t = "💻 GitHub"
-    l = "https://github.com/gregzaal/Auto-Voice-Channels"
+    t = "💻"
+    l = "Not Available"
     can_embed = channel.permissions_for(ctx['guild'].me).embed_links
     if can_embed:
         try:
