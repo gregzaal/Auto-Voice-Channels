@@ -347,6 +347,7 @@ async def admin_command(cmd, ctx):
                     "end_time": datetime.fromtimestamp(kv['end_time']).strftime("%Y-%m-%d %H:%M")
                 }
             s = "```json\n" + json.dumps(readable, indent=1, sort_keys=True) + "```"
+            print(s)
             try:
                 await channel.send(s)
             except discord.errors.HTTPException:
