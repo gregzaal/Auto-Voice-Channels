@@ -435,6 +435,8 @@ def eval_expression(text, is_sapphire, creator, party, game_name):
         'ROLE': [r.id for r in creator.roles],
         'LIVE': ((creator.voice and hasattr(creator.voice, 'self_stream') and creator.voice.self_stream) or
                  (act and act.type == discord.ActivityType.streaming)),
+        'LIVE_DISCORD': creator.voice and hasattr(creator.voice, 'self_stream') and creator.voice.self_stream,
+        'LIVE_EXTERNAL': act and act.type == discord.ActivityType.streaming,
         'GAME': game_name,
     }
     if is_sapphire:
