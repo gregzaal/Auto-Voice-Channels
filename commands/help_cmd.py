@@ -212,8 +212,8 @@ async def execute(ctx, params):
             )
             e.add_field(
                 name=" ·  `LIVE`",
-                value="Whether or not the creator of the channel is streaming with Twitch. Does **not** yet include "
-                      "the new \"Go live\" feature in discord (waiting for discord.py v1.3 release).\n\n"
+                value="Whether or not the creator of the channel is streaming. Use `LIVE_DISCORD` to only detect "
+                "discord's \"Go Live\" streams, or `LIVE_EXTERNAL` for Twitch. `LIVE` will include both.\n\n"
             )
             e.add_field(
                 name=" ·  `PLAYERS>number`",
