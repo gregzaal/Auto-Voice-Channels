@@ -356,14 +356,23 @@ async def check_votekicks(client):
                 )
             elif time() > vk['end_time'] + 5:
                 to_remove.append(mid)
-                log("VOTEKICK TIMED OUT: {} ({}/{})".format(
-                    vk['offender'].display_name, in_favor, vk['required_votes']), guild)
+                log("VOTEKICK TIMED OUT: {} ({}/{}) {} {}".format(
+                    vk['offender'].display_name, in_favor, vk['required_votes'], mid, type(mid)), guild)
                 await vk['message'].edit(content="‼ **Votekick** timed out: Insufficient votes received "
                                                  "({0}/{1}), required: {2}/{1}.".format(in_favor,
                                                                                         len(vk['participants']) + 1,
                                                                                         vk['required_votes']))
         for mid in to_remove:
+            log("REMOVING VOTEKICK: {} {} len:{} keys:{}".format(
+                mid,
+                type(mid),
+                len(cfg.VOTEKICKS),
+                ', '.join([str(k) + " " + str(type(k)) for k in cfg.VOTEKICKS.keys()])),
+                guild)
             del cfg.VOTEKICKS[mid]
+            print("... len:{} keys:{}".format(
+                  len(cfg.VOTEKICKS),
+                  ', '.join([str(k) + " " + str(type(k)) for k in cfg.VOTEKICKS.keys()])))
 
         end_time = time()
         fn_name = "check_votekicks"
