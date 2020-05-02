@@ -351,7 +351,7 @@ async def admin_command(cmd, ctx):
                 await channel.send(s)
             except discord.errors.HTTPException:
                 # Usually because message is over character limit
-                haste_url = await utils.hastebin(file_content)
+                haste_url = await utils.hastebin(s)
                 await channel.send(haste_url)
         except:
             await channel.send(traceback.format_exc())
