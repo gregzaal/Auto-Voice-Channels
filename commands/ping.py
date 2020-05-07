@@ -33,7 +33,6 @@ async def execute(ctx, params):
     t1 = ctx['message'].created_at
     t2 = r.created_at
     embed = discord.Embed(color=discord.Color.from_rgb(205, 220, 57))
-    embed.title = "Pong!"
     rc = (t2 - t1).total_seconds()
     e = '😭' if rc > 5 else ('😨' if rc > 1 else '👌')
     embed.add_field(name="Reaction time:", value="{0:.3f}s {1}\n".format(rc, e))
@@ -44,7 +43,7 @@ async def execute(ctx, params):
     embed.add_field(name="Shard:", value=guild.shard_id)
     embed.add_field(name="Guild region:", value=guild.region)
     embed.add_field(name="Bot region:", value=cfg.SERVER_LOCATION)
-    await r.edit(content=None, embed=embed)
+    await r.edit(content="Pong!", embed=embed)
     return True, "NO RESPONSE"
 
 
