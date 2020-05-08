@@ -101,6 +101,16 @@ def get_config():
 
 
 @func_timer()
+def set_config(data):
+    cf = os.path.join(cfg.SCRIPT_DIR, 'config.json')
+    if not os.path.exists(cf):
+        print("Config file doesn't exist!")
+        import sys
+        sys.exit(0)
+    return write_json(cf, data, indent=4)
+
+
+@func_timer()
 def update_server_location():
     try:
         print("Getting server location...")
