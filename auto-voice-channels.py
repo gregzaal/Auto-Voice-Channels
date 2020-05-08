@@ -748,46 +748,65 @@ async def on_message(message):
                                        "If you've tried that already, then make sure I have the right permissions "
                                        "to see and reply to your commands in that channel.")
         elif message.content.lower().startswith("power-overwhelming"):
-            auth_guild = message.content[len("power-overwhelming"):].strip()
-            try:
-                auth_guild = int(auth_guild)
-            except ValueError:
-                await message.channel.send("`{}` is not a valid guild ID, try typing "
-                                           "`who am I` to get a list of guilds we're both in.".format(auth_guild))
+            channel = message.channel
+            params_str = message.content[len("power-overwhelming"):].strip()
+            if not params_str:
+                await channel.send("You need to specify a guild ID. "
+                                   "Try typing `who am I` to get a list of guilds we're both in")
                 return
-            else:
-                channel = message.channel
-                g = client.get_guild(auth_guild)
-                if g is None:
-                    await channel.send("`{}` is not a guild I know about, "
-                                       "maybe you need to invite me there first?".format(auth_guild))
+            auth_guilds = params_str.replace(' ', '\n').split('\n')
+            for auth_guild in auth_guilds:
+                try:
+                    g = client.get_guild(int(auth_guild))
+                    if g is None:
+                        await channel.send("`{}` is not a guild I know about, "
+                                           "maybe you need to invite me there first?".format(auth_guild))
+                        return
+                except ValueError:
+                    await channel.send("`{}` is not a valid guild ID, try typing "
+                                       "`who am I` to get a list of guilds we're both in.".format(auth_guild))
                     return
-                ctx = {
-                    'message': message,
-                    'channel': channel,
-                    'client': client,
-                }
-                success, response = await func.power_overwhelming(ctx, g)
+                except Exception as e:
+                    error_text = "Auth Error `{}`\nUser `{}`\nCMD `{}`".format(type(e).__name__,
+                                                                               message.author.id,
+                                                                               message.content)
+                    await func.admin_log(error_text, ctx['client'])
+                    log(error_text)
+                    error_text = traceback.format_exc()
+                    await func.admin_log(error_text, ctx['client'])
+                    log(error_text)
+                    return False, ("A `{}` error occured :(\n"
+                                   "An admin has been notified and will be in touch.\n"
+                                   "In the meantime, try asking for help in the support server: "
+                                   "https://discord.gg/qhMrz6u".format(type(e).__name__))
 
-                if success or response != "NO RESPONSE":
-                    log("DM CMD {}: {}".format("Y" if success else "F", message.content))
+            ctx = {
+                'message': message,
+                'channel': channel,
+                'client': client,
+            }
+            auth_guilds = [int(g) for g in auth_guilds]
+            success, response = await func.power_overwhelming(ctx, auth_guilds)
 
-                if success:
-                    if response:
-                        if response != "NO RESPONSE":
-                            await echo(response, channel, message.author)
-                    else:
-                        await func.react(message, '✅')
-                else:
+            if success or response != "NO RESPONSE":
+                log("DM CMD {}: {}".format("Y" if success else "F", message.content))
+
+            if success:
+                if response:
                     if response != "NO RESPONSE":
-                        await func.react(message, '❌')
-                        if response:
-                            await echo(response, channel, message.author)
-        elif message.content.lower() == "who am i":
+                        await echo(response, channel, message.author)
+                else:
+                    await func.react(message, '✅')
+            else:
+                if response != "NO RESPONSE":
+                    await func.react(message, '❌')
+                    if response:
+                        await echo(response, channel, message.author)
+        elif message.content.lower() in ["who am i", "who am i?"]:
             in_guilds = []
             for g in client.guilds:
                 if message.author in g.members:
-                    in_guilds.append("**{}** `{}`".format(g.name, g.id))
+                    in_guilds.append("`{}` **{}**".format(g.id, g.name))
             if in_guilds:
                 await message.channel.send("We're both in the following guilds:\n{}".format('\n'.join(in_guilds)))
             else:

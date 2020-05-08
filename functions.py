@@ -594,10 +594,10 @@ def get_sapphire_id(guild):
 
 
 @utils.func_timer()
-async def power_overwhelming(ctx, guild):
+async def power_overwhelming(ctx, auth_guilds):
     author = ctx['message'].author
     r = "Checking..."
-    s = False
+    success = False
     m = await ctx['channel'].send(r)
 
     if patreon_info is None:
@@ -607,27 +607,59 @@ async def power_overwhelming(ctx, guild):
     patrons[cfg.CONFIG['admin_id']] = "sapphire"
     auth_path = os.path.join(cfg.SCRIPT_DIR, "patron_auths.json")
     if author.id in patrons:
-        auths = utils.read_json(auth_path)
-        auths[str(author.id)] = {"servers": [guild.id]}
-        utils.write_json(auth_path, auths, indent=4)
-        patreon_info.update_patron_servers(patrons)
-        s = True
         reward = patrons[author.id].title()
-        await admin_log("🔑 Authenticated **{}**'s {} server {} `{}`".format(
-            author.name, reward, guild.name, guild.id
-        ), ctx['client'], important=True)
-        r = "✅ Nice! This server is now a **{}** server.".format(reward)
+        max_guilds = {
+            "Gold": 2,
+            "Sapphire": 5,
+            "Diamond": 10
+        }
+        if isinstance(auth_guilds, list) and len(auth_guilds) > max_guilds[reward]:
+            return False, ("Sorry, {0} patrons can only enable {0} features in up to {1} servers.".format(
+                reward, max_guilds[reward]
+            ))
+
+        auths = utils.read_json(auth_path)
+        str_uid = str(author.id)
+        prev_auths = auths[str_uid]['servers'] if str_uid in auths else []
+        if isinstance(auth_guilds, list):  # Possibly multiple guilds specified, command run in DM
+            auths[str_uid] = {"servers": auth_guilds}
+            guilds = [ctx['client'].get_guild(g) for g in auth_guilds]
+        else:  # Single guild specified, command run in server
+            auths[str_uid] = {"servers": [auth_guilds.id]}
+            guilds = [auth_guilds]
+
+        if cfg.SAPPHIRE_ID is not None:
+            config = utils.get_config()
+            if author.id != config['sapphires'][str(cfg.SAPPHIRE_ID)]['initiator']:
+                return False, "This bot doesn't belong to you."
+            config['sapphires'][str(cfg.SAPPHIRE_ID)]['servers'] = [g.id for g in guilds]
+            utils.set_config(config)
+            cfg.CONFIG = config
+
+        utils.write_json(auth_path, auths, indent=4)
+
+        patreon_info.update_patron_servers(patrons)
+        success = True
+        r = ""
+        for g in guilds:
+            await admin_log("🔑 Authenticated **{}**'s {} server {} `{}`".format(
+                author.name, reward, g.name, g.id
+            ), ctx['client'], important=True)
+            r += "\n✅ Nice! *{}* is now a **{}** server.".format(g.name, reward)
+        for a in prev_auths:
+            if a not in [g.id for g in guilds]:
+                r += "\n❗ Removed authentication from `{}`.".format(a)
         if reward in ["Diamond", "Sapphire"]:
             r += ("\nPlease give me ~{} hours to set up your private bot - "
                   "I'll DM you when it's ready to make the swap!".format(12 if reward == "Sapphire" else 24))
     else:
-        await admin_log("🔒 Failed to authenticate for **{}**".format(author.name), ctx['client'])
+        await admin_log("🔒 Failed to authenticate for **{}** `{}`".format(author.name, author.id), ctx['client'])
         r = ("❌ Sorry it doesn't look like you're a Patron.\n"
              "If you just recently became one, please make sure you've connected your discord account "
              "(<https://bit.ly/2UdfYbQ>) and try again in a few minutes. "
              "If it still doesn't work, let me know in the support server: <https://discord.io/DotsBotsSupport>.")
     await m.edit(content=r)
-    return s, "NO RESPONSE"
+    return success, "NO RESPONSE"
 
 
 @utils.func_timer()

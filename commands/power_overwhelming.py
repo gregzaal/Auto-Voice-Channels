@@ -17,7 +17,14 @@ help_text = [
 
 
 async def execute(ctx, params):
-    return await func.power_overwhelming(ctx, ctx['guild'])
+    r = await func.power_overwhelming(ctx, ctx['guild'])
+    if params and len(r) > 1:
+        response = r[1] if r[1] != "NO RESPONSE" else ""
+        if r[0] is True:
+            response += ("\nNote: If you want to authenticate more than one server, "
+                         "you need to DM me `power-overwhelming SERVER_ID SERVER_ID SERVER_ID...`")
+            return (r[0], response)
+    return r
 
 
 command = Cmd(
