@@ -539,7 +539,7 @@ async def lingering_secondaries(client):
             await func.log_timings(client, fn_name)
 
 
-@loop(minutes=30)
+@loop(hours=2.4)
 async def analytics(client):
     start_time = time()
     if client.is_ready() and cfg.SAPPHIRE_ID is None:
