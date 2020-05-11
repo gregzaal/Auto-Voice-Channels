@@ -8,6 +8,7 @@ import sys
 from datetime import datetime
 from time import time
 
+import backup
 import cfg
 from commands import admin_commands
 import commands
@@ -1142,4 +1143,5 @@ update_seed.start(client)
 analytics.start(client)
 update_status.start(client)
 check_patreon.start()
+backup.start_backups()
 client.run(TOKEN)
