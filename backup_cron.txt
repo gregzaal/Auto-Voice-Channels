@@ -1,0 +1,2 @@
+# Install with `crontab backup_cron.txt`
+*/10 * * * * ~/Auto-Voice-Channels/backup.sh
