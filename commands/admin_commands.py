@@ -371,6 +371,40 @@ async def admin_command(cmd, ctx):
             print("Failed to close", cfg.WRITES_IN_PROGRESS)
             await func.react(message, '❌')
 
+    if cmd == 'loop':
+        mode = params[0]
+        loop_name = params[1]
+        try:
+            loop = ctx['loops'][loop_name]
+            modes = {  # Dict of possible loop functions/attrs as [fn, arg]
+                'current_loop': [loop.current_loop, None],
+                'next_iteration': [loop.next_iteration, None],
+                'start': [loop.start, client],
+                'stop': [loop.stop, None],
+                'cancel': [loop.cancel, None],
+                'restart': [loop.restart, client],
+                'is_being_cancelled': [loop.is_being_cancelled, None],
+            }
+            if mode not in modes:
+                await func.react(message, '❓')
+                return
+            fn, arg = modes[mode]
+            if callable(fn):
+                if arg is None:
+                    r = fn()
+                else:
+                    r = fn(arg)
+                if r is not None:
+                    await channel.send(str(r))
+            else:
+                await channel.send(str(fn))
+            await func.react(message, '✅')
+        except:
+            await channel.send(traceback.format_exc())
+            await channel.send("Loops: \n{}".format('\n'.join(ctx['loops'].keys())))
+            await func.react(message, '❌')
+
+
     if cmd == 'rename':
         try:
             cid = utils.strip_quotes(params[0])
