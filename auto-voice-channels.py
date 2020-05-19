@@ -598,6 +598,21 @@ async def check_patreon():
     await func.check_patreon(force_update=cfg.SAPPHIRE_ID in [None, 0] and TOKEN != cfg.CONFIG['token_dev'])
 
 
+loops = {  # loops with client as only arg - passed to admin_commands's `loop` cmd
+    'main_loop': main_loop,
+    'creation_loop': creation_loop,
+    'deletion_loop': deletion_loop,
+    'check_dead': check_dead,
+    'check_votekicks': check_votekicks,
+    'create_join_channels': create_join_channels,
+    'update_seed': update_seed,
+    'dynamic_tickrate': dynamic_tickrate,
+    'lingering_secondaries': lingering_secondaries,
+    'analytics': analytics,
+    'update_status': update_status,
+}
+
+
 async def check_all_channels(guild, settings):
 
     @utils.func_timer()
@@ -737,6 +752,7 @@ async def on_message(message):
                 'params_str': params_str,
                 'guilds': guilds,
                 'LAST_COMMIT': LAST_COMMIT,
+                'loops': loops,
             }
             await admin_commands.admin_command(cmd, ctx)
         return
@@ -1130,16 +1146,7 @@ async def on_guild_remove(guild):
 
 
 cleanup(client=client, tick_=1)
-main_loop.start(client)
-creation_loop.start(client)
-deletion_loop.start(client)
-check_dead.start(client)
-check_votekicks.start(client)
-create_join_channels.start(client)
-dynamic_tickrate.start(client)
-lingering_secondaries.start(client)
-update_seed.start(client)
-analytics.start(client)
-update_status.start(client)
+for ln, l in loops.items():
+    l.start(client)
 check_patreon.start()
 client.run(TOKEN)
