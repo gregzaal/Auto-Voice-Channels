@@ -611,7 +611,6 @@ async def check_patreon():
 
 loops = {  # loops with client as only arg - passed to admin_commands's `loop` cmd
     'main_loop': main_loop,
-    'creation_loop': creation_loop,
     'deletion_loop': deletion_loop,
     'check_dead': check_dead,
     'check_votekicks': check_votekicks,
@@ -622,6 +621,8 @@ loops = {  # loops with client as only arg - passed to admin_commands's `loop` c
     'analytics': analytics,
     'update_status': update_status,
 }
+if 'disable_creation_loop' not in cfg.CONFIG or not cfg.CONFIG['disable_creation_loop']:
+    loops['creation_loop'] = creation_loop
 
 
 async def check_all_channels(guild, settings):
