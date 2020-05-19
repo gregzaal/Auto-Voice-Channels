@@ -275,7 +275,7 @@ def num_active_guilds(guilds):
         settings = get_serv_settings(g)
         if 'last_activity' in settings:
             age = curtime - settings['last_activity']
-            if age / 604800 <= 3:  # 3 Weeks
+            if age / 604800 <= 6:  # 6 Weeks
                 num_guilds += 1
     return num_guilds
 
