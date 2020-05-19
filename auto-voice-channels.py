@@ -704,10 +704,11 @@ class MyClient(discord.AutoShardedClient):
         await func.admin_log("🟥🟧🟨🟩   **Ready**   🟩🟨🟧🟥", self)
 
 
+heartbeat_timeout = cfg.CONFIG['heartbeat_timeout'] if 'heartbeat_timeout' in cfg.CONFIG else 60
 if NUM_SHARDS > 1:
-    client = MyClient(shard_count=NUM_SHARDS)
+    client = MyClient(shard_count=NUM_SHARDS, heartbeat_timeout=heartbeat_timeout)
 else:
-    client = MyClient()
+    client = MyClient(heartbeat_timeout=heartbeat_timeout)
 
 
 async def reload_modules(m):
