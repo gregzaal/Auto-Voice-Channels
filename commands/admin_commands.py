@@ -2,7 +2,7 @@ import json
 import os
 import sys
 import traceback
-from datetime import datetime
+from datetime import datetime, date
 
 import cfg
 import discord
@@ -379,11 +379,13 @@ async def admin_command(cmd, ctx):
             modes = {  # Dict of possible loop functions/attrs as [fn, arg]
                 'current_loop': [loop.current_loop, None],
                 'next_iteration': [loop.next_iteration, None],
+                'next_run': [loop.next_iteration, None],  # Alias
                 'start': [loop.start, client],
                 'stop': [loop.stop, None],
                 'cancel': [loop.cancel, None],
                 'restart': [loop.restart, client],
                 'is_being_cancelled': [loop.is_being_cancelled, None],
+                'last_run': [loop.last_run, None],
             }
             if mode not in modes:
                 await func.react(message, '❓')
@@ -394,16 +396,19 @@ async def admin_command(cmd, ctx):
                     r = fn()
                 else:
                     r = fn(arg)
-                if r is not None:
-                    await channel.send(str(r))
             else:
-                await channel.send(str(fn))
+                r = fn
+            if r is not None:
+                if isinstance(r, date):
+                    r = r.astimezone(pytz.timezone(cfg.CONFIG['log_timezone']))
+                    await channel.send(r.strftime("%Y-%m-%d %H:%M:%S"))
+                else:
+                    await channel.send(str(r))
             await func.react(message, '✅')
         except:
             await channel.send(traceback.format_exc())
             await channel.send("Loops: \n{}".format('\n'.join(ctx['loops'].keys())))
             await func.react(message, '❌')
-
 
     if cmd == 'rename':
         try:

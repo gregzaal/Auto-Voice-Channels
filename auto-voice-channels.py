@@ -163,6 +163,7 @@ def cleanup(client, tick_):
 
 @loop(seconds=cfg.CONFIG['loop_interval'])
 async def main_loop(client):
+    main_loop.last_run = datetime.now(pytz.utc)
     start_time = time()
     if client.is_ready():
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
@@ -195,6 +196,7 @@ async def main_loop(client):
 
 @loop(seconds=cfg.CONFIG['loop_interval'])
 async def creation_loop(client):
+    creation_loop.last_run = datetime.now(pytz.utc)
 
     @utils.func_timer()
     async def check_create(guild, settings):
@@ -225,6 +227,7 @@ async def creation_loop(client):
 
 @loop(seconds=cfg.CONFIG['loop_interval'] * 2)
 async def deletion_loop(client):
+    deletion_loop.last_run = datetime.now(pytz.utc)
 
     @utils.func_timer()
     async def check_empty(guild, settings):
@@ -258,6 +261,7 @@ async def deletion_loop(client):
 
 @loop(minutes=2)
 async def check_dead(client):
+    check_dead.last_run = datetime.now(pytz.utc)
 
     def for_looper(client):
         for guild in func.get_guilds(client):
@@ -305,6 +309,7 @@ async def check_dead(client):
 
 @loop(seconds=2)
 async def check_votekicks(client):
+    check_votekicks.last_run = datetime.now(pytz.utc)
     start_time = time()
     if client.is_ready():
         to_remove = []
@@ -383,6 +388,7 @@ async def check_votekicks(client):
 
 @loop(seconds=3)
 async def create_join_channels(client):
+    create_join_channels.last_run = datetime.now(pytz.utc)
     start_time = time()
     if not client.is_ready():
         return
@@ -469,12 +475,14 @@ async def create_join_channels(client):
 
 @loop(minutes=3)
 async def update_seed(client):
+    update_seed.last_run = datetime.now(pytz.utc)
     if client.is_ready():
         cfg.SEED = int(time())
 
 
 @loop(minutes=5)
 async def dynamic_tickrate(client):
+    dynamic_tickrate.last_run = datetime.now(pytz.utc)
     start_time = time()
     if client.is_ready():
         current_channels = utils.num_active_channels(func.get_guilds(client))
@@ -505,6 +513,7 @@ def get_potentials():
 
 @loop(minutes=5.22)
 async def lingering_secondaries(client):
+    lingering_secondaries.last_run = datetime.now(pytz.utc)
     start_time = time()
     if client.is_ready():
         potentials = None
@@ -541,15 +550,16 @@ async def lingering_secondaries(client):
 
 @loop(hours=2.4)
 async def analytics(client):
+    analytics.last_run = datetime.now(pytz.utc)
     start_time = time()
     if client.is_ready() and cfg.SAPPHIRE_ID is None:
         fp = os.path.join(cfg.SCRIPT_DIR, "analytics.json")
         guilds = func.get_guilds(client)
         if not os.path.exists(fp):
-            analytics = {}
+            data = {}
         else:
-            analytics = utils.read_json(fp)
-        analytics[datetime.now(pytz.timezone(cfg.CONFIG['log_timezone'])).strftime("%Y-%m-%d %H:%M")] = {
+            data = utils.read_json(fp)
+        data[datetime.now(pytz.timezone(cfg.CONFIG['log_timezone'])).strftime("%Y-%m-%d %H:%M")] = {
             'nc': utils.num_active_channels(guilds),
             'tt': round(cfg.TICK_TIME, 2),
             'tr': main_loop.seconds,
@@ -558,7 +568,7 @@ async def analytics(client):
         }
         with concurrent.futures.ThreadPoolExecutor() as pool:
             await client.loop.run_in_executor(
-                pool, utils.write_json, fp, analytics)
+                pool, utils.write_json, fp, data)
         end_time = time()
         fn_name = "analytics"
         cfg.TIMINGS[fn_name] = end_time - start_time
@@ -568,6 +578,7 @@ async def analytics(client):
 
 @loop(minutes=2)
 async def update_status(client):
+    update_status.last_run = datetime.now(pytz.utc)
     if client.is_ready():
         guilds = func.get_guilds(client)
         if guilds:
