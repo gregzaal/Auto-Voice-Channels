@@ -161,7 +161,8 @@ def cleanup(client, tick_):
     cfg.TIMINGS[fn_name] = end_time - start_time
 
 
-@loop(seconds=cfg.CONFIG['loop_interval'])
+# @loop(seconds=cfg.CONFIG['loop_interval'])
+@loop(minutes=10)
 async def main_loop(client):
     main_loop.last_run = datetime.now(pytz.utc)
     start_time = time()
@@ -616,7 +617,7 @@ loops = {  # loops with client as only arg - passed to admin_commands's `loop` c
     'check_votekicks': check_votekicks,
     'create_join_channels': create_join_channels,
     'update_seed': update_seed,
-    'dynamic_tickrate': dynamic_tickrate,
+    # 'dynamic_tickrate': dynamic_tickrate,
     'lingering_secondaries': lingering_secondaries,
     'analytics': analytics,
     'update_status': update_status,
