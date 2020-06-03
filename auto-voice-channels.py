@@ -191,7 +191,7 @@ async def main_loop(client):
             else:
                 if cfg.NUM_PATRONS != num_patrons:
                     if cfg.NUM_PATRONS != -1:  # Skip first run, since patrons are fetched on startup already.
-                        await func.check_patreon(force_update=TOKEN != cfg.CONFIG['token_dev'], client=client)
+                        await func.check_patreon(force_update=(not DEV_BOT), client=client)
                     cfg.NUM_PATRONS = num_patrons
 
 
@@ -607,7 +607,7 @@ async def update_status(client):
 @loop(hours=3)
 async def check_patreon():
     # Will run at startup too, since it doesn't have to wait for client.is_ready
-    await func.check_patreon(force_update=cfg.SAPPHIRE_ID in [None, 0] and TOKEN != cfg.CONFIG['token_dev'])
+    await func.check_patreon(force_update=cfg.SAPPHIRE_ID in [None, 0] and not DEV_BOT)
 
 
 loops = {  # loops with client as only arg - passed to admin_commands's `loop` cmd
