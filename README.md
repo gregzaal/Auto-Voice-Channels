@@ -21,10 +21,10 @@
 * Go to the directory: `cd Auto-Voice-Channels`
 * Make folder to store guild settings: `mkdir guilds`
 * Install pip: `sudo apt-get -y install python3-pip`
-* Install requirements: `python3 -m pip install -r requirements.txt`
 * Install venv: `pip3 install virtualenv`
 * Make venv: `python3 -m virtualenv bot-env`
 * Use venv: `. bot-env/bin/activate`
+* Install requirements: `python3 -m pip install -r requirements.txt`
 * Create your application + bot here: <https://discordapp.com/developers/applications>
 * Set up `config.json`:
   * `admin_id` is your ID, for the bot to DM you when it logs on, joins servers, gets errors, etc.
