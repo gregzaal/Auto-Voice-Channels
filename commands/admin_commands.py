@@ -242,6 +242,24 @@ async def admin_command(cmd, ctx):
         else:
             await func.react(message, '❌')
 
+    if cmd == 'refetch':
+        gid = utils.strip_quotes(params_str)
+        try:
+            gid = int(gid)
+        except ValueError:
+            await func.react(message, '❌')
+            return
+
+        g = client.get_guild(gid)
+
+        if g is None:
+            await func.react(message, '❓')
+            return
+
+        utils.get_serv_settings(g, force_refetch=True)
+        await func.react(message, '✅')
+        return
+
     if cmd == 'disable':
         try:
             g = client.get_guild(int(utils.strip_quotes(params_str)))

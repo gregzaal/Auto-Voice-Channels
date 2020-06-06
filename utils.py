@@ -123,8 +123,8 @@ def update_server_location():
 
 
 @func_timer()
-def get_serv_settings(guild):
-    if guild.id in cfg.GUILD_SETTINGS:
+def get_serv_settings(guild, force_refetch=False):
+    if guild.id in cfg.GUILD_SETTINGS and not force_refetch:
         cfg.PREV_GUILD_SETTINGS[guild.id] = deepcopy(cfg.GUILD_SETTINGS[guild.id])
         return cfg.GUILD_SETTINGS[guild.id]
 
