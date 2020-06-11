@@ -777,6 +777,7 @@ async def on_message(message):
                                        "you need to type the commands in a channel in your server.\n"
                                        "If you've tried that already, then make sure I have the right permissions "
                                        "to see and reply to your commands in that channel.")
+            return
         elif message.content.lower().startswith("power-overwhelming"):
             channel = message.channel
             params_str = message.content[len("power-overwhelming"):].strip()
