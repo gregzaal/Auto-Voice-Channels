@@ -703,7 +703,10 @@ class MyClient(discord.AutoShardedClient):
             print("s{}: {} guilds".format(s, shards[s]))
         print('=' * 24)
 
-        await func.admin_log("🟥🟧🟨🟩   **Ready**   🟩🟨🟧🟥", self)
+        if 'disable_ready_message' in cfg.CONFIG and cfg.CONFIG['disable_ready_message']:
+            log("READY")
+        else:
+            await func.admin_log("🟥🟧🟨🟩   **Ready**   🟩🟨🟧🟥", self)
 
 
 heartbeat_timeout = cfg.CONFIG['heartbeat_timeout'] if 'heartbeat_timeout' in cfg.CONFIG else 60
