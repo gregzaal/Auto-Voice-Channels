@@ -611,7 +611,7 @@ async def power_overwhelming(ctx, auth_guilds):
         max_guilds = {
             "Gold": 2,
             "Sapphire": 5,
-            "Diamond": 20
+            "Diamond": 50
         }
         if isinstance(auth_guilds, list) and len(auth_guilds) > max_guilds[reward]:
             return False, ("Sorry, {0} patrons can only enable {0} features in up to {1} servers.".format(
