@@ -7,7 +7,10 @@
 - [Discord server](https://discord.gg/HT6GNhJ)
 - [Patreon](https://www.patreon.com/pixaal)
 
-## Requires:
+
+
+## Manual Quick Start:
+### Requires:
 
 * [Python 3.5.3+](https://www.python.org/downloads/)
 * [discord.py](https://pypi.org/project/discord.py/) (`pip install discord.py`)
@@ -15,7 +18,7 @@
 * [psutil](https://pypi.org/project/psutil/) (`pip install psutil`)
 * [Requests](https://pypi.org/project/requests/) (`pip install requests`)
 
-## Quick start:
+### Steps
 
 * Clone the repository: `git clone https://github.com/gregzaal/Auto-Voice-Channels.git`
 * Go to the directory: `cd Auto-Voice-Channels`
@@ -42,8 +45,25 @@
 }
 ```
 
-* Invite the bot to your own server, replacing `<YOUR BOT ID>` with... your bot ID: `https://discordapp.com/api/oauth2/authorize?client_id=<YOUR BOT ID>&permissions=286280784&scope=bot`
+* Invite the bot to your own server, replacing `<YOUR CLIENT ID>` with... your bot ID: `https://discordapp.com/api/oauth2/authorize?client_id=<YOUR CLIENT ID>&permissions=286280784&scope=bot`
 * Start your bot: `python3 auto-voice-channels.py`
+
+## Using docker
+### Requires:
+
+* Docker for [windows](https://docs.docker.com/docker-for-windows/install/) or [linux](https://docs.docker.com/engine/install/)
+* [Docker Compose](https://docs.docker.com/compose/install/)
+
+* Clone the repository: `git clone https://github.com/gregzaal/Auto-Voice-Channels.git`
+* Create your application + bot here: <https://discordapp.com/developers/applications>
+* edit environmental varibles inside docker-compose.yml
+  * - admin_id=123456789012345678
+  * - client_id=987654321098765432
+  * - log_timezone=Africa/Johannesburg
+  * - token=XXXXXXXXXXXXXXXXXXXXXXXX.XXXXXX.XXXXXXXXXXXXXXXXXXXXXXXXXXX
+* Invite the bot to your own server, replacing `<YOUR CLIENT ID>` with... your bot ID: `https://discordapp.com/api/oauth2/authorize?client_id=<YOUR CLIENT ID>&permissions=286280784&scope=bot`
+* run docker-compose up
+
 
 ## Help:
 
