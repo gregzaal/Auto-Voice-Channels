@@ -45,7 +45,7 @@
 }
 ```
 
-* Invite the bot to your own server, replacing `<YOUR CLIENT ID>` with... your bot ID: `https://discordapp.com/api/oauth2/authorize?client_id=<YOUR CLIENT ID>&permissions=286280784&scope=bot`
+* Invite the bot to your own server, replacing `<YOUR BOT ID>` with... your bot ID: `https://discordapp.com/api/oauth2/authorize?client_id=<YOUR BOT ID>&permissions=286280784&scope=bot`
 * Start your bot: `python3 auto-voice-channels.py`
 
 ## Using docker
@@ -61,7 +61,7 @@
   * - client_id=987654321098765432
   * - log_timezone=Africa/Johannesburg
   * - token=XXXXXXXXXXXXXXXXXXXXXXXX.XXXXXX.XXXXXXXXXXXXXXXXXXXXXXXXXXX
-* Invite the bot to your own server, replacing `<YOUR CLIENT ID>` with... your bot ID: `https://discordapp.com/api/oauth2/authorize?client_id=<YOUR CLIENT ID>&permissions=286280784&scope=bot`
+* Invite the bot to your own server, replacing `<YOUR BOT ID>` with... your bot ID: `https://discordapp.com/api/oauth2/authorize?client_id=<YOUR BOT ID>&permissions=286280784&scope=bot`
 * run docker-compose up
 
 
