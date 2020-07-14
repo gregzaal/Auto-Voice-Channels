@@ -94,7 +94,9 @@ def write_json(fp, data, indent=1):
 def get_config():
     cf = os.path.join(cfg.SCRIPT_DIR, 'config.json')
     if not os.path.exists(cf):
-        print("Config file doesn't exist!")
+        print("Config file doesn't exist!\n"
+              "You need to create a 'config.json' file next to this script and fill in some details like your token.\n"
+              "Read the instructions on GitHub: https://github.com/gregzaal/Auto-Voice-Channels")
         import sys
         sys.exit(0)
     return read_json(cf)
