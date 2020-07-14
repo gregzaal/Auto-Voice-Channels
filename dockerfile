@@ -11,12 +11,8 @@ COPY . /Auto-voice-channels
 WORKDIR /Auto-voice-channels
 # Install pre prerequisites
 RUN mkdir guilds \
-    && pip3 install virtualenv \
-    && python3 -m virtualenv bot-env \
-    && . bot-env/bin/activate \
-    && python3 -m pip install -r requirements.txt \
-# Create json file based off ENV
-    && ./docker/scripts/create-config.sh
+    && python3 -m pip install -r requirements.txt
 
-CMD python3 auto-voice-channels.py
+#create config file based on ENVs and run bot
+CMD ./docker/scripts/create-config.sh && python3 auto-voice-channels.py
     
