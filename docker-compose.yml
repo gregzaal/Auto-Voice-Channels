@@ -1,4 +1,4 @@
-123456789012345678version: "2.2"
+version: "2.2"
 
 services:
     autovoice:
@@ -7,5 +7,5 @@ services:
         environment:
             - admin_id=123456789012345678
             - client_id=123456789012345678
-            - log_timezone=Europe/London
+            - log_timezone=Africa/Johannesburg
             - token=XXXXXXXXXXXXXXXXXXXXXXXX.XXXXXX.XXXXXXXXXXXXXXXXXXXXXXXXXXX
