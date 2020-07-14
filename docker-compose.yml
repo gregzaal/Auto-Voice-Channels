@@ -1,0 +1,11 @@
+version: "2.2"
+
+services:
+    autovoice:
+        build: .
+        image: autovoicechannels:latest
+        environment:
+            - admin_id=115271840435404809
+            - client_id=732585101400997909
+            - log_timezone=Europe/London
+            - token=NzMyNTg1MTAxNDAwOTk3OTA5.Xw2vSw.PmouyIhRtqW_cbZPy2qU1JHoLag
