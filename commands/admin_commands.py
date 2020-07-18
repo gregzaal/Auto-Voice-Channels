@@ -525,7 +525,10 @@ async def admin_command(cmd, ctx):
                     cfg.CONFIG['leave_inactive'].append(g.id)
                     inactive_guilds += 1
                     if params_str == "go":
-                        await g.leave()
+                        try:
+                            await g.leave()
+                        except discord.errors.NotFound:
+                            pass
             if params_str == "go":
                 await channel.send("Left {} of {} guilds.".format(inactive_guilds, total_guilds))
             else:
