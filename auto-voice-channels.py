@@ -488,7 +488,7 @@ async def dynamic_tickrate(client):
     if client.is_ready():
         current_channels = utils.num_active_channels(func.get_guilds(client))
         new_tickrate = current_channels / 7
-        new_tickrate = max(3, min(100, new_tickrate))
+        new_tickrate = max(301, new_tickrate)
         new_seed_interval = current_channels / 45
         new_seed_interval = max(10, min(15, new_seed_interval))
         if cfg.SAPPHIRE_ID is None:
@@ -617,7 +617,7 @@ loops = {  # loops with client as only arg - passed to admin_commands's `loop` c
     'check_votekicks': check_votekicks,
     'create_join_channels': create_join_channels,
     'update_seed': update_seed,
-    # 'dynamic_tickrate': dynamic_tickrate,
+    'dynamic_tickrate': dynamic_tickrate,
     'lingering_secondaries': lingering_secondaries,
     'analytics': analytics,
     'update_status': update_status,
