@@ -119,10 +119,9 @@ async def admin_command(cmd, ctx):
         top_guilds = []
         for g in guilds:
             s = func.get_secondaries(g)
-            if s:
-                top_guilds.append({"name": g.name,
-                                   "size": len([m for m in g.members if not m.bot]),
-                                   "num": len(s)})
+            top_guilds.append({"name": g.name,
+                                "size": len([m for m in g.members if not m.bot]),
+                                "num": len(s) if s is not None else 0})
         top_guilds = sorted(top_guilds, key=lambda x: x['num'], reverse=True)[:10]
         r = "**Top Guilds:**"
         for g in top_guilds:
@@ -510,6 +509,30 @@ async def admin_command(cmd, ctx):
                     settings['auto_channels'] = tmp
                     utils.set_serv_settings(g, settings)
             await channel.send("Cleaned {} of {} primaries".format(n_real_primaries, n_primaries))
+        except:
+            await channel.send(traceback.format_exc())
+            await func.react(message, '❌')
+
+    if cmd == 'leaveinactive':
+        params_str = utils.strip_quotes(params_str)
+        try:
+            total_guilds = 0
+            inactive_guilds = 0
+            cfg.CONFIG['leave_inactive'] = []
+            for g in client.guilds:
+                total_guilds += 1
+                if not utils.guild_is_active(g) or g not in guilds:
+                    cfg.CONFIG['leave_inactive'].append(g.id)
+                    inactive_guilds += 1
+                    if params_str == "go":
+                        await g.leave()
+            if params_str == "go":
+                await channel.send("Left {} of {} guilds.".format(inactive_guilds, total_guilds))
+            else:
+                await channel.send("Will leave {} of {} guilds. "
+                                   "Rerun command with 'go' at end to actually leave them.".format(
+                                       inactive_guilds, total_guilds))
+            cfg.CONFIG['leave_inactive'] = []
         except:
             await channel.send(traceback.format_exc())
             await func.react(message, '❌')
