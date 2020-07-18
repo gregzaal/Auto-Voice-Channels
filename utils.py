@@ -270,15 +270,22 @@ def num_active_channels(guilds):
 
 
 @func_timer()
-def num_active_guilds(guilds):
+def guild_is_active(g):
     curtime = time()
+    settings = get_serv_settings(g)
+    if 'last_activity' in settings:
+        age = curtime - settings['last_activity']
+        if age / 604800 <= 6:  # 6 Weeks
+            return True
+    return False
+
+
+@func_timer()
+def num_active_guilds(guilds):
     num_guilds = 0
     for g in guilds:
-        settings = get_serv_settings(g)
-        if 'last_activity' in settings:
-            age = curtime - settings['last_activity']
-            if age / 604800 <= 6:  # 6 Weeks
-                num_guilds += 1
+        if guild_is_active(g):
+            num_guilds += 1
     return num_guilds
 
 

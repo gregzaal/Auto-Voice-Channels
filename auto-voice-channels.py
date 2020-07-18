@@ -1154,12 +1154,15 @@ async def on_guild_remove(guild):
         settings['left'] = datetime.now(pytz.timezone(cfg.CONFIG['log_timezone'])).strftime("%Y-%m-%d %H:%M")
         utils.set_serv_settings(guild, settings)
         log("Left guild {} `{}` with {} members".format(guild.name, guild.id, num_members))
-    await func.admin_log(
-        ":new_moon: Left: **{}** (`{}`) - **{}** members".format(
-            func.esc_md(guild.name),
-            guild.id,
-            num_members),
-        client)
+    if 'leave_inactive' in cfg.CONFIG and guild.id in cfg.CONFIG['leave_inactive']:
+        pass
+    else:
+        await func.admin_log(
+            ":new_moon: Left: **{}** (`{}`) - **{}** members".format(
+                func.esc_md(guild.name),
+                guild.id,
+                num_members),
+            client)
 
 
 cleanup(client=client, tick_=1)
