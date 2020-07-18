@@ -488,12 +488,12 @@ async def dynamic_tickrate(client):
     if client.is_ready():
         current_channels = utils.num_active_channels(func.get_guilds(client))
         new_tickrate = current_channels / 7
-        new_tickrate = max(301, new_tickrate)
+        new_tickrate = max(5, min(100, new_tickrate))
         new_seed_interval = current_channels / 45
         new_seed_interval = max(10, min(15, new_seed_interval))
         if cfg.SAPPHIRE_ID is None:
             print("New tickrate is {0:.1f}s, seed interval is {1:.2f}m".format(new_tickrate, new_seed_interval))
-        main_loop.change_interval(seconds=new_tickrate)
+        main_loop.change_interval(seconds=max(301, new_tickrate))
         creation_loop.change_interval(seconds=new_tickrate)
         deletion_loop.change_interval(seconds=new_tickrate * 2)
         update_seed.change_interval(minutes=new_seed_interval)
