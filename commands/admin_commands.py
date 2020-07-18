@@ -521,7 +521,7 @@ async def admin_command(cmd, ctx):
             cfg.CONFIG['leave_inactive'] = []
             for g in client.guilds:
                 total_guilds += 1
-                if not utils.guild_is_active(g) or g not in guilds:
+                if g and (not utils.guild_is_active(g) or g not in guilds):
                     cfg.CONFIG['leave_inactive'].append(g.id)
                     inactive_guilds += 1
                     if params_str == "go":
