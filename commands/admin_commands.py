@@ -115,6 +115,14 @@ async def admin_command(cmd, ctx):
             )
         ))
 
+    if cmd == 'ping':
+        r = await channel.send(". . .")
+        t1 = message.created_at
+        t2 = r.created_at
+        response_time = (t2 - t1).total_seconds()
+        e = '🔴🔴🔴' if response_time > 5 else ('🟠🟠' if response_time > 1 else '🟢')
+        await r.edit(content="**{0} {1:.1f}s**".format(e, response_time))
+
     if cmd == 'top':
         top_guilds = []
         for g in guilds:
