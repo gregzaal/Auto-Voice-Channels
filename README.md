@@ -26,7 +26,7 @@
 * Use venv: `. bot-env/bin/activate`
 * Install requirements: `python3 -m pip install -r requirements.txt`
 * Create your application + bot here: <https://discordapp.com/developers/applications>
-* Set up `config.json`:
+* Create a `config.json` file in the Auto-Voice-Channels folder and fill it in:
   * `admin_id` is your ID, for the bot to DM you when it logs on, joins servers, gets errors, etc.
   * `client_id` is the bot ID.
   * `log_timezone` is for the time displayed in logs, see [this list](https://stackoverflow.com/questions/13866926/is-there-a-list-of-pytz-timezones).
