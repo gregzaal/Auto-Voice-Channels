@@ -22,6 +22,8 @@ async def execute(ctx, params):
 
     func.split_channels(guild, channel)
 
+    return True, ("Successfully split channel into groups")
+
 
 
 
