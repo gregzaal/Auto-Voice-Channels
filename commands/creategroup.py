@@ -20,15 +20,16 @@ help_text = [
     ]
 ]
 
- 
+
 async def execute(ctx, params):
     guild = ctx['guild']
     default_name = "➕ New Session"
+    group_name = ' '.join(params)
 
     try:
-        await func.create_primary(guild, default_name, ctx['message'].author)
+        await func.create_group(guild, group_name, default_name, ctx['message'].author)
     except discord.errors.Forbidden:
-        return False, "I don't have permission to create channels."
+        return False, "I don't have permission to create categories."
     except discord.errors.HTTPException as e:
         return False, "An HTTPException occurred: {}".format(e.text)
 

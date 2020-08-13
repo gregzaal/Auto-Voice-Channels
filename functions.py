@@ -1037,6 +1037,42 @@ def get_voice_context_channel_ids(guild, settings=None):
 
 
 @utils.func_timer()
+async def create_group(guild, gname, cname, author):
+    overwrites = {
+        guild.me: discord.PermissionOverwrite(read_messages=True,
+                                              connect=True,
+                                              manage_channels=True,
+                                              move_members=True)
+    }
+    
+    group_merge_channel_name = gname +" Tavern"
+    group_text_channel_name = gname +" Commands"
+
+    g = await guild.create_category(gname, overwrites=overwrites)
+    c = await guild.create_voice_channel(group_merge_channel_name, overwrites=overwrites, category=g)
+    await guild.create_voice_channel(cname, overwrites=overwrites, category=g)
+    await guild.create_text_channel(group_text_channel_name, overwrites=overwrites, category=g)
+    
+    
+    settings = utils.get_serv_settings(guild)
+    settings['auto_channels'][c.id] = {"secondaries": {}}
+    settings['server_contact'] = author.id
+
+    settings["group_channels"][g.id] = {"channels": {}}
+    utils.set_serv_settings(guild, settings)
+
+    await server_log(
+        guild,
+        "🆕 {} (`{}`) created a new group channel (`{}`)".format(
+            user_hash(author), author.id, c.id
+        ), 1, settings
+    )
+
+    return g
+
+
+
+@utils.func_timer()
 async def create_primary(guild, cname, author):
     overwrites = {
         guild.me: discord.PermissionOverwrite(read_messages=True,
@@ -1061,41 +1097,44 @@ async def create_primary(guild, cname, author):
     return c
 
 @utils.func_timer()
-def split_channels(guild, channel):
+async def merge_channels(guild, channel):
     settings = utils.get_serv_settings(guild)
     CategoryID = channel.category_id
-    VC_Length = len(guild.voice_channels)
-    VC_User_List = []
-    settings["group_channels"] = {"categories": {}}
-    settings["group_channels"]["categories"][CategoryID] = {"channels": {}}
+    group_merge_channel = settings["group_channels"][CategoryID][merge_channel]
+    VoiceChannel_Length = len(guild.voice_channels)
+    VoiceChannel_User_List = []
     
-
+    
+    #Make a list of all the channels and users in the category where the command was executed
+    #Stores the list under the group_channel in settings
     for i in range(VC_Length):
         if guild.voice_channels[i].category_id == CategoryID:
             for members in guild.voice_channels[i].members:
                 VC_User_List.append(members.id)
+                try:
+                    await members.move_to(group_merge_channel)
+                except discord.errors.HTTPException as e:
+                    log("Failed to move user {}: {}".format(creator.display_name, e.text), guild)
+                    return c
             
-            settings["group_channels"]["categories"][CategoryID]["channels"][guild.voice_channels[i].id] = {"users": {}}
-            settings["group_channels"]["categories"][CategoryID]["channels"][guild.voice_channels[i].id]["users"] = VC_User_List
+            settings["group_channels"][CategoryID]["channels"][guild.voice_channels[i].id] = {"users": {}}
+            settings["group_channels"][CategoryID]["channels"][guild.voice_channels[i].id]["users"] = VC_User_List
             VC_User_List = []
                 
     utils.set_serv_settings(guild, settings)    
             
-            
-            
-            
-    
-    
-    #settings["group_channels"][CategoryID]["channels"] = VC_ID_List
-    
-
-    #print(VC_ID_List)
-    
-    
 
     return 
 
+@utils.func_timer()
+async def split_channels(guild, channel):
+    settings = utils.get_serv_settings(guild)
+    CategoryID = channel.category_id
 
+
+
+
+    return
 
 
 @utils.func_timer(2.5)
@@ -1324,6 +1363,11 @@ async def create_secondary(guild, primary, creator, private=False):
 
 @utils.func_timer()
 async def delete_secondary(guild, channel):
+    settings = utils.get_serv_settings(guild)
+    category_id = channel.category_id
+    if settings["group_channels"][category_id]["channels"][channel.id]:
+        return
+
     if channel_is_requested(channel):
         return
     lock_channel_request(channel)
