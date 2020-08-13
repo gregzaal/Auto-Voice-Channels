@@ -3,5 +3,6 @@
     "enabled": true,
     "requiredrole": "",
     "auto_channels": {},
+    "group_channels":{},
     "channel_name_template": "## [@@game_name@@]"
 }

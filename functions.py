@@ -142,6 +142,8 @@ def toggle_position(guild, chid):
     return "error"
 
 
+
+
 @utils.func_timer()
 def get_channel_games(channel):
     settings = utils.get_serv_settings(channel.guild)
@@ -1058,6 +1060,46 @@ async def create_primary(guild, cname, author):
 
     return c
 
+@utils.func_timer()
+def merge_channels(guild, channel):
+    settings = utils.get_serv_settings(guild)
+    CategoryID = channel.category_id
+    VC_Length = len(guild.voice_channels)
+    VC_User_List = []
+    settings["group_channels"] = {"categories": {}}
+    settings["group_channels"]["categories"][CategoryID] = {"channels": {}}
+    
+
+    for i in range(VC_Length):
+        if guild.voice_channels[i].category_id == CategoryID:
+            for members in guild.voice_channels[i].members:
+                VC_User_List.append(members.id)
+            print(VC_User_List)
+
+            
+
+            settings["group_channels"]["categories"][CategoryID]["channels"][guild.voice_channels[i].id] = {"users": {}}
+            settings["group_channels"]["categories"][CategoryID]["channels"][guild.voice_channels[i].id]["users"] = VC_User_List
+            VC_User_List = []
+                
+    utils.set_serv_settings(guild, settings)    
+            
+            
+            
+            
+    
+    
+    #settings["group_channels"][CategoryID]["channels"] = VC_ID_List
+    
+
+    #print(VC_ID_List)
+    
+    
+
+    return 
+
+
+
 
 @utils.func_timer(2.5)
 async def create_secondary(guild, primary, creator, private=False):
@@ -1134,7 +1176,7 @@ async def create_secondary(guild, primary, creator, private=False):
     if ('above' in settings['auto_channels'][primary.id] and
             settings['auto_channels'][primary.id]['above'] is False):
         above = False
-    c_position = primary.position
+    c_position = 0
     if not above:
         secondaries = settings['auto_channels'][primary.id]['secondaries'].keys()
         c_position += 1 + len([v for v in voice_channels if v.id in secondaries and v.position > primary.position])

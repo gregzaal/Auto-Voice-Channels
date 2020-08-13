@@ -167,7 +167,7 @@ def set_serv_settings(guild, settings):
     #     num_channels += len(settings['auto_channels'][p]['secondaries'])
 
     # if num_channels < prev_num_channels:
-    #     print("{}REM:{} {} ln:{} fn:{} gt:{} gnt:{}".format(
+    #     print("{}REM:{} {} ln:{} fn:{} gt:{} gnt:{}".format( 
     #         ' ' * 16,
     #         prev_num_channels - num_channels,
     #         guild.id,
