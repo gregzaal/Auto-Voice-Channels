@@ -1061,7 +1061,7 @@ async def create_primary(guild, cname, author):
     return c
 
 @utils.func_timer()
-def merge_channels(guild, channel):
+def split_channels(guild, channel):
     settings = utils.get_serv_settings(guild)
     CategoryID = channel.category_id
     VC_Length = len(guild.voice_channels)
@@ -1074,10 +1074,7 @@ def merge_channels(guild, channel):
         if guild.voice_channels[i].category_id == CategoryID:
             for members in guild.voice_channels[i].members:
                 VC_User_List.append(members.id)
-            print(VC_User_List)
-
             
-
             settings["group_channels"]["categories"][CategoryID]["channels"][guild.voice_channels[i].id] = {"users": {}}
             settings["group_channels"]["categories"][CategoryID]["channels"][guild.voice_channels[i].id]["users"] = VC_User_List
             VC_User_List = []
