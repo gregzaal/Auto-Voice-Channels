@@ -1049,8 +1049,8 @@ async def create_group(guild, gname, cname, author):
     group_text_channel_name = gname +" Commands"
 
     g = await guild.create_category(gname, overwrites=overwrites)
-    c = await guild.create_voice_channel(group_merge_channel_name, overwrites=overwrites, category=g)
-    await guild.create_voice_channel(cname, overwrites=overwrites, category=g)
+    m = await guild.create_voice_channel(group_merge_channel_name, overwrites=overwrites, category=g)
+    c = await guild.create_voice_channel(cname, overwrites=overwrites, category=g)
     await guild.create_text_channel(group_text_channel_name, overwrites=overwrites, category=g)
     
     
@@ -1058,7 +1058,8 @@ async def create_group(guild, gname, cname, author):
     settings['auto_channels'][c.id] = {"secondaries": {}}
     settings['server_contact'] = author.id
 
-    settings["group_channels"][g.id] = {"channels": {}}
+    settings["group_channels"][g.id] = {"channels": {},"merge_channel": {}}
+    settings["group_channels"][g.id]["merge_channel"] = m.id
     utils.set_serv_settings(guild, settings)
 
     await server_log(
@@ -1098,28 +1099,45 @@ async def create_primary(guild, cname, author):
 
 @utils.func_timer()
 async def merge_channels(guild, channel):
+
     settings = utils.get_serv_settings(guild)
     CategoryID = channel.category_id
-    group_merge_channel = settings["group_channels"][CategoryID][merge_channel]
+    group_merge_channel = settings["group_channels"][channel.category_id]["merge_channel"]
+    print("Fuuuuck you")
+    #group_merge_channel = utils.get_merge_channel(settings, channel)
+    print(group_merge_channel)
+    group_merge_channel = guild.get_channel(group_merge_channel)
+    print(group_merge_channel)
+    print("Fuuuuck you")
     VoiceChannel_Length = len(guild.voice_channels)
+    print(group_merge_channel)
     VoiceChannel_User_List = []
     
+
     
     #Make a list of all the channels and users in the category where the command was executed
     #Stores the list under the group_channel in settings
-    for i in range(VC_Length):
+    for i in range(VoiceChannel_Length):
         if guild.voice_channels[i].category_id == CategoryID:
             for members in guild.voice_channels[i].members:
-                VC_User_List.append(members.id)
+                
+                VoiceChannel_User_List.append(members.id)
+                print(members.id)
+                settings["group_channels"][CategoryID]["channels"][guild.voice_channels[i].id] = {"users": {}}
+                settings["group_channels"][CategoryID]["channels"][guild.voice_channels[i].id]["users"] = VoiceChannel_User_List
+                VoiceChannel_User_List = []
+
                 try:
                     await members.move_to(group_merge_channel)
+                    print("hello")
                 except discord.errors.HTTPException as e:
-                    log("Failed to move user {}: {}".format(creator.display_name, e.text), guild)
-                    return c
+                    log("Failed to move user {}: {}".format(members.display_name, e.text), guild)
+                    print("NotToday!")
+                    return
             
-            settings["group_channels"][CategoryID]["channels"][guild.voice_channels[i].id] = {"users": {}}
-            settings["group_channels"][CategoryID]["channels"][guild.voice_channels[i].id]["users"] = VC_User_List
-            VC_User_List = []
+                settings["group_channels"][CategoryID]["channels"][guild.voice_channels[i].id] = {"users": {}}
+                settings["group_channels"][CategoryID]["channels"][guild.voice_channels[i].id]["users"] = VoiceChannel_User_List
+                VoiceChannel_User_List = []
                 
     utils.set_serv_settings(guild, settings)    
             
@@ -1365,8 +1383,11 @@ async def create_secondary(guild, primary, creator, private=False):
 async def delete_secondary(guild, channel):
     settings = utils.get_serv_settings(guild)
     category_id = channel.category_id
-    if settings["group_channels"][category_id]["channels"][channel.id]:
-        return
+    try:
+        if settings["group_channels"][category_id]["channels"][channel.id]:
+            return
+    except Exception:
+        print("Fuuuuck")
 
     if channel_is_requested(channel):
         return

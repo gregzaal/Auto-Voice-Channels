@@ -236,6 +236,13 @@ def get_creator_id(settings, channel):
             if s == channel.id:
                 return sv['creator']
 
+@func_timer()
+def get_merge_channel(settings, channel):
+    for p in settings['group_channels'].items():
+            if p == channel.category_id:
+                print(channel.category_id)
+                return p['merge_channel']
+
 
 @func_timer()
 def plain_mention(mention):

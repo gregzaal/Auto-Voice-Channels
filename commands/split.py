@@ -20,7 +20,7 @@ async def execute(ctx, params):
     
     #print(CategoryID)
 
-    func.split_channels(guild, channel)
+    await func.split_channels(guild, channel)
 
     return True, ("Successfully split channel into groups")
 

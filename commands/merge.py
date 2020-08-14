@@ -20,7 +20,7 @@ async def execute(ctx, params):
     
     #print(CategoryID)
 
-    func.merge_channels(guild, channel)
+    await func.merge_channels(guild, channel)
 
     return True, ("Successfully merged channels")
 
