@@ -4,19 +4,13 @@ from commands.base import Cmd
 
 help_text = [
     [
-        ("Usage:", "<PREFIX><COMMAND>"),
+        ("Usage:", "<PREFIX><COMMAND> GROUP NAME"),
         ("Description:",
-         "Make a new primary voice channel. When users join this channel, I'll make a new one for them and move them "
-         "into it. By default primary channels are named \"+ New Session\" and placed at the top of your server, but "
-         "you can safely rename it, move it around and change its permissions.\n\n"
-         "You can create as many primary channels as you want and place them in different areas of your server. "
-         "They (and the secondary channels I create for them) will inherit the permissions of the category they are in "
-         "by default.\n\n"
-         "If you move a primary channel into a private/restricted category, **make sure I have permission to create "
-         "and edit voice channels there**.\n\n"
-         "Secondary channels will copy the perimissions, bitrate and user limit of their primary channel.\n\n"
-         "By default secondary channels will be placed above their primary channel. Use *<PREFIX>toggleposition* to "
-         "place them below instead."),
+         "Make a new voice channel group. This will create a new catagory containing a primary channel that will create secondary channels, as well as a \n"
+         "'Tavern' channel that will be used for holding the entire group, and a text channel for chatting and bot commands (You can also create another private\n"
+         "text channel for commands if you wish, it just needs to be under the same category and you will need to give the bot permission to use it ). After\n"
+         "creating this gorup, you can use the <PREFIX>merge (or <PREFIX>m) command to move all users out of their voice channels made in the category and place them into\n"
+         "the 'Tavern' channel. You can then use <PREFIX>split (or <PREFIX>sp) to move all the users out of the 'Tavern' channel and back into the ones they came from"),
     ]
 ]
 
@@ -33,12 +27,8 @@ async def execute(ctx, params):
     except discord.errors.HTTPException as e:
         return False, "An HTTPException occurred: {}".format(e.text)
 
-    response = ("A new voice channel called \"{}\" has been created. "
-                "You can now move it around, rename it, etc.\n\n"
-                "Whenever a user enters this voice channel, a new voice channel will be created above it "
-                "for them, and they will automatically be moved to it.\n"
-                "When that channel is empty, it will be deleted automatically.\n\n"
-                "Use `{}template` to change the naming scheme for the new channels".format(default_name,
+    response = ("A new voice channel group called " + group_name + " has been created. "
+                "You can now use the split and merge commnands within this category\n".format(default_name,
                                                                                            ctx['print_prefix']))
     return True, response
 

@@ -5,10 +5,8 @@ help_text = [
     [
         ("Usage:", "<PREFIX><COMMAND>"),
         ("Description:",
-         "Toggle whether new channels are placed above (default) or below the primary one.\n"
-         "First join a voice channel and then run the command to toggle the position of future channels "
-         "created by the same primary (\"+ New Session\") channel.\n"
-         "Does not affect existing channels, wait for those to become empty and get deleted, or move them manually."),
+         "Once you have completed using the group, run this command so that the voice channels being preserved by the.\n"
+         "merge command can be automatically deleted again"),
     ]
 ]
 
