@@ -16,13 +16,12 @@ help_text = [
 async def execute(ctx, params):
     channel = ctx['channel']
     guild = ctx['guild']
-    client = ctx['client']
     
     #print(CategoryID)
 
-    await func.split_channels(guild, channel, client)
+    await func.reset_group(guild, channel)
 
-    return True, ("Successfully split channel into groups")
+    return True, ("Successfully merged channels")
 
 
 

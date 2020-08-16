@@ -32,5 +32,5 @@ command = Cmd(
     help_text=help_text,
     params_required=0,
     admin_required=False,
-    voice_required=True,
+    voice_required=False,
 )
