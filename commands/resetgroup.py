@@ -21,7 +21,7 @@ async def execute(ctx, params):
 
     await func.reset_group(guild, channel)
 
-    return True, ("Successfully merged channels")
+    return True, ("Successfully reset group")
 
 
 

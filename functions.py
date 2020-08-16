@@ -1131,23 +1131,19 @@ async def merge_channels(guild, channel):
     for i in range(VoiceChannel_Length):
         if (guild.voice_channels[i].category_id == CategoryID) & (guild.voice_channels[i].id != group_merge_channel_id):
             for members in guild.voice_channels[i].members:
-                print(guild.voice_channels[i].members)
                 VoiceChannel_User_List.append(members.id)
                 group_settings["group_channels"][CategoryID]["channels"][guild.voice_channels[i].id] = {"users": {}}
                 #print(VoiceChannel_User_List)
                 group_settings["group_channels"][CategoryID]["channels"][guild.voice_channels[i].id]["users"] = VoiceChannel_User_List
                 #print(VoiceChannel_User_List)
-                VoiceChannel_User_List = []
-
                 try:
-                    print("iwughbuierbiwuegbiewu")
-                    print(members)
                     await members.move_to(group_merge_channel)
                     #print("hello")
                 except discord.errors.HTTPException as e:
                     log("Failed to move user {}: {}".format(members.display_name, e.text), guild)
                     #print("NotToday!")
                     return
+            VoiceChannel_User_List = []
             
 
                 
@@ -1168,7 +1164,7 @@ async def split_channels(guild, channel, client):
                     member = guild.get_member(uid)
                     await member.move_to(guild.get_channel(cid))
                 except discord.errors.HTTPException as e:
-                    log("Failed to move user {}: {}".format(usertwo.display_name, e.text), guild)
+                    log("Failed to move user {}: {}".format(member.display_name, e.text), guild)
                     return
 
 
