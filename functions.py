@@ -1165,7 +1165,6 @@ async def split_channels(guild, channel, client):
                     await member.move_to(guild.get_channel(cid))
                 except discord.errors.HTTPException as e:
                     log("Failed to move user {}: {}".format(member.display_name, e.text), guild)
-                    return
 
 
 
