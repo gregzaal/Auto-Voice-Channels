@@ -4,6 +4,7 @@ class Cmd:
         self,
         help_text,
         execute,
+        help_link=None,
         params_required=0,
         voice_required=False,
         creator_only=False,
@@ -12,6 +13,7 @@ class Cmd:
         sapphire_required=False,
     ):
         self.help_text = help_text
+        self.help_link = help_link
         self.execute = execute
         self.params_required = params_required
         self.voice_required = voice_required
