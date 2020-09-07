@@ -140,8 +140,13 @@ async def execute(ctx, params):
                 if 'incorrect_command_usage' in ctx and part == help_text[0]:
                     content = "Incorrect command usage, here's some info about the `{}` command:".format(c)
                 if part == help_text[-1]:
-                    e.set_footer(text="More help: discord.io/DotsBotsSupport  \nSupport me: patreon.com/pixaal",
+                    e.set_footer(text="More help: wiki.dotsbots.com  \nSupport me: patreon.com/pixaal",
                                  icon_url=ctx['guild'].me.avatar_url_as(size=32))
+                if part == help_text[0]:
+                    help_link = (commands[c].help_link if
+                                 commands[c].help_link is not None
+                                 else "https://wiki.dotsbots.com/en/commands/" + c)
+                    e.description = "ℹ More info: " + help_link
                 for i, p in enumerate(part):
                     t = ("⠀\n" + p[0]) if i != 0 and not p[0].startswith(" ·  ") else p[0]
                     d = (p[1] + "\n⠀") if i == len(part) - 1 and part == help_text[-1] else p[1]
@@ -184,6 +189,7 @@ async def execute(ctx, params):
             e = discord.Embed(color=discord.Color.from_rgb(205, 220, 57))
             e.title = "Template Expressions"
             e.description = (
+                "ℹ More info: https://wiki.dotsbots.com/en/expressions\n\n"
                 "Expressions are a powerful way to set the channel name based on certain conditions, such as whether "
                 "or not the creator has a particular role, what game is being played, and the party size.\n\n"
                 "Expressions must be in the following form:\n"

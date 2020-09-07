@@ -128,8 +128,8 @@ async def admin_command(cmd, ctx):
         for g in guilds:
             s = func.get_secondaries(g)
             top_guilds.append({"name": g.name,
-                                "size": len([m for m in g.members if not m.bot]),
-                                "num": len(s) if s is not None else 0})
+                               "size": len([m for m in g.members if not m.bot]),
+                               "num": len(s) if s is not None else 0})
         top_guilds = sorted(top_guilds, key=lambda x: x['num'], reverse=True)[:10]
         r = "**Top Guilds:**"
         for g in top_guilds:
