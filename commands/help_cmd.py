@@ -80,7 +80,13 @@ async def execute(ctx, params):
             s = s.replace("**Gold Patron**", ":credit_card: **Gold Patron**")
             s = s.replace("Change the prefix of the bot (default is", "Change the prefix of the bot (currently")
             s = s.replace("<https://www.patreon.com/pixaal>", "https://www.patreon.com/pixaal")  # Always embed
-            if s.startswith("\n**-- Commands --**\n") and can_embed:
+            if s.startswith("\n**-- Quickstart --**\n") and can_embed:
+                embed = discord.Embed(
+                    color=discord.Color.from_rgb(221, 46, 68),
+                    description="❤ If you like this bot and want to help keep it alive, [support us on Patreon](https://www.patreon.com/pixaal) :)")
+                await channel.send(content="** **" + s, embed=embed)
+                continue
+            elif s.startswith("\n**-- Commands --**\n") and can_embed:
                 lines = [l for l in s.split('\n') if l != ""]
                 parts = []
                 title = []
@@ -103,7 +109,7 @@ async def execute(ctx, params):
                     embed = discord.Embed(color=discord.Color.from_rgb(205, 220, 57))
                     for c in p[1]:
                         cmd_name, cmd_desc = c.split(" - ", 1)
-                        embed.add_field(name=" ·  " + cmd_name, value=cmd_desc)
+                        embed.add_field(name=" ·  " + cmd_name, value=cmd_desc, inline=False)
                     try:
                         await channel.send(content=p[0].replace("Commands --**", "Commands --**\n"), embed=embed)
                     except discord.errors.Forbidden:
@@ -115,11 +121,6 @@ async def execute(ctx, params):
                         )
                         return False, "NO RESPONSE"
                 continue
-            if i == 0:
-                s = '\n'.join(s.strip('\n').split('\n')[:-1])  # Remove last line of first section (gfycat embed)
-                s += "\nhttps://gfycat.com/latemealyhoneyeater"
-            else:
-                s = '** **' + s
             echo_success = await echo(s, channel, author)
             if not echo_success:
                 return False, "NO RESPONSE"
