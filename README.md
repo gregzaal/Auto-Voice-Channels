@@ -1,11 +1,6 @@
-# Auto-Voice-Channels
+# Auto-Voice-Channels - Ubuntu 20.04
 
-### A Discord bot that automatically creates voice channels as they are needed.
-
-- [Public bot invite link](https://discordapp.com/api/oauth2/authorize?client_id=479393422705426432&permissions=286280784&scope=bot)
-- [Beta bot invite link](https://discordapp.com/api/oauth2/authorize?client_id=675405085752164372&permissions=286280784&scope=bot)
-- [Discord server](https://discord.gg/HT6GNhJ)
-- [Patreon](https://www.patreon.com/pixaal)
+Guide
 
 ## Requires:
 
@@ -16,6 +11,8 @@
 * [Requests](https://pypi.org/project/requests/) (`pip install requests`)
 
 ## Quick start:
+
+sudo apt-get install gcc
 
 * Clone the repository: `git clone https://github.com/gregzaal/Auto-Voice-Channels.git`
 * Go to the directory: `cd Auto-Voice-Channels`
