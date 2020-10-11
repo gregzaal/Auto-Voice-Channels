@@ -25,3 +25,4 @@ Here are the most commonly used commands. For the full list of commands availabl
 `vc/lock` or `vc/limit` - Lock or set the user limit of your channel to prevent any more people from being able to join.
 
 `vc/ping` - A quick test command to check the bot is working, and show its response time. Frequently high response times (>2s) may indicate performance issues.
+
