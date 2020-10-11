@@ -1,7 +1,9 @@
 # Auto-Voice-Channels - Ubuntu 20.04
 
 Guide
+
 sudo apt-get install gcc
+sudo apt-get install git
 
 ## Requires:
 
