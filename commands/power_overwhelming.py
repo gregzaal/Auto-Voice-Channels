@@ -30,6 +30,7 @@ async def execute(ctx, params):
 command = Cmd(
     execute=execute,
     help_text=help_text,
+    help_link="https://wiki.dotsbots.com/en/gold-patrons",
     params_required=0,
     admin_required=True,
 )
