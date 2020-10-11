@@ -80,7 +80,13 @@ async def execute(ctx, params):
             s = s.replace("**Gold Patron**", ":credit_card: **Gold Patron**")
             s = s.replace("Change the prefix of the bot (default is", "Change the prefix of the bot (currently")
             s = s.replace("<https://www.patreon.com/pixaal>", "https://www.patreon.com/pixaal")  # Always embed
-            if s.startswith("\n**-- Commands --**\n") and can_embed:
+            if s.startswith("\n**-- Quickstart --**\n") and can_embed:
+                embed = discord.Embed(
+                    color=discord.Color.from_rgb(221, 46, 68),
+                    description="❤ If you like this bot and want to help keep it alive, [support us on Patreon](https://www.patreon.com/pixaal) :)")
+                await channel.send(content="** **" + s, embed=embed)
+                continue
+            elif s.startswith("\n**-- Commands --**\n") and can_embed:
                 lines = [l for l in s.split('\n') if l != ""]
                 parts = []
                 title = []
@@ -103,7 +109,7 @@ async def execute(ctx, params):
                     embed = discord.Embed(color=discord.Color.from_rgb(205, 220, 57))
                     for c in p[1]:
                         cmd_name, cmd_desc = c.split(" - ", 1)
-                        embed.add_field(name=" ·  " + cmd_name, value=cmd_desc)
+                        embed.add_field(name=" ·  " + cmd_name, value=cmd_desc, inline=False)
                     try:
                         await channel.send(content=p[0].replace("Commands --**", "Commands --**\n"), embed=embed)
                     except discord.errors.Forbidden:
@@ -115,11 +121,6 @@ async def execute(ctx, params):
                         )
                         return False, "NO RESPONSE"
                 continue
-            if i == 0:
-                s = '\n'.join(s.strip('\n').split('\n')[:-1])  # Remove last line of first section (gfycat embed)
-                s += "\nhttps://gfycat.com/latemealyhoneyeater"
-            else:
-                s = '** **' + s
             echo_success = await echo(s, channel, author)
             if not echo_success:
                 return False, "NO RESPONSE"
@@ -140,8 +141,13 @@ async def execute(ctx, params):
                 if 'incorrect_command_usage' in ctx and part == help_text[0]:
                     content = "Incorrect command usage, here's some info about the `{}` command:".format(c)
                 if part == help_text[-1]:
-                    e.set_footer(text="More help: discord.io/DotsBotsSupport  \nSupport me: patreon.com/pixaal",
+                    e.set_footer(text="More help: wiki.dotsbots.com  \nSupport me: patreon.com/pixaal",
                                  icon_url=ctx['guild'].me.avatar_url_as(size=32))
+                if part == help_text[0]:
+                    help_link = (commands[c].help_link if
+                                 commands[c].help_link is not None
+                                 else "https://wiki.dotsbots.com/en/commands/" + c)
+                    e.description = "ℹ More info: " + help_link
                 for i, p in enumerate(part):
                     t = ("⠀\n" + p[0]) if i != 0 and not p[0].startswith(" ·  ") else p[0]
                     d = (p[1] + "\n⠀") if i == len(part) - 1 and part == help_text[-1] else p[1]
@@ -184,6 +190,7 @@ async def execute(ctx, params):
             e = discord.Embed(color=discord.Color.from_rgb(205, 220, 57))
             e.title = "Template Expressions"
             e.description = (
+                "ℹ More info: https://wiki.dotsbots.com/en/expressions\n\n"
                 "Expressions are a powerful way to set the channel name based on certain conditions, such as whether "
                 "or not the creator has a particular role, what game is being played, and the party size.\n\n"
                 "Expressions must be in the following form:\n"
