@@ -4,7 +4,7 @@ from utils import match_case
 mc = match_case
 
 digits = {
-    '0': "Zero0",
+    '0': "Zero",
     '1': "One",
     '2': "Two",
     '3': "Three",
