@@ -7,6 +7,7 @@ Guide
 * sudo apt-get install gcc -y
 * sudo apt-get install git -y
 * sudo apt-get install python3-pip -y
+* sudo apt-get install python3-dev -y
 
 ## Requires:
 
