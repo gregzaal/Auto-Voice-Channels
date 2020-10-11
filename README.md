@@ -47,4 +47,4 @@
 
 ## Help:
 
-[Join the support server](https://discord.gg/HT6GNhJ) and ask, or [open an issue](https://github.com/gregzaal/Auto-Voice-Channels/issues).
+Updates: git pull origin master
