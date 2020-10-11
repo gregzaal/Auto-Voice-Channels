@@ -1,18 +1,17 @@
 # Auto-Voice-Channels - Ubuntu 20.04
 
 Guide
+sudo apt-get install gcc
 
 ## Requires:
 
 * [Python 3.5.3+](https://www.python.org/downloads/)
-* [discord.py](https://pypi.org/project/discord.py/) (`pip install discord.py`)
-* [pytz](https://pypi.org/project/pytz/) (`pip install pytz`)
-* [psutil](https://pypi.org/project/psutil/) (`pip install psutil`)
-* [Requests](https://pypi.org/project/requests/) (`pip install requests`)
+* [discord.py](https://pypi.org/project/discord.py/) (`pip3 install discord.py`)
+* [pytz](https://pypi.org/project/pytz/) (`pip3 install pytz`)
+* [psutil](https://pypi.org/project/psutil/) (`pip3 install psutil`)
+* [Requests](https://pypi.org/project/requests/) (`pip3 install requests`)
 
 ## Quick start:
-
-sudo apt-get install gcc
 
 * Clone the repository: `git clone https://github.com/gregzaal/Auto-Voice-Channels.git`
 * Go to the directory: `cd Auto-Voice-Channels`
