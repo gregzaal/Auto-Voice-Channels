@@ -33,6 +33,7 @@
   * `token` is your bot's private token you can find [here](https://discordapp.com/developers/applications) - do not share it with anyone else.
   * There are a number of [optional settings](https://github.com/gregzaal/Auto-Voice-Channels/wiki/Optional-configuration) too, which aren't necessary to set but provide some further configuration options if needed.
 
+
 ```json
 {
     "admin_id":123456789012345678,
