@@ -64,7 +64,7 @@ def log(msg, guild=None):
         )
     text += "\n    "
     text += str(msg)
-    print(text)
+    print(text.encode('utf-8'))
 
 
 @func_timer()
