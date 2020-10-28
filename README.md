@@ -17,7 +17,7 @@
 
 ## Quick start:
 
-* Clone the repository: `git clone https://github.com/gregzaal/Auto-Voice-Channels.git`
+* Clone the repository: `git clone https://github.com/Jakimbo/Auto-Voice-Channels.git`
 * Go to the directory: `cd Auto-Voice-Channels`
 * Make folder to store guild settings: `mkdir guilds`
 * Make folder to store group settings: `mkdir groups`
