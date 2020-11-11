@@ -30,6 +30,8 @@ logging.basicConfig(level=logging.INFO)
 ADMIN_CHANNEL = None
 ADMIN = None
 
+POOL = concurrent.futures.ThreadPoolExecutor()
+
 DEV_BOT = cfg.CONFIG['DEV'] if 'DEV' in cfg.CONFIG else False
 GOLD_BOT = False
 NUM_SHARDS = cfg.CONFIG['num_shards'] if 'num_shards' in cfg.CONFIG else 0
@@ -158,7 +160,7 @@ def cleanup(client, tick_):
                 ADMIN_CHANNEL = client.get_channel(cfg.CONFIG['admin_channel'])
 
         if ADMIN is None:
-            ADMIN = client.get_user(cfg.CONFIG['admin_id'])
+            ADMIN = client.fetch_user(cfg.CONFIG['admin_id'])
 
     asyncio.get_event_loop().create_task(first_start(client))
 
@@ -173,11 +175,11 @@ async def main_loop(client):
     main_loop.last_run = datetime.now(pytz.utc)
     start_time = time()
     if client.is_ready():
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            thread_ = executor.submit(func.get_guilds, client)
-        while not thread_.done():
-            await asyncio.sleep(0.1)
-        guilds = thread_.result()
+        guilds = await asyncio.get_event_loop().run_in_executor(
+            POOL,
+            func.get_guilds,
+            client
+        )
         for guild in guilds:
             settings = utils.get_serv_settings(guild)
             if settings['enabled'] and settings['auto_channels']:
@@ -216,11 +218,11 @@ async def creation_loop(client):
 
     start_time = time()
     if client.is_ready():
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            thread_ = executor.submit(func.get_guilds, client)
-        while not thread_.done():
-            await asyncio.sleep(0.1)
-        guilds = thread_.result()
+        guilds = await asyncio.get_event_loop().run_in_executor(
+            POOL,
+            func.get_guilds,
+            client
+        )
         for guild in guilds:
             settings = utils.get_serv_settings(guild)
             if settings['enabled'] and settings['auto_channels']:
@@ -249,11 +251,11 @@ async def deletion_loop(client):
 
     start_time = time()
     if client.is_ready():
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            thread_ = executor.submit(func.get_guilds, client)
-        while not thread_.done():
-            await asyncio.sleep(0.1)
-        guilds = thread_.result()
+        guilds = await asyncio.get_event_loop().run_in_executor(
+            POOL,
+            func.get_guilds,
+            client
+        )
         for guild in guilds:
             settings = utils.get_serv_settings(guild)
             if settings['enabled'] and settings['auto_channels']:
@@ -717,6 +719,7 @@ class MyClient(discord.AutoShardedClient):
 
 heartbeat_timeout = cfg.CONFIG['heartbeat_timeout'] if 'heartbeat_timeout' in cfg.CONFIG else 60
 if NUM_SHARDS > 1:
+    print("wew")
     client = MyClient(shard_count=NUM_SHARDS, heartbeat_timeout=heartbeat_timeout)
 else:
     client = MyClient(heartbeat_timeout=heartbeat_timeout)
