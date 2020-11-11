@@ -38,7 +38,7 @@ def func_timer(threshold=0.5):
             else:
                 async def tmp():
                     with wrapping_logic(parent_func):
-                        return (await func(*args, **kwargs))
+                        return await func(*args, **kwargs)
                 return tmp()
         return wrapper
     return duration
