@@ -7,7 +7,6 @@ import subprocess
 import sys
 from datetime import datetime
 from time import time
-import numba
 
 import cfg
 from commands import admin_commands
@@ -27,6 +26,7 @@ try:
     uvloop.install()
 except ImportError:  # Pragma no cover
     pass
+
 
 logging.basicConfig(level=logging.INFO)
 ADMIN_CHANNEL = None
@@ -273,7 +273,6 @@ async def deletion_loop(client):
             await func.log_timings(client, fn_name)
 
 
-@numba.generated_jit()
 def for_looper(client):
     for guild in func.get_guilds(client):
         settings = utils.get_serv_settings(guild)  # Need fresh in case some were deleted
