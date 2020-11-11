@@ -20,6 +20,12 @@ import functions as func
 from functions import log, echo
 from discord.ext.tasks import loop
 
+try:
+    import uvloop
+    uvloop.install()
+except ImportError:  # Pragma no cover
+    pass
+
 logging.basicConfig(level=logging.INFO)
 ADMIN_CHANNEL = None
 ADMIN = None
