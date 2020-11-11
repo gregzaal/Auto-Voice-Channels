@@ -484,8 +484,9 @@ async def create_join_channels(client):
                     break
 
                 # give the event loop some more control
-                await asyncio.sleep(0)
-            await asyncio.sleep(0)
+                await asyncio.sleep(0.5)
+            await asyncio.sleep(0.5)
+        await asyncio.sleep(0.5)
 
     for i in to_remove:
         try:
