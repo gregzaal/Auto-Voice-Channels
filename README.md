@@ -26,6 +26,7 @@
 * Use venv: `. bot-env/bin/activate`
 * Install requirements: `python3 -m pip install -r requirements.txt`
 * Create your application + bot here: <https://discordapp.com/developers/applications>
+* Enable both **Presence** and **Server Members** Privileged Gateway Intents in the Bot section.
 * Create a `config.json` file in the Auto-Voice-Channels folder and fill it in:
   * `admin_id` is your ID, for the bot to DM you when it logs on, joins servers, gets errors, etc.
   * `client_id` is the bot ID.
