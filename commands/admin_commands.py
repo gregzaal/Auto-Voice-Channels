@@ -556,3 +556,31 @@ async def admin_command(cmd, ctx):
         except:
             await channel.send(traceback.format_exc())
             await func.react(message, '❌')
+
+    if cmd == 'leaveunauthorized':
+        params_str = utils.strip_quotes(params_str)
+        try:
+            total_guilds = 0
+            unauthorized_guilds = 0
+            cfg.CONFIG['leave_unauthorized'] = []
+            for g in client.guilds:
+                total_guilds += 1
+                if g not in guilds:
+                    print("---", g.id, g.name)
+                    cfg.CONFIG['leave_unauthorized'].append(g.id)
+                    unauthorized_guilds += 1
+                    if params_str == "go":
+                        try:
+                            await g.leave()
+                        except discord.errors.NotFound:
+                            pass
+            if params_str == "go":
+                await channel.send("Left {} of {} guilds.".format(unauthorized_guilds, total_guilds))
+            else:
+                await channel.send("Will leave {} of {} guilds. "
+                                   "Rerun command with 'go' at end to actually leave them.".format(
+                                       unauthorized_guilds, total_guilds))
+            cfg.CONFIG['leave_unauthorized'] = []
+        except:
+            await channel.send(traceback.format_exc())
+            await func.react(message, '❌')
