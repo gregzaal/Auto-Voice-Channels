@@ -125,20 +125,29 @@ async def admin_command(cmd, ctx):
 
     if cmd == 'top':
         top_guilds = []
-        for g in guilds:
+        total_users = 0
+        mode = utils.strip_quotes(params_str)
+        for g in client.guilds:
+            num_users = len([m for m in g.members if not m.bot])
+            total_users += num_users
             s = func.get_secondaries(g)
             top_guilds.append({"name": g.name,
-                               "size": len([m for m in g.members if not m.bot]),
-                               "num": len(s) if s is not None else 0})
-        top_guilds = sorted(top_guilds, key=lambda x: x['num'], reverse=True)[:10]
+                               "size": num_users,
+                               "num": len(s) if s is not None else 0,
+                               "in_guilds": g in guilds})
+        if mode in ["users", "members"]:
+            top_guilds = sorted(top_guilds, key=lambda x: x['size'], reverse=True)[:10]
+        else:
+            top_guilds = sorted(top_guilds, key=lambda x: x['num'], reverse=True)[:10]
         r = "**Top Guilds:**"
         for g in top_guilds:
-            r += "\n`{}` {}: \t**{}**".format(
+            r += "\n{}`{}` {}: \t**{}**".format(
+                "" if g['in_guilds'] else "⚠",
                 g['size'],
                 func.esc_md(g['name']),
                 g['num']
             )
-        r += "\n\n**{}**".format(utils.num_active_channels(guilds))
+        r += "\n\n**{}** channels, **{}** users".format(utils.num_active_channels(guilds), total_users)
         await channel.send(r)
 
     if cmd == 'patrons':
