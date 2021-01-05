@@ -1156,6 +1156,8 @@ async def on_guild_remove(guild):
         log("Left guild {} `{}` with {} members".format(guild.name, guild.id, num_members))
     if 'leave_inactive' in cfg.CONFIG and guild.id in cfg.CONFIG['leave_inactive']:
         pass
+    elif 'leave_unauthorized' in cfg.CONFIG and guild.id in cfg.CONFIG['leave_unauthorized']:
+        pass
     else:
         await func.admin_log(
             ":new_moon: Left: **{}** (`{}`) - **{}** members".format(
