@@ -15,6 +15,10 @@
 * [psutil](https://pypi.org/project/psutil/) (`pip install psutil`)
 * [Requests](https://pypi.org/project/requests/) (`pip install requests`)
 
+## Optional Extras:
+
+* [uvloop](https://pypi.org/project/uvloop/) (`pip install uvloop`) - **UNIX ONLY**
+
 ## Quick start:
 
 * Clone the repository: `git clone https://github.com/gregzaal/Auto-Voice-Channels.git`
