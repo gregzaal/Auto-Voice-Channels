@@ -452,6 +452,7 @@ async def create_join_channels(client):
                         except:
                             log("Failed to create join-channel, and failed to notify {}".format(creator))
                             break
+                        break
                     utils.permastore_secondary(jc.id)
                     settings['auto_channels'][p]['secondaries'][s]['jc'] = jc.id
                     utils.set_serv_settings(guild, settings)
