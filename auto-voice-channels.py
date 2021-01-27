@@ -756,6 +756,7 @@ class MyClient(discord.AutoShardedClient):
         self.ready_once = True
         for guild in self.guilds:
             await guild.chunk()
+            await asyncio.sleep(0.1)
 
     async def on_shard_ready(self, _):
         await self.on_ready()
