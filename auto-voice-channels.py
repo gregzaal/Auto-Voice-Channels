@@ -20,6 +20,14 @@ import functions as func
 from functions import log, echo
 from discord.ext.tasks import loop
 
+intents = discord.Intents.default()
+intents.members = True
+intents.presences = True
+intents.typing = False
+intents.webhooks = False
+intents.invites = False
+intents.integrations = False
+
 try:
     import uvloop
 
@@ -28,7 +36,7 @@ except ImportError:  # Pragma no cover
     pass
 
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.WARNING)
 ADMIN_CHANNEL = None
 ADMIN = None
 
@@ -37,6 +45,7 @@ POOL = concurrent.futures.ThreadPoolExecutor()
 DEV_BOT = cfg.CONFIG['DEV'] if 'DEV' in cfg.CONFIG else False
 GOLD_BOT = False
 NUM_SHARDS = cfg.CONFIG['num_shards'] if 'num_shards' in cfg.CONFIG else 0
+
 if DEV_BOT:
     print("DEV BOT")
     TOKEN = cfg.CONFIG['token_dev']
@@ -176,6 +185,8 @@ def cleanup(client, tick_):
 # @loop(seconds=cfg.CONFIG['loop_interval'])
 @loop(minutes=10)
 async def main_loop(client):
+    await client.wait_until_ready()
+
     main_loop.last_run = datetime.now(pytz.utc)
     start_time = time()
     if client.is_ready():
@@ -210,6 +221,8 @@ async def main_loop(client):
 
 @loop(seconds=cfg.CONFIG['loop_interval'])
 async def creation_loop(client):
+    await client.wait_until_ready()
+
     creation_loop.last_run = datetime.now(pytz.utc)
 
     @utils.func_timer()
@@ -241,6 +254,8 @@ async def creation_loop(client):
 
 @loop(seconds=cfg.CONFIG['loop_interval'] * 2)
 async def deletion_loop(client):
+    await client.wait_until_ready()
+
     deletion_loop.last_run = datetime.now(pytz.utc)
 
     @utils.func_timer()
@@ -311,6 +326,8 @@ def for_looper(client):
 
 @loop(minutes=2)
 async def check_dead(client):
+    await client.wait_until_ready()
+
     check_dead.last_run = datetime.now(pytz.utc)
 
     start_time = time()
@@ -326,6 +343,8 @@ async def check_dead(client):
 
 @loop(seconds=2)
 async def check_votekicks(client):
+    await client.wait_until_ready()
+
     check_votekicks.last_run = datetime.now(pytz.utc)
     start_time = time()
     if client.is_ready():
@@ -411,6 +430,8 @@ async def check_votekicks(client):
 
 @loop(seconds=3)
 async def create_join_channels(client):
+    await client.wait_until_ready()
+
     create_join_channels.last_run = datetime.now(pytz.utc)
     start_time = time()
     if not client.is_ready():
@@ -506,6 +527,8 @@ async def create_join_channels(client):
 
 @loop(minutes=3)
 async def update_seed(client):
+    await client.wait_until_ready()
+
     update_seed.last_run = datetime.now(pytz.utc)
     if client.is_ready():
         cfg.SEED = int(time())
@@ -513,6 +536,8 @@ async def update_seed(client):
 
 @loop(minutes=5)
 async def dynamic_tickrate(client):
+    await client.wait_until_ready()
+
     dynamic_tickrate.last_run = datetime.now(pytz.utc)
     start_time = time()
     if client.is_ready():
@@ -545,6 +570,8 @@ def get_potentials():
 
 @loop(minutes=5.22)
 async def lingering_secondaries(client):
+    await client.wait_until_ready()
+
     lingering_secondaries.last_run = datetime.now(pytz.utc)
     start_time = time()
     if client.is_ready():
@@ -590,6 +617,8 @@ async def lingering_secondaries(client):
 
 @loop(hours=2.4)
 async def analytics(client):
+    await client.wait_until_ready()
+
     analytics.last_run = datetime.now(pytz.utc)
     start_time = time()
     if client.is_ready() and cfg.SAPPHIRE_ID is None:
@@ -618,6 +647,8 @@ async def analytics(client):
 
 @loop(minutes=2)
 async def update_status(client):
+    await client.wait_until_ready()
+
     update_status.last_run = datetime.now(pytz.utc)
     if client.is_ready():
         guilds = func.get_guilds(client)
@@ -718,9 +749,24 @@ async def check_all_channels(guild, settings):
 class MyClient(discord.AutoShardedClient):
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        super().__init__(intents=intents, *args, **kwargs)
+        self.ready_once = False
+
+    async def start_chunking(self):
+        self.ready_once = True
+        for guild in self.guilds:
+            await guild.chunk()
+            await asyncio.sleep(0.1)
+
+    async def on_shard_ready(self, _):
+        await self.on_ready()
 
     async def on_ready(self):
+        if self.ready_once:
+            return
+
+        asyncio.create_task(self.start_chunking())
+
         print('=' * 24)
         curtime = datetime.now(pytz.timezone(cfg.CONFIG['log_timezone'])).strftime("%Y-%m-%d %H:%M")
         print(curtime)
@@ -755,9 +801,16 @@ class MyClient(discord.AutoShardedClient):
 heartbeat_timeout = cfg.CONFIG['heartbeat_timeout'] if 'heartbeat_timeout' in cfg.CONFIG else 60
 if NUM_SHARDS > 1:
     print("wew")
-    client = MyClient(shard_count=NUM_SHARDS, heartbeat_timeout=heartbeat_timeout)
+    client = MyClient(
+        shard_count=NUM_SHARDS,
+        heartbeat_timeout=heartbeat_timeout,
+        chunk_guilds_at_startup=False,
+    )
 else:
-    client = MyClient(heartbeat_timeout=heartbeat_timeout)
+    client = MyClient(
+        heartbeat_timeout=heartbeat_timeout,
+        chunk_guilds_at_startup=False,
+    )
 
 
 async def reload_modules(m):
