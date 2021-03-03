@@ -5,6 +5,7 @@ import logging
 import traceback
 import subprocess
 import sys
+from copy import deepcopy
 from datetime import datetime
 from time import time
 
@@ -462,7 +463,8 @@ async def create_join_channels(client):
         if guild not in func.get_guilds(client):
             continue
         settings = utils.get_serv_settings(guild)
-        for p, pv in settings['auto_channels'].items():
+        settings_copy = deepcopy(settings)
+        for p, pv in settings_copy['auto_channels'].items():
             for s, sv in pv['secondaries'].items():
                 if 'priv' in sv and 'jc' not in sv:
                     creator = pcv['creator'].display_name
