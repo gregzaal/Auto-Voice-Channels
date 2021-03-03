@@ -890,13 +890,11 @@ async def on_message(message):
                     g = client.get_guild(int(auth_guild))
                     if g is None:
                         await channel.send("`{}` is not a guild I know about, "
-                                           "maybe you need to invite me there first?".format(
-                            auth_guild))
+                                           "maybe you need to invite me there first?".format(auth_guild))
                         return
                 except ValueError:
                     await channel.send("`{}` is not a valid guild ID, try typing "
-                                       "`who am I` to get a list of guilds we're both in.".format(
-                        auth_guild))
+                                       "`who am I` to get a list of guilds we're both in.".format(auth_guild))
                     return
                 except Exception as e:
                     error_text = "Auth Error `{}`\nUser `{}`\nCMD `{}`".format(type(e).__name__,
