@@ -61,11 +61,39 @@
 
 * Clone the repository: `git clone https://github.com/gregzaal/Auto-Voice-Channels.git`
 * Create your application + bot here: <https://discordapp.com/developers/applications>
-* edit environmental varibles inside docker-compose.yml
-  * - admin_id=123456789012345678
-  * - client_id=987654321098765432
-  * - log_timezone=Africa/Johannesburg
-  * - token=XXXXXXXXXXXXXXXXXXXXXXXX.XXXXXX.XXXXXXXXXXXXXXXXXXXXXXXXXXX
+* Use docker run command
+  First create your image
+  ```shell
+  docker build -t auto-voice-channels .
+  ```
+  Then run it
+  ```shell
+  docker run \
+  --name=auto-voice-channels \
+  -e admin_id=<your admin id> \
+  -e client_id=<your client id> \
+  -e log_timezone=Africa/Johannesburg \
+  -e token=<your token> \
+  -v path to data:/AutoVoiceChannels/guilds \
+  --restart unless-stopped \
+  auto-voice-channels
+  ```
+* Use docker-compose
+```yaml
+version: "2.2"
+
+services:
+  autovoice:
+    build: .
+    image: autovoicechannels:latest
+    environment:
+      - admin_id=<your admin id>
+      - client_id=<your client id>
+      - log_timezone=Africa/Johannesburg
+      - token=<your token>
+    volumes:
+      - path to data:/AutoVoiceChannels/guilds
+```
 * Invite the bot to your own server, replacing `<YOUR BOT ID>` with... your bot ID: `https://discordapp.com/api/oauth2/authorize?client_id=<YOUR BOT ID>&permissions=286280784&scope=bot`
 * run docker-compose up
 
