@@ -167,7 +167,7 @@ def set_serv_settings(guild, settings):
     #     num_channels += len(settings['auto_channels'][p]['secondaries'])
 
     # if num_channels < prev_num_channels:
-    #     print("{}REM:{} {} ln:{} fn:{} gt:{} gnt:{}".format(
+    #     print("{}REM:{} {} ln:{} fn:{} gt:{} gnt:{}".format( 
     #         ' ' * 16,
     #         prev_num_channels - num_channels,
     #         guild.id,
@@ -180,6 +180,43 @@ def set_serv_settings(guild, settings):
     settings['guild_name'] = guild.name
     cfg.GUILD_SETTINGS[guild.id] = settings
     fp = os.path.join(cfg.SCRIPT_DIR, 'guilds', str(guild.id) + '.json')
+    return write_json(fp, settings)
+
+@func_timer()
+def get_group_settings(guild, force_refetch=False):
+    if guild.id in cfg.GROUP_SETTINGS and not force_refetch:
+        cfg.PREV_GROUP_SETTINGS[guild.id] = deepcopy(cfg.GROUP_SETTINGS[guild.id])
+        return cfg.GROUP_SETTINGS[guild.id]
+
+
+    fp = os.path.join(cfg.SCRIPT_DIR, 'groups', str(guild.id) + '.json')
+    if not os.path.exists(fp):
+        write_json(fp, read_json(os.path.join(cfg.SCRIPT_DIR, 'default_group_settings.json')))
+    data = read_json(fp)
+
+
+    old_data = deepcopy(data)
+    for gid, gc in old_data['group_channels'].items():
+        del data['group_channels'][gid]
+        old_gc = deepcopy(gc)
+        for cid, u in old_gc['channels'].items():
+            del gc['channels'][cid]
+            gc['channels'][int(cid)] = u
+            #for uid in u['users']:
+            #    del uid[cid] = uid
+            #cid['users'][int(uid)] = u
+        data['group_channels'][int(gid)] = gc
+
+
+
+    cfg.GROUP_SETTINGS[guild.id] = data
+    cfg.PREV_GROUP_SETTINGS[guild.id] = data
+    return cfg.GROUP_SETTINGS[guild.id]
+
+@func_timer()
+def set_group_settings(guild, settings):
+    cfg.GROUP_SETTINGS[guild.id] = settings
+    fp = os.path.join(cfg.SCRIPT_DIR, 'groups', str(guild.id) + '.json')
     return write_json(fp, settings)
 
 
@@ -235,6 +272,12 @@ def get_creator_id(settings, channel):
         for s, sv in pv['secondaries'].items():
             if s == channel.id:
                 return sv['creator']
+
+@func_timer()
+def get_merge_channel(settings, channel):
+    for p in settings['group_channels'].items():
+            if p == channel.category_id:
+                return p['merge_channel']
 
 
 @func_timer()

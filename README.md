@@ -21,9 +21,10 @@
 
 ## Quick start:
 
-* Clone the repository: `git clone https://github.com/gregzaal/Auto-Voice-Channels.git`
+* Clone the repository: `git clone https://github.com/Jakimbo/Auto-Voice-Channels.git`
 * Go to the directory: `cd Auto-Voice-Channels`
 * Make folder to store guild settings: `mkdir guilds`
+* Make folder to store group settings: `mkdir groups`
 * Install pip: `sudo apt-get -y install python3-pip`
 * Install venv: `pip3 install virtualenv`
 * Make venv: `python3 -m virtualenv bot-env`

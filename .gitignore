@@ -2,6 +2,7 @@ __pycache__
 /.vscode
 /bot-env
 /guilds
+/groups
 /logo
 /utils
 analytics.json

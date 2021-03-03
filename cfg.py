@@ -15,6 +15,8 @@ TIER_ICONS = {
 
 # Store settings so we don't have to read them from drive all the time
 GUILD_SETTINGS = {}
+GROUP_SETTINGS = {}
+PREV_GROUP_SETTINGS = {}
 PREV_GUILD_SETTINGS = {}
 
 # Store Patreon stuff so we can use it globally and don't have to read it all on every is_gold check
