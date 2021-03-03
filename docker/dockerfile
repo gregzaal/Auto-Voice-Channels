@@ -9,7 +9,6 @@ ENV token token
 COPY . /Auto-voice-channels
 # Change working directory
 WORKDIR /Auto-voice-channels
-VOLUME ./guilds
 # Install pre prerequisites
 RUN mkdir guilds \
     && python3 -m pip install -r requirements.txt \
