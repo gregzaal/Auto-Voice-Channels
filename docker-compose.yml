@@ -2,10 +2,18 @@ version: "2.2"
 
 services:
     autovoice:
-        build: .
+        build:
+            context: . 
+            dockerfile: docker/dockerfile
         image: autovoicechannels:latest
+        volumes:
+            - type: volume
+              source: guilds
+              target: /Auto-voice-channels/guilds
         environment:
-            - admin_id=123456789012345678
-            - client_id=123456789012345678
-            - log_timezone=Africa/Johannesburg
-            - token=XXXXXXXXXXXXXXXXXXXXXXXX.XXXXXX.XXXXXXXXXXXXXXXXXXXXXXXXXXX
+            - admin_id=764880242191892482
+            - client_id=732585101400997909
+            - log_timezone=Europe/London
+            - token=NzMyNTg1MTAxNDAwOTk3OTA5.Xw2vCg.2t5AVYLa8SPhTKrU0LH7iXVmkpQ
+volumes:
+    guilds:
