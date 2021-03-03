@@ -62,7 +62,7 @@
 * Clone the repository: `git clone https://github.com/gregzaal/Auto-Voice-Channels.git`
 * Create your application + bot here: <https://discordapp.com/developers/applications>
 * Invite the bot to your own server, replacing `<YOUR BOT ID>` with... your bot ID: `https://discordapp.com/api/oauth2/authorize?client_id=<YOUR BOT ID>&permissions=286280784&scope=bot`
-* build/run
+* build/run, make sure all commands are ran within your 
   * Use docker run command
   First create your image
   ```shell
@@ -96,6 +96,14 @@
       volumes:
         - path to data:/AutoVoiceChannels/guilds
   ```
+
+### Parameters
+| Parameter        | Function |
+| -----------      | ----------- |
+| `-e admin_id`    | is your ID, for the bot to DM you when it logs on, joins servers, gets errors, etc|
+| `-e client_id`   | is the bot ID|
+| `-e log_timezone`| is for the time displayed in logs, see [this list](https://stackoverflow.com/questions/13866926/is-there-a-list-of-pytz-timezones)|
+| `-e token`       | is your bot's private token you can find [here](https://discordapp.com/developers/applications) - do not share it with anyone else|
 
 ## Help:
 
