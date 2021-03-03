@@ -61,13 +61,14 @@
 
 * Clone the repository: `git clone https://github.com/gregzaal/Auto-Voice-Channels.git`
 * Create your application + bot here: <https://discordapp.com/developers/applications>
+* Invite the bot to your own server, replacing `<YOUR BOT ID>` with... your bot ID: `https://discordapp.com/api/oauth2/authorize?client_id=<YOUR BOT ID>&permissions=286280784&scope=bot`
 * build/run
   * Use docker run command
   First create your image
   ```shell
   docker build -t auto-voice-channels .
   ```
-  Then run it
+  Then run it, make sure you change ENVs and your volume path
   ```shell
   docker run \
   --name=auto-voice-channels \
@@ -79,7 +80,7 @@
   --restart unless-stopped \
   auto-voice-channels
   ```
-  * Use docker-compose
+  * Use docker-compose, make sure you change ENVs and your volume path
   ```yaml
   version: "2.2"
 
@@ -95,9 +96,6 @@
       volumes:
         - path to data:/AutoVoiceChannels/guilds
   ```
-* Invite the bot to your own server, replacing `<YOUR BOT ID>` with... your bot ID: `https://discordapp.com/api/oauth2/authorize?client_id=<YOUR BOT ID>&permissions=286280784&scope=bot`
-* run docker-compose up
-
 
 ## Help:
 
