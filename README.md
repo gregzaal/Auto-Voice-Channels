@@ -80,20 +80,20 @@
   auto-voice-channels
   ```
   * Use docker-compose
-    ```yaml
-    version: "2.2"
+  ```yaml
+  version: "2.2"
 
-    services:
-      autovoice:
-        build: .
-        image: autovoicechannels:latest
-        environment:
-          - admin_id=<your admin id>
-          - client_id=<your client id>
-          - log_timezone=Africa/Johannesburg
-          - token=<your token>
-        volumes:
-          - path to data:/AutoVoiceChannels/guilds
+  services:
+    autovoice:
+      build: .
+      image: autovoicechannels:latest
+      environment:
+        - admin_id=<your admin id>
+        - client_id=<your client id>
+        - log_timezone=Africa/Johannesburg
+        - token=<your token>
+      volumes:
+        - path to data:/AutoVoiceChannels/guilds
   ```
 * Invite the bot to your own server, replacing `<YOUR BOT ID>` with... your bot ID: `https://discordapp.com/api/oauth2/authorize?client_id=<YOUR BOT ID>&permissions=286280784&scope=bot`
 * run docker-compose up
