@@ -125,20 +125,29 @@ async def admin_command(cmd, ctx):
 
     if cmd == 'top':
         top_guilds = []
-        for g in guilds:
+        total_users = 0
+        mode = utils.strip_quotes(params_str)
+        for g in client.guilds:
+            num_users = len([m for m in g.members if not m.bot])
+            total_users += num_users
             s = func.get_secondaries(g)
             top_guilds.append({"name": g.name,
-                               "size": len([m for m in g.members if not m.bot]),
-                               "num": len(s) if s is not None else 0})
-        top_guilds = sorted(top_guilds, key=lambda x: x['num'], reverse=True)[:10]
+                               "size": num_users,
+                               "num": len(s) if s is not None else 0,
+                               "in_guilds": g in guilds})
+        if mode in ["users", "members"]:
+            top_guilds = sorted(top_guilds, key=lambda x: x['size'], reverse=True)[:10]
+        else:
+            top_guilds = sorted(top_guilds, key=lambda x: x['num'], reverse=True)[:10]
         r = "**Top Guilds:**"
         for g in top_guilds:
-            r += "\n`{}` {}: \t**{}**".format(
+            r += "\n{}`{}` {}: \t**{}**".format(
+                "" if g['in_guilds'] else "⚠",
                 g['size'],
                 func.esc_md(g['name']),
                 g['num']
             )
-        r += "\n\n**{}**".format(utils.num_active_channels(guilds))
+        r += "\n\n**{}** channels, **{}** users".format(utils.num_active_channels(guilds), total_users)
         await channel.send(r)
 
     if cmd == 'patrons':
@@ -544,6 +553,34 @@ async def admin_command(cmd, ctx):
                                    "Rerun command with 'go' at end to actually leave them.".format(
                                        inactive_guilds, total_guilds))
             cfg.CONFIG['leave_inactive'] = []
+        except:
+            await channel.send(traceback.format_exc())
+            await func.react(message, '❌')
+
+    if cmd == 'leaveunauthorized':
+        params_str = utils.strip_quotes(params_str)
+        try:
+            total_guilds = 0
+            unauthorized_guilds = 0
+            cfg.CONFIG['leave_unauthorized'] = []
+            for g in client.guilds:
+                total_guilds += 1
+                if g not in guilds:
+                    print("---", g.id, g.name)
+                    cfg.CONFIG['leave_unauthorized'].append(g.id)
+                    unauthorized_guilds += 1
+                    if params_str == "go":
+                        try:
+                            await g.leave()
+                        except discord.errors.NotFound:
+                            pass
+            if params_str == "go":
+                await channel.send("Left {} of {} guilds.".format(unauthorized_guilds, total_guilds))
+            else:
+                await channel.send("Will leave {} of {} guilds. "
+                                   "Rerun command with 'go' at end to actually leave them.".format(
+                                       unauthorized_guilds, total_guilds))
+            cfg.CONFIG['leave_unauthorized'] = []
         except:
             await channel.send(traceback.format_exc())
             await func.react(message, '❌')
