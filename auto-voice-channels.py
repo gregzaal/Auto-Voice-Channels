@@ -1276,6 +1276,7 @@ async def on_guild_remove(guild):
 
 cleanup(client=client, tick_=1)
 for ln, l in loops.items():
+    l.add_exception_type(RuntimeError)
     l.start(client)
 check_patreon.start()
 client.run(TOKEN)
