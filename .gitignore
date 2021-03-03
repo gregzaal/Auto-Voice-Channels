@@ -14,3 +14,4 @@ patron_auths.json
 push.bat
 secondaries.txt
 venv.bat
+docker-compose.yml
