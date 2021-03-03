@@ -419,6 +419,8 @@ async def admin_command(cmd, ctx):
                 'cancel': [loop.cancel, None],
                 'restart': [loop.restart, client],
                 'is_being_cancelled': [loop.is_being_cancelled, None],
+                'is_running': [loop.is_running, None],
+                'failed': [loop.failed, None],
                 'last_run': [loop.last_run, None],
             }
             if mode not in modes:
