@@ -494,8 +494,15 @@ async def create_join_channels(client):
                                 creator))
                             break
                         break
+
                     utils.permastore_secondary(jc.id)
-                    settings['auto_channels'][p]['secondaries'][s]['jc'] = jc.id
+
+                    try:
+                        settings['auto_channels'][p]['secondaries'][s]['jc'] = jc.id
+                    except KeyError:
+                        to_remove.append(pc)
+                        break
+
                     utils.set_serv_settings(guild, settings)
                     to_remove.append(pc)
                     try:
