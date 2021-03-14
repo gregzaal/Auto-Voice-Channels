@@ -1294,9 +1294,24 @@ async def on_guild_remove(guild):
             client)
 
 
+async def loop_error_override(Exception):
+    '''Called if unhandled exception occurs in any of our defined loops'''
+
+    error_text = traceback.format_exc()
+    print(error_text)
+
+    error_text = "<@{}> loop error\n```py\n{}".format(cfg.CONFIG['admin_id'], error_text)
+    error_text += "\n```"
+    try:
+        await func.admin_log(error_text, client)
+    except:
+        pass  # Such programming wow
+
+
 cleanup(client=client, tick_=1)
 for ln, l in loops.items():
     l.add_exception_type(RuntimeError)
+    l.error(loop_error_override)
     l.start(client)
 check_patreon.start()
 client.run(TOKEN)
