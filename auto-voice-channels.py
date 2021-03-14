@@ -372,28 +372,37 @@ async def check_votekicks(client):
                                                        vk['voice_channel'].name,
                                                        in_favor, len(vk['participants']) + 1),
                     guild)
+
                 try:
                     await vk['offender'].move_to(None)  # Kick
                 except Exception as e:
-                    to_remove.append(mid)
-                    await vk['message'].edit(
-                        content="‼ **Votekick** failed - A `{}` error was encountered.".format(
-                            type(e).__name__))
+                    try:
+                        await vk['message'].edit(
+                            content="‼ **Votekick** failed - A `{}` error was encountered.".format(
+                                type(e).__name__))
+                    except discord.errors.NotFound:
+                        continue
                     continue
+
                 banned = True
                 try:
                     await vk['voice_channel'].set_permissions(vk['offender'], connect=False)
                 except discord.errors.Forbidden:
                     banned = False
-                await vk['message'].edit(content=(
-                    "‼ **Votekick** ‼\n"
-                    "{} was **kicked** from {}'s channel{}.{}".format(
-                        vk['offender'].mention, vk['initiator'].mention,
-                        (
-                            ", but could not be banned from the channel as I don't have the *Manage Roles* permission."
-                            if not banned else ""),
-                        ("\nReason: **{}**".format(vk['reason']) if vk['reason'] else ""))
-                ))
+
+                try:
+                    await vk['message'].edit(content=(
+                        "‼ **Votekick** ‼\n"
+                        "{} was **kicked** from {}'s channel{}.{}".format(
+                            vk['offender'].mention, vk['initiator'].mention,
+                            (
+                                ", but could not be banned from the channel as I don't have the *Manage     Roles* permission."
+                                if not banned else ""),
+                            ("\nReason: **{}**".format(vk['reason']) if vk['reason'] else ""))
+                    ))
+                except discord.errors.NotFound:
+                    continue
+
                 await func.server_log(
                     guild,
                     "👢 {} (`{}`) has been **kicked** from {}'s channel.".format(
@@ -405,11 +414,15 @@ async def check_votekicks(client):
                 log("VOTEKICK TIMED OUT: {} ({}/{}) {} {}".format(
                     vk['offender'].display_name, in_favor, vk['required_votes'], mid, type(mid)),
                     guild)
-                await vk['message'].edit(
-                    content="‼ **Votekick** timed out: Insufficient votes received "
-                            "({0}/{1}), required: {2}/{1}.".format(in_favor,
-                                                                   len(vk['participants']) + 1,
-                                                                   vk['required_votes']))
+
+                try:
+                    await vk['message'].edit(
+                        content="‼ **Votekick** timed out: Insufficient votes received "
+                                "({0}/{1}), required: {2}/{1}.".format(in_favor,
+                                                                       len(vk['participants']) + 1,
+                                                                       vk['required_votes']))
+                except discord.errors.NotFound:
+                    continue
         for mid in to_remove:
             log("REMOVING VOTEKICK: {} {} len:{} keys:{}".format(
                 mid,
