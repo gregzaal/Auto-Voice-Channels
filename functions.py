@@ -1182,6 +1182,15 @@ async def create_secondary(guild, primary, creator, private=False):
             user_limit=user_limit,
             overwrites=overwrites
         )
+    except discord.errors.Forbidden:
+        await dm_user(
+            creator,
+            ":warning: Sorry, I was unable to create a channel for you as I don't have permission to do so. "
+            "Please let an admin of the server **{}** know about this issue so that "
+            "they can fix this.".format(esc_md(guild.name)))
+        await creator.move_to(None)  # Kick them from voice channel
+        lock_user_request(creator)
+        return
     except discord.errors.HTTPException as e:
         if "Maximum number of channels in category reached" in e.text:
             log("Failed to create channel for {}: Max channels reached".format(creator.display_name), guild)
@@ -1195,15 +1204,6 @@ async def create_secondary(guild, primary, creator, private=False):
             return
         else:
             raise e
-    except discord.errors.Forbidden:
-        await dm_user(
-            creator,
-            ":warning: Sorry, I was unable to create a channel for you as I don't have permission to do so. "
-            "Please let an admin of the server **{}** know about this issue so that "
-            "they can fix this.".format(esc_md(guild.name)))
-        await creator.move_to(None)  # Kick them from voice channel
-        lock_user_request(creator)
-        return
     log("{}  Creating channel for {}".format(str(c.id)[-4:], creator.display_name), guild)
     utils.permastore_secondary(c.id)
     lock_channel_request(c)
