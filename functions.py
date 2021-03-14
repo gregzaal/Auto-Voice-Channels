@@ -644,12 +644,12 @@ async def power_overwhelming(ctx, auth_guilds):
         for g in guilds:
             await admin_log("🔑 Authenticated **{}**'s {} server {} `{}`".format(
                 author.name, reward, g.name, g.id
-            ), ctx['client'], important=True)
+            ), ctx['client'], important=False)
             r += "\n✅ Nice! *{}* is now a **{}** server.".format(g.name, reward)
         for a in prev_auths:
             if a not in [g.id for g in guilds]:
                 r += "\n❗ Removed authentication from `{}`.".format(a)
-        if reward in ["Diamond", "Sapphire"]:
+        if reward in ["Diamond", "Sapphire"] and cfg.SAPPHIRE_ID is None:
             r += ("\nPlease give me ~{} hours to set up your private bot - "
                   "I'll DM you when it's ready to make the swap!".format(12 if reward == "Sapphire" else 24))
     else:
