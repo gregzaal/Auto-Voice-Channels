@@ -395,9 +395,8 @@ async def check_votekicks(client):
                         "‼ **Votekick** ‼\n"
                         "{} was **kicked** from {}'s channel{}.{}".format(
                             vk['offender'].mention, vk['initiator'].mention,
-                            (
-                                ", but could not be banned from the channel as I don't have the *Manage     Roles* permission."
-                                if not banned else ""),
+                            ((", but could not be banned from the channel as I don't have the"
+                              "*Manage     Roles* permission.") if not banned else ""),
                             ("\nReason: **{}**".format(vk['reason']) if vk['reason'] else ""))
                     ))
                 except discord.errors.NotFound:
