@@ -23,6 +23,9 @@ help_text = [
 
         (" ·  `$0#`, `$00#`, `$000#`, etc.", "Just like `$#` above but with padded zeros (e.g. '001', '002', etc.)."),
 
+        (" ·  `+#`",
+         "The channel number just like `##`, but with roman number. e.g. 'I', 'II', 'V' "),
+
         (" ·  `@@game_name@@`",
          "replaced with the game that most people in the channel are playing, "
          "or \"General\" if no one is playing anything/there is too much variety. "
