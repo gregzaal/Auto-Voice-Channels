@@ -14,6 +14,7 @@ import translate
 import utils
 from utils import log
 
+import roman
 try:
     import patreon_info
 except ImportError:
@@ -806,6 +807,7 @@ async def rename_channel(guild, channel, settings, primary_id, templates=None, i
         if i == -1:
             i_str = "?"
         cname = cname.replace('##', '#' + i_str)
+        cname = cname.replace('+#', roman.toRoman(i_str))
         for x in range(5):
             cname = cname.replace('${}#'.format('0' * x), i_str.zfill(x + 1))
 
