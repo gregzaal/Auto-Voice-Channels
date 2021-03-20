@@ -807,7 +807,7 @@ async def rename_channel(guild, channel, settings, primary_id, templates=None, i
         if i == -1:
             i_str = "?"
         cname = cname.replace('##', '#' + i_str)
-        cname = cname.replace('+#', roman.toRoman(i))
+        cname = cname.replace('+#', roman.toRoman(int(i + 1)))
         for x in range(5):
             cname = cname.replace('${}#'.format('0' * x), i_str.zfill(x + 1))
 
