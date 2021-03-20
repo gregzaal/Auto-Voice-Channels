@@ -81,7 +81,7 @@ def user_hash(user):
 
 
 @utils.func_timer()
-def check_primary_permissions(channel, me, category):
+def check_primary_permissions(channel, me):
     perms = channel.permissions_for(me)
     perms_required = [
         perms.manage_channels,
@@ -89,12 +89,8 @@ def check_primary_permissions(channel, me, category):
         perms.send_messages,
         perms.move_members,
     ]
-
-    if category is None:
-        category = channel.category
-
-    if category:
-        perms = category.permissions_for(me)
+    if channel.category:
+        perms = channel.category.permissions_for(me)
         perms_required += [
             perms.manage_channels,
             perms.read_messages,
@@ -114,15 +110,6 @@ def set_template(guild, chid, template):
                 utils.set_serv_settings(guild, settings)
                 return
 
-@utils.func_timer()
-def set_category(guild, chid, category):
-    settings = utils.get_serv_settings(guild)
-    for p in settings['auto_channels']:
-        for sid in settings['auto_channels'][p]['secondaries']:
-            if sid == chid:
-                settings['auto_channels'][p]['category'] = category.id
-                utils.set_serv_settings(guild, settings)
-                return
 
 @utils.func_timer()
 async def set_default_limit(guild, c, limit):
@@ -1085,26 +1072,18 @@ async def create_secondary(guild, primary, creator, private=False):
         log("{} no longer in primary".format(creator.display_name), guild)
         return
 
-    category = None
-
-    if settings['auto_channels'][primary.id]['category'] is not None:
-        category = guild.get_channel(int(settings['auto_channels'][primary.id]['category']))
-
-    if category is None:
-        category = primary.category
-
     # Check we're allowed to make the channel
     if user_request_is_locked(creator):
         return
-    elif not check_primary_permissions(primary, guild.me, category):
+    elif not check_primary_permissions(primary, guild.me):
         lock_user_request(creator)
         log("{} ({}) tried creating a channel where I don't have permissions".format(creator.display_name,
                                                                                      creator.id), guild)
         msg = "{} ❌ You tried creating a channel where I don't have the right permissions.".format(creator.mention)
         server_contact = guild.get_member(settings['server_contact'])
         msg += "\n\nPlease make sure I have the following permissions"
-        if category:
-            msg += " in the \"{}\" category:\n".format(category.name)
+        if primary.category:
+            msg += " in the \"{}\" category:\n".format(primary.category.name)
         else:
             msg += ":\n"
         msg += "- **Manage Channel**\n"
@@ -1151,18 +1130,16 @@ async def create_secondary(guild, primary, creator, private=False):
     # Find what the channel position is supposed to be
     # Channel.position is unreliable, so we have to find it manually.
     c_position = 0
-
-    if category.id != primary.category.id:
-        voice_channels = [x for x in guild.channels if isinstance(x, type(primary))]
-        voice_channels.sort(key=lambda ch: ch.position)
-        above = True
-        if ('above' in settings['auto_channels'][primary.id] and
-                settings['auto_channels'][primary.id]['above'] is False):
-            above = False
-        c_position = primary.position
-        if not above:
-            secondaries = settings['auto_channels'][primary.id]['secondaries'].keys()
-            c_position += 1 + len([v for v in voice_channels if v.id in secondaries and v.position > primary.position])
+    voice_channels = [x for x in guild.channels if isinstance(x, type(primary))]
+    voice_channels.sort(key=lambda ch: ch.position)
+    above = True
+    if ('above' in settings['auto_channels'][primary.id] and
+            settings['auto_channels'][primary.id]['above'] is False):
+        above = False
+    c_position = primary.position
+    if not above:
+        secondaries = settings['auto_channels'][primary.id]['secondaries'].keys()
+        c_position += 1 + len([v for v in voice_channels if v.id in secondaries and v.position > primary.position])
 
     # Copy stuff from primary channel
     user_limit = 0
@@ -1181,8 +1158,8 @@ async def create_secondary(guild, primary, creator, private=False):
                     else 'PRIMARY')
     overwrites = primary.overwrites
     if perms_source == 'CATEGORY':
-        if category:
-            overwrites = category.overwrites
+        if primary.category:
+            overwrites = primary.category.overwrites
     elif isinstance(perms_source, int):
         try:
             overwrites = guild.get_channel(perms_source).overwrites
@@ -1202,7 +1179,7 @@ async def create_secondary(guild, primary, creator, private=False):
     try:
         c = await guild.create_voice_channel(
             "⌛",
-            category=category,
+            category=primary.category,
             bitrate=bitrate,
             user_limit=user_limit,
             overwrites=overwrites
@@ -1298,7 +1275,7 @@ async def create_secondary(guild, primary, creator, private=False):
                 overwrites[showto_r] = discord.PermissionOverwrite(read_messages=True)
         tc = await guild.create_text_channel(
             utils.nice_cname(settings['text_channel_name']) if 'text_channel_name' in settings else "voice context",
-            category=category,
+            category=primary.category,
             overwrites=overwrites,
             topic=(":eye: This channel is only visible to members of your voice channel, "
                    "and admins of this server. It will be deleted when everyone leaves. VC ID: {}".format(c.id)))
