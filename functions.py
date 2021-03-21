@@ -1084,9 +1084,10 @@ async def create_secondary(guild, primary, creator, private=False):
         return
 
     category = None
+    category_id = settings['auto_channels'][primary.id].get('category')
 
-    if settings['auto_channels'][primary.id]['category'] is not None:
-        category = guild.get_channel(int(settings['auto_channels'][primary.id]['category']))
+    if category_id:
+        category = guild.get_channel(int(category_id))
 
     if category is None:
         category = primary.category
