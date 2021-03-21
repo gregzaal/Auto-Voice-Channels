@@ -45,7 +45,9 @@ from . import (
     toggleposition,
     transfer,
     uniquenames,
-    unlimit
+    unlimit,
+    listcategories,
+    category
 )
 
 commands = {
@@ -95,6 +97,8 @@ commands = {
     "uniquenames": uniquenames.command,
     "unlimit": unlimit.command,
     "unlock": unlimit.command,
+    "listcategories": listcategories.command,
+    "category": category.command
 }
 
 
