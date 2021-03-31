@@ -33,12 +33,12 @@
 * Create your application + bot here: <https://discordapp.com/developers/applications>
 * Enable both **Presence** and **Server Members** Privileged Gateway Intents in the Bot section.
 * Create a `config.json` file in the Auto-Voice-Channels folder and fill it in:
-  * `admin_id` is your ID, for the bot to DM you when it logs on, joins servers, gets errors, etc.
-  * `client_id` is the bot ID.
+  * `admin_id` is your personal [user ID](https://techswift.org/2020/04/22/how-to-find-your-user-id-on-discord/), for the bot to DM you errors and other important logs.
+  * `client_id` is the bot application client ID.
   * `log_timezone` is for the time displayed in logs, see [this list](https://stackoverflow.com/questions/13866926/is-there-a-list-of-pytz-timezones).
   * `token` is your bot's private token you can find [here](https://discordapp.com/developers/applications) - do not share it with anyone else.
   * There are a number of [optional settings](https://github.com/gregzaal/Auto-Voice-Channels/wiki/Optional-configuration) too, which aren't necessary to set but provide some further configuration options if needed.
-  * Your config.json file should look something like this:
+  * Your `config.json` file should look something like this:
 
 ```json
 {
@@ -54,7 +54,7 @@
 
 ### On Windows:
 
-While this bot will work just fine on windows for development, the most likely reason you've scrolled here is because you want to run your bot on your home computer. 
+While this bot will work just fine on windows for development, the most likely reason you've scrolled here is because you want to run your bot on your home computer.
 
 This is **not recommended** for two main reasons:
 
