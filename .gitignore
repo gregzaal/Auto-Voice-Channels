@@ -1,7 +1,7 @@
 __pycache__
 /.vscode
 /bot-env
-/guilds
+/guilds/*.json
 /logo
 /utils
 analytics.json

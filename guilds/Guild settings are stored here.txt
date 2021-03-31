@@ -1,0 +1,5 @@
+This folder serves as the bots persistent memory of server-specific settings and configuration, including active channels.
+
+Every guild has its own .json file, named with the guild ID.
+
+If this bot is running, it stores all the same info in memory and reads from that instead, meaning this folder serves more as a live backup which allows it to continue where it left off if the process is restarted.
