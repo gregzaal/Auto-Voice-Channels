@@ -498,7 +498,7 @@ async def create_join_channels(client):
                     utils.set_serv_settings(guild, settings)
                     to_remove.append(pc)
                     try:
-                        await jc.move(category=vc.category, above=vc)
+                        await jc.move(category=vc.category, before=vc)
                     except discord.errors.Forbidden:
                         # Harmless error, no idea why it sometimes throws this, seems like a bug.
                         pass
