@@ -48,6 +48,7 @@ ATTEMPTED_CHANNEL_NAMES = {}
 ERROR_MESSAGES = {}
 DM_ERROR_MESSAGES = {}
 DISCONNECTED = False
+IGNORE_ROLES_FOR_DELETION = []
 
 # Cached prefixes so we don't have to read settings file on every message
 PREFIXES = {}
