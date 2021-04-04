@@ -1237,7 +1237,7 @@ async def on_voice_state_update(member, before, after):
 @client.event
 async def on_guild_join(guild):
     num_members = len([m for m in guild.members if not m.bot])
-    important = num_members > 5000
+    important = num_members > 50000
     if cfg.SAPPHIRE_ID is None:
         settings = utils.get_serv_settings(guild)
         settings['left'] = False
