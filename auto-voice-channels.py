@@ -364,14 +364,8 @@ async def check_votekicks(client):
                 return
 
             in_favor = len(vk['in_favor'])
-            log("TESTVOTEKICK: {} ({}/{})".format(vk['offender'].display_name, in_favor,
-                                                  vk['required_votes']), guild)
             if in_favor >= vk['required_votes']:
                 to_remove.append(mid)
-                log("Kicked {} from {} ({}/{})".format(vk['offender'].display_name,
-                                                       vk['voice_channel'].name,
-                                                       in_favor, len(vk['participants']) + 1),
-                    guild)
 
                 try:
                     await vk['offender'].move_to(None)  # Kick
@@ -410,9 +404,6 @@ async def check_votekicks(client):
                 )
             elif time() > vk['end_time'] + 5:
                 to_remove.append(mid)
-                log("VOTEKICK TIMED OUT: {} ({}/{}) {} {}".format(
-                    vk['offender'].display_name, in_favor, vk['required_votes'], mid, type(mid)),
-                    guild)
 
                 try:
                     await vk['message'].edit(
@@ -423,16 +414,7 @@ async def check_votekicks(client):
                 except discord.errors.NotFound:
                     continue
         for mid in to_remove:
-            log("REMOVING VOTEKICK: {} {} len:{} keys:{}".format(
-                mid,
-                type(mid),
-                len(cfg.VOTEKICKS),
-                ', '.join([str(k) + " " + str(type(k)) for k in cfg.VOTEKICKS.keys()])),
-                guild)
             del cfg.VOTEKICKS[mid]
-            print("... len:{} keys:{}".format(
-                len(cfg.VOTEKICKS),
-                ', '.join([str(k) + " " + str(type(k)) for k in cfg.VOTEKICKS.keys()])))
 
         end_time = time()
         fn_name = "check_votekicks"
