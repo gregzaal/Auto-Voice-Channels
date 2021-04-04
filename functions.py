@@ -1127,20 +1127,6 @@ async def create_secondary(guild, primary, creator, private=False):
 
     lock_user_request(creator, offset=20)  # Add offset in case creating the channel takes more than 3s
 
-    # Find what the channel position is supposed to be
-    # Channel.position is unreliable, so we have to find it manually.
-    c_position = 0
-    voice_channels = [x for x in guild.channels if isinstance(x, type(primary))]
-    voice_channels.sort(key=lambda ch: ch.position)
-    above = True
-    if ('above' in settings['auto_channels'][primary.id] and
-            settings['auto_channels'][primary.id]['above'] is False):
-        above = False
-    c_position = primary.position
-    if not above:
-        secondaries = settings['auto_channels'][primary.id]['secondaries'].keys()
-        c_position += 1 + len([v for v in voice_channels if v.id in secondaries and v.position > primary.position])
-
     # Copy stuff from primary channel
     user_limit = 0
     if primary.user_limit:
@@ -1219,8 +1205,21 @@ async def create_secondary(guild, primary, creator, private=False):
     settings['last_activity'] = int(time())
     utils.set_serv_settings(guild, settings)
 
+    # Set channel position
+    above = True
+    if ('above' in settings['auto_channels'][primary.id] and
+            settings['auto_channels'][primary.id]['above'] is False):
+        above = False
+    offset = 0
+    if not above:
+        offset = len(settings['auto_channels'][primary.id]['secondaries']) - 1
     try:
-        await c.edit(position=c_position)
+        await c.move(
+            category=primary.category,
+            before=primary if above else None,
+            after=primary if not above else None,
+            offset=offset
+        )
     except discord.errors.Forbidden:
         # No idea why it sometimes throws this, seems like a bug.
         # If it can create channels, it certainly has permission to move them.
