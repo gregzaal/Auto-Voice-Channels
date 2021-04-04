@@ -1182,7 +1182,8 @@ async def create_secondary(guild, primary, creator, private=False):
             category=primary.category,
             bitrate=bitrate,
             user_limit=user_limit,
-            overwrites=overwrites
+            overwrites=overwrites,
+            rtc_region=primary.rtc_region
         )
     except discord.errors.Forbidden:
         await dm_user(
