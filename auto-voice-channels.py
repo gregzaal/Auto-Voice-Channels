@@ -464,8 +464,6 @@ async def create_join_channels(client):
                     creator = pcv['creator'].display_name
                     vc = pcv['voice_channel']
 
-                    c_position = vc.position
-
                     overwrites = vc.overwrites
                     k = guild.default_role
                     v = overwrites[k] if k in overwrites else discord.PermissionOverwrite()
@@ -500,8 +498,7 @@ async def create_join_channels(client):
                     utils.set_serv_settings(guild, settings)
                     to_remove.append(pc)
                     try:
-                        # Set position again, sometimes create_voice_channel gets it wrong.
-                        await jc.edit(position=c_position)
+                        await jc.move(category=vc.category, above=vc)
                     except discord.errors.Forbidden:
                         # Harmless error, no idea why it sometimes throws this, seems like a bug.
                         pass
