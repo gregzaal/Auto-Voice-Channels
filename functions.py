@@ -1395,15 +1395,17 @@ async def remove_broken_channels(guild):
                 except ValueError:
                     continue
                 vc = guild.get_channel(vcid)
-                if not vc:
+                if not vc and c.id not in cfg.IGNORE_FOR_DELETION:
                     try:
                         await c.delete()
+                    except discord.errors.Forbidden:
+                        log("Failed to delete text channel {} in guild {}".format(c.id, guild.id), guild)
                     except discord.errors.NotFound:
                         pass
 
     for r in guild.roles:
         front = "🎤🤖vc "
-        if r.name.startswith(front) and r.id not in cfg.IGNORE_ROLES_FOR_DELETION:
+        if r.name.startswith(front) and r.id not in cfg.IGNORE_FOR_DELETION:
             try:
                 vcid = int(r.name.split(front)[1])
             except ValueError:
@@ -1414,6 +1416,6 @@ async def remove_broken_channels(guild):
                     await r.delete()
                 except discord.errors.Forbidden:
                     log("Failed to delete role {} in guild {}".format(r.id, guild.id), guild)
-                    cfg.IGNORE_ROLES_FOR_DELETION.append(r.id)
+                    cfg.IGNORE_FOR_DELETION.append(r.id)
                 except discord.errors.NotFound:
                     pass
