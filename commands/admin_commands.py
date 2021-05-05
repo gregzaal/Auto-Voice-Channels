@@ -331,6 +331,21 @@ async def admin_command(cmd, ctx):
         uid = utils.strip_quotes(params_str)
         try:
             u = client.get_user(int(uid))
+            s = ""
+
+            # patreon_data = cfg.PATREON_DATA
+            patreon_data = utils.read_json(os.path.join(cfg.SCRIPT_DIR, "patreon_data.json"))
+            try:
+                for p_uid, p_user in patreon_data['user_data'].items():
+                    try:
+                        if p_user['attributes']['social_connections']['discord']['user_id'] == uid:
+                            s += "{} `{}`\n".format(p_user['attributes']['full_name'], p_user['attributes']['email'])
+                            break
+                    except (KeyError, TypeError):
+                        pass  # Skip users with no discord connection
+            except KeyError:
+                log("Failed to get patron name and email for {}".format(uid))
+
             in_guilds = {}
             for g in client.guilds:
                 if u in g.members:
@@ -343,7 +358,7 @@ async def admin_command(cmd, ctx):
                         "role": m.top_role.name,
                     }
             if in_guilds:
-                s = "**{}**".format(func.user_hash(u))
+                s += "**{}**".format(func.user_hash(u))
                 s += " \t :b: :regional_indicator_o: :regional_indicator_t:" if u.bot else ""
                 can_dm = True
                 try:
@@ -357,10 +372,10 @@ async def admin_command(cmd, ctx):
                     s += "\n{}`{}` **{}** (`{}`) \t {} ({})".format(
                         g['patron'], gid, g['guild_name'], g['guild_size'], g['user_name'], g['role']
                     )
-
-                await echo(s, channel)
             else:
-                await channel.send("¯\\_(ツ)_/¯")
+                s += "¯\\_(ツ)_/¯"
+
+            await echo(s, channel)
         except:
             await channel.send(traceback.format_exc())
             await func.react(message, '❌')
