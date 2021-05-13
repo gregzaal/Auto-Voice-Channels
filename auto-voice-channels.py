@@ -445,12 +445,15 @@ async def create_join_channels(client):
         if 'request_time' in pcv and time() - pcv['request_time'] > 120:
             # Unable to create join channel for 120s
             to_remove.append(pc)
-            await pcv['text_channel'].send(
-                ":warning: {} For some reason I was unable to create your \"⇩ Join\" channel, please try again later. "
-                "Your channel is still private, but there's now no way for anyone to join you. "
-                "Use `{}public` to make it public again."
-                "".format(pcv['creator'].mention, pcv['prefix']))
-            log("Failed to create join-channel, timed out.")
+            try:
+                await pcv['text_channel'].send(
+                    ":warning: {} For some reason I was unable to create your \"⇩ Join\" channel, please try again later. "
+                    "Your channel is still private, but there's now no way for anyone to join you. "
+                    "Use `{}public` to make it public again."
+                    "".format(pcv['creator'].mention, pcv['prefix']))
+                log("Failed to create join-channel, timed out.")
+            except (discord.errors.Forbidden, discord.errors.NotFound):
+                log("Failed to create join-channel, timed out - and failed to send message.")
             continue
 
         guild = client.get_guild(pcv['guild_id'])
