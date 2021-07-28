@@ -37,7 +37,7 @@
   * `client_id` is the bot application client ID.
   * `log_timezone` is for the time displayed in logs, see [this list](https://stackoverflow.com/questions/13866926/is-there-a-list-of-pytz-timezones).
   * `token` is your bot's private token you can find [here](https://discordapp.com/developers/applications) - do not share it with anyone else.
-  * There are a number of [optional settings](https://github.com/gregzaal/Auto-Voice-Channels/wiki/Optional-configuration) too, which aren't necessary to set but provide some further configuration options if needed.
+  * There are a number of [optional settings](https://wiki.dotsbots.com/en/self-hosting/optional-config) too, which aren't necessary to set but provide some further configuration options if needed.
   * Your `config.json` file should look something like this:
 
 ```json
