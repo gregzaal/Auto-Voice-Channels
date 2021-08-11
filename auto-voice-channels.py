@@ -516,6 +516,14 @@ async def create_join_channels(client):
                     except discord.errors.Forbidden:
                         # Harmless error, no idea why it sometimes throws this, seems like a bug.
                         pass
+                    except discord.errors.InvalidArgument as e:
+                        try:
+                            await pcv['text_channel'].send(
+                                ":warning: {} I couldn't move the \"⇩ Join\" channel to the right position, but it should still work. Discord says: {}".format(pcv['creator'].mention, e.text))
+                        except:
+                            log("Failed to create join-channel, and failed to notify {}".format(
+                                creator))
+                            break
                     break
 
                 # give the event loop some more control
