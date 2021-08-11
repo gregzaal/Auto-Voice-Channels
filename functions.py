@@ -1400,6 +1400,7 @@ async def remove_broken_channels(guild):
                         await c.delete()
                     except discord.errors.Forbidden:
                         log("Failed to delete text channel {} in guild {}".format(c.id, guild.id), guild)
+                        cfg.IGNORE_FOR_DELETION.append(c.id)
                     except discord.errors.NotFound:
                         pass
 
