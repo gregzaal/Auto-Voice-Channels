@@ -489,6 +489,17 @@ async def create_join_channels(client):
                                 creator))
                             break
                         break
+                    except discord.errors.HTTPException as e:
+                        to_remove.append(pc)
+                        try:
+                            await pcv['text_channel'].send(
+                                ":warning: {} I couldn't create the \"⇩ Join\" channel for you, Discord says: {}".format(pcv['creator'].mention, e.text))
+                        except:
+                            log("Failed to create join-channel, and failed to notify {}".format(
+                                creator))
+                            break
+                        break
+
 
                     utils.permastore_secondary(jc.id)
 
