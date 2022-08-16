@@ -74,7 +74,6 @@ async def execute(ctx, params):
         sections = docs.split('** **')
         for i, s in enumerate(sections):
             s = s.replace("@Auto Voice Channels ", "@{} ".format(ctx['message'].guild.me.display_name))
-            s = s.replace("vc/", esc_md(ctx['prefix_p']))
             s = s.replace("@pixaal", author.mention)
             s = s.replace(" :)", " :slight_smile:")
             s = s.replace("**Gold Patron**", ":credit_card: **Gold Patron**")

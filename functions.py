@@ -527,7 +527,7 @@ async def check_patreon(force_update=False, client=None):
                 important = True if r in ['sapphire', 'diamond'] else False
                 await admin_log("🎉 New {} patron! **{}** (`{}`)".format(cfg.TIER_ICONS[r], pn, p), client, important)
                 msg = ("🎉 **Thanks for your support!** 🎉\nTo activate your patron-exclusive features, "
-                       "simply run `vc/power-overwhelming` in your server.")
+                       "simply run `@me power-overwhelming` in your server.")
                 if r in ['sapphire', 'diamond']:
                     msg += "\n\nGive me a few hours to set up your private "
                     msg += "bot" if r == 'sapphire' else "server"

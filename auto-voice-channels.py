@@ -162,7 +162,7 @@ def cleanup(client, tick_):
             cfg.FIRST_RUN_COMPLETE = True
             guilds = func.get_guilds(client)
             if guilds:
-                text = 'vc/help'
+                text = '@me help'
                 if len(guilds) == 1 and guilds[0].id in cfg.PREFIXES:
                     text = cfg.PREFIXES[guilds[0].id] + 'help'
             else:
@@ -500,7 +500,6 @@ async def create_join_channels(client):
                             break
                         break
 
-
                     utils.permastore_secondary(jc.id)
 
                     try:
@@ -675,7 +674,7 @@ async def update_status(client):
     if client.is_ready():
         guilds = func.get_guilds(client)
         if guilds:
-            prefix = 'vc/'
+            prefix = '@me '
             if len(guilds) == 1 and guilds[0].id in cfg.PREFIXES:
                 prefix = cfg.PREFIXES[guilds[0].id]
             nc = utils.num_active_channels(guilds)
