@@ -974,8 +974,8 @@ async def on_message(message):
     if message.guild not in guilds:
         return
 
-    prefix_m = message.guild.me.mention
-    prefix_mx = "<@!" + prefix_m[2:]
+    prefix_m = f"<@{client.user.id}>"
+    prefix_mx = f"<@!{client.user.id}>"
     if message.guild.id in cfg.PREFIXES:
         prefix_p = cfg.PREFIXES[message.guild.id]
     else:
