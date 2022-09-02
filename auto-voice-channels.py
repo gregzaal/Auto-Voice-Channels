@@ -43,22 +43,22 @@ ADMIN = None
 
 POOL = concurrent.futures.ThreadPoolExecutor()
 
-DEV_BOT = cfg.CONFIG['DEV'] if 'DEV' in cfg.CONFIG else False
+DEV_BOT = cfg.CONFIG["DEV"] if "DEV" in cfg.CONFIG else False
 GOLD_BOT = False
-NUM_SHARDS = cfg.CONFIG['num_shards'] if 'num_shards' in cfg.CONFIG else 0
+NUM_SHARDS = cfg.CONFIG["num_shards"] if "num_shards" in cfg.CONFIG else 0
 
 if DEV_BOT:
     print("DEV BOT")
-    TOKEN = cfg.CONFIG['token_dev']
+    TOKEN = cfg.CONFIG["token_dev"]
 else:
-    TOKEN = cfg.CONFIG['token']
+    TOKEN = cfg.CONFIG["token"]
 try:
     sid = int(sys.argv[1])
     if str(sid) in cfg.CONFIG["sapphires"]:
         cfg.SAPPHIRE_ID = sid
-        TOKEN = cfg.CONFIG["sapphires"][str(sid)]['token']
+        TOKEN = cfg.CONFIG["sapphires"][str(sid)]["token"]
         NUM_SHARDS = 1
-    elif 'gold_id' in cfg.CONFIG and sid == 6666:
+    elif "gold_id" in cfg.CONFIG and sid == 6666:
         GOLD_BOT = True
         TOKEN = cfg.CONFIG["token_gold"]
         NUM_SHARDS = 1
@@ -72,9 +72,7 @@ except ValueError:
 
 LAST_COMMIT = "UNKNOWN"
 try:
-    LAST_COMMIT = \
-        subprocess.check_output(['git', 'log', '-1']).decode('ascii').strip().split('\n\n    ', 1)[
-            1]
+    LAST_COMMIT = subprocess.check_output(["git", "log", "-1"]).decode("ascii").strip().split("\n\n    ", 1)[1]
 except:
     print("Warning: Failed to get last commit log")
     pass
@@ -111,7 +109,7 @@ class LoopChecks:
                     tmp[u] = v
                 else:
                     if u in cfg.USER_ABUSE_EVENTS:
-                        del (cfg.USER_ABUSE_EVENTS[u])
+                        del cfg.USER_ABUSE_EVENTS[u]
             cfg.USER_REQUESTS = tmp
             await asyncio.sleep(self._tick)
 
@@ -162,19 +160,18 @@ def cleanup(client, tick_):
             cfg.FIRST_RUN_COMPLETE = True
             guilds = func.get_guilds(client)
             if guilds:
-                text = '@me help'
+                text = "@me help"
                 if len(guilds) == 1 and guilds[0].id in cfg.PREFIXES:
-                    text = cfg.PREFIXES[guilds[0].id] + 'help'
+                    text = cfg.PREFIXES[guilds[0].id] + "help"
             else:
                 text = "🚧No guilds🚧"
-            await client.change_presence(
-                activity=discord.Activity(name=text, type=discord.ActivityType.watching))
+            await client.change_presence(activity=discord.Activity(name=text, type=discord.ActivityType.watching))
 
-            if 'admin_channel' in cfg.CONFIG:
-                ADMIN_CHANNEL = client.get_channel(cfg.CONFIG['admin_channel'])
+            if "admin_channel" in cfg.CONFIG:
+                ADMIN_CHANNEL = client.get_channel(cfg.CONFIG["admin_channel"])
 
         if ADMIN is None:
-            ADMIN = await client.fetch_user(cfg.CONFIG['admin_id'])
+            ADMIN = await client.fetch_user(cfg.CONFIG["admin_id"])
 
     asyncio.get_event_loop().create_task(first_start(client))
 
@@ -191,14 +188,10 @@ async def main_loop(client):
     main_loop.last_run = datetime.now(pytz.utc)
     start_time = time()
     if client.is_ready():
-        guilds = await asyncio.get_event_loop().run_in_executor(
-            POOL,
-            func.get_guilds,
-            client
-        )
+        guilds = await asyncio.get_event_loop().run_in_executor(POOL, func.get_guilds, client)
         for guild in guilds:
             settings = utils.get_serv_settings(guild)
-            if settings['enabled'] and settings['auto_channels']:
+            if settings["enabled"] and settings["auto_channels"]:
                 await check_all_channels(guild, settings)
         end_time = time()
         fn_name = "main_loop"
@@ -209,8 +202,7 @@ async def main_loop(client):
         # Check for new patrons using patron role in support server
         if cfg.SAPPHIRE_ID is None:
             try:
-                num_patrons = len(
-                    client.get_guild(601015720200896512).get_role(606482184043364373).members)
+                num_patrons = len(client.get_guild(601015720200896512).get_role(606482184043364373).members)
             except AttributeError:
                 pass
             else:
@@ -220,7 +212,7 @@ async def main_loop(client):
                     cfg.NUM_PATRONS = num_patrons
 
 
-@loop(seconds=cfg.CONFIG['loop_interval'])
+@loop(seconds=cfg.CONFIG["loop_interval"])
 async def creation_loop(client):
     await client.wait_until_ready()
 
@@ -228,7 +220,7 @@ async def creation_loop(client):
 
     @utils.func_timer()
     async def check_create(guild, settings):
-        for pid in settings['auto_channels']:
+        for pid in settings["auto_channels"]:
             p = client.get_channel(int(pid))
             if p is not None:
                 users_waiting = [m for m in p.members if not func.user_request_is_locked(m)]
@@ -237,14 +229,10 @@ async def creation_loop(client):
 
     start_time = time()
     if client.is_ready():
-        guilds = await asyncio.get_event_loop().run_in_executor(
-            POOL,
-            func.get_guilds,
-            client
-        )
+        guilds = await asyncio.get_event_loop().run_in_executor(POOL, func.get_guilds, client)
         for guild in guilds:
             settings = utils.get_serv_settings(guild)
-            if settings['enabled'] and settings['auto_channels']:
+            if settings["enabled"] and settings["auto_channels"]:
                 await check_create(guild, settings)
         end_time = time()
         fn_name = "creation_loop"
@@ -253,7 +241,7 @@ async def creation_loop(client):
             await func.log_timings(client, fn_name)
 
 
-@loop(seconds=cfg.CONFIG['loop_interval'] * 2)
+@loop(seconds=cfg.CONFIG["loop_interval"] * 2)
 async def deletion_loop(client):
     await client.wait_until_ready()
 
@@ -272,14 +260,10 @@ async def deletion_loop(client):
 
     start_time = time()
     if client.is_ready():
-        guilds = await asyncio.get_event_loop().run_in_executor(
-            POOL,
-            func.get_guilds,
-            client
-        )
+        guilds = await asyncio.get_event_loop().run_in_executor(POOL, func.get_guilds, client)
         for guild in guilds:
             settings = utils.get_serv_settings(guild)
-            if settings['enabled'] and settings['auto_channels']:
+            if settings["enabled"] and settings["auto_channels"]:
                 await check_empty(guild, settings)
                 await func.remove_broken_channels(guild)
         end_time = time()
@@ -293,30 +277,28 @@ def for_looper(client):
     for guild in func.get_guilds(client):
         settings = utils.get_serv_settings(guild)  # Need fresh in case some were deleted
         dead_secondaries = []
-        for p in settings['auto_channels']:
-            for sid, sv in settings['auto_channels'][p]['secondaries'].items():
+        for p in settings["auto_channels"]:
+            for sid, sv in settings["auto_channels"][p]["secondaries"].items():
                 s = client.get_channel(sid)
                 if s is None:
-                    dying = sv['dying'] + 1 if 'dying' in sv else 1
-                    settings['auto_channels'][p]['secondaries'][sid]['dying'] = dying
-                    cfg.GUILD_SETTINGS[
-                        guild.id] = settings  # Temporarily settings, no need to write to disk.
+                    dying = sv["dying"] + 1 if "dying" in sv else 1
+                    settings["auto_channels"][p]["secondaries"][sid]["dying"] = dying
+                    cfg.GUILD_SETTINGS[guild.id] = settings  # Temporarily settings, no need to write to disk.
                     log("{} is dead ({})".format(sid, dying), guild)
                     if dying >= 3:
                         dead_secondaries.append(sid)
                 else:
-                    if 'dying' in sv:
-                        settings['auto_channels'][p]['secondaries'][sid]['dying'] = 0
-                        cfg.GUILD_SETTINGS[
-                            guild.id] = settings  # Temporarily settings, no need to write to disk.
+                    if "dying" in sv:
+                        settings["auto_channels"][p]["secondaries"][sid]["dying"] = 0
+                        cfg.GUILD_SETTINGS[guild.id] = settings  # Temporarily settings, no need to write to disk.
 
         if dead_secondaries:
-            for p, pv in settings['auto_channels'].items():
+            for p, pv in settings["auto_channels"].items():
                 tmp = {}
-                for s, sv in pv['secondaries'].items():
+                for s, sv in pv["secondaries"].items():
                     if s not in dead_secondaries:
                         tmp[s] = sv
-                settings['auto_channels'][p]['secondaries'] = tmp
+                settings["auto_channels"][p]["secondaries"] = tmp
 
             utils.set_serv_settings(guild, settings)
 
@@ -358,59 +340,72 @@ async def check_votekicks(client):
                 print("Ignoring error:")
                 traceback.print_exc()
                 continue
-            guild = vk['message'].guild
+            guild = vk["message"].guild
             guilds = func.get_guilds(client)
             if guild not in guilds:
                 return
 
-            in_favor = len(vk['in_favor'])
-            if in_favor >= vk['required_votes']:
+            in_favor = len(vk["in_favor"])
+            if in_favor >= vk["required_votes"]:
                 to_remove.append(mid)
 
                 try:
-                    await vk['offender'].move_to(None)  # Kick
+                    await vk["offender"].move_to(None)  # Kick
                 except Exception as e:
                     try:
-                        await vk['message'].edit(
-                            content="‼ **Votekick** failed - A `{}` error was encountered.".format(
-                                type(e).__name__))
+                        await vk["message"].edit(
+                            content="‼ **Votekick** failed - A `{}` error was encountered.".format(type(e).__name__)
+                        )
                     except discord.errors.NotFound:
                         continue
                     continue
 
                 banned = True
                 try:
-                    await vk['voice_channel'].set_permissions(vk['offender'], connect=False)
+                    await vk["voice_channel"].set_permissions(vk["offender"], connect=False)
                 except discord.errors.Forbidden:
                     banned = False
 
                 try:
-                    await vk['message'].edit(content=(
-                        "‼ **Votekick** ‼\n"
-                        "{} was **kicked** from {}'s channel{}.{}".format(
-                            vk['offender'].mention, vk['initiator'].mention,
-                            ((", but could not be banned from the channel as I don't have the"
-                              "*Manage     Roles* permission.") if not banned else ""),
-                            ("\nReason: **{}**".format(vk['reason']) if vk['reason'] else ""))
-                    ))
+                    await vk["message"].edit(
+                        content=(
+                            "‼ **Votekick** ‼\n"
+                            "{} was **kicked** from {}'s channel{}.{}".format(
+                                vk["offender"].mention,
+                                vk["initiator"].mention,
+                                (
+                                    (
+                                        ", but could not be banned from the channel as I don't have the"
+                                        "*Manage     Roles* permission."
+                                    )
+                                    if not banned
+                                    else ""
+                                ),
+                                ("\nReason: **{}**".format(vk["reason"]) if vk["reason"] else ""),
+                            )
+                        )
+                    )
                 except discord.errors.NotFound:
                     continue
 
                 await func.server_log(
                     guild,
                     "👢 {} (`{}`) has been **kicked** from {}'s channel.".format(
-                        func.user_hash(vk['offender']), vk['offender'].id, vk['initiator']
-                    ), 1, utils.get_serv_settings(guild)
+                        func.user_hash(vk["offender"]), vk["offender"].id, vk["initiator"]
+                    ),
+                    1,
+                    utils.get_serv_settings(guild),
                 )
-            elif time() > vk['end_time'] + 5:
+            elif time() > vk["end_time"] + 5:
                 to_remove.append(mid)
 
                 try:
-                    await vk['message'].edit(
+                    await vk["message"].edit(
                         content="‼ **Votekick** timed out: Insufficient votes received "
-                                "({0}/{1}), required: {2}/{1}.".format(in_favor,
-                                                                       len(vk['participants']) + 1,
-                                                                       vk['required_votes']))
+                        "({0}/{1}), required: {2}/{1}.".format(
+                            in_favor, len(vk["participants"]) + 1, vk["required_votes"]
+                        )
+                    )
                 except discord.errors.NotFound:
                     continue
         for mid in to_remove:
@@ -442,30 +437,31 @@ async def create_join_channels(client):
             traceback.print_exc()
             continue
 
-        if 'request_time' in pcv and time() - pcv['request_time'] > 120:
+        if "request_time" in pcv and time() - pcv["request_time"] > 120:
             # Unable to create join channel for 120s
             to_remove.append(pc)
             try:
-                await pcv['text_channel'].send(
-                    ":warning: {} For some reason I was unable to create your \"⇩ Join\" channel, please try again later. "
-                    "Your channel is still private, but there's now no way for anyone to join you. "
+                await pcv["text_channel"].send(
+                    ':warning: {} For some reason I was unable to create your "⇩ Join" channel, please try again later.'
+                    " Your channel is still private, but there's now no way for anyone to join you. "
                     "Use `{}public` to make it public again."
-                    "".format(pcv['creator'].mention, pcv['prefix']))
+                    "".format(pcv["creator"].mention, pcv["prefix"])
+                )
                 log("Failed to create join-channel, timed out.")
             except (discord.errors.Forbidden, discord.errors.NotFound):
                 log("Failed to create join-channel, timed out - and failed to send message.")
             continue
 
-        guild = client.get_guild(pcv['guild_id'])
+        guild = client.get_guild(pcv["guild_id"])
         if guild not in func.get_guilds(client):
             continue
         settings = utils.get_serv_settings(guild)
         settings_copy = deepcopy(settings)
-        for p, pv in settings_copy['auto_channels'].items():
-            for s, sv in pv['secondaries'].items():
-                if 'priv' in sv and 'jc' not in sv:
-                    creator = pcv['creator'].display_name
-                    vc = pcv['voice_channel']
+        for p, pv in settings_copy["auto_channels"].items():
+            for s, sv in pv["secondaries"].items():
+                if "priv" in sv and "jc" not in sv:
+                    creator = pcv["creator"].display_name
+                    vc = pcv["voice_channel"]
 
                     overwrites = vc.overwrites
                     k = guild.default_role
@@ -474,36 +470,40 @@ async def create_join_channels(client):
                     overwrites[k] = v
 
                     try:
-                        jc = await guild.create_voice_channel("⇩ Join {}".format(creator),
-                                                              # TODO creator can change
-                                                              category=vc.category,
-                                                              overwrites=overwrites)
+                        jc = await guild.create_voice_channel(
+                            "⇩ Join {}".format(creator),
+                            # TODO creator can change
+                            category=vc.category,
+                            overwrites=overwrites,
+                        )
                     except discord.errors.Forbidden:
                         to_remove.append(pc)
                         try:
-                            await pcv['text_channel'].send(
-                                ":warning: {} I don't have permission to make the \"⇩ Join\" channel for you anymore."
-                                "".format(pcv['creator'].mention))
+                            await pcv["text_channel"].send(
+                                ':warning: {} I don\'t have permission to make the "⇩ Join" channel for you anymore.'
+                                "".format(pcv["creator"].mention)
+                            )
                         except:
-                            log("Failed to create join-channel, and failed to notify {}".format(
-                                creator))
+                            log("Failed to create join-channel, and failed to notify {}".format(creator))
                             break
                         break
                     except discord.errors.HTTPException as e:
                         to_remove.append(pc)
                         try:
-                            await pcv['text_channel'].send(
-                                ":warning: {} I couldn't create the \"⇩ Join\" channel for you, Discord says: {}".format(pcv['creator'].mention, e.text))
+                            await pcv["text_channel"].send(
+                                ':warning: {} I couldn\'t create the "⇩ Join" channel for you, Discord says: {}'.format(
+                                    pcv["creator"].mention, e.text
+                                )
+                            )
                         except:
-                            log("Failed to create join-channel, and failed to notify {}".format(
-                                creator))
+                            log("Failed to create join-channel, and failed to notify {}".format(creator))
                             break
                         break
 
                     utils.permastore_secondary(jc.id)
 
                     try:
-                        settings['auto_channels'][p]['secondaries'][s]['jc'] = jc.id
+                        settings["auto_channels"][p]["secondaries"][s]["jc"] = jc.id
                     except KeyError:
                         to_remove.append(pc)
                         break
@@ -517,11 +517,14 @@ async def create_join_channels(client):
                         pass
                     except discord.errors.InvalidArgument as e:
                         try:
-                            await pcv['text_channel'].send(
-                                ":warning: {} I couldn't move the \"⇩ Join\" channel to the right position, but it should still work. Discord says: {}".format(pcv['creator'].mention, e.text))
+                            await pcv["text_channel"].send(
+                                (
+                                    ':warning: {} I couldn\'t move the "⇩ Join" channel to the right position, but it '
+                                    "should still work. Discord says: {}"
+                                ).format(pcv["creator"].mention, e.text)
+                            )
                         except:
-                            log("Failed to create join-channel, and failed to notify {}".format(
-                                creator))
+                            log("Failed to create join-channel, and failed to notify {}".format(creator))
                             break
                     break
 
@@ -568,8 +571,7 @@ async def dynamic_tickrate(client):
         new_seed_interval = current_channels / 45
         new_seed_interval = max(10, min(15, new_seed_interval))
         if cfg.SAPPHIRE_ID is None:
-            print("New tickrate is {0:.1f}s, seed interval is {1:.2f}m".format(new_tickrate,
-                                                                               new_seed_interval))
+            print("New tickrate is {0:.1f}s, seed interval is {1:.2f}m".format(new_tickrate, new_seed_interval))
         main_loop.change_interval(seconds=max(301, new_tickrate))
         creation_loop.change_interval(seconds=new_tickrate)
         deletion_loop.change_interval(seconds=new_tickrate * 2)
@@ -584,7 +586,7 @@ async def dynamic_tickrate(client):
 
 
 def get_potentials():
-    with open(os.path.join(cfg.SCRIPT_DIR, "secondaries.txt"), 'r') as f:
+    with open(os.path.join(cfg.SCRIPT_DIR, "secondaries.txt"), "r") as f:
         potentials = f.read()
     return potentials
 
@@ -599,27 +601,24 @@ async def lingering_secondaries(client):
         potentials = None
         with concurrent.futures.ThreadPoolExecutor() as pool:
             potentials = await client.loop.run_in_executor(pool, get_potentials)
-        potentials = potentials.split('\n')
+        potentials = potentials.split("\n")
         if potentials:
             # Sets apparently give better performance. Discard all but last 10k.
             potentials = set(potentials[-10000:])
             for guild in func.get_guilds(client):
                 settings = utils.get_serv_settings(guild)
-                if not settings['enabled'] or not settings['auto_channels']:
+                if not settings["enabled"] or not settings["auto_channels"]:
                     continue
                 secondaries = func.get_secondaries(guild, settings=settings, include_jc=True)
                 voice_channels = [x for x in guild.channels if isinstance(x, discord.VoiceChannel)]
                 for v in voice_channels:
-                    if v.id not in secondaries and str(
-                            v.id) in potentials and not func.channel_is_requested(v):
-                        if v.name not in ['⌛', '⚠']:
+                    if v.id not in secondaries and str(v.id) in potentials and not func.channel_is_requested(v):
+                        if v.name not in ["⌛", "⚠"]:
                             try:
-                                await v.edit(name='⚠')
+                                await v.edit(name="⚠")
                                 log("Remembering channel {}".format(v.id), guild)
                                 await func.admin_log(
-                                    "⚠ Remembering channel `{}` in guild **{}**".format(v.id,
-                                                                                        guild.name),
-                                    client
+                                    "⚠ Remembering channel `{}` in guild **{}**".format(v.id, guild.name), client
                                 )
                             except discord.errors.NotFound:
                                 pass
@@ -649,16 +648,15 @@ async def analytics(client):
             data = {}
         else:
             data = utils.read_json(fp)
-        data[datetime.now(pytz.timezone(cfg.CONFIG['log_timezone'])).strftime("%Y-%m-%d %H:%M")] = {
-            'nc': utils.num_active_channels(guilds),
-            'tt': round(cfg.TICK_TIME, 2),
-            'tr': main_loop.seconds,
-            'ng': len(guilds),
-            'm': round(psutil.virtual_memory().used / 1024 / 1024 / 1024, 2),
+        data[datetime.now(pytz.timezone(cfg.CONFIG["log_timezone"])).strftime("%Y-%m-%d %H:%M")] = {
+            "nc": utils.num_active_channels(guilds),
+            "tt": round(cfg.TICK_TIME, 2),
+            "tr": main_loop.seconds,
+            "ng": len(guilds),
+            "m": round(psutil.virtual_memory().used / 1024 / 1024 / 1024, 2),
         }
         with concurrent.futures.ThreadPoolExecutor() as pool:
-            await client.loop.run_in_executor(
-                pool, utils.write_json, fp, data)
+            await client.loop.run_in_executor(pool, utils.write_json, fp, data)
         end_time = time()
         fn_name = "analytics"
         cfg.TIMINGS[fn_name] = end_time - start_time
@@ -674,7 +672,7 @@ async def update_status(client):
     if client.is_ready():
         guilds = func.get_guilds(client)
         if guilds:
-            prefix = '@me '
+            prefix = "@me "
             if len(guilds) == 1 and guilds[0].id in cfg.PREFIXES:
                 prefix = cfg.PREFIXES[guilds[0].id]
             nc = utils.num_active_channels(guilds)
@@ -689,9 +687,8 @@ async def update_status(client):
             pass
         if text != old_text:
             try:
-                await client.change_presence(
-                    activity=discord.Activity(name=text, type=discord.ActivityType.watching))
-                log("Changing status to: {}".format(text.replace(' ', ' ')))
+                await client.change_presence(activity=discord.Activity(name=text, type=discord.ActivityType.watching))
+                log("Changing status to: {}".format(text.replace(" ", " ")))
             except Exception as e:
                 log("Failed to update status: {}".format(type(e).__name__))
 
@@ -703,19 +700,19 @@ async def check_patreon():
 
 
 loops = {  # loops with client as only arg - passed to admin_commands's `loop` cmd
-    'main_loop': main_loop,
-    'deletion_loop': deletion_loop,
-    'check_dead': check_dead,
-    'check_votekicks': check_votekicks,
-    'create_join_channels': create_join_channels,
-    'update_seed': update_seed,
-    'dynamic_tickrate': dynamic_tickrate,
-    'lingering_secondaries': lingering_secondaries,
-    'analytics': analytics,
-    'update_status': update_status,
+    "main_loop": main_loop,
+    "deletion_loop": deletion_loop,
+    "check_dead": check_dead,
+    "check_votekicks": check_votekicks,
+    "create_join_channels": create_join_channels,
+    "update_seed": update_seed,
+    "dynamic_tickrate": dynamic_tickrate,
+    "lingering_secondaries": lingering_secondaries,
+    "analytics": analytics,
+    "update_status": update_status,
 }
-if 'disable_creation_loop' not in cfg.CONFIG or not cfg.CONFIG['disable_creation_loop']:
-    loops['creation_loop'] = creation_loop
+if "disable_creation_loop" not in cfg.CONFIG or not cfg.CONFIG["disable_creation_loop"]:
+    loops["creation_loop"] = creation_loop
 
 
 async def check_all_channels(guild, settings):
@@ -723,28 +720,25 @@ async def check_all_channels(guild, settings):
     async def check_rename(guild, settings):
         # Update secondary channel names
         settings = utils.get_serv_settings(guild)  # Need fresh in case some were deleted
-        templates = {'0': 0}  # Initialize with 0's to prevent checking again if empty
-        for p in settings['auto_channels']:
+        templates = {"0": 0}  # Initialize with 0's to prevent checking again if empty
+        for p in settings["auto_channels"]:
             secondaries = []
-            for sid, sv in settings['auto_channels'][p]['secondaries'].items():
+            for sid, sv in settings["auto_channels"][p]["secondaries"].items():
                 s = client.get_channel(sid)
                 if s is not None:
                     secondaries.append(s)
-                    if "template" in settings['auto_channels'][p]:
-                        templates[s.id] = settings['auto_channels'][p]['template']
+                    if "template" in settings["auto_channels"][p]:
+                        templates[s.id] = settings["auto_channels"][p]["template"]
                     if "name" in sv:
-                        templates[s.id] = sv['name']
+                        templates[s.id] = sv["name"]
                 await asyncio.sleep(0)
             await asyncio.sleep(0)
 
             secondaries = sorted(secondaries, key=lambda x: discord.utils.snowflake_time(x.id))
             for i, s in enumerate(secondaries):
-                await func.rename_channel(guild=guild,
-                                          channel=s,
-                                          settings=settings,
-                                          primary_id=None,
-                                          templates=templates,
-                                          i=i)
+                await func.rename_channel(
+                    guild=guild, channel=s, settings=settings, primary_id=None, templates=templates, i=i
+                )
             await asyncio.sleep(0)
 
     if guild is None or guild.name is None:
@@ -768,7 +762,6 @@ async def check_all_channels(guild, settings):
 
 
 class MyClient(discord.AutoShardedClient):
-
     def __init__(self, *args, **kwargs):
         super().__init__(intents=intents, *args, **kwargs)
         self.ready_once = False
@@ -788,16 +781,16 @@ class MyClient(discord.AutoShardedClient):
 
         asyncio.create_task(self.start_chunking())
 
-        print('=' * 24)
-        curtime = datetime.now(pytz.timezone(cfg.CONFIG['log_timezone'])).strftime("%Y-%m-%d %H:%M")
+        print("=" * 24)
+        curtime = datetime.now(pytz.timezone(cfg.CONFIG["log_timezone"])).strftime("%Y-%m-%d %H:%M")
         print(curtime)
-        print('Logged in as')
+        print("Logged in as")
         print(self.user.name)
         print(self.user.id)
         if cfg.SAPPHIRE_ID is not None:
             print("Sapphire:", cfg.SAPPHIRE_ID)
         print("discordpy version: {}".format(discord.__version__))
-        print('-' * 24)
+        print("-" * 24)
 
         shards = {}
         for g in func.get_guilds(self):
@@ -806,20 +799,20 @@ class MyClient(discord.AutoShardedClient):
             else:
                 shards[g.shard_id] = 1
             settings = utils.get_serv_settings(g)
-            if 'prefix' in settings:
-                cfg.PREFIXES[g.id] = settings['prefix']
+            if "prefix" in settings:
+                cfg.PREFIXES[g.id] = settings["prefix"]
         print("Shards:", len(shards))
         for s in shards:
             print("s{}: {} guilds".format(s, shards[s]))
-        print('=' * 24)
+        print("=" * 24)
 
-        if 'disable_ready_message' in cfg.CONFIG and cfg.CONFIG['disable_ready_message']:
+        if "disable_ready_message" in cfg.CONFIG and cfg.CONFIG["disable_ready_message"]:
             log("READY")
         else:
             await func.admin_log("🟥🟧🟨🟩   **Ready**   🟩🟨🟧🟥", self)
 
 
-heartbeat_timeout = cfg.CONFIG['heartbeat_timeout'] if 'heartbeat_timeout' in cfg.CONFIG else 60
+heartbeat_timeout = cfg.CONFIG["heartbeat_timeout"] if "heartbeat_timeout" in cfg.CONFIG else 60
 if NUM_SHARDS > 1:
     print("wew")
     client = MyClient(
@@ -839,6 +832,7 @@ async def reload_modules(m):
         if m:
             commands.reload_command(m)
         from importlib import reload
+
         reload(commands)
         reload(utils)
         reload(func)
@@ -866,75 +860,84 @@ async def on_message(message):
     admin_channels = []
     if admin is not None:
         admin_channels = [admin.dm_channel]
-    if 'admin_channel' in cfg.CONFIG and ADMIN_CHANNEL is not None:
+    if "admin_channel" in cfg.CONFIG and ADMIN_CHANNEL is not None:
         admin_channels.append(ADMIN_CHANNEL)
     if message.channel in admin_channels:
-        split = message.content.split(' ')
-        cmd = split[0].split('\n')[0].lower()
-        params_str = message.content[len(cmd):].strip()
-        params = params_str.split(' ')
+        split = message.content.split(" ")
+        cmd = split[0].split("\n")[0].lower()
+        params_str = message.content[len(cmd) :].strip()
+        params = params_str.split(" ")
 
-        if cmd == 'reload':
+        if cmd == "reload":
             m = utils.strip_quotes(params_str)
             success = await reload_modules(m)
-            await func.react(message, '✅' if success else '❌')
+            await func.react(message, "✅" if success else "❌")
         else:
             ctx = {
-                'client': client,
-                'admin': admin,
-                'message': message,
-                'params': params,
-                'params_str': params_str,
-                'guilds': guilds,
-                'LAST_COMMIT': LAST_COMMIT,
-                'loops': loops,
+                "client": client,
+                "admin": admin,
+                "message": message,
+                "params": params,
+                "params_str": params_str,
+                "guilds": guilds,
+                "LAST_COMMIT": LAST_COMMIT,
+                "loops": loops,
             }
             await admin_commands.admin_command(cmd, ctx)
         return
 
     if not message.guild:  # DM
-        if 'help' in message.content and len(message.content) <= len("@Auto Voice Channels help"):
-            await message.channel.send("Sorry I don't respond to commands in DMs, "
-                                       "you need to type the commands in a channel in your server.\n"
-                                       "If you've tried that already, then make sure I have the right permissions "
-                                       "to see and reply to your commands in that channel.")
+        if "help" in message.content and len(message.content) <= len("@Auto Voice Channels help"):
+            await message.channel.send(
+                "Sorry I don't respond to commands in DMs, "
+                "you need to type the commands in a channel in your server.\n"
+                "If you've tried that already, then make sure I have the right permissions "
+                "to see and reply to your commands in that channel."
+            )
         elif message.content.lower().startswith("power-overwhelming"):
             channel = message.channel
-            params_str = message.content[len("power-overwhelming"):].strip()
+            params_str = message.content[len("power-overwhelming") :].strip()
             if not params_str:
-                await channel.send("You need to specify a guild ID. "
-                                   "Try typing `who am I` to get a list of guilds we're both in")
+                await channel.send(
+                    "You need to specify a guild ID. " "Try typing `who am I` to get a list of guilds we're both in"
+                )
                 return
-            auth_guilds = params_str.replace(' ', '\n').split('\n')
+            auth_guilds = params_str.replace(" ", "\n").split("\n")
             for auth_guild in auth_guilds:
                 try:
                     g = client.get_guild(int(auth_guild))
                     if g is None:
-                        await channel.send("`{}` is not a guild I know about, "
-                                           "maybe you need to invite me there first?".format(auth_guild))
+                        await channel.send(
+                            "`{}` is not a guild I know about, "
+                            "maybe you need to invite me there first?".format(auth_guild)
+                        )
                         return
                 except ValueError:
-                    await channel.send("`{}` is not a valid guild ID, try typing "
-                                       "`who am I` to get a list of guilds we're both in.".format(auth_guild))
+                    await channel.send(
+                        "`{}` is not a valid guild ID, try typing "
+                        "`who am I` to get a list of guilds we're both in.".format(auth_guild)
+                    )
                     return
                 except Exception as e:
-                    error_text = "Auth Error `{}`\nUser `{}`\nCMD `{}`".format(type(e).__name__,
-                                                                               message.author.id,
-                                                                               message.content)
-                    await func.admin_log(error_text, ctx['client'])
+                    error_text = "Auth Error `{}`\nUser `{}`\nCMD `{}`".format(
+                        type(e).__name__, message.author.id, message.content
+                    )
+                    await func.admin_log(error_text, ctx["client"])
                     log(error_text)
                     error_text = traceback.format_exc()
-                    await func.admin_log(error_text, ctx['client'])
+                    await func.admin_log(error_text, ctx["client"])
                     log(error_text)
-                    return False, ("A `{}` error occured :(\n"
-                                   "An admin has been notified and will be in touch.\n"
-                                   "In the meantime, try asking for help in the support server: "
-                                   "https://discord.gg/qhMrz6u".format(type(e).__name__))
+                    return False, (
+                        "A `{}` error occured :(\n"
+                        "An admin has been notified and will be in touch.\n"
+                        "In the meantime, try asking for help in the support server: "
+                        "https://discord.gg/qhMrz6u".format(type(e).__name__)
+                    )
 
             ctx = {
-                'message': message,
-                'channel': channel,
-                'client': client,
+                "message": message,
+                "channel": channel,
+                "client": client,
             }
             auth_guilds = [int(g) for g in auth_guilds]
             success, response = await func.power_overwhelming(ctx, auth_guilds)
@@ -947,10 +950,10 @@ async def on_message(message):
                     if response != "NO RESPONSE":
                         await echo(response, channel, message.author)
                 else:
-                    await func.react(message, '✅')
+                    await func.react(message, "✅")
             else:
                 if response != "NO RESPONSE":
-                    await func.react(message, '❌')
+                    await func.react(message, "❌")
                     if response:
                         await echo(response, channel, message.author)
         elif message.content.lower() in ["who am i", "who am i?"]:
@@ -959,15 +962,16 @@ async def on_message(message):
                 if g.get_member(message.author.id):
                     in_guilds.append("`{}` **{}**".format(g.id, g.name))
             if in_guilds:
-                await message.channel.send(
-                    "We're both in the following guilds:\n{}".format('\n'.join(in_guilds)))
+                await message.channel.send("We're both in the following guilds:\n{}".format("\n".join(in_guilds)))
             else:
                 await message.channel.send("I'm not in any of the same guilds as you.")
         else:
-            await admin_channels[-1].send(embed=discord.Embed(
-                title="DM from **{}** [`{}`]:".format(message.author.name, message.author.id),
-                description=message.content
-            ))
+            await admin_channels[-1].send(
+                embed=discord.Embed(
+                    title="DM from **{}** [`{}`]:".format(message.author.name, message.author.id),
+                    description=message.content,
+                )
+            )
         return
 
     if message.guild not in guilds:
@@ -978,7 +982,7 @@ async def on_message(message):
     if message.guild.id in cfg.PREFIXES:
         prefix_p = cfg.PREFIXES[message.guild.id]
     else:
-        prefix_p = 'vc/'
+        prefix_p = "vc/"
 
     prefix = None
     if message.content.startswith(prefix_m):
@@ -993,34 +997,34 @@ async def on_message(message):
 
     # Commands
     if prefix:
-        msg = message.content[len(prefix):].strip()  # Remove prefix
-        split = msg.split(' ')
+        msg = message.content[len(prefix) :].strip()  # Remove prefix
+        split = msg.split(" ")
         cmd = split[0].lower()
         params = split[1:]
-        params_str = ' '.join(params)
-        clean_paramstr = ' '.join(message.clean_content[len(prefix):].strip().split(' ')[1:])
+        params_str = " ".join(params)
+        clean_paramstr = " ".join(message.clean_content[len(prefix) :].strip().split(" ")[1:])
 
         guild = message.guild
         channel = message.channel
 
         settings = utils.get_serv_settings(guild)
         if channel.id not in func.get_voice_context_channel_ids(guild, settings):
-            settings['last_channel'] = channel.id
+            settings["last_channel"] = channel.id
             utils.set_serv_settings(guild, settings)
 
         ctx = {
-            'client': client,
-            'guild': guild,
-            'prefix': prefix,
-            'print_prefix': print_prefix,
-            'prefix_p': prefix_p,
-            'command': cmd,
-            'gold': func.is_gold(guild),
-            'sapphire': func.is_sapphire(guild),
-            'settings': settings,
-            'message': message,
-            'channel': channel,
-            'clean_paramstr': clean_paramstr,
+            "client": client,
+            "guild": guild,
+            "prefix": prefix,
+            "print_prefix": print_prefix,
+            "prefix_p": prefix_p,
+            "command": cmd,
+            "gold": func.is_gold(guild),
+            "sapphire": func.is_sapphire(guild),
+            "settings": settings,
+            "message": message,
+            "channel": channel,
+            "clean_paramstr": clean_paramstr,
         }
 
         # Restricted commands
@@ -1029,7 +1033,7 @@ async def on_message(message):
             perms.manage_channels,
             perms.manage_roles,
         ]
-        ctx['admin'] = all(perms_required)
+        ctx["admin"] = all(perms_required)
 
         success, response = await commands.run(cmd, ctx, params)
 
@@ -1041,10 +1045,10 @@ async def on_message(message):
                 if response != "NO RESPONSE":
                     await echo(response, channel, message.author)
             else:
-                await func.react(message, '✅')
+                await func.react(message, "✅")
         else:
             if response != "NO RESPONSE":
-                await func.react(message, '❌')
+                await func.react(message, "❌")
                 if response:
                     await echo(response, channel, message.author)
 
@@ -1063,13 +1067,12 @@ async def on_reaction_add(reaction, user):
         return
 
     if reaction.message.id in cfg.VOTEKICKS:
-        if reaction.emoji == '✅':
+        if reaction.emoji == "✅":
             vk = cfg.VOTEKICKS[reaction.message.id]
-            if time() < vk['end_time']:
-                if user not in vk['in_favor'] and user in vk['participants']:
-                    vk['in_favor'].append(user)
-                    log("{} voted to kick {}".format(user.display_name,
-                                                     vk['offender'].display_name), guild)
+            if time() < vk["end_time"]:
+                if user not in vk["in_favor"] and user in vk["participants"]:
+                    vk["in_favor"].append(user)
+                    log("{} voted to kick {}".format(user.display_name, vk["offender"].display_name), guild)
         return
 
     to_delete = []
@@ -1082,51 +1085,54 @@ async def on_reaction_add(reaction, user):
             traceback.print_exc()
             continue
 
-        if reaction.message.id == j['mid'] and user.id == j['creator'].id:
+        if reaction.message.id == j["mid"] and user.id == j["creator"].id:
             reacted = False
-            if reaction.emoji == '✅':
+            if reaction.emoji == "✅":
                 reacted = True
                 try:
-                    await j['vc'].set_permissions(j['requester'], connect=True)
-                    await j['requester'].move_to(j['vc'])
+                    await j["vc"].set_permissions(j["requester"], connect=True)
+                    await j["requester"].move_to(j["vc"])
                 except discord.errors.Forbidden:
-                    await j['msg'].edit(
+                    await j["msg"].edit(
                         content=":warning: I don't have permission to move {} to **{}** :(".format(
-                            j['requester'].mention, func.esc_md(j['vc'].name)
-                        ))
+                            j["requester"].mention, func.esc_md(j["vc"].name)
+                        )
+                    )
                 except discord.errors.HTTPException as e:
-                    await j['msg'].edit(
+                    await j["msg"].edit(
                         content=":warning: Unable to move {} to {}'s channel ({})".format(
-                            j['requester'].mention, j['creator'].mention, e.text
-                        ))
+                            j["requester"].mention, j["creator"].mention, e.text
+                        )
+                    )
                 else:
-                    await j['msg'].delete(delay=5)
-            elif reaction.emoji in ['❌', '⛔']:
+                    await j["msg"].delete(delay=5)
+            elif reaction.emoji in ["❌", "⛔"]:
                 reacted = True
                 try:
-                    await j['requester'].move_to(None)
+                    await j["requester"].move_to(None)
                 except discord.errors.Forbidden:
                     pass
                 except discord.errors.HTTPException:
                     pass
                 else:
-                    await j['msg'].edit(
+                    await j["msg"].edit(
                         content="Sorry {}, your request to join {} was denied.".format(
-                            j['requester'].mention, j['creator'].mention
-                        ))
-                if reaction.emoji == '⛔':
+                            j["requester"].mention, j["creator"].mention
+                        )
+                    )
+                if reaction.emoji == "⛔":
                     try:
-                        await j['jc'].set_permissions(j['requester'], connect=False)
+                        await j["jc"].set_permissions(j["requester"], connect=False)
                     except Exception as e:
-                        await j['msg'].edit(
-                            content="{}\nFailed to block user ({}).".format(j['msg'].content,
-                                                                            type(e).__name__))
+                        await j["msg"].edit(
+                            content="{}\nFailed to block user ({}).".format(j["msg"].content, type(e).__name__)
+                        )
             if reacted:
                 to_delete.append(uid)
                 try:
-                    await j['msg'].remove_reaction('✅', guild.me)
-                    await j['msg'].remove_reaction('❌', guild.me)
-                    await j['msg'].remove_reaction('⛔', guild.me)
+                    await j["msg"].remove_reaction("✅", guild.me)
+                    await j["msg"].remove_reaction("❌", guild.me)
+                    await j["msg"].remove_reaction("⛔", guild.me)
                 except discord.errors.Forbidden:
                     # Shouldn't have an issue removing your own reactions, but apparently sometimes you do.
                     pass
@@ -1153,10 +1159,10 @@ async def on_reaction_remove(reaction, user):
         return
 
     if reaction.message.id in cfg.VOTEKICKS:
-        if reaction.emoji == '✅':
+        if reaction.emoji == "✅":
             vk = cfg.VOTEKICKS[reaction.message.id]
-            if user in vk['in_favor'] and user in vk['participants']:
-                vk['in_favor'].remove(user)
+            if user in vk["in_favor"] and user in vk["participants"]:
+                vk["in_favor"].remove(user)
                 return
 
 
@@ -1175,10 +1181,10 @@ async def on_voice_state_update(member, before, after):
         return
 
     settings = utils.get_serv_settings(guild)
-    if not settings['enabled']:
+    if not settings["enabled"]:
         return
 
-    if not settings['auto_channels']:
+    if not settings["auto_channels"]:
         # No channels have been set up, do nothing
         return
 
@@ -1186,7 +1192,7 @@ async def on_voice_state_update(member, before, after):
     join_channels = func.get_join_channels(guild, settings)
 
     if after.channel:
-        if after.channel.id in settings['auto_channels']:
+        if after.channel.id in settings["auto_channels"]:
             await func.create_secondary(guild, after.channel, member)
         elif after.channel.id in secondaries:
             if after.channel.name != "⌛":
@@ -1194,24 +1200,25 @@ async def on_voice_state_update(member, before, after):
                 bitrate = await func.update_bitrate(after.channel, settings)
                 await func.server_log(
                     guild,
-                    "➡ {} (`{}`) joined \"**{}**\" (`{}`)".format(
+                    '➡ {} (`{}`) joined "**{}**" (`{}`)'.format(
                         func.user_hash(member), member.id, after.channel.name, after.channel.id
-                    ) + (" ⤏ {}kbps".format(round(bitrate / 1000)) if bitrate else ""), 3, settings
+                    )
+                    + (" ⤏ {}kbps".format(round(bitrate / 1000)) if bitrate else ""),
+                    3,
+                    settings,
                 )
         elif after.channel.id in join_channels:
             sv = join_channels[after.channel.id]
-            msg_channel = guild.get_channel(sv['msgs'])
-            vc = guild.get_channel(sv['vc'])
-            creator = guild.get_member(sv['creator'])
+            msg_channel = guild.get_channel(sv["msgs"])
+            vc = guild.get_channel(sv["vc"])
+            creator = guild.get_member(sv["creator"])
             if msg_channel and creator and vc:
                 try:
                     m = await msg_channel.send(
                         "Hey {},\n{} would like to join your private voice channel. React with:\n"
                         "• ✅ to **allow**.\n"
                         "• ❌ to **deny** this time.\n"
-                        "• ⛔ to deny and **block** future requests from them.".format(
-                            creator.mention, member.mention
-                        )
+                        "• ⛔ to deny and **block** future requests from them.".format(creator.mention, member.mention)
                     )
                     cfg.JOINS_IN_PROGRESS[member.id] = {
                         "creator": creator,
@@ -1219,14 +1226,16 @@ async def on_voice_state_update(member, before, after):
                         "vc": vc,
                         "jc": after.channel,
                         "msg": m,
-                        "mid": m.id
+                        "mid": m.id,
                     }
-                    log("{} ({}) requests to join {}".format(
-                        member.display_name, member.id, creator.display_name), guild)
+                    log(
+                        "{} ({}) requests to join {}".format(member.display_name, member.id, creator.display_name),
+                        guild,
+                    )
                     try:
-                        await m.add_reaction('✅')
-                        await m.add_reaction('❌')
-                        await m.add_reaction('⛔')
+                        await m.add_reaction("✅")
+                        await m.add_reaction("❌")
+                        await m.add_reaction("⛔")
                     except discord.errors.Forbidden:
                         pass
                 except Exception as e:
@@ -1243,10 +1252,12 @@ async def on_voice_state_update(member, before, after):
                 bitrate = await func.update_bitrate(before.channel, settings, user_left=member)
             await func.server_log(
                 guild,
-                "🚪 {} (`{}`) left \"**{}**\" (`{}`)".format(
+                '🚪 {} (`{}`) left "**{}**" (`{}`)'.format(
                     func.user_hash(member), member.id, before.channel.name, before.channel.id
-                ) + (" [bitrate: {}kbps]".format(round(bitrate / 1000)) if bitrate else ""), 3,
-                settings
+                )
+                + (" [bitrate: {}kbps]".format(round(bitrate / 1000)) if bitrate else ""),
+                3,
+                settings,
             )
             if not members:
                 await func.delete_secondary(guild, before.channel)
@@ -1258,17 +1269,16 @@ async def on_guild_join(guild):
     important = num_members > 50000
     if cfg.SAPPHIRE_ID is None:
         settings = utils.get_serv_settings(guild)
-        settings['left'] = False
+        settings["left"] = False
         utils.set_serv_settings(guild, settings)
         log("Joined guild {} `{}` with {} members".format(guild.name, guild.id, num_members))
     await func.admin_log(
         ":bell:{} Joined: **{}** (`{}`) - **{}** members".format(
-            utils.guild_size_icon(num_members),
-            func.esc_md(guild.name),
-            guild.id,
-            num_members),
+            utils.guild_size_icon(num_members), func.esc_md(guild.name), guild.id, num_members
+        ),
         client,
-        important=important)
+        important=important,
+    )
 
 
 @client.event
@@ -1276,30 +1286,27 @@ async def on_guild_remove(guild):
     num_members = len([m for m in guild.members if not m.bot])
     if cfg.SAPPHIRE_ID is None:
         settings = utils.get_serv_settings(guild)
-        settings['left'] = datetime.now(pytz.timezone(cfg.CONFIG['log_timezone'])).strftime(
-            "%Y-%m-%d %H:%M")
+        settings["left"] = datetime.now(pytz.timezone(cfg.CONFIG["log_timezone"])).strftime("%Y-%m-%d %H:%M")
         utils.set_serv_settings(guild, settings)
         log("Left guild {} `{}` with {} members".format(guild.name, guild.id, num_members))
-    if 'leave_inactive' in cfg.CONFIG and guild.id in cfg.CONFIG['leave_inactive']:
+    if "leave_inactive" in cfg.CONFIG and guild.id in cfg.CONFIG["leave_inactive"]:
         pass
-    elif 'leave_unauthorized' in cfg.CONFIG and guild.id in cfg.CONFIG['leave_unauthorized']:
+    elif "leave_unauthorized" in cfg.CONFIG and guild.id in cfg.CONFIG["leave_unauthorized"]:
         pass
     else:
         await func.admin_log(
-            ":new_moon: Left: **{}** (`{}`) - **{}** members".format(
-                func.esc_md(guild.name),
-                guild.id,
-                num_members),
-            client)
+            ":new_moon: Left: **{}** (`{}`) - **{}** members".format(func.esc_md(guild.name), guild.id, num_members),
+            client,
+        )
 
 
 async def loop_error_override(Exception):
-    '''Called if unhandled exception occurs in any of our defined loops'''
+    """Called if unhandled exception occurs in any of our defined loops"""
 
     error_text = traceback.format_exc()
     print(error_text)
 
-    error_text = "<@{}> loop error\n```py\n{}".format(cfg.CONFIG['admin_id'], error_text)
+    error_text = "<@{}> loop error\n```py\n{}".format(cfg.CONFIG["admin_id"], error_text)
     error_text += "\n```"
     try:
         await func.admin_log(error_text, client)
