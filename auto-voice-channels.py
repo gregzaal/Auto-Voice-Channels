@@ -1002,7 +1002,7 @@ async def on_message(message):
         cmd = split[0].lower()
         params = split[1:]
         params_str = " ".join(params)
-        clean_paramstr = " ".join(message.clean_content[len(prefix) :].strip().split(" ")[1:])
+        clean_paramstr = " ".join(message.clean_content[len(print_prefix) :].strip().split(" ")[1:])
 
         guild = message.guild
         channel = message.channel
