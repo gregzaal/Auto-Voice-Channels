@@ -12,9 +12,9 @@ info = b2.InMemoryAccountInfo()
 b2_api = b2.B2Api(info)
 
 try:
-    application_key_id = cfg.CONFIG['b2_key_id']
-    application_key = cfg.CONFIG['b2_key']
-    destination = cfg.CONFIG['b2_destination']
+    application_key_id = cfg.CONFIG["b2_key_id"]
+    application_key = cfg.CONFIG["b2_key"]
+    destination = cfg.CONFIG["b2_destination"]
 except KeyError:
     print("Missing b2 config key(s).")
     sys.exit()
@@ -23,15 +23,10 @@ b2_api.authorize_account("production", application_key_id, application_key)
 
 source = cfg.SCRIPT_DIR
 
-source_tmp = os.path.join(cfg.SCRIPT_DIR, '.tmp_BU')
+source_tmp = os.path.join(cfg.SCRIPT_DIR, ".tmp_BU")
 if os.path.exists(source_tmp):
     shutil.rmtree(source_tmp)
-shutil.copytree(source,
-                source_tmp,
-                symlinks=False,
-                ignore=shutil.ignore_patterns(
-                    '.*', 'bot-env', '__pycache__'
-                ))
+shutil.copytree(source, source_tmp, symlinks=False, ignore=shutil.ignore_patterns(".*", "bot-env", "__pycache__"))
 
 source = b2.parse_sync_folder(source_tmp, b2_api)
 destination = b2.parse_sync_folder(destination, b2_api)
@@ -39,7 +34,7 @@ destination = b2.parse_sync_folder(destination, b2_api)
 policies_manager = b2.ScanPoliciesManager(
     exclude_dir_regexes=("bot-env", ".git", ".*__(.*)__.*", "^\\.(.*)"),
     exclude_file_regexes=("^\\.(.*)", ".*__pycache__.*", ".*\\.txt"),
-    exclude_all_symlinks=True
+    exclude_all_symlinks=True,
 )
 
 synchronizer = b2.Synchronizer(

@@ -3,14 +3,14 @@ from utils import get_config
 from time import time
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-SCRIPT_DIR = SCRIPT_DIR + ('/' if not SCRIPT_DIR.endswith('/') else '')
+SCRIPT_DIR = SCRIPT_DIR + ("/" if not SCRIPT_DIR.endswith("/") else "")
 SAPPHIRE_ID = None
 INVITE_LINK = "https://discordapp.com/api/oauth2/authorize?client_id=@@CID@@&permissions=286280784&scope=bot"
 
 TIER_ICONS = {
-    'gold': ':credit_card:',
-    'sapphire': ':gem:',
-    'diamond': ':diamond_shape_with_a_dot_inside:',
+    "gold": ":credit_card:",
+    "sapphire": ":gem:",
+    "diamond": ":diamond_shape_with_a_dot_inside:",
 }
 
 # Store settings so we don't have to read them from drive all the time
@@ -54,7 +54,7 @@ IGNORE_FOR_DELETION = []
 PREFIXES = {}
 
 FIRST_RUN_COMPLETE = False
-SERVER_LOCATION = 'Unknown'
+SERVER_LOCATION = "Unknown"
 
 TICK_TIME = 0
 G_TICK_TIME = 0
@@ -65,13 +65,9 @@ SEED = int(time())
 
 CONFIG = get_config()
 
-defaults = {
-    'loop_interval': 7,
-    'gold_interval': 3,
-    'sapphires': {}
-}
+defaults = {"loop_interval": 7, "gold_interval": 3, "sapphires": {}}
 for d, dv in defaults.items():
     if d not in CONFIG:
         CONFIG[d] = dv
 
-TICK_RATE = CONFIG['loop_interval']
+TICK_RATE = CONFIG["loop_interval"]

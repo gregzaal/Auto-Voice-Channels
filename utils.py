@@ -20,7 +20,6 @@ import pytz
 
 def func_timer(threshold=0.5):
     def duration(func):
-
         @contextmanager
         def wrapping_logic(parent_func):
             start_ts = time()
@@ -36,11 +35,15 @@ def func_timer(threshold=0.5):
                 with wrapping_logic(parent_func):
                     return func(*args, **kwargs)
             else:
+
                 async def tmp():
                     with wrapping_logic(parent_func):
                         return await func(*args, **kwargs)
+
                 return tmp()
+
         return wrapper
+
     return duration
 
 
@@ -56,12 +59,9 @@ def format_timings():
 
 @func_timer()
 def log(msg, guild=None):
-    text = datetime.now(pytz.timezone(cfg.CONFIG['log_timezone'])).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    text = datetime.now(pytz.timezone(cfg.CONFIG["log_timezone"])).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
     if guild:
-        text += " [{}]{}".format(
-            guild.name,
-            "<{}>".format(guild.shard_id) if guild.shard_id != 0 else ""
-        )
+        text += " [{}]{}".format(guild.name, "<{}>".format(guild.shard_id) if guild.shard_id != 0 else "")
     text += "\n    "
     text += str(msg)
     print(text)
@@ -69,7 +69,7 @@ def log(msg, guild=None):
 
 @func_timer()
 def read_json(fp):
-    with open(fp, 'r') as f:
+    with open(fp, "r") as f:
         data = json.load(f)
     return data
 
@@ -85,29 +85,33 @@ def write_json(fp, data, indent=1):
     except:
         traceback.print_exc()
     else:
-        with open(fp, 'w') as f:
+        with open(fp, "w") as f:
             f.write(s)
     cfg.WRITES_IN_PROGRESS.remove(fp)
 
 
 @func_timer()
 def get_config():
-    cf = os.path.join(cfg.SCRIPT_DIR, 'config.json')
+    cf = os.path.join(cfg.SCRIPT_DIR, "config.json")
     if not os.path.exists(cf):
-        print("Config file doesn't exist!\n"
-              "You need to create a 'config.json' file next to this script and fill in some details like your token.\n"
-              "Read the instructions on GitHub: https://github.com/gregzaal/Auto-Voice-Channels")
+        print(
+            "Config file doesn't exist!\n"
+            "You need to create a 'config.json' file next to this script and fill in some details like your token.\n"
+            "Read the instructions on GitHub: https://github.com/gregzaal/Auto-Voice-Channels"
+        )
         import sys
+
         sys.exit(0)
     return read_json(cf)
 
 
 @func_timer()
 def set_config(data):
-    cf = os.path.join(cfg.SCRIPT_DIR, 'config.json')
+    cf = os.path.join(cfg.SCRIPT_DIR, "config.json")
     if not os.path.exists(cf):
         print("Config file doesn't exist!")
         import sys
+
         sys.exit(0)
     return write_json(cf, data, indent=4)
 
@@ -117,7 +121,7 @@ def update_server_location():
     try:
         print("Getting server location...")
         j = json.loads(get("http://ip-api.com/json/").text)
-        cfg.SERVER_LOCATION = "{}, {}, {}".format(j['city'], j['region'], j['country'])
+        cfg.SERVER_LOCATION = "{}, {}, {}".format(j["city"], j["region"], j["country"])
         print(cfg.SERVER_LOCATION)
     except:
         print("Failed to update server location")
@@ -130,25 +134,25 @@ def get_serv_settings(guild, force_refetch=False):
         cfg.PREV_GUILD_SETTINGS[guild.id] = deepcopy(cfg.GUILD_SETTINGS[guild.id])
         return cfg.GUILD_SETTINGS[guild.id]
 
-    fp = os.path.join(cfg.SCRIPT_DIR, 'guilds', str(guild.id) + '.json')
+    fp = os.path.join(cfg.SCRIPT_DIR, "guilds", str(guild.id) + ".json")
     if not os.path.exists(fp):
-        write_json(fp, read_json(os.path.join(cfg.SCRIPT_DIR, 'default_settings.json')))
+        write_json(fp, read_json(os.path.join(cfg.SCRIPT_DIR, "default_settings.json")))
     data = read_json(fp)
 
     # Convert string IDs to ints
     old_data = deepcopy(data)
-    for p, v in old_data['auto_channels'].items():
-        del data['auto_channels'][p]
-        if isinstance(v['secondaries'], list):
+    for p, v in old_data["auto_channels"].items():
+        del data["auto_channels"][p]
+        if isinstance(v["secondaries"], list):
             # Convert old secondaries[] to secondaries{}
-            v['secondaries'] = dict.fromkeys(v['secondaries'], {"creator": 1})
+            v["secondaries"] = dict.fromkeys(v["secondaries"], {"creator": 1})
         old_v = deepcopy(v)
-        for s, sv in old_v['secondaries'].items():
-            del v['secondaries'][s]
-            v['secondaries'][int(s)] = sv
-        data['auto_channels'][int(p)] = v
-    if 'creators' in data:  # Old method of storing creators
-        del data['creators']
+        for s, sv in old_v["secondaries"].items():
+            del v["secondaries"][s]
+            v["secondaries"][int(s)] = sv
+        data["auto_channels"][int(p)] = v
+    if "creators" in data:  # Old method of storing creators
+        del data["creators"]
 
     cfg.GUILD_SETTINGS[guild.id] = data
     cfg.PREV_GUILD_SETTINGS[guild.id] = data
@@ -177,9 +181,9 @@ def set_serv_settings(guild, settings):
     #         type(guild.name).__name__)
     #     )
 
-    settings['guild_name'] = guild.name
+    settings["guild_name"] = guild.name
     cfg.GUILD_SETTINGS[guild.id] = settings
-    fp = os.path.join(cfg.SCRIPT_DIR, 'guilds', str(guild.id) + '.json')
+    fp = os.path.join(cfg.SCRIPT_DIR, "guilds", str(guild.id) + ".json")
     return write_json(fp, settings)
 
 
@@ -190,8 +194,8 @@ def permastore_secondary(cid):
     while not success and attempts < 100:
         attempts += 1
         try:
-            with open(os.path.join(cfg.SCRIPT_DIR, "secondaries.txt"), 'a') as f:
-                f.write(str(cid) + '\n')
+            with open(os.path.join(cfg.SCRIPT_DIR, "secondaries.txt"), "a") as f:
+                f.write(str(cid) + "\n")
         except:
             print("Failed to remember {}".format(cid))
         else:
@@ -204,43 +208,43 @@ def clean_permastore():
     if not os.path.exists(fp):
         return
 
-    with open(fp, 'r') as f:
+    with open(fp, "r") as f:
         lines = f.readlines()
 
     lines = lines[-10000:]  # Drop all but the last 10k lines
 
-    with open(fp, 'w') as f:
+    with open(fp, "w") as f:
         f.writelines(lines)
 
 
 @func_timer()
 def count_lines(fp):
     n = 0
-    with open(fp, 'r', encoding="utf8") as f:
+    with open(fp, "r", encoding="utf8") as f:
         n += len([l for l in f.readlines() if l.strip()])
     return n
 
 
 @func_timer()
 def get_primary_channel(guild, settings, channel):
-    for p, v in settings['auto_channels'].items():
-        for s in v['secondaries']:
+    for p, v in settings["auto_channels"].items():
+        for s in v["secondaries"]:
             if s == channel.id:
                 return guild.get_channel(p)
 
 
 @func_timer()
 def get_creator_id(settings, channel):
-    for p, pv in settings['auto_channels'].items():
-        for s, sv in pv['secondaries'].items():
+    for p, pv in settings["auto_channels"].items():
+        for s, sv in pv["secondaries"].items():
             if s == channel.id:
-                return sv['creator']
+                return sv["creator"]
 
 
 @func_timer()
 def plain_mention(mention):
     # Remove '!' from mention so that user and member mentions are the same.
-    return mention.replace('!', '')
+    return mention.replace("!", "")
 
 
 @func_timer()
@@ -251,7 +255,7 @@ def get_user_in_channel(name, channel):
         if plain_mention(m.mention) == plain_mention(name):
             return m
     for m in members:
-        if m.name.lower() + '#' + m.discriminator == name.lower():
+        if m.name.lower() + "#" + m.discriminator == name.lower():
             return m
     for m in members:
         if m.display_name.lower() == name.lower():
@@ -264,8 +268,8 @@ def num_active_channels(guilds):
     num_channels = 0
     for g in guilds:
         settings = get_serv_settings(g)
-        for p in settings['auto_channels']:
-            num_channels += len(settings['auto_channels'][p]['secondaries'])
+        for p in settings["auto_channels"]:
+            num_channels += len(settings["auto_channels"][p]["secondaries"])
     return num_channels
 
 
@@ -273,8 +277,8 @@ def num_active_channels(guilds):
 def guild_is_active(g):
     curtime = time()
     settings = get_serv_settings(g)
-    if 'last_activity' in settings:
-        age = curtime - settings['last_activity']
+    if "last_activity" in settings:
+        age = curtime - settings["last_activity"]
         if age / 604800 <= 6:  # 6 Weeks
             return True
     return False
@@ -314,23 +318,23 @@ def guild_size_icon(n):
 
 @func_timer()
 def ldir(o):
-    ''' Get all attributes/functions of an object, return them as a string in a nice format '''
-    return '[\n' + (',\n'.join(dir(o))) + '\n]'
+    """Get all attributes/functions of an object, return them as a string in a nice format"""
+    return "[\n" + (",\n".join(dir(o))) + "\n]"
 
 
 @func_timer()
 def fmsg(m):
     # Format message to display in a code block
-    s = '```\n'
+    s = "```\n"
     s += str(m)
-    s += '\n```'
+    s += "\n```"
     return s
 
 
 @func_timer()
 def strip_quotes(s):
     # TODO just use s.strip("\"' ")
-    chars_to_strip = ['\'', '"', ' ']
+    chars_to_strip = ["'", '"', " "]
     if s:
         while s[0] in chars_to_strip:
             if len(s) <= 1:
@@ -364,7 +368,7 @@ def match_case(target, source):
 @func_timer()
 def capitalize(s):
     # s.title() does bad stuff with apostrophes, need to use our own method.
-    return ' '.join(x.capitalize() for x in s.split())
+    return " ".join(x.capitalize() for x in s.split())
 
 
 @func_timer()
@@ -384,28 +388,28 @@ def random_case(s):
 
 @func_timer()
 def first_n_words(s, n=1):
-    return ' '.join(s.split(' ')[:n])
+    return " ".join(s.split(" ")[:n])
 
 
 @func_timer()
 def acronym(s):
-    words = s.split(' ')
-    return ''.join(w[0] for w in words if w)
+    words = s.split(" ")
+    return "".join(w[0] for w in words if w)
 
 
 @func_timer()
 def remove_short_words(s):
-    words = s.split(' ')
-    short_words = "a an and at by from in is of on or the to".split(' ')
+    words = s.split(" ")
+    short_words = "a an and at by from in is of on or the to".split(" ")
     new_words = [w for w in words if w.lower() not in short_words]
-    return ' '.join(new_words)
+    return " ".join(new_words)
 
 
 @func_timer()
 def full_strip(s):
     s = s.strip()
-    while '  ' in s:
-        s = s.replace('  ', ' ')
+    while "  " in s:
+        s = s.replace("  ", " ")
     return s
 
 
@@ -413,7 +417,8 @@ def full_strip(s):
 def upsidedown(s):
     try:
         import upsidedown as _upsidedown
-        return ''.join((_upsidedown.transform(s)))
+
+        return "".join((_upsidedown.transform(s)))
     except ImportError:
         log("Cannot import upsidedown")
         return s
@@ -427,23 +432,23 @@ def ascii_only(s):
         if c in printable_chars:
             ns += c
         else:
-            ns += '_'
+            ns += "_"
     return ns
 
 
 @func_timer()
 def nice_cname(text):
-    text = text.replace('/', ' ⁄ ')
-    text = text.replace(' ', ' ')  # Fake space character
+    text = text.replace("/", " ⁄ ")
+    text = text.replace(" ", " ")  # Fake space character
     return text
 
 
 @func_timer()
 def get_display_name(settings, user):
     uid = str(user.id)
-    if 'custom_nicks' in settings:
-        if uid in settings['custom_nicks']:
-            return settings['custom_nicks'][uid]
+    if "custom_nicks" in settings:
+        if uid in settings["custom_nicks"]:
+            return settings["custom_nicks"][uid]
     return user.display_name
 
 
@@ -451,24 +456,26 @@ def get_display_name(settings, user):
 def eval_expression(text, is_sapphire, creator, party, game_name):
     act = creator.activity
     variables = {
-        'ROLE': [r.id for r in creator.roles],
-        'LIVE': ((creator.voice and hasattr(creator.voice, 'self_stream') and creator.voice.self_stream) or
-                 (act and act.type == discord.ActivityType.streaming)),
-        'LIVE_DISCORD': creator.voice and hasattr(creator.voice, 'self_stream') and creator.voice.self_stream,
-        'LIVE_EXTERNAL': act and act.type == discord.ActivityType.streaming,
-        'GAME': game_name,
+        "ROLE": [r.id for r in creator.roles],
+        "LIVE": (
+            (creator.voice and hasattr(creator.voice, "self_stream") and creator.voice.self_stream)
+            or (act and act.type == discord.ActivityType.streaming)
+        ),
+        "LIVE_DISCORD": creator.voice and hasattr(creator.voice, "self_stream") and creator.voice.self_stream,
+        "LIVE_EXTERNAL": act and act.type == discord.ActivityType.streaming,
+        "GAME": game_name,
     }
     if is_sapphire:
         try:
-            variables['PLAYERS'] = int(party['num_playing']) if party else 0
+            variables["PLAYERS"] = int(party["num_playing"]) if party else 0
         except ValueError:
-            variables['PLAYERS'] = 0
+            variables["PLAYERS"] = 0
         try:
-            variables['MAX'] = int(party['size']) if party else 0
+            variables["MAX"] = int(party["size"]) if party else 0
         except (ValueError, IndexError):
-            variables['MAX'] = 0
+            variables["MAX"] = 0
 
-        variables['RICH'] = party['rich'] if party else False
+        variables["RICH"] = party["rich"] if party else False
 
     ops = [  # 2D list - can't use dict as it needs to be ordered
         ["<=", operator.le],
@@ -480,13 +487,13 @@ def eval_expression(text, is_sapphire, creator, party, game_name):
         [":", operator.contains],
     ]
 
-    if '??' not in text:
+    if "??" not in text:
         return text
 
-    c, t = text.split('??', 1)
+    c, t = text.split("??", 1)
 
-    if '//' in t:
-        t, f = t.split('//', 1)
+    if "//" in t:
+        t, f = t.split("//", 1)
     else:
         f = ""
 
@@ -528,21 +535,21 @@ def debug_unicode(s):
         if 32 <= ord(c) <= 126:
             text += c
         else:
-            text += '`'
+            text += "`"
             text += str(ord(c))
-            text += '` '
+            text += "` "
     if text == s:
         # All simple ascii characters, no need to print anything
         return ""
     else:
-        return '(' + text + ')'
+        return "(" + text + ")"
 
 
 @func_timer()
 def chunks(l, n):
     """Yield successive n-sized chunks from l."""
     for i in range(0, len(l), n):
-        yield l[i:i + n]
+        yield l[i : i + n]
 
 
 @func_timer()
@@ -555,7 +562,8 @@ def dict_chunks(data, size=25):
 @func_timer()
 async def hastebin(s):
     from aiohttp import ClientSession
+
     url = "https://hastebin.com"
     async with ClientSession() as session:
-        async with session.post(url + "/documents", data=s.encode('utf-8')) as post:
-            return url + '/' + (await post.json())['key']
+        async with session.post(url + "/documents", data=s.encode("utf-8")) as post:
+            return url + "/" + (await post.json())["key"]

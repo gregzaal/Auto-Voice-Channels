@@ -4,31 +4,31 @@ from utils import match_case
 mc = match_case
 
 digits = {
-    '0': "Zero",
-    '1': "One",
-    '2': "Two",
-    '3': "Three",
-    '4': "Four",
-    '5': "Five",
-    '6': "Six",
-    '7': "Seven",
-    '8': "Eight",
-    '9': "Nine",
+    "0": "Zero",
+    "1": "One",
+    "2": "Two",
+    "3": "Three",
+    "4": "Four",
+    "5": "Five",
+    "6": "Six",
+    "7": "Seven",
+    "8": "Eight",
+    "9": "Nine",
 }
 
 
 def uwu(s):
-    ''' Sources:
+    """Sources:
     https://github.com/QuazzyWazzy/UwU-fy
     https://github.com/mackyclemen/uwu-cpp
     https://github.com/mackyclemen/uwu-android
-    '''
+    """
 
     # Rs & Ls to Ws
     tmp = ""
     for i, c in enumerate(s):
-        if c.lower() in ['r', 'l']:
-            c = mc('w', c)
+        if c.lower() in ["r", "l"]:
+            c = mc("w", c)
         tmp += c
     s = tmp
 
@@ -87,7 +87,7 @@ def uwu(s):
     for t in trans:
         for w in t[0]:
             trans_d[w] = t[1]
-    s = ' '.join([mc(trans_d[w.lower()], w) if w.lower() in trans_d else w for w in s.split(' ')])
+    s = " ".join([mc(trans_d[w.lower()], w) if w.lower() in trans_d else w for w in s.split(" ")])
 
     replacements = {
         "no": "nyo",

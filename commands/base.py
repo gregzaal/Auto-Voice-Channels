@@ -1,5 +1,4 @@
 class Cmd:
-
     def __init__(
         self,
         help_text,

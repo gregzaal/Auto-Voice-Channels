@@ -7,29 +7,29 @@ from utils import log
 help_text = [
     [
         ("Usage:", "<PREFIX><COMMAND>"),
-        ("Description:",
-         "List all of the aliases for game names in this server."),
+        ("Description:", "List all of the aliases for game names in this server."),
     ]
 ]
 
 
 async def execute(ctx, params):
-    settings = ctx['settings']
-    channel = ctx['channel']
-    author = ctx['message'].author
+    settings = ctx["settings"]
+    channel = ctx["channel"]
+    author = ctx["message"].author
 
-    if not settings['aliases']:
+    if not settings["aliases"]:
         return True, "You haven't set any aliases yet."
 
     e = discord.Embed(color=discord.Color.from_rgb(205, 220, 57))
     e.title = "This server has the following aliases:"
     e.set_footer(
-        text="Use \"{0}removealias ORIGINAL NAME\" to delete an alias, "
-        "or \"{0}alias ORIGINAL NAME >> NEW NAME\" to create or replace one.".format(ctx['print_prefix']))
+        text='Use "{0}removealias ORIGINAL NAME" to delete an alias, '
+        'or "{0}alias ORIGINAL NAME >> NEW NAME" to create or replace one.'.format(ctx["print_prefix"])
+    )
 
-    keys = sorted(settings['aliases'].keys(), key=lambda x: x.lower())
+    keys = sorted(settings["aliases"].keys(), key=lambda x: x.lower())
     for a in keys:
-        av = settings['aliases'][a]
+        av = settings["aliases"][a]
         e.add_field(name=a, value=av, inline=True)
     try:
         await channel.send(embed=e)
@@ -38,7 +38,7 @@ async def execute(ctx, params):
         await func.dm_user(
             author,
             "I don't have permission to send messages in the "
-            "`#{}` channel of **{}**.".format(channel.name, channel.guild.name)
+            "`#{}` channel of **{}**.".format(channel.name, channel.guild.name),
         )
         return False, "NO RESPONSE"
     except Exception:

@@ -6,8 +6,10 @@ from commands.base import Cmd
 help_text = [
     [
         ("Usage:", "<PREFIX><COMMAND>"),
-        ("Description:",
-         "Get information about this server, such as the voice channels I know about and the Patreon status."),
+        (
+            "Description:",
+            "Get information about this server, such as the voice channels I know about and the Patreon status.",
+        ),
     ]
 ]
 
@@ -30,8 +32,8 @@ def permission_checks(channel, me):
 
 
 async def execute(ctx, params):
-    guild = ctx['guild']
-    settings = ctx['settings']
+    guild = ctx["guild"]
+    settings = ctx["settings"]
     r = "Name: **{}** \tID: `{}`\n".format(func.esc_md(guild.name), guild.id)
     members = [m for m in guild.members if not m.bot]
     num_members = len(members)
@@ -43,26 +45,29 @@ async def execute(ctx, params):
     )
 
     r += "\n**Known Channels:**\n"
-    for p in settings['auto_channels']:
+    for p in settings["auto_channels"]:
         pc = guild.get_channel(p)
         if pc:
             r += "{} (`{}`)".format(func.esc_md(pc.name), pc.id)
             if pc.category:
-                r += " in category \"{}\"".format(func.esc_md(pc.category.name))
+                r += ' in category "{}"'.format(func.esc_md(pc.category.name))
             r += permission_checks(pc, guild.me)
-            secondaries = settings['auto_channels'][p]['secondaries']
+            secondaries = settings["auto_channels"][p]["secondaries"]
             r += "\t {} sub-channel{}".format(len(secondaries), "s" if len(secondaries) != 1 else "")
             r += "\n"
             for s, v in secondaries.items():
                 sc = guild.get_channel(s)
-                scc = guild.get_member(v['creator'])
+                scc = guild.get_member(v["creator"])
                 if sc:
-                    r += "\t ⮡ \t\"{}\" (`{}`)\t Created by: \"{}\" (\"{}\", `{}`){}\n".format(
-                        func.esc_md(sc.name), sc.id,
-                        func.esc_md(scc.display_name), func.user_hash(scc), scc.id,
-                        permission_checks(sc, guild.me)
+                    r += '\t ⮡ \t"{}" (`{}`)\t Created by: "{}" ("{}", `{}`){}\n'.format(
+                        func.esc_md(sc.name),
+                        sc.id,
+                        func.esc_md(scc.display_name),
+                        func.user_hash(scc),
+                        scc.id,
+                        permission_checks(sc, guild.me),
                     )
-    r = r.replace('➕', '＋')  # Make the default plus sign more visible
+    r = r.replace("➕", "＋")  # Make the default plus sign more visible
     return True, r
 
 

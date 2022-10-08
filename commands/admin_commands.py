@@ -19,29 +19,29 @@ except ImportError:
 
 
 async def admin_command(cmd, ctx):
-    client = ctx['client']
-    message = ctx['message']
+    client = ctx["client"]
+    message = ctx["message"]
     channel = message.channel
-    params = ctx['params']
-    params_str = ctx['params_str']
-    guilds = ctx['guilds']
-    LAST_COMMIT = ctx['LAST_COMMIT']
+    params = ctx["params"]
+    params_str = ctx["params_str"]
+    guilds = ctx["guilds"]
+    LAST_COMMIT = ctx["LAST_COMMIT"]
 
-    if cmd == 'log':
+    if cmd == "log":
         logfile = "log{}.txt".format("" if cfg.SAPPHIRE_ID is None else cfg.SAPPHIRE_ID)
         if not os.path.exists(logfile):
             await channel.send("No log file")
             return
-        with open(logfile, 'r', encoding="utf8") as f:
+        with open(logfile, "r", encoding="utf8") as f:
             data = f.read()
         data = data[-10000:]  # Drop everything but the last 10k characters to make string ops quicker
-        data = data.replace('  Creating channel for ', '  ✅')
-        data = data.replace('  Deleting ', '    ❌')
-        data = data.replace('  Renaming ⌛  to  ', ' ⏩ ')
-        data = data.replace('  Renaming ', ' 🔄')
-        data = data.replace('  to  ', ' ⏩ ')
-        data = data.replace('  CMD Y: ', '  C✔ ')
-        data = data.replace('  CMD F: ', '  C✖ ')
+        data = data.replace("  Creating channel for ", "  ✅")
+        data = data.replace("  Deleting ", "    ❌")
+        data = data.replace("  Renaming ⌛  to  ", " ⏩ ")
+        data = data.replace("  Renaming ", " 🔄")
+        data = data.replace("  to  ", " ⏩ ")
+        data = data.replace("  CMD Y: ", "  C✔ ")
+        data = data.replace("  CMD F: ", "  C✖ ")
         data = data.replace(" creating channels too quickly", " creating channels too quickly❗❗")
         data = data.replace(" where I don't have permissions", " where I don't have permissions❗❗")
         data = data.replace("Traceback (most recent", "❗❗Traceback (most recent")
@@ -49,27 +49,27 @@ async def admin_command(cmd, ctx):
         data = data.replace("Remembering channel ", "❗❗Remembering ")
         data = data.replace("New tickrate is ", "🕐")
         data = data.replace(", seed interval is ", " 🕐")
-        data = data.replace('  ', ' ')  # Reduce indent to save character space
-        today = datetime.now(pytz.timezone(cfg.CONFIG['log_timezone'])).strftime("%Y-%m-%d")
-        data = data.replace(today, 'T')
+        data = data.replace("  ", " ")  # Reduce indent to save character space
+        today = datetime.now(pytz.timezone(cfg.CONFIG["log_timezone"])).strftime("%Y-%m-%d")
+        data = data.replace(today, "T")
         character_limit = 2000 - 17  # 17 for length of ```autohotkey\n at start and ``` at end.
-        data = data[character_limit * -1:]
-        data = data.split('\n', 1)[1]
-        lines = data.split('\n')
+        data = data[character_limit * -1 :]
+        data = data.split("\n", 1)[1]
+        lines = data.split("\n")
         for i, l in enumerate(lines):
             # Fake colon (U+02D0) to prevent highlighting the line
             if " ⏩" in l:
-                lines[i] = l.replace(':', 'ː')
-            elif l.startswith('T '):
-                if '[' in l:
-                    s = l.split('[', 1)
-                    lines[i] = s[0] + '[' + s[1].replace(':', 'ː')
-        data = '\n'.join(lines)
-        data = '```autohotkey\n' + data
-        data = data + '```'
+                lines[i] = l.replace(":", "ː")
+            elif l.startswith("T "):
+                if "[" in l:
+                    s = l.split("[", 1)
+                    lines[i] = s[0] + "[" + s[1].replace(":", "ː")
+        data = "\n".join(lines)
+        data = "```autohotkey\n" + data
+        data = data + "```"
         await channel.send(data)
 
-    if cmd == 'stats':
+    if cmd == "stats":
         r = await channel.send(". . .")
         t1 = message.created_at
         t2 = r.created_at
@@ -80,50 +80,55 @@ async def admin_command(cmd, ctx):
 
         lines_of_code = 0
         for f in os.listdir(cfg.SCRIPT_DIR):
-            if f.lower().endswith('.py'):
+            if f.lower().endswith(".py"):
                 lines_of_code += utils.count_lines(os.path.join(cfg.SCRIPT_DIR, f))
             elif f == "commands":
                 for sf in os.listdir(os.path.join(cfg.SCRIPT_DIR, f)):
-                    if sf.lower().endswith('.py'):
+                    if sf.lower().endswith(".py"):
                         lines_of_code += utils.count_lines(os.path.join(cfg.SCRIPT_DIR, f, sf))
 
         cpu = psutil.cpu_percent()
         mem = psutil.virtual_memory()
-        disk = psutil.disk_usage('/')
-        await r.edit(content=(
-            "Servers: **{tot_servs}** (A:{active_servs} S:{shards}) \t "
-            "Users: **{users}** \t Channels: **{channels}** \n"
-            "Response time: **{rt}** \t Tick rate: **{tr}** \t Tick time: **{tt}** | **{gtt}**\n"
-            "CPU: **{cpu}%** \t MEM: **{memg} ({memp}%)** \t DISK: **{diskg} ({diskp}%)**\n"
-            "**Last commit:** {commit}\n"
-            "**Lines of code:** {lines}\n"
-            "**Timings:** \n{timings}".format(
-                tot_servs=len(guilds),
-                active_servs=utils.num_active_guilds(guilds),
-                shards=utils.num_shards(guilds),
-                users=num_users,
-                channels=utils.num_active_channels(guilds),
-                rt="{0:.2f}s".format(response_time),
-                tr="{0:.1f}s".format(cfg.TICK_RATE),
-                tt="{0:.2f}s".format(cfg.TICK_TIME),
-                gtt="{0:.2f}s".format(cfg.G_TICK_TIME),
-                cpu=cpu, memg="{0:.1f}GB".format(mem.used / 1024 / 1024 / 1024), memp=round(mem.percent),
-                diskg="{0:.1f}GB".format(disk.used / 1024 / 1024 / 1024), diskp=round(disk.percent),
-                commit=LAST_COMMIT,
-                lines=lines_of_code,
-                timings=utils.format_timings()
+        disk = psutil.disk_usage("/")
+        await r.edit(
+            content=(
+                "Servers: **{tot_servs}** (A:{active_servs} S:{shards}) \t "
+                "Users: **{users}** \t Channels: **{channels}** \n"
+                "Response time: **{rt}** \t Tick rate: **{tr}** \t Tick time: **{tt}** | **{gtt}**\n"
+                "CPU: **{cpu}%** \t MEM: **{memg} ({memp}%)** \t DISK: **{diskg} ({diskp}%)**\n"
+                "**Last commit:** {commit}\n"
+                "**Lines of code:** {lines}\n"
+                "**Timings:** \n{timings}".format(
+                    tot_servs=len(guilds),
+                    active_servs=utils.num_active_guilds(guilds),
+                    shards=utils.num_shards(guilds),
+                    users=num_users,
+                    channels=utils.num_active_channels(guilds),
+                    rt="{0:.2f}s".format(response_time),
+                    tr="{0:.1f}s".format(cfg.TICK_RATE),
+                    tt="{0:.2f}s".format(cfg.TICK_TIME),
+                    gtt="{0:.2f}s".format(cfg.G_TICK_TIME),
+                    cpu=cpu,
+                    memg="{0:.1f}GB".format(mem.used / 1024 / 1024 / 1024),
+                    memp=round(mem.percent),
+                    diskg="{0:.1f}GB".format(disk.used / 1024 / 1024 / 1024),
+                    diskp=round(disk.percent),
+                    commit=LAST_COMMIT,
+                    lines=lines_of_code,
+                    timings=utils.format_timings(),
+                )
             )
-        ))
+        )
 
-    if cmd == 'ping':
+    if cmd == "ping":
         r = await channel.send(". . .")
         t1 = message.created_at
         t2 = r.created_at
         response_time = (t2 - t1).total_seconds()
-        e = '🔴🔴🔴' if response_time > 5 else ('🟠🟠' if response_time > 1 else '🟢')
+        e = "🔴🔴🔴" if response_time > 5 else ("🟠🟠" if response_time > 1 else "🟢")
         await r.edit(content="**{0} {1:.1f}s**".format(e, response_time))
 
-    if cmd == 'top':
+    if cmd == "top":
         top_guilds = []
         total_users = 0
         mode = utils.strip_quotes(params_str)
@@ -131,33 +136,29 @@ async def admin_command(cmd, ctx):
             num_users = len([m for m in g.members if not m.bot])
             total_users += num_users
             s = func.get_secondaries(g)
-            top_guilds.append({"name": g.name,
-                               "size": num_users,
-                               "num": len(s) if s is not None else 0,
-                               "in_guilds": g in guilds})
+            top_guilds.append(
+                {"name": g.name, "size": num_users, "num": len(s) if s is not None else 0, "in_guilds": g in guilds}
+            )
         if mode in ["users", "members"]:
-            top_guilds = sorted(top_guilds, key=lambda x: x['size'], reverse=True)[:10]
+            top_guilds = sorted(top_guilds, key=lambda x: x["size"], reverse=True)[:10]
         else:
-            top_guilds = sorted(top_guilds, key=lambda x: x['num'], reverse=True)[:10]
+            top_guilds = sorted(top_guilds, key=lambda x: x["num"], reverse=True)[:10]
         r = "**Top Guilds:**"
         for g in top_guilds:
             r += "\n{}`{}` {}: \t**{}**".format(
-                "" if g['in_guilds'] else "⚠",
-                g['size'],
-                func.esc_md(g['name']),
-                g['num']
+                "" if g["in_guilds"] else "⚠", g["size"], func.esc_md(g["name"]), g["num"]
             )
         r += "\n\n**{}** channels, **{}** users".format(utils.num_active_channels(guilds), total_users)
         await channel.send(r)
 
-    if cmd == 'patrons':
+    if cmd == "patrons":
         if patreon_info is None:
-            await channel.send(content='❌')
+            await channel.send(content="❌")
             return
 
         patrons = patreon_info.fetch_patrons(force_update=True)
         if not patrons:
-            await channel.send(content='❌')
+            await channel.send(content="❌")
             return
         fields = {}
         auths = patreon_info.update_patron_servers(patrons)
@@ -169,10 +170,10 @@ async def admin_command(cmd, ctx):
                 pn = "Unknown"
             gn = ""
             if str(p) in auths:
-                for s in auths[str(p)]['servers']:
+                for s in auths[str(p)]["servers"]:
                     gn += "`{}` ".format(s)
-                if 'extra_gold' in auths[str(p)]:
-                    for s in auths[str(p)]['extra_gold']:
+                if "extra_gold" in auths[str(p)]:
+                    for s in auths[str(p)]["extra_gold"]:
                         gn += "+g`{}` ".format(s)
             fields["`{}` **{}** {}".format(p, pn, cfg.TIER_ICONS[pv])] = gn
         try:
@@ -185,49 +186,49 @@ async def admin_command(cmd, ctx):
                 await channel.send(embed=e)
         except:
             await channel.send(traceback.format_exc())
-            await func.react(message, '❌')
+            await func.react(message, "❌")
 
-    if cmd == 'sapphiredebug':
+    if cmd == "sapphiredebug":
         if cfg.SAPPHIRE_ID is None:
-            await channel.send(content='❌ Not a sapphire')
+            await channel.send(content="❌ Not a sapphire")
             return
 
         if patreon_info is None:
-            await channel.send(content='❌ No patreon_info')
+            await channel.send(content="❌ No patreon_info")
             return
 
         auths = utils.read_json(os.path.join(cfg.SCRIPT_DIR, "patron_auths.json"))
-        initiator_id = cfg.CONFIG["sapphires"][str(cfg.SAPPHIRE_ID)]['initiator']
-        msg = ("Sapphire ID: {}\n"
-               "User: `{}`\n"
-               "Actual guilds: {}\n"
-               "Config guilds: {}\n"
-               "Authenticated guilds: {}\n"
-               "get_guilds: {}".format(
-                   cfg.SAPPHIRE_ID,
-                   initiator_id,
-                   ", ".join(['`' + str(g.id) + '`' for g in client.guilds]),
-                   ", ".join(['`' + str(g) + '`' for g in cfg.CONFIG["sapphires"][str(cfg.SAPPHIRE_ID)]['servers']]),
-                   ", ".join(['`' + str(g) + '`' for g in auths[str(initiator_id)]['servers']]),
-                   ", ".join(['`' + str(g.id) + '`' for g in func.get_guilds(client)]))
-               )
+        initiator_id = cfg.CONFIG["sapphires"][str(cfg.SAPPHIRE_ID)]["initiator"]
+        msg = (
+            "Sapphire ID: {}\n"
+            "User: `{}`\n"
+            "Actual guilds: {}\n"
+            "Config guilds: {}\n"
+            "Authenticated guilds: {}\n"
+            "get_guilds: {}".format(
+                cfg.SAPPHIRE_ID,
+                initiator_id,
+                ", ".join(["`" + str(g.id) + "`" for g in client.guilds]),
+                ", ".join(["`" + str(g) + "`" for g in cfg.CONFIG["sapphires"][str(cfg.SAPPHIRE_ID)]["servers"]]),
+                ", ".join(["`" + str(g) + "`" for g in auths[str(initiator_id)]["servers"]]),
+                ", ".join(["`" + str(g.id) + "`" for g in func.get_guilds(client)]),
+            )
+        )
         await channel.send(msg)
 
-    if cmd == 'status':
+    if cmd == "status":
         g = utils.strip_quotes(params_str)
         if not g:
-            await func.react(message, '❌')
+            await func.react(message, "❌")
             return
         try:
-            await client.change_presence(
-                activity=discord.Activity(name=g, type=discord.ActivityType.watching)
-            )
-            await func.react(message, '✅')
+            await client.change_presence(activity=discord.Activity(name=g, type=discord.ActivityType.watching))
+            await func.react(message, "✅")
         except:
             await channel.send(traceback.format_exc())
-            await func.react(message, '❌')
+            await func.react(message, "❌")
 
-    if cmd == 'settings':
+    if cmd == "settings":
         gid = utils.strip_quotes(params_str)
         try:
             int(gid)
@@ -236,7 +237,7 @@ async def admin_command(cmd, ctx):
                 if x.name == gid:
                     gid = str(x.id)
                     break
-        fname = gid + '.json'
+        fname = gid + ".json"
         fp = os.path.join(cfg.SCRIPT_DIR, "guilds", fname)
         if os.path.exists(fp):
             gid = int(gid)
@@ -245,10 +246,10 @@ async def admin_command(cmd, ctx):
             head += "💎" if func.is_sapphire(gid) else ("💳" if func.is_gold(gid) else "")
             s = head
             s += "\n```json\n"
-            with open(fp, 'r') as f:
+            with open(fp, "r") as f:
                 file_content = f.read()
             s += file_content
-            s += '```'
+            s += "```"
             try:
                 await channel.send(s)
             except discord.errors.HTTPException:
@@ -256,51 +257,51 @@ async def admin_command(cmd, ctx):
                 haste_url = await utils.hastebin(file_content)
                 await channel.send("{}\n{}".format(head, haste_url))
         else:
-            await func.react(message, '❌')
+            await func.react(message, "❌")
 
-    if cmd == 'refetch':
+    if cmd == "refetch":
         gid = utils.strip_quotes(params_str)
         try:
             gid = int(gid)
         except ValueError:
-            await func.react(message, '❌')
+            await func.react(message, "❌")
             return
 
         g = client.get_guild(gid)
 
         if g is None:
-            await func.react(message, '❓')
+            await func.react(message, "❓")
             return
 
         utils.get_serv_settings(g, force_refetch=True)
-        await func.react(message, '✅')
+        await func.react(message, "✅")
         return
 
-    if cmd == 'disable':
+    if cmd == "disable":
         try:
             g = client.get_guild(int(utils.strip_quotes(params_str)))
             settings = utils.get_serv_settings(g)
-            settings['enabled'] = False
+            settings["enabled"] = False
             utils.set_serv_settings(g, settings)
             log("Force Disabling", g)
-            await func.react(message, '✅')
+            await func.react(message, "✅")
         except:
             await channel.send(traceback.format_exc())
-            await func.react(message, '❌')
+            await func.react(message, "❌")
 
-    if cmd == 'enable':
+    if cmd == "enable":
         try:
             g = client.get_guild(int(utils.strip_quotes(params_str)))
             settings = utils.get_serv_settings(g)
-            settings['enabled'] = True
+            settings["enabled"] = True
             utils.set_serv_settings(g, settings)
             log("Force Enabling", g)
-            await func.react(message, '✅')
+            await func.react(message, "✅")
         except:
             await channel.send(traceback.format_exc())
-            await func.react(message, '❌')
+            await func.react(message, "❌")
 
-    if cmd == 'info':
+    if cmd == "info":
         cid = utils.strip_quotes(params_str)
         try:
             c = client.get_channel(int(cid))
@@ -314,20 +315,19 @@ async def admin_command(cmd, ctx):
             )
             if c.id in cfg.ATTEMPTED_CHANNEL_NAMES:
                 s += "**__Attempted Name:__** {}\n{}\n\n".format(
-                    cfg.ATTEMPTED_CHANNEL_NAMES[c.id],
-                    utils.debug_unicode(cfg.ATTEMPTED_CHANNEL_NAMES[c.id])
+                    cfg.ATTEMPTED_CHANNEL_NAMES[c.id], utils.debug_unicode(cfg.ATTEMPTED_CHANNEL_NAMES[c.id])
                 )
             s += "**__{} Members:__**\n".format(len(members))
-            s += '\n'.join(members)
-            s += '\n\n**__{} Games:__**\n'.format(len(games))
-            s += '\n'.join(games)
-            s = s.replace('\n\n\n', '\n\n')
+            s += "\n".join(members)
+            s += "\n\n**__{} Games:__**\n".format(len(games))
+            s += "\n".join(games)
+            s = s.replace("\n\n\n", "\n\n")
             await channel.send(s)
         except:
             await channel.send(traceback.format_exc())
-            await func.react(message, '❌')
+            await func.react(message, "❌")
 
-    if cmd == 'whois':
+    if cmd == "whois":
         uid = utils.strip_quotes(params_str)
         try:
             u = client.get_user(int(uid))
@@ -336,10 +336,10 @@ async def admin_command(cmd, ctx):
             # patreon_data = cfg.PATREON_DATA
             patreon_data = utils.read_json(os.path.join(cfg.SCRIPT_DIR, "patreon_data.json"))
             try:
-                for p_uid, p_user in patreon_data['user_data'].items():
+                for p_uid, p_user in patreon_data["user_data"].items():
                     try:
-                        if p_user['attributes']['social_connections']['discord']['user_id'] == uid:
-                            s += "{} `{}`\n".format(p_user['attributes']['full_name'], p_user['attributes']['email'])
+                        if p_user["attributes"]["social_connections"]["discord"]["user_id"] == uid:
+                            s += "{} `{}`\n".format(p_user["attributes"]["full_name"], p_user["attributes"]["email"])
                             break
                     except (KeyError, TypeError):
                         pass  # Skip users with no discord connection
@@ -366,11 +366,11 @@ async def admin_command(cmd, ctx):
                     can_dm = client.user.permissions_in(u.dm_channel).send_messages
                 except discord.errors.Forbidden:
                     can_dm = False
-                s += " \t Can DM: {}".format('✅' if can_dm else '❌')
+                s += " \t Can DM: {}".format("✅" if can_dm else "❌")
 
                 for gid, g in in_guilds.items():
                     s += "\n{}`{}` **{}** (`{}`) \t {} ({})".format(
-                        g['patron'], gid, g['guild_name'], g['guild_size'], g['user_name'], g['role']
+                        g["patron"], gid, g["guild_name"], g["guild_size"], g["user_name"], g["role"]
                     )
             else:
                 s += "¯\\_(ツ)_/¯"
@@ -378,22 +378,22 @@ async def admin_command(cmd, ctx):
             await echo(s, channel)
         except:
             await channel.send(traceback.format_exc())
-            await func.react(message, '❌')
+            await func.react(message, "❌")
 
-    if cmd == 'votekicks':
+    if cmd == "votekicks":
         try:
             readable = {}
             for k, kv in cfg.VOTEKICKS.items():
                 readable[k] = {
-                    "initiator": kv['initiator'].display_name,
-                    "participants": [m.display_name for m in kv['participants']],
-                    "required_votes": kv['required_votes'],
-                    "offender": kv['offender'].display_name,
-                    "reason": kv['reason'],
-                    "in_favor": [m.display_name for m in kv['in_favor']],
-                    "voice_channel": kv['voice_channel'].id,
-                    "message": kv['message'].id,
-                    "end_time": datetime.fromtimestamp(kv['end_time']).strftime("%Y-%m-%d %H:%M")
+                    "initiator": kv["initiator"].display_name,
+                    "participants": [m.display_name for m in kv["participants"]],
+                    "required_votes": kv["required_votes"],
+                    "offender": kv["offender"].display_name,
+                    "reason": kv["reason"],
+                    "in_favor": [m.display_name for m in kv["in_favor"]],
+                    "voice_channel": kv["voice_channel"].id,
+                    "message": kv["message"].id,
+                    "end_time": datetime.fromtimestamp(kv["end_time"]).strftime("%Y-%m-%d %H:%M"),
                 }
             s = "```json\n" + json.dumps(readable, indent=1, sort_keys=True) + "```"
             print(s)
@@ -405,9 +405,9 @@ async def admin_command(cmd, ctx):
                 await channel.send(haste_url)
         except:
             await channel.send(traceback.format_exc())
-            await func.react(message, '❌')
+            await func.react(message, "❌")
 
-    if cmd == 'exit':
+    if cmd == "exit":
         attempts = 0
         while attempts < 100:
             attempts += 1
@@ -418,28 +418,28 @@ async def admin_command(cmd, ctx):
                 break
         else:
             print("Failed to close", cfg.WRITES_IN_PROGRESS)
-            await func.react(message, '❌')
+            await func.react(message, "❌")
 
-    if cmd == 'loop':
+    if cmd == "loop":
         mode = params[0]
         loop_name = params[1]
         try:
-            loop = ctx['loops'][loop_name]
+            loop = ctx["loops"][loop_name]
             modes = {  # Dict of possible loop functions/attrs as [fn, arg]
-                'current_loop': [loop.current_loop, None],
-                'next_iteration': [loop.next_iteration, None],
-                'next_run': [loop.next_iteration, None],  # Alias
-                'start': [loop.start, client],
-                'stop': [loop.stop, None],
-                'cancel': [loop.cancel, None],
-                'restart': [loop.restart, client],
-                'is_being_cancelled': [loop.is_being_cancelled, None],
-                'is_running': [loop.is_running, None],
-                'failed': [loop.failed, None],
-                'last_run': [loop.last_run, None],
+                "current_loop": [loop.current_loop, None],
+                "next_iteration": [loop.next_iteration, None],
+                "next_run": [loop.next_iteration, None],  # Alias
+                "start": [loop.start, client],
+                "stop": [loop.stop, None],
+                "cancel": [loop.cancel, None],
+                "restart": [loop.restart, client],
+                "is_being_cancelled": [loop.is_being_cancelled, None],
+                "is_running": [loop.is_running, None],
+                "failed": [loop.failed, None],
+                "last_run": [loop.last_run, None],
             }
             if mode not in modes:
-                await func.react(message, '❓')
+                await func.react(message, "❓")
                 return
             fn, arg = modes[mode]
             if callable(fn):
@@ -451,70 +451,70 @@ async def admin_command(cmd, ctx):
                 r = fn
             if r is not None:
                 if isinstance(r, date):
-                    r = r.astimezone(pytz.timezone(cfg.CONFIG['log_timezone']))
+                    r = r.astimezone(pytz.timezone(cfg.CONFIG["log_timezone"]))
                     await channel.send(r.strftime("%Y-%m-%d %H:%M:%S"))
                 else:
                     await channel.send(str(r))
-            await func.react(message, '✅')
+            await func.react(message, "✅")
         except:
             await channel.send(traceback.format_exc())
-            await channel.send("Loops: \n{}".format('\n'.join(ctx['loops'].keys())))
-            await func.react(message, '❌')
+            await channel.send("Loops: \n{}".format("\n".join(ctx["loops"].keys())))
+            await func.react(message, "❌")
 
-    if cmd == 'rename':
+    if cmd == "rename":
         try:
             cid = utils.strip_quotes(params[0])
             c = client.get_channel(int(cid))
-            new_name = ' '.join(params[1:])
+            new_name = " ".join(params[1:])
             if not new_name:
                 new_name = "⌛"
             await c.edit(name=new_name)
         except:
             await channel.send(traceback.format_exc())
-            await func.react(message, '❌')
+            await func.react(message, "❌")
         else:
-            await func.react(message, '✅')
+            await func.react(message, "✅")
             log("{0}  Force Renaming to {1}".format(cid[-4:], new_name), c.guild)
 
-    if cmd == 'forget':
+    if cmd == "forget":
         try:
             cid = int(utils.strip_quotes(params[0]))
             c = client.get_channel(cid)
             settings = utils.get_serv_settings(c.guild)
-            for p, pv in settings['auto_channels'].items():
-                tmp = settings['auto_channels'][p]['secondaries'].copy()
-                for s, sv in pv['secondaries'].items():
+            for p, pv in settings["auto_channels"].items():
+                tmp = settings["auto_channels"][p]["secondaries"].copy()
+                for s, sv in pv["secondaries"].items():
                     if s == cid:
-                        del settings['auto_channels'][p]['secondaries'][s]
+                        del settings["auto_channels"][p]["secondaries"][s]
                         break
             utils.set_serv_settings(c.guild, settings)
         except:
             await channel.send(traceback.format_exc())
-            await func.react(message, '❌')
+            await func.react(message, "❌")
         else:
-            await func.react(message, '✅')
+            await func.react(message, "✅")
 
-    if cmd == 'delete':
+    if cmd == "delete":
         try:
             cid = int(utils.strip_quotes(params[0]))
             c = client.get_channel(cid)
             await c.delete()
         except:
             await channel.send(traceback.format_exc())
-            await func.react(message, '❌')
+            await func.react(message, "❌")
         else:
-            await func.react(message, '✅')
+            await func.react(message, "✅")
 
-    if cmd == 'whisper':
+    if cmd == "whisper":
         params_str = utils.strip_quotes(params_str)
-        if '\n' not in params_str:
-            await func.react(message, '❌')
+        if "\n" not in params_str:
+            await func.react(message, "❌")
             return
-        uid, msg = params_str.split('\n', 1)
+        uid, msg = params_str.split("\n", 1)
         try:
             u = await client.fetch_user(uid)
         except discord.errors.NotFound:
-            await func.react(message, '❌')
+            await func.react(message, "❌")
             return
         if u.dm_channel is None:
             await u.create_dm()
@@ -522,41 +522,41 @@ async def admin_command(cmd, ctx):
             await u.dm_channel.send(msg)
         except:
             await channel.send(traceback.format_exc())
-            await func.react(message, '❌')
+            await func.react(message, "❌")
         else:
-            await func.react(message, '✅')
+            await func.react(message, "✅")
 
-    if cmd == 'cleanprimaries':
+    if cmd == "cleanprimaries":
         try:
             n_primaries = 0
             n_real_primaries = 0
             for g in client.guilds:
                 settings = utils.get_serv_settings(g)
                 tmp = {}
-                n_primaries += len(settings['auto_channels'])
-                for p, pv in settings['auto_channels'].items():
+                n_primaries += len(settings["auto_channels"])
+                for p, pv in settings["auto_channels"].items():
                     c = g.get_channel(p)
                     if c:
                         tmp[p] = pv
                 n_real_primaries += len(tmp)
-                if len(settings['auto_channels']) != len(tmp):
-                    settings['auto_channels'] = tmp
+                if len(settings["auto_channels"]) != len(tmp):
+                    settings["auto_channels"] = tmp
                     utils.set_serv_settings(g, settings)
             await channel.send("Cleaned {} of {} primaries".format(n_real_primaries, n_primaries))
         except:
             await channel.send(traceback.format_exc())
-            await func.react(message, '❌')
+            await func.react(message, "❌")
 
-    if cmd == 'leaveinactive':
+    if cmd == "leaveinactive":
         params_str = utils.strip_quotes(params_str)
         try:
             total_guilds = 0
             inactive_guilds = 0
-            cfg.CONFIG['leave_inactive'] = []
+            cfg.CONFIG["leave_inactive"] = []
             for g in client.guilds:
                 total_guilds += 1
                 if g and (not utils.guild_is_active(g) or g not in guilds):
-                    cfg.CONFIG['leave_inactive'].append(g.id)
+                    cfg.CONFIG["leave_inactive"].append(g.id)
                     inactive_guilds += 1
                     if params_str == "go":
                         try:
@@ -566,25 +566,26 @@ async def admin_command(cmd, ctx):
             if params_str == "go":
                 await channel.send("Left {} of {} guilds.".format(inactive_guilds, total_guilds))
             else:
-                await channel.send("Will leave {} of {} guilds. "
-                                   "Rerun command with 'go' at end to actually leave them.".format(
-                                       inactive_guilds, total_guilds))
-            cfg.CONFIG['leave_inactive'] = []
+                await channel.send(
+                    "Will leave {} of {} guilds. "
+                    "Rerun command with 'go' at end to actually leave them.".format(inactive_guilds, total_guilds)
+                )
+            cfg.CONFIG["leave_inactive"] = []
         except:
             await channel.send(traceback.format_exc())
-            await func.react(message, '❌')
+            await func.react(message, "❌")
 
-    if cmd == 'leaveunauthorized':
+    if cmd == "leaveunauthorized":
         params_str = utils.strip_quotes(params_str)
         try:
             total_guilds = 0
             unauthorized_guilds = 0
-            cfg.CONFIG['leave_unauthorized'] = []
+            cfg.CONFIG["leave_unauthorized"] = []
             for g in client.guilds:
                 total_guilds += 1
                 if g not in guilds:
                     print("---", g.id, g.name)
-                    cfg.CONFIG['leave_unauthorized'].append(g.id)
+                    cfg.CONFIG["leave_unauthorized"].append(g.id)
                     unauthorized_guilds += 1
                     if params_str == "go":
                         try:
@@ -594,10 +595,11 @@ async def admin_command(cmd, ctx):
             if params_str == "go":
                 await channel.send("Left {} of {} guilds.".format(unauthorized_guilds, total_guilds))
             else:
-                await channel.send("Will leave {} of {} guilds. "
-                                   "Rerun command with 'go' at end to actually leave them.".format(
-                                       unauthorized_guilds, total_guilds))
-            cfg.CONFIG['leave_unauthorized'] = []
+                await channel.send(
+                    "Will leave {} of {} guilds. "
+                    "Rerun command with 'go' at end to actually leave them.".format(unauthorized_guilds, total_guilds)
+                )
+            cfg.CONFIG["leave_unauthorized"] = []
         except:
             await channel.send(traceback.format_exc())
-            await func.react(message, '❌')
+            await func.react(message, "❌")

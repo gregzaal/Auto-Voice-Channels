@@ -4,20 +4,19 @@ from commands.base import Cmd
 
 help_text = [
     [
-        ("Usage:", "<PREFIX><COMMAND>\n"
-                   "<PREFIX><COMMAND> `@USER`"),
-        ("Description:",
-         "List all of the roles (and their IDs) in the server, or all the roles that a particular user has."),
-        ("Examples:",
-         "<PREFIX><COMMAND>\n"
-         "<PREFIX><COMMAND> @pixaal"),
+        ("Usage:", "<PREFIX><COMMAND>\n" "<PREFIX><COMMAND> `@USER`"),
+        (
+            "Description:",
+            "List all of the roles (and their IDs) in the server, or all the roles that a particular user has.",
+        ),
+        ("Examples:", "<PREFIX><COMMAND>\n" "<PREFIX><COMMAND> @pixaal"),
     ]
 ]
 
 
 async def execute(ctx, params):
-    params_str = ' '.join(params)
-    guild = ctx['guild']
+    params_str = " ".join(params)
+    guild = ctx["guild"]
     username = utils.strip_quotes(params_str)
     if username:
         # Show roles of particular user if param is provided
@@ -28,7 +27,7 @@ async def execute(ctx, params):
                 found_user = True
                 break
         if not found_user:
-            return False, "There is no user named \"{}\"".format(username)
+            return False, 'There is no user named "{}"'.format(username)
     else:
         # If no param is provided, show all roles in server
         roles = guild.roles
@@ -37,11 +36,9 @@ async def execute(ctx, params):
     roles = sorted(roles, key=lambda x: x.created_at)
     for r in roles:
         if r.name != "@everyone":
-            l.append("`{0}`  `{1}`  {2}".format(str(r.id),
-                                                r.created_at.strftime("%Y/%m/%d"),
-                                                r.name))
+            l.append("`{0}`  `{1}`  {2}".format(str(r.id), r.created_at.strftime("%Y/%m/%d"), r.name))
     for c in utils.chunks(l, 10):
-        await echo('\n'.join(c), ctx['channel'], ctx['message'].author)
+        await echo("\n".join(c), ctx["channel"], ctx["message"].author)
 
     return True, "NO RESPONSE"
 

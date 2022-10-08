@@ -6,8 +6,7 @@ from commands.base import Cmd
 
 help_text = [
     [
-        ("Usage:", "<PREFIX><COMMAND>\n"
-                   "<PREFIX><COMMAND> `COMMAND`"),
+        ("Usage:", "<PREFIX><COMMAND>\n" "<PREFIX><COMMAND> `COMMAND`"),
         ("Description:", "Get help using this bot, or more information about a particular command."),
         ("Example:", "<PREFIX><COMMAND> template"),
     ]
@@ -15,11 +14,11 @@ help_text = [
 
 
 async def execute(ctx, params):
-    channel = ctx['channel']
-    author = ctx['message'].author
+    channel = ctx["channel"]
+    author = ctx["message"].author
     if not params:
         support_server_id = 601015720200896512
-        if not ctx['admin'] and ctx['guild'].id != support_server_id:
+        if not ctx["admin"] and ctx["guild"].id != support_server_id:
             e = discord.Embed(color=discord.Color.from_rgb(205, 220, 57))
             e.title = "Auto Voice Channels"
             e.description = (
@@ -36,15 +35,13 @@ async def execute(ctx, params):
                 "Use **<PREFIX>unlock** to remove the limit.\n\n"
                 " ·  **<PREFIX>private** - "
                 "Make your voice channel private, preventing anyone from joining you directly. "
-                "Creates a \"⇩ Join {}\" channel above yours so people can request to join you.\n\n"
+                'Creates a "⇩ Join {}" channel above yours so people can request to join you.\n\n'
                 " ·  **<PREFIX>kick `@USER`** - "
                 "Start a votekick to remove someone from your channel.\n\n"
                 " ·  **<PREFIX>transfer `@USER`** - "
-                "Transfer ownership of your channel to someone else.\n\n".format(
-                    esc_md(author.display_name)
-                )
+                "Transfer ownership of your channel to someone else.\n\n".format(esc_md(author.display_name))
             )
-            if ctx['gold']:
+            if ctx["gold"]:
                 text += (
                     " ·  **<PREFIX>name** - Change the name of your voice channel.\n\n"
                     " ·  **<PREFIX>nick** - Set what channels that show the creator's name will call you.\n\n"
@@ -55,7 +52,7 @@ async def execute(ctx, params):
                 " ·  **<PREFIX>invite** - Invite me to another server!\n\n"
                 " ·  **<PREFIX>help `command`** - Get more info about a particular command."
             )
-            text = text.replace('<PREFIX>', ctx['print_prefix'])
+            text = text.replace("<PREFIX>", ctx["print_prefix"])
             e.add_field(name="Commands:", value=text)
             try:
                 await channel.send(embed=e)
@@ -64,16 +61,16 @@ async def execute(ctx, params):
                 await dm_user(
                     author,
                     "I don't have permission to send messages in the "
-                    "`#{}` channel of **{}**.".format(channel.name, channel.guild.name)
+                    "`#{}` channel of **{}**.".format(channel.name, channel.guild.name),
                 )
                 return False, "NO RESPONSE"
             return True, "NO RESPONSE"
-        can_embed = channel.permissions_for(ctx['guild'].me).embed_links
-        with open("docs.md", 'r', encoding='utf8') as f:
+        can_embed = channel.permissions_for(ctx["guild"].me).embed_links
+        with open("docs.md", "r", encoding="utf8") as f:
             docs = f.read()
-        sections = docs.split('** **')
+        sections = docs.split("** **")
         for i, s in enumerate(sections):
-            s = s.replace("@Auto Voice Channels ", "@{} ".format(ctx['message'].guild.me.display_name))
+            s = s.replace("@Auto Voice Channels ", "@{} ".format(ctx["message"].guild.me.display_name))
             s = s.replace("@pixaal", author.mention)
             s = s.replace(" :)", " :slight_smile:")
             s = s.replace("**Gold Patron**", ":credit_card: **Gold Patron**")
@@ -82,19 +79,20 @@ async def execute(ctx, params):
             if s.startswith("\n**-- Quickstart --**\n") and can_embed:
                 embed = discord.Embed(
                     color=discord.Color.from_rgb(221, 46, 68),
-                    description="❤ If you like this bot and want to help keep it alive, [support us on Patreon](https://www.patreon.com/pixaal) :)")
+                    description="❤ If you like this bot and want to help keep it alive, [support us on Patreon](https://www.patreon.com/pixaal) :)",
+                )
                 await channel.send(content="** **" + s, embed=embed)
                 continue
             elif s.startswith("\n**-- Commands --**\n") and can_embed:
-                lines = [l for l in s.split('\n') if l != ""]
+                lines = [l for l in s.split("\n") if l != ""]
                 parts = []
                 title = []
                 end_of_title = False
                 cmds = []
                 for l in lines:
-                    if not l.startswith('`'):
+                    if not l.startswith("`"):
                         if end_of_title:
-                            parts.append(["** **\n" + '\n'.join(title), cmds])
+                            parts.append(["** **\n" + "\n".join(title), cmds])
                             title = []
                             cmds = []
                             end_of_title = False
@@ -102,7 +100,7 @@ async def execute(ctx, params):
                     else:
                         end_of_title = True
                         cmds.append(l)
-                parts.append(["** **\n" + '\n'.join(title), cmds])
+                parts.append(["** **\n" + "\n".join(title), cmds])
 
                 for j, p in enumerate(parts):
                     embed = discord.Embed(color=discord.Color.from_rgb(205, 220, 57))
@@ -116,7 +114,7 @@ async def execute(ctx, params):
                         await dm_user(
                             author,
                             "I don't have permission to send messages in the "
-                            "`#{}` channel of **{}**.".format(channel.name, channel.guild.name)
+                            "`#{}` channel of **{}**.".format(channel.name, channel.guild.name),
                         )
                         return False, "NO RESPONSE"
                 continue
@@ -126,10 +124,11 @@ async def execute(ctx, params):
         return True, "NO RESPONSE"
     else:
         from commands import commands
+
         c = params[0]
         if c in commands:
             replacements = {
-                "<PREFIX>": ctx['print_prefix'],
+                "<PREFIX>": ctx["print_prefix"],
                 "<COMMAND>": c,
                 "<USER>": author.mention,
             }
@@ -137,20 +136,24 @@ async def execute(ctx, params):
             for part in help_text:
                 e = discord.Embed(color=discord.Color.from_rgb(205, 220, 57))
                 content = None
-                if 'incorrect_command_usage' in ctx and part == help_text[0]:
+                if "incorrect_command_usage" in ctx and part == help_text[0]:
                     content = "Incorrect command usage, here's some info about the `{}` command:".format(c)
                 if part == help_text[-1]:
-                    e.set_footer(text="More help: wiki.dotsbots.com  \nSupport me: patreon.com/pixaal",
-                                 icon_url=ctx['guild'].me.avatar_url_as(size=32))
+                    e.set_footer(
+                        text="More help: wiki.dotsbots.com  \nSupport me: patreon.com/pixaal",
+                        icon_url=ctx["guild"].me.avatar_url_as(size=32),
+                    )
                 if part == help_text[0]:
-                    help_link = (commands[c].help_link if
-                                 commands[c].help_link is not None
-                                 else "https://wiki.dotsbots.com/en/commands/" + c)
+                    help_link = (
+                        commands[c].help_link
+                        if commands[c].help_link is not None
+                        else "https://wiki.dotsbots.com/en/commands/" + c
+                    )
                     e.description = "ℹ More info: " + help_link
                 for i, p in enumerate(part):
                     t = ("⠀\n" + p[0]) if i != 0 and not p[0].startswith(" ·  ") else p[0]
                     d = (p[1] + "\n⠀") if i == len(part) - 1 and part == help_text[-1] else p[1]
-                    if t == 'title':
+                    if t == "title":
                         e.title = d
                     else:
                         for r, rv in replacements.items():
@@ -164,7 +167,7 @@ async def execute(ctx, params):
                     await dm_user(
                         author,
                         "I don't have permission to send messages in the "
-                        "`#{}` channel of **{}**.".format(channel.name, channel.guild.name)
+                        "`#{}` channel of **{}**.".format(channel.name, channel.guild.name),
                     )
                     return False, "NO RESPONSE"
                 except Exception:
@@ -172,20 +175,20 @@ async def execute(ctx, params):
                     print(traceback.format_exc())
                     return False, "NO RESPONSE"
 
-            if commands[c].sapphire_required and not ctx['sapphire']:
+            if commands[c].sapphire_required and not ctx["sapphire"]:
                 await channel.send(
                     "**Note:** This command is restricted to :gem: **Sapphire Patron** servers.\n"
                     "Become a Sapphire Patron to support the development of this bot and unlock more ~~useless~~ "
                     "amazing features: <https://www.patreon.com/pixaal>"
                 )
-            elif commands[c].gold_required and not ctx['gold']:
+            elif commands[c].gold_required and not ctx["gold"]:
                 await channel.send(
                     "**Note:** This command is restricted to :credit_card: **Gold Patron** servers.\n"
                     "Become a Gold Patron to support the development of this bot and unlock more ~~useless~~ "
                     "amazing features: <https://www.patreon.com/pixaal>"
                 )
             return True, "NO RESPONSE"
-        elif c == 'expressions':
+        elif c == "expressions":
             e = discord.Embed(color=discord.Color.from_rgb(205, 220, 57))
             e.title = "Template Expressions"
             e.description = (
@@ -203,41 +206,38 @@ async def execute(ctx, params):
                 "like `@@num@@` or `@@game_name@@`, or even other nested expressions, "
                 "however only a certain things may be used as the `CONDITION`:\n\n"
             )
-            e.add_field(
-                name=" ·  `ROLE:role id`",
-                value="Check whether or not the creator has a particular role.\n\n"
-            )
+            e.add_field(name=" ·  `ROLE:role id`", value="Check whether or not the creator has a particular role.\n\n")
             e.add_field(
                 name=" ·  `GAME=game name`",
                 value="Check if the game that users in the channel are playing (the same one that "
                 "`@@game_name@@` returns, including aliases) matches **exactly** the text provided.\n"
                 "You can also use `!=` instead of `=` to match anything **other** than exactly the text provided, "
                 "or `:` to match anything that **contains** the text provided. "
-                "E.g. `GAME:Call of Duty` will match with *\"Call of Duty: Modern Warfare\"*, "
-                "but `GAME=Call of Duty` will not.\n\n"
+                'E.g. `GAME:Call of Duty` will match with *"Call of Duty: Modern Warfare"*, '
+                "but `GAME=Call of Duty` will not.\n\n",
             )
             e.add_field(
                 name=" ·  `LIVE`",
                 value="Whether or not the creator of the channel is streaming. Use `LIVE_DISCORD` to only detect "
-                "discord's \"Go Live\" streams, or `LIVE_EXTERNAL` for Twitch. `LIVE` will include both.\n\n"
+                'discord\'s "Go Live" streams, or `LIVE_EXTERNAL` for Twitch. `LIVE` will include both.\n\n',
             )
             e.add_field(
                 name=" ·  `PLAYERS>number`",
                 value="💎 [*patrons only.*](https://patreon.com/pixaal) Check if the number of players in your game "
                 "(determined either by Discord Rich Presence or the game activity statuses of members in the channel) "
-                "is greater than the number provided. You can also use `<`, `<=`, `>=`, `=` and `!=`.\n\n"
+                "is greater than the number provided. You can also use `<`, `<=`, `>=`, `=` and `!=`.\n\n",
             )
             e.add_field(
                 name=" ·  `MAX>number`",
                 value="💎 [*patrons only.*](https://patreon.com/pixaal) Check if the maximum number of players "
                 "allowed in your game (determined by Discord Rich Presence or the channel limit) is greater than the "
-                "number provided. You can also use `<`, `<=`, `>=`, `=` and `!=`.\n\n"
+                "number provided. You can also use `<`, `<=`, `>=`, `=` and `!=`.\n\n",
             )
             e.add_field(
                 name=" ·  `RICH`",
                 value="💎 [*patrons only.*](https://patreon.com/pixaal) Whether or not the current game uses "
-                      "Discord Rich Presence, which means `@@num_playing@@`, `@@party_size@@`, `@@party_state@@`, and "
-                      "`@@party_details@@` should have reliable values.\n\n"
+                "Discord Rich Presence, which means `@@num_playing@@`, `@@party_size@@`, `@@party_state@@`, and "
+                "`@@party_details@@` should have reliable values.\n\n",
             )
             try:
                 await channel.send(embed=e)
@@ -246,7 +246,7 @@ async def execute(ctx, params):
                 await dm_user(
                     author,
                     "I don't have permission to send messages in the "
-                    "`#{}` channel of **{}**.".format(channel.name, channel.guild.name)
+                    "`#{}` channel of **{}**.".format(channel.name, channel.guild.name),
                 )
                 return False, "NO RESPONSE"
             e = discord.Embed(color=discord.Color.from_rgb(205, 220, 57))
@@ -269,9 +269,11 @@ async def execute(ctx, params):
             await channel.send(embed=e)
             return True, "NO RESPONSE"
         else:
-            if 'dcnf' not in ctx['settings'] or ctx['settings']['dcnf'] is False:
-                return False, ("`{}` is not a recognized command. Run '**{}help**' "
-                               "to get a list of commands".format(c, ctx['print_prefix']))
+            if "dcnf" not in ctx["settings"] or ctx["settings"]["dcnf"] is False:
+                return False, (
+                    "`{}` is not a recognized command. Run '**{}help**' "
+                    "to get a list of commands".format(c, ctx["print_prefix"])
+                )
             else:
                 return False, "NO RESPONSE"
 

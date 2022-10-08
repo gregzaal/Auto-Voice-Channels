@@ -15,6 +15,7 @@ import utils
 from utils import log
 
 import roman
+
 try:
     import patreon_info
 except ImportError:
@@ -77,7 +78,7 @@ def esc_md(text):
 
 @utils.func_timer()
 def user_hash(user):
-    return esc_md(user.name) + '#' + user.discriminator
+    return esc_md(user.name) + "#" + user.discriminator
 
 
 @utils.func_timer()
@@ -103,10 +104,10 @@ def check_primary_permissions(channel, me):
 @utils.func_timer()
 def set_template(guild, chid, template):
     settings = utils.get_serv_settings(guild)
-    for p in settings['auto_channels']:
-        for sid in settings['auto_channels'][p]['secondaries']:
+    for p in settings["auto_channels"]:
+        for sid in settings["auto_channels"][p]["secondaries"]:
             if sid == chid:
-                settings['auto_channels'][p]['template'] = template
+                settings["auto_channels"][p]["template"] = template
                 utils.set_serv_settings(guild, settings)
                 return
 
@@ -116,10 +117,10 @@ async def set_default_limit(guild, c, limit):
     chid = c.id
     await c.edit(user_limit=limit)
     settings = utils.get_serv_settings(guild)
-    for p in settings['auto_channels']:
-        for sid in settings['auto_channels'][p]['secondaries']:
+    for p in settings["auto_channels"]:
+        for sid in settings["auto_channels"][p]["secondaries"]:
             if sid == chid:
-                settings['auto_channels'][p]['limit'] = limit
+                settings["auto_channels"][p]["limit"] = limit
                 utils.set_serv_settings(guild, settings)
                 pc = guild.get_channel(int(p))
                 if pc.user_limit:
@@ -130,13 +131,13 @@ async def set_default_limit(guild, c, limit):
 @utils.func_timer()
 def toggle_position(guild, chid):
     settings = utils.get_serv_settings(guild)
-    for p in settings['auto_channels']:
-        for sid in settings['auto_channels'][p]['secondaries']:
+    for p in settings["auto_channels"]:
+        for sid in settings["auto_channels"][p]["secondaries"]:
             if sid == chid:
                 above = True
-                if 'above' in settings['auto_channels'][p]:
-                    above = settings['auto_channels'][p]['above']
-                settings['auto_channels'][p]['above'] = not above
+                if "above" in settings["auto_channels"][p]:
+                    above = settings["auto_channels"][p]["above"]
+                settings["auto_channels"][p]["above"] = not above
                 utils.set_serv_settings(guild, settings)
                 above = not above
                 return "above" if above else "below"
@@ -146,7 +147,7 @@ def toggle_position(guild, chid):
 @utils.func_timer()
 def get_channel_games(channel):
     settings = utils.get_serv_settings(channel.guild)
-    general = ["General"] if 'general' not in settings else [settings['general']]
+    general = ["General"] if "general" not in settings else [settings["general"]]
     games = {}
     for m in sorted(channel.members, key=lambda x: x.display_name.lower()):
         if not m.bot:
@@ -202,8 +203,8 @@ def get_alias(g, settings):
         "Call of Duty®️ː Modern Warfare®️": "CoDːMW",
     }
 
-    if g in settings['aliases']:
-        g = settings['aliases'][g]
+    if g in settings["aliases"]:
+        g = settings["aliases"][g]
     elif g in std_aliases:
         g = std_aliases[g]
 
@@ -213,7 +214,7 @@ def get_alias(g, settings):
 @utils.func_timer()
 def get_game_name(channel, games):
     settings = utils.get_serv_settings(channel.guild)
-    general = ["General"] if 'general' not in settings else [settings['general']]
+    general = ["General"] if "general" not in settings else [settings["general"]]
 
     if games == general:
         return games[0]
@@ -227,7 +228,7 @@ def get_game_name(channel, games):
         if g not in games:
             games.append(g)
 
-    return ', '.join(games)
+    return ", ".join(games)
 
 
 @utils.func_timer()
@@ -244,29 +245,29 @@ def get_party_info(channel, game, asip, default=""):
         act_name = get_alias(act.name, settings) if act else None
         if act and act_name == game:
             pid = -1
-            if hasattr(act, 'party') and act.party:
-                if 'id' in act.party:
-                    pid = act.party['id']
+            if hasattr(act, "party") and act.party:
+                if "id" in act.party:
+                    pid = act.party["id"]
             if pid == -1:
                 # No party ID is given, so we make our own based on other info
                 pid = act_name
-                if hasattr(act, 'party') and act.party:
-                    if 'size' in act.party:
-                        pid += ('/'.join(str(v) for v in act.party['size']))
-                if hasattr(act, 'state') and act.state:
+                if hasattr(act, "party") and act.party:
+                    if "size" in act.party:
+                        pid += "/".join(str(v) for v in act.party["size"])
+                if hasattr(act, "state") and act.state:
                     pid += act.state
-                if hasattr(act, 'details') and act.details:
+                if hasattr(act, "details") and act.details:
                     pid += act.details
 
-            if hasattr(act, 'state') and act.state:
+            if hasattr(act, "state") and act.state:
                 states[pid] = act.state
-            if hasattr(act, 'details') and act.details:
+            if hasattr(act, "details") and act.details:
                 details[pid] = act.details
-            if hasattr(act, 'party') and act.party:
-                if 'size' in act.party:
-                    num_playing[pid] = str(act.party['size'][0])
+            if hasattr(act, "party") and act.party:
+                if "size" in act.party:
+                    num_playing[pid] = str(act.party["size"][0])
                     try:
-                        sizes[pid] = str(act.party['size'][1])
+                        sizes[pid] = str(act.party["size"][1])
                     except IndexError:
                         sizes[pid] = "0"
 
@@ -280,41 +281,41 @@ def get_party_info(channel, game, asip, default=""):
             biggest_party = [p, v]
     pid, players = biggest_party
     info = {
-        'state': default,
-        'details': default,
-        'rich': False,
-        'sneakies': "0",
-        'num_playing': "0",
-        'size': "0",
+        "state": default,
+        "details": default,
+        "rich": False,
+        "sneakies": "0",
+        "num_playing": "0",
+        "size": "0",
     }
     if pid is not None:
-        info['state'] = states[pid] if pid in states else default
-        info['details'] = details[pid] if pid in details else default
-        info['rich'] = pid in states or pid in details
-        info['sneakies'] = sneakies
+        info["state"] = states[pid] if pid in states else default
+        info["details"] = details[pid] if pid in details else default
+        info["rich"] = pid in states or pid in details
+        info["sneakies"] = sneakies
         if pid in num_playing:
-            info['num_playing'] = num_playing[pid]
+            info["num_playing"] = num_playing[pid]
         else:
-            info['num_playing'] = str(players + sneakies)
+            info["num_playing"] = str(players + sneakies)
         if pid in sizes:
-            info['size'] = sizes[pid]
+            info["size"] = sizes[pid]
         elif channel.user_limit:
-            info['size'] = str(channel.user_limit)
+            info["size"] = str(channel.user_limit)
     return info
 
 
 @utils.func_timer()
 async def update_bitrate(channel, settings, user_left=None, reset=False):
-    if 'custom_bitrates' not in settings:
+    if "custom_bitrates" not in settings:
         return False
 
     custom_bitrates = []
     for m in channel.members:
-        if str(m.id) in settings['custom_bitrates']:
-            custom_bitrates.append(settings['custom_bitrates'][str(m.id)])
+        if str(m.id) in settings["custom_bitrates"]:
+            custom_bitrates.append(settings["custom_bitrates"][str(m.id)])
 
     if not custom_bitrates:
-        if reset or (user_left and str(user_left.id) in settings['custom_bitrates']):
+        if reset or (user_left and str(user_left.id) in settings["custom_bitrates"]):
             p = utils.get_primary_channel(channel.guild, settings, channel)
             bitrate = p.bitrate
         else:
@@ -331,19 +332,19 @@ async def update_bitrate(channel, settings, user_left=None, reset=False):
 
 @utils.func_timer()
 async def update_text_channel_role(guild, member, channel, mode):
-    if mode == 'leave' and len(channel.members) <= 0:
+    if mode == "leave" and len(channel.members) <= 0:
         return  # Last person leaving, channel will be deleted, no need to update roles
 
     settings = utils.get_serv_settings(guild)
-    for p, pv in settings['auto_channels'].items():
-        for s, sv in pv['secondaries'].items():
+    for p, pv in settings["auto_channels"].items():
+        for s, sv in pv["secondaries"].items():
             if s == channel.id:
-                if 'tcr' in sv:
-                    r = guild.get_role(sv['tcr'])
+                if "tcr" in sv:
+                    r = guild.get_role(sv["tcr"])
                     if r:
-                        if mode == 'join':
+                        if mode == "join":
                             await member.add_roles(r)
-                        elif mode == 'leave':
+                        elif mode == "leave":
                             try:
                                 await member.remove_roles(r)
                             except discord.errors.NotFound:
@@ -392,7 +393,7 @@ async def echo(msg, channel, user=None):
     max_chars = 1950  # Discord has a character limit of 2000 per message. Use 1950 to be safe.
     msg = str(msg)
     if len(msg) > max_chars:
-        chunks = list([msg[i:i + max_chars] for i in range(0, len(msg), max_chars)])
+        chunks = list([msg[i : i + max_chars] for i in range(0, len(msg), max_chars)])
     else:
         chunks = [msg]
 
@@ -405,7 +406,7 @@ async def echo(msg, channel, user=None):
                 await dm_user(
                     user,
                     "I don't have permission to send messages in the "
-                    "`#{}` channel of **{}**.".format(channel.name, channel.guild.name)
+                    "`#{}` channel of **{}**.".format(channel.name, channel.guild.name),
                 )
             return False
         except Exception:
@@ -420,12 +421,12 @@ async def blind_echo(msg, guild):
     settings = utils.get_serv_settings(guild)
     msg_channel = None
     last_message = None
-    if 'last_channel' in settings:
-        msg_channel = guild.get_channel(settings['last_channel'])
+    if "last_channel" in settings:
+        msg_channel = guild.get_channel(settings["last_channel"])
         if msg_channel:
             last_message = msg_channel.last_message
     if not msg_channel:
-        server_contact = guild.get_member(settings['server_contact'])
+        server_contact = guild.get_member(settings["server_contact"])
         if server_contact is not None:
             if server_contact.dm_channel is None:
                 await server_contact.create_dm()
@@ -440,7 +441,7 @@ async def blind_echo(msg, guild):
         try:
             m = await msg_channel.send(msg)
         except:
-            settings['last_channel'] = 0  # Don't try use this channel in future
+            settings["last_channel"] = 0  # Don't try use this channel in future
             utils.set_serv_settings(guild, settings)
             return
         cfg.ERROR_MESSAGES[m.id] = time()
@@ -448,7 +449,7 @@ async def blind_echo(msg, guild):
 
 @utils.func_timer()
 async def admin_log(msg, client, important=False):
-    admin = client.get_user(cfg.CONFIG['admin_id'])
+    admin = client.get_user(cfg.CONFIG["admin_id"])
     if admin.dm_channel is None:
         await admin.create_dm()
     mention = admin.mention
@@ -456,8 +457,8 @@ async def admin_log(msg, client, important=False):
         msg = msg + "\n" + mention
 
     admin_channel = admin.dm_channel
-    if 'admin_channel' in cfg.CONFIG:
-        admin_channel = client.get_channel(cfg.CONFIG['admin_channel'])
+    if "admin_channel" in cfg.CONFIG:
+        admin_channel = client.get_channel(cfg.CONFIG["admin_channel"])
 
     await admin_channel.send(msg)
 
@@ -476,10 +477,10 @@ async def log_timings(client, highlight):
 async def server_log(guild, msg, msg_level, settings=None):
     if settings is None:
         settings = utils.get_serv_settings(guild)
-    if 'logging' not in settings or settings['logging'] is False:
+    if "logging" not in settings or settings["logging"] is False:
         return
 
-    log_level = settings['log_level']
+    log_level = settings["log_level"]
     if msg_level > log_level:
         return
 
@@ -490,13 +491,13 @@ async def server_log(guild, msg, msg_level, settings=None):
         return
 
     try:
-        channel = guild.get_channel(settings['logging'])
+        channel = guild.get_channel(settings["logging"])
     except:
         # Channel no longer exists, or we can't get it, either way we can't log anything.
         return
 
     try:
-        msg = msg.replace('➕', '＋')  # Make the default plus sign more visible
+        msg = msg.replace("➕", "＋")  # Make the default plus sign more visible
         await channel.send(msg)
     except discord.errors.Forbidden:
         log("Forbidden to log", guild)
@@ -524,27 +525,31 @@ async def check_patreon(force_update=False, client=None):
                     pn = pu.display_name
                 except AttributeError:
                     pn = "<UNKNOWN>"
-                important = True if r in ['sapphire', 'diamond'] else False
+                important = True if r in ["sapphire", "diamond"] else False
                 await admin_log("🎉 New {} patron! **{}** (`{}`)".format(cfg.TIER_ICONS[r], pn, p), client, important)
-                msg = ("🎉 **Thanks for your support!** 🎉\nTo activate your patron-exclusive features, "
-                       "simply run `@me power-overwhelming` in your server.")
-                if r in ['sapphire', 'diamond']:
+                msg = (
+                    "🎉 **Thanks for your support!** 🎉\nTo activate your patron-exclusive features, "
+                    "simply run `@me power-overwhelming` in your server."
+                )
+                if r in ["sapphire", "diamond"]:
                     msg += "\n\nGive me a few hours to set up your private "
-                    msg += "bot" if r == 'sapphire' else "server"
+                    msg += "bot" if r == "sapphire" else "server"
                     msg += ", and then I'll contact you in the support server to make the switch."
-                    if r == 'diamond':
-                        msg += ("\nPlease let me know whether you prefer a server in Europe, "
-                                "North America or Asia by replying to this message.")
+                    if r == "diamond":
+                        msg += (
+                            "\nPlease let me know whether you prefer a server in Europe, "
+                            "North America or Asia by replying to this message."
+                        )
                 await dm_user(pu, msg)
 
         for p, r in previous_patrons.items():
-            if p not in patrons and p != cfg.CONFIG['admin_id']:
+            if p not in patrons and p != cfg.CONFIG["admin_id"]:
                 pu = client.get_user(p)
                 try:
                     pn = pu.display_name
                 except AttributeError:
                     pn = "<UNKNOWN>"
-                important = True if r in ['sapphire', 'diamond'] else False
+                important = True if r in ["sapphire", "diamond"] else False
                 await admin_log("😱 Lost {} patron! **{}** (`{}`)".format(cfg.TIER_ICONS[r], pn, p), client, important)
 
     patreon_info.update_patron_servers(patrons)
@@ -596,44 +601,42 @@ def get_sapphire_id(guild):
 
 @utils.func_timer()
 async def power_overwhelming(ctx, auth_guilds):
-    author = ctx['message'].author
+    author = ctx["message"].author
     r = "Checking..."
     success = False
-    m = await ctx['channel'].send(r)
+    m = await ctx["channel"].send(r)
 
     if patreon_info is None:
         return False, "No need to do that."
 
     patrons = patreon_info.fetch_patrons(force_update=False)
-    patrons[cfg.CONFIG['admin_id']] = "sapphire"
+    patrons[cfg.CONFIG["admin_id"]] = "sapphire"
     auth_path = os.path.join(cfg.SCRIPT_DIR, "patron_auths.json")
     if author.id in patrons:
         reward = patrons[author.id].title()
-        max_guilds = {
-            "Gold": 2,
-            "Sapphire": 5,
-            "Diamond": 50
-        }
+        max_guilds = {"Gold": 2, "Sapphire": 5, "Diamond": 50}
         if isinstance(auth_guilds, list) and len(auth_guilds) > max_guilds[reward]:
-            return False, ("Sorry, {0} patrons can only enable {0} features in up to {1} servers.".format(
-                reward, max_guilds[reward]
-            ))
+            return False, (
+                "Sorry, {0} patrons can only enable {0} features in up to {1} servers.".format(
+                    reward, max_guilds[reward]
+                )
+            )
 
         auths = utils.read_json(auth_path)
         str_uid = str(author.id)
-        prev_auths = auths[str_uid]['servers'] if str_uid in auths else []
+        prev_auths = auths[str_uid]["servers"] if str_uid in auths else []
         if isinstance(auth_guilds, list):  # Possibly multiple guilds specified, command run in DM
             auths[str_uid] = {"servers": auth_guilds}
-            guilds = [ctx['client'].get_guild(g) for g in auth_guilds]
+            guilds = [ctx["client"].get_guild(g) for g in auth_guilds]
         else:  # Single guild specified, command run in server
             auths[str_uid] = {"servers": [auth_guilds.id]}
             guilds = [auth_guilds]
 
         if cfg.SAPPHIRE_ID is not None:
             config = utils.get_config()
-            if author.id != config['sapphires'][str(cfg.SAPPHIRE_ID)]['initiator']:
+            if author.id != config["sapphires"][str(cfg.SAPPHIRE_ID)]["initiator"]:
                 return False, "This bot doesn't belong to you."
-            config['sapphires'][str(cfg.SAPPHIRE_ID)]['servers'] = [g.id for g in guilds]
+            config["sapphires"][str(cfg.SAPPHIRE_ID)]["servers"] = [g.id for g in guilds]
             utils.set_config(config)
             cfg.CONFIG = config
 
@@ -643,22 +646,28 @@ async def power_overwhelming(ctx, auth_guilds):
         success = True
         r = ""
         for g in guilds:
-            await admin_log("🔑 Authenticated **{}**'s {} server {} `{}`".format(
-                author.name, reward, g.name, g.id
-            ), ctx['client'], important=False)
+            await admin_log(
+                "🔑 Authenticated **{}**'s {} server {} `{}`".format(author.name, reward, g.name, g.id),
+                ctx["client"],
+                important=False,
+            )
             r += "\n✅ Nice! *{}* is now a **{}** server.".format(g.name, reward)
         for a in prev_auths:
             if a not in [g.id for g in guilds]:
                 r += "\n❗ Removed authentication from `{}`.".format(a)
         if reward in ["Diamond", "Sapphire"] and cfg.SAPPHIRE_ID is None:
-            r += ("\nPlease give me ~{} hours to set up your private bot - "
-                  "I'll DM you when it's ready to make the swap!".format(12 if reward == "Sapphire" else 24))
+            r += (
+                "\nPlease give me ~{} hours to set up your private bot - "
+                "I'll DM you when it's ready to make the swap!".format(12 if reward == "Sapphire" else 24)
+            )
     else:
-        await admin_log("🔒 Failed to authenticate for **{}** `{}`".format(author.name, author.id), ctx['client'])
-        r = ("❌ Sorry it doesn't look like you're a Patron.\n"
-             "If you just recently became one, please make sure you've connected your discord account "
-             "(<https://bit.ly/2UdfYbQ>) and try again in a few minutes. "
-             "If it still doesn't work, let me know in the support server: <https://discord.io/DotsBotsSupport>.")
+        await admin_log("🔒 Failed to authenticate for **{}** `{}`".format(author.name, author.id), ctx["client"])
+        r = (
+            "❌ Sorry it doesn't look like you're a Patron.\n"
+            "If you just recently became one, please make sure you've connected your discord account "
+            "(<https://bit.ly/2UdfYbQ>) and try again in a few minutes. "
+            "If it still doesn't work, let me know in the support server: <https://discord.io/DotsBotsSupport>."
+        )
     await m.edit(content=r)
     return success, "NO RESPONSE"
 
@@ -667,7 +676,7 @@ async def power_overwhelming(ctx, auth_guilds):
 def get_guilds(client):
     guilds = []
     am_sapphire_bot = cfg.SAPPHIRE_ID is not None
-    am_gold_bot = 'gold_id' in cfg.CONFIG and client.user.id == cfg.CONFIG['gold_id']
+    am_gold_bot = "gold_id" in cfg.CONFIG and client.user.id == cfg.CONFIG["gold_id"]
     for g in client.guilds:
         if g is not None and g.name is not None:
             if am_sapphire_bot:
@@ -696,44 +705,47 @@ async def react(message, r):
 @utils.func_timer()
 async def custom_name(guild, c, u, n):
     settings = utils.get_serv_settings(guild)
-    for p, pv in settings['auto_channels'].items():
-        for s, sv in pv['secondaries'].items():
+    for p, pv in settings["auto_channels"].items():
+        for s, sv in pv["secondaries"].items():
             if s == c.id:
-                if n.lower() == 'reset':
-                    del settings['auto_channels'][p]['secondaries'][s]['name']
+                if n.lower() == "reset":
+                    del settings["auto_channels"][p]["secondaries"][s]["name"]
                 else:
-                    if 'uniquenames' in settings and settings['uniquenames']:
+                    if "uniquenames" in settings and settings["uniquenames"]:
                         existing_names = []
-                        for t_p, t_pv in settings['auto_channels'].items():
-                            for t_s, t_sv in t_pv['secondaries'].items():
-                                if 'name' in t_sv and t_s != c.id:
-                                    existing_names.append(t_sv['name'])
+                        for t_p, t_pv in settings["auto_channels"].items():
+                            for t_s, t_sv in t_pv["secondaries"].items():
+                                if "name" in t_sv and t_s != c.id:
+                                    existing_names.append(t_sv["name"])
                         if n in existing_names:
                             return False, "That name is already used by another channel, please pick another."
-                    settings['auto_channels'][p]['secondaries'][s]['name'] = n
+                    settings["auto_channels"][p]["secondaries"][s]["name"] = n
                 utils.set_serv_settings(guild, settings)
                 await server_log(
                     guild,
-                    ":regional_indicator_n: {} (`{}`) changed the channel (`{}`) name to \"{}\"".format(
+                    ':regional_indicator_n: {} (`{}`) changed the channel (`{}`) name to "{}"'.format(
                         user_hash(u), u.id, c.id, esc_md(n)
-                    ), 2, settings)
+                    ),
+                    2,
+                    settings,
+                )
     return True, None
 
 
 @utils.func_timer()
 async def set_creator(guild, cid, creator):
     settings = utils.get_serv_settings(guild)
-    for p, pv in settings['auto_channels'].items():
-        for s, sv in pv['secondaries'].items():
+    for p, pv in settings["auto_channels"].items():
+        for s, sv in pv["secondaries"].items():
             if s == cid:
-                settings['auto_channels'][p]['secondaries'][s]['creator'] = creator.id
+                settings["auto_channels"][p]["secondaries"][s]["creator"] = creator.id
                 try:
-                    jc = guild.get_channel(settings['auto_channels'][p]['secondaries'][s]['jc'])
+                    jc = guild.get_channel(settings["auto_channels"][p]["secondaries"][s]["jc"])
                     await jc.edit(name="⇩ Join {}".format(creator.display_name))
                 except (KeyError, AttributeError):
                     pass
                 if s in cfg.PRIV_CHANNELS:
-                    cfg.PRIV_CHANNELS[s]['creator'] = creator
+                    cfg.PRIV_CHANNELS[s]["creator"] = creator
                 break
     utils.set_serv_settings(guild, settings)
     return True
@@ -749,37 +761,40 @@ async def rename_channel(guild, channel, settings, primary_id, templates=None, i
         channel = guild.get_channel(channel.id)
     if not templates:
         templates = {}
-        if "template" in settings['auto_channels'][primary_id]:
+        if "template" in settings["auto_channels"][primary_id]:
             try:
-                templates[channel.id] = settings['auto_channels'][primary_id]['template']
+                templates[channel.id] = settings["auto_channels"][primary_id]["template"]
             except AttributeError:
                 return  # channel has no ID
     if channel.members and (ignore_lock or not channel_is_requested(channel)):
         if channel.id in templates:
             cname = templates[channel.id]
         else:
-            cname = settings['channel_name_template']
+            cname = settings["channel_name_template"]
 
         guild_is_gold = is_gold(guild)
         guild_is_sapphire = is_sapphire(guild)
 
-        has_expression = '{{' in cname and '}}' in cname and cname.count('{{') == cname.count('}}') and guild_is_gold
-        is_private = settings['priv'] if 'priv' in settings else False
+        has_expression = "{{" in cname and "}}" in cname and cname.count("{{") == cname.count("}}") and guild_is_gold
+        is_private = settings["priv"] if "priv" in settings else False
 
         cname = cname.replace("@@num_players@@", "@@num_playing@@")  # Common mistake
 
-        if '@@game_name@@' in cname or '@@party_' in cname or '@@num_playing@@' in cname or has_expression:
+        if "@@game_name@@" in cname or "@@party_" in cname or "@@num_playing@@" in cname or has_expression:
             games = get_channel_games(channel)
             gname = get_game_name(channel, games)
 
-        if '@@party_' in cname or '@@num_playing@@' in cname or has_expression:
-            party = get_party_info(channel, gname, settings['asip'] if 'asip' in settings else False)
+        if "@@party_" in cname or "@@num_playing@@" in cname or has_expression:
+            party = get_party_info(channel, gname, settings["asip"] if "asip" in settings else False)
 
-        if ('@@creator@@' in cname or
-                ('general' in settings and '@@creator@@' in settings['general']) or
-                '@@num_others@@' in cname or
-                '@@stream_name@@' in cname or
-                has_expression or is_private):
+        if (
+            "@@creator@@" in cname
+            or ("general" in settings and "@@creator@@" in settings["general"])
+            or "@@num_others@@" in cname
+            or "@@stream_name@@" in cname
+            or has_expression
+            or is_private
+        ):
             creator = None
             creator_name = "Unknown"
             creator_id = utils.get_creator_id(settings, channel)
@@ -806,83 +821,106 @@ async def rename_channel(guild, channel, settings, primary_id, templates=None, i
         i_str = str(i + 1)
         if i == -1:
             i_str = "?"
-        cname = cname.replace('##', '#' + i_str)
-        cname = cname.replace('+#', roman.toRoman(int(i + 1)))
+        cname = cname.replace("##", "#" + i_str)
+        cname = cname.replace("+#", roman.toRoman(int(i + 1)))
         for x in range(5):
-            cname = cname.replace('${}#'.format('0' * x), i_str.zfill(x + 1))
+            cname = cname.replace("${}#".format("0" * x), i_str.zfill(x + 1))
 
         random_set = 0
-        while (guild_is_gold and
-               '[[' in cname and
-               ']]' in cname and
-               ('/' in cname.split('[[', 1)[1].split(']]', 1)[0] or
-                '\\' in cname.split('[[', 1)[1].split(']]', 1)[0])):
+        while (
+            guild_is_gold
+            and "[[" in cname
+            and "]]" in cname
+            and ("/" in cname.split("[[", 1)[1].split("]]", 1)[0] or "\\" in cname.split("[[", 1)[1].split("]]", 1)[0])
+        ):
             seed_c = channel.id + random_set
             seed_d = cfg.SEED + channel.id + random_set
-            b, m = cname.split('[[', 1)
-            m, e = m.split(']]', 1)
-            if '\\' in m:
-                words = m.split('\\')
+            b, m = cname.split("[[", 1)
+            m, e = m.split("]]", 1)
+            if "\\" in m:
+                words = m.split("\\")
                 seed(seed_d)
                 m = choice(words)
             else:
-                words = m.split('/')
+                words = m.split("/")
                 seed(seed_c)
                 m = choice(words)
             cname = b + m + e
             random_set += 1
 
-        if '@@nato@@' in cname and guild_is_gold:
-            nato = ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo', 'Foxtrot', 'Golf', 'Hotel', 'India', 'Juliett',
-                    'Kilo', 'Lima', 'Mike', 'November', 'Oscar', 'Papa', 'Quebec', 'Romeo', 'Sierra', 'Tango',
-                    'Uniform', 'Victor', 'Whiskey', 'X Ray', 'Yankee', 'Zulu']
+        if "@@nato@@" in cname and guild_is_gold:
+            nato = [
+                "Alpha",
+                "Bravo",
+                "Charlie",
+                "Delta",
+                "Echo",
+                "Foxtrot",
+                "Golf",
+                "Hotel",
+                "India",
+                "Juliett",
+                "Kilo",
+                "Lima",
+                "Mike",
+                "November",
+                "Oscar",
+                "Papa",
+                "Quebec",
+                "Romeo",
+                "Sierra",
+                "Tango",
+                "Uniform",
+                "Victor",
+                "Whiskey",
+                "X Ray",
+                "Yankee",
+                "Zulu",
+            ]
             if i < len(nato):
                 nato = nato[i]
             else:
                 nato = nato[i % len(nato)] + " " + str(ceil((i + 1) / len(nato)))
-            cname = cname.replace('@@nato@@', nato)
+            cname = cname.replace("@@nato@@", nato)
 
-        if '@@num@@' in cname:
+        if "@@num@@" in cname:
             members = [m for m in channel.members if not m.bot]
-            cname = cname.replace('@@num@@', str(len(members)))
+            cname = cname.replace("@@num@@", str(len(members)))
 
-        if '@@num_playing@@' in cname and guild_is_sapphire:
-            cname = cname.replace('@@num_playing@@', party['num_playing'])
+        if "@@num_playing@@" in cname and guild_is_sapphire:
+            cname = cname.replace("@@num_playing@@", party["num_playing"])
 
-        if '@@party_size@@' in cname and guild_is_sapphire:
-            cname = cname.replace('@@party_size@@', party['size'])
+        if "@@party_size@@" in cname and guild_is_sapphire:
+            cname = cname.replace("@@party_size@@", party["size"])
 
-        if '@@party_state@@' in cname and guild_is_sapphire:
-            cname = cname.replace('@@party_state@@', party['state'])
+        if "@@party_state@@" in cname and guild_is_sapphire:
+            cname = cname.replace("@@party_state@@", party["state"])
 
-        if '@@party_details@@' in cname and guild_is_sapphire:
-            cname = cname.replace('@@party_details@@', party['details'])
+        if "@@party_details@@" in cname and guild_is_sapphire:
+            cname = cname.replace("@@party_details@@", party["details"])
 
         others = -1
-        if '@@num_others@@' in cname:
-            others = len([m for m in channel.members if (
-                not m.bot and
-                m.id != creator_id
-            )])
-            cname = cname.replace('@@num_others@@', str(others))
+        if "@@num_others@@" in cname:
+            others = len([m for m in channel.members if (not m.bot and m.id != creator_id)])
+            cname = cname.replace("@@num_others@@", str(others))
 
-        while ('<<' in cname and
-               '>>' in cname and
-               ('/' in cname.split('<<', 1)[1].split('>>', 1)[0] or
-                '\\' in cname.split('<<', 1)[1].split('>>', 1)[0])):
-            b, m = cname.split('<<', 1)
-            m, e = m.split('>>', 1)
+        while (
+            "<<" in cname
+            and ">>" in cname
+            and ("/" in cname.split("<<", 1)[1].split(">>", 1)[0] or "\\" in cname.split("<<", 1)[1].split(">>", 1)[0])
+        ):
+            b, m = cname.split("<<", 1)
+            m, e = m.split(">>", 1)
             c = None
-            if m.count('/') == 1:
-                c = '/'
+            if m.count("/") == 1:
+                c = "/"
                 n = len([m for m in channel.members if not m.bot])
-            elif m.count('\\') == 1:
-                c = '\\'
+            elif m.count("\\") == 1:
+                c = "\\"
                 if others == -1:
-                    n = len([m for m in channel.members if (
-                        not m.bot and
-                        m.id != utils.get_creator_id(settings, channel)
-                    )])
+                    n = len(
+                        [m for m in channel.members if (not m.bot and m.id != utils.get_creator_id(settings, channel))]
+                    )
                 else:
                     n = others
             if c is not None:
@@ -893,71 +931,71 @@ async def rename_channel(guild, channel, settings, primary_id, templates=None, i
                     m = p
             cname = b + m + e
 
-        if '@@bitrate@@' in cname and guild_is_gold:
-            cname = cname.replace('@@bitrate@@', "{}kbps".format(round(channel.bitrate / 1000)))
+        if "@@bitrate@@" in cname and guild_is_gold:
+            cname = cname.replace("@@bitrate@@", "{}kbps".format(round(channel.bitrate / 1000)))
 
-        while '{{' in cname and '}}' in cname and cname.count('{{') == cname.count('}}') and guild_is_gold:
-            m, e = cname.split('}}', 1)
-            sections = m.split('{{')
-            b = '{{'.join(sections[:-1])
+        while "{{" in cname and "}}" in cname and cname.count("{{") == cname.count("}}") and guild_is_gold:
+            m, e = cname.split("}}", 1)
+            sections = m.split("{{")
+            b = "{{".join(sections[:-1])
             m = sections[-1]
 
             m = utils.eval_expression(m, guild_is_sapphire, creator, party, gname)
             cname = b + m + e
 
-        if '@@game_name@@' in cname:
-            cname = cname.replace('@@game_name@@', gname)
+        if "@@game_name@@" in cname:
+            cname = cname.replace("@@game_name@@", gname)
 
-        if '@@creator@@' in cname:
-            cname = cname.replace('@@creator@@', creator_name)
+        if "@@creator@@" in cname:
+            cname = cname.replace("@@creator@@", creator_name)
 
-        if '@@stream_name@@' in cname:
+        if "@@stream_name@@" in cname:
             stream_name = ""
             for act in creator.activities:
                 if act.type == discord.ActivityType.streaming:
                     stream_name = act.name
                     break
-            cname = cname.replace('@@stream_name@@', stream_name)
+            cname = cname.replace("@@stream_name@@", stream_name)
 
-        while '""' in cname and cname.count('""') % 2 == 0 and ':' in cname.split('""', 1)[1].split('""')[0]:
+        while '""' in cname and cname.count('""') % 2 == 0 and ":" in cname.split('""', 1)[1].split('""')[0]:
             b, m = cname.split('""', 1)
             m, e = m.split('""', 1)
-            m, s = m.split(':', 1)
+            m, s = m.split(":", 1)
             s = s.strip()
-            modes = m.split('+')
+            modes = m.split("+")
             ops = {
-                'caps': str.upper,
-                'upper': str.upper,
-                'lower': str.lower,
-                'title': utils.capitalize,
-                'swap': str.swapcase,
-                'rand': utils.random_case,
-                'usd': utils.upsidedown,
-                'acro': utils.acronym,
-                'remshort': utils.remove_short_words,
-                'spaces': utils.full_strip,
-                'uwu': translate.uwu,
-                'scaps': translate.small_caps,
-                'bold': translate.bold,
-                'italic': translate.italic,
-                'bolditalic': translate.bolditalic,
-                'script': translate.script,
-                'boldscript': translate.boldscript,
-                'fraktur': translate.fraktur,
-                'boldfraktur': translate.boldfraktur,
-                'double': translate.double,
-                'sans': translate.sans,
-                'boldsans': translate.boldsans,
-                'italicsans': translate.italicsans,
-                'bolditalicsans': translate.bolditalicsans,
-                'mono': translate.mono,
+                "caps": str.upper,
+                "upper": str.upper,
+                "lower": str.lower,
+                "title": utils.capitalize,
+                "swap": str.swapcase,
+                "rand": utils.random_case,
+                "usd": utils.upsidedown,
+                "acro": utils.acronym,
+                "remshort": utils.remove_short_words,
+                "spaces": utils.full_strip,
+                "uwu": translate.uwu,
+                "scaps": translate.small_caps,
+                "bold": translate.bold,
+                "italic": translate.italic,
+                "bolditalic": translate.bolditalic,
+                "script": translate.script,
+                "boldscript": translate.boldscript,
+                "fraktur": translate.fraktur,
+                "boldfraktur": translate.boldfraktur,
+                "double": translate.double,
+                "sans": translate.sans,
+                "boldsans": translate.boldsans,
+                "italicsans": translate.italicsans,
+                "bolditalicsans": translate.bolditalicsans,
+                "mono": translate.mono,
             }
             for mode in modes:
                 mode = mode.lower().strip()
                 if mode in ops:
                     s = ops[mode](s)
                     continue
-                if mode.endswith('w') and len(mode) <= 3:
+                if mode.endswith("w") and len(mode) <= 3:
                     try:
                         n = mode[:-1].strip()
                         n = int(n)
@@ -983,8 +1021,12 @@ async def rename_channel(guild, channel, settings, primary_id, templates=None, i
                 await channel.edit(name=cname)
             except discord.errors.Forbidden:
                 log("Cannot rename channel {}: Missing permissions".format(channel.id), guild)
-                await blind_echo(":warning: **Error!** I don't have permission to rename channel `{}`{}".format(
-                    channel.id, " in the \"{}\" category".format(channel.category) if channel.category else ""), guild)
+                await blind_echo(
+                    ":warning: **Error!** I don't have permission to rename channel `{}`{}".format(
+                        channel.id, ' in the "{}" category'.format(channel.category) if channel.category else ""
+                    ),
+                    guild,
+                )
             except discord.errors.HTTPException as e:
                 log("Cannot rename channel {}: {}".format(channel.id, e.text), guild)
 
@@ -1003,11 +1045,11 @@ def get_secondaries(guild, settings=None, include_jc=False):
     if not settings:
         settings = utils.get_serv_settings(guild)
     secondaries = []
-    for p in settings['auto_channels']:
-        for s, sv in settings['auto_channels'][p]['secondaries'].items():
+    for p in settings["auto_channels"]:
+        for s, sv in settings["auto_channels"][p]["secondaries"].items():
             secondaries.append(s)
-            if include_jc and 'jc' in sv:
-                secondaries.append(sv['jc'])
+            if include_jc and "jc" in sv:
+                secondaries.append(sv["jc"])
     return secondaries
 
 
@@ -1016,11 +1058,11 @@ def get_join_channels(guild, settings=None):
     if not settings:
         settings = utils.get_serv_settings(guild)
     jcs = {}
-    for p in settings['auto_channels']:
-        for s, sv in settings['auto_channels'][p]['secondaries'].items():
-            if 'jc' in sv:
-                sv['vc'] = s
-                jcs[sv['jc']] = sv
+    for p in settings["auto_channels"]:
+        for s, sv in settings["auto_channels"][p]["secondaries"].items():
+            if "jc" in sv:
+                sv["vc"] = s
+                jcs[sv["jc"]] = sv
     return jcs
 
 
@@ -1029,33 +1071,30 @@ def get_voice_context_channel_ids(guild, settings=None):
     if not settings:
         settings = utils.get_serv_settings(guild)
     channel_ids = []
-    for p in settings['auto_channels']:
-        for s, sv in settings['auto_channels'][p]['secondaries'].items():
-            if 'tc' in sv:
-                channel_ids.append(sv['tc'])
+    for p in settings["auto_channels"]:
+        for s, sv in settings["auto_channels"][p]["secondaries"].items():
+            if "tc" in sv:
+                channel_ids.append(sv["tc"])
     return channel_ids
 
 
 @utils.func_timer()
 async def create_primary(guild, cname, author):
     overwrites = {
-        guild.me: discord.PermissionOverwrite(read_messages=True,
-                                              connect=True,
-                                              manage_channels=True,
-                                              move_members=True)
+        guild.me: discord.PermissionOverwrite(read_messages=True, connect=True, manage_channels=True, move_members=True)
     }
     c = await guild.create_voice_channel(cname, overwrites=overwrites)
 
     settings = utils.get_serv_settings(guild)
-    settings['auto_channels'][c.id] = {"secondaries": {}}
-    settings['server_contact'] = author.id
+    settings["auto_channels"][c.id] = {"secondaries": {}}
+    settings["server_contact"] = author.id
     utils.set_serv_settings(guild, settings)
 
     await server_log(
         guild,
-        "🆕 {} (`{}`) created a new primary channel channel (`{}`)".format(
-            user_hash(author), author.id, c.id
-        ), 1, settings
+        "🆕 {} (`{}`) created a new primary channel channel (`{}`)".format(user_hash(author), author.id, c.id),
+        1,
+        settings,
     )
 
     return c
@@ -1077,13 +1116,15 @@ async def create_secondary(guild, primary, creator, private=False):
         return
     elif not check_primary_permissions(primary, guild.me):
         lock_user_request(creator)
-        log("{} ({}) tried creating a channel where I don't have permissions".format(creator.display_name,
-                                                                                     creator.id), guild)
+        log(
+            "{} ({}) tried creating a channel where I don't have permissions".format(creator.display_name, creator.id),
+            guild,
+        )
         msg = "{} ❌ You tried creating a channel where I don't have the right permissions.".format(creator.mention)
-        server_contact = guild.get_member(settings['server_contact'])
+        server_contact = guild.get_member(settings["server_contact"])
         msg += "\n\nPlease make sure I have the following permissions"
         if primary.category:
-            msg += " in the \"{}\" category:\n".format(primary.category.name)
+            msg += ' in the "{}" category:\n'.format(primary.category.name)
         else:
             msg += ":\n"
         msg += "- **Manage Channel**\n"
@@ -1115,13 +1156,15 @@ async def create_secondary(guild, primary, creator, private=False):
                     "You are trying to create voice channels in **{}** too quickly "
                     "and have been placed on cooldown for 15 seconds.\n"
                     "It's perfectly okay to stress test me initially, but continued abuse or any deliberate attempt at "
-                    "sabotage may eventually result in you being blacklisted and ignored.".format(guild.name)
+                    "sabotage may eventually result in you being blacklisted and ignored.".format(guild.name),
                 )
                 await server_log(
                     guild,
                     "⚠ {} (`{}`) tried creating channels too quickly and has entered cooldown".format(
                         user_hash(creator), creator.id
-                    ), 1, settings
+                    ),
+                    1,
+                    settings,
                 )
             return
 
@@ -1131,19 +1174,21 @@ async def create_secondary(guild, primary, creator, private=False):
     user_limit = 0
     if primary.user_limit:
         user_limit = primary.user_limit
-    elif 'limit' in settings['auto_channels'][primary.id]:
-        user_limit = settings['auto_channels'][primary.id]['limit']
+    elif "limit" in settings["auto_channels"][primary.id]:
+        user_limit = settings["auto_channels"][primary.id]["limit"]
     bitrate = primary.bitrate
     try:
-        bitrate = min(guild.bitrate_limit, settings['custom_bitrates'][str(creator.id)] * 1000)
+        bitrate = min(guild.bitrate_limit, settings["custom_bitrates"][str(creator.id)] * 1000)
     except KeyError:
         pass
 
-    perms_source = (settings['auto_channels'][primary.id]['inheritperms']
-                    if 'inheritperms' in settings['auto_channels'][primary.id]
-                    else 'PRIMARY')
+    perms_source = (
+        settings["auto_channels"][primary.id]["inheritperms"]
+        if "inheritperms" in settings["auto_channels"][primary.id]
+        else "PRIMARY"
+    )
     overwrites = primary.overwrites
-    if perms_source == 'CATEGORY':
+    if perms_source == "CATEGORY":
         if primary.category:
             overwrites = primary.category.overwrites
     elif isinstance(perms_source, int):
@@ -1169,14 +1214,15 @@ async def create_secondary(guild, primary, creator, private=False):
             bitrate=bitrate,
             user_limit=user_limit,
             overwrites=overwrites,
-            rtc_region=primary.rtc_region
+            rtc_region=primary.rtc_region,
         )
     except discord.errors.Forbidden:
         await dm_user(
             creator,
             ":warning: Sorry, I was unable to create a channel for you as I don't have permission to do so. "
             "Please let an admin of the server **{}** know about this issue so that "
-            "they can fix this.".format(esc_md(guild.name)))
+            "they can fix this.".format(esc_md(guild.name)),
+        )
         await creator.move_to(None)  # Kick them from voice channel
         lock_user_request(creator)
         return
@@ -1187,7 +1233,8 @@ async def create_secondary(guild, primary, creator, private=False):
                 creator,
                 ":warning: Sorry, I was unable to create a channel for you as the maximum number of channels in that "
                 "category has been reached. Please let an admin of the server **{}** know about this issue so that "
-                "they can make another category for voice channels.".format(esc_md(guild.name)))
+                "they can make another category for voice channels.".format(esc_md(guild.name)),
+            )
             await creator.move_to(None)  # Kick them from voice channel
             lock_user_request(creator)
             return
@@ -1199,26 +1246,25 @@ async def create_secondary(guild, primary, creator, private=False):
     settings = utils.get_serv_settings(guild)
     sv = {"creator": creator.id}
     if private:
-        sv['priv'] = True
-    settings['auto_channels'][primary.id]['secondaries'][c.id] = sv
-    settings['left'] = False  # Just in case a returning guild's "on_guild_join" call wasn't caught.
-    settings['last_activity'] = int(time())
+        sv["priv"] = True
+    settings["auto_channels"][primary.id]["secondaries"][c.id] = sv
+    settings["left"] = False  # Just in case a returning guild's "on_guild_join" call wasn't caught.
+    settings["last_activity"] = int(time())
     utils.set_serv_settings(guild, settings)
 
     # Set channel position
     above = True
-    if ('above' in settings['auto_channels'][primary.id] and
-            settings['auto_channels'][primary.id]['above'] is False):
+    if "above" in settings["auto_channels"][primary.id] and settings["auto_channels"][primary.id]["above"] is False:
         above = False
     offset = 0
     if not above:
-        offset = len(settings['auto_channels'][primary.id]['secondaries']) - 1
+        offset = len(settings["auto_channels"][primary.id]["secondaries"]) - 1
     try:
         await c.move(
             category=primary.category,
             before=primary if above else None,
             after=primary if not above else None,
-            offset=offset
+            offset=offset,
         )
     except discord.errors.Forbidden:
         # No idea why it sometimes throws this, seems like a bug.
@@ -1236,21 +1282,14 @@ async def create_secondary(guild, primary, creator, private=False):
     lock_user_request(creator, 5)  # Lock again just to remove the 20s offset used earlier
 
     # Rename channel
-    num_siblings = len([s for s in settings['auto_channels'][primary.id]['secondaries'] if s != c.id])
+    num_siblings = len([s for s in settings["auto_channels"][primary.id]["secondaries"] if s != c.id])
     name = await rename_channel(
-        guild=guild,
-        channel=c,
-        settings=None,
-        primary_id=primary.id,
-        i=num_siblings,
-        ignore_lock=True
+        guild=guild, channel=c, settings=None, primary_id=primary.id, i=num_siblings, ignore_lock=True
     )
 
     # Logging
-    log_msg = "✅ {} (`{}`) created \"**{}**\" (`{}`) using \"**{}**\" (`{}`)".format(
-        user_hash(creator), creator.id,
-        "None" if not name else esc_md(name), c.id,
-        esc_md(primary.name), primary.id
+    log_msg = '✅ {} (`{}`) created "**{}**" (`{}`) using "**{}**" (`{}`)'.format(
+        user_hash(creator), creator.id, "None" if not name else esc_md(name), c.id, esc_md(primary.name), primary.id
     )
     if bitrate != primary.bitrate:
         log_msg += " [{}kbps]".format(round(bitrate / 1000))
@@ -1258,7 +1297,7 @@ async def create_secondary(guild, primary, creator, private=False):
 
     # Text Channel
     settings = utils.get_serv_settings(guild)
-    if 'text_channels' in settings and settings['text_channels'] and is_gold(guild):
+    if "text_channels" in settings and settings["text_channels"] and is_gold(guild):
         try:
             r = await guild.create_role(name="🎤🤖vc {}".format(c.id))
         except discord.errors.Forbidden:
@@ -1269,19 +1308,22 @@ async def create_secondary(guild, primary, creator, private=False):
             guild.me: discord.PermissionOverwrite(read_messages=True),
             r: discord.PermissionOverwrite(read_messages=True),
         }
-        if 'stct' in settings:
-            showto_r = guild.get_role(settings['stct'])
+        if "stct" in settings:
+            showto_r = guild.get_role(settings["stct"])
             if showto_r:
                 overwrites[showto_r] = discord.PermissionOverwrite(read_messages=True)
         tc = await guild.create_text_channel(
-            utils.nice_cname(settings['text_channel_name']) if 'text_channel_name' in settings else "voice context",
+            utils.nice_cname(settings["text_channel_name"]) if "text_channel_name" in settings else "voice context",
             category=primary.category,
             overwrites=overwrites,
-            topic=(":eye: This channel is only visible to members of your voice channel, "
-                   "and admins of this server. It will be deleted when everyone leaves. VC ID: {}".format(c.id)))
+            topic=(
+                ":eye: This channel is only visible to members of your voice channel, "
+                "and admins of this server. It will be deleted when everyone leaves. VC ID: {}".format(c.id)
+            ),
+        )
         settings = utils.get_serv_settings(guild)
-        settings['auto_channels'][primary.id]['secondaries'][c.id]['tc'] = tc.id
-        settings['auto_channels'][primary.id]['secondaries'][c.id]['tcr'] = r.id
+        settings["auto_channels"][primary.id]["secondaries"][c.id]["tc"] = tc.id
+        settings["auto_channels"][primary.id]["secondaries"][c.id]["tcr"] = r.id
         utils.set_serv_settings(guild, settings)
 
     if creator in c.members:
@@ -1308,8 +1350,12 @@ async def delete_secondary(guild, channel):
         pass
     except discord.errors.Forbidden:
         log("Forbidden to delete channel {} in guild {}".format(channel.id, guild.id), guild)
-        await blind_echo(":warning: **Error!** I don't have permission to delete channel `{}`{}".format(
-            channel.id, " in the \"{}\" category".format(channel.category) if channel.category else ""), guild)
+        await blind_echo(
+            ":warning: **Error!** I don't have permission to delete channel `{}`{}".format(
+                channel.id, ' in the "{}" category'.format(channel.category) if channel.category else ""
+            ),
+            guild,
+        )
         lock_channel_request(channel, 10)
     except Exception:
         log("Failed to delete channel {} in guild {}".format(channel.id, guild.id), guild)
@@ -1317,35 +1363,35 @@ async def delete_secondary(guild, channel):
         print(traceback.format_exc())
     else:
         settings = utils.get_serv_settings(guild)
-        for p in settings['auto_channels']:
-            tmp = settings['auto_channels'][p]['secondaries'].copy()
+        for p in settings["auto_channels"]:
+            tmp = settings["auto_channels"][p]["secondaries"].copy()
             for s, sv in tmp.items():
                 if s == cid:
-                    if 'jc' in sv:
-                        jc = guild.get_channel(sv['jc'])
+                    if "jc" in sv:
+                        jc = guild.get_channel(sv["jc"])
                         if jc:
                             try:
                                 await jc.delete()
                             except discord.errors.NotFound:
                                 # Small chance of channel disappearing before we can delete it
                                 pass
-                    if 'tc' in sv:
-                        tc = guild.get_channel(sv['tc'])
+                    if "tc" in sv:
+                        tc = guild.get_channel(sv["tc"])
                         if tc:
                             try:
                                 await tc.delete()
                             except discord.errors.NotFound:
                                 # Small chance of channel disappearing before we can delete it
                                 pass
-                    if 'tcr' in sv:
-                        tcr = guild.get_role(sv['tcr'])
+                    if "tcr" in sv:
+                        tcr = guild.get_role(sv["tcr"])
                         if tcr:
                             try:
                                 await tcr.delete()
                             except discord.errors.NotFound:
                                 # Small chance of role disappearing before we can delete it
                                 pass
-                    del settings['auto_channels'][p]['secondaries'][s]
+                    del settings["auto_channels"][p]["secondaries"][s]
         utils.set_serv_settings(guild, settings)
 
         if channel.id in cfg.ATTEMPTED_CHANNEL_NAMES:
@@ -1353,27 +1399,26 @@ async def delete_secondary(guild, channel):
 
         unlock_channel_request(channel)
 
-        await server_log(
-            guild,
-            "❌ \"**{}**\" (`{}`) was deleted".format(
-                esc_md(channel.name), channel.id
-            ), 2, settings
-        )
+        await server_log(guild, '❌ "**{}**" (`{}`) was deleted'.format(esc_md(channel.name), channel.id), 2, settings)
 
 
 @utils.func_timer()
 async def remove_broken_channels(guild):
     voice_channels = [x for x in guild.channels if isinstance(x, discord.VoiceChannel)]
     for v in voice_channels:
-        if v.name in ['⌛', '⚠'] and not channel_is_requested(v):
+        if v.name in ["⌛", "⚠"] and not channel_is_requested(v):
             if not v.members:
                 lock_channel_request(v)
                 try:
                     await v.delete()
                 except discord.errors.Forbidden:
                     log("Forbidden to delete channel {} in guild {}".format(v.id, guild.id), guild)
-                    await blind_echo(":warning: **Error!** I don't have permission to delete channel `{}`{}".format(
-                        v.id, " in the \"{}\" category".format(v.category) if v.category else ""), guild)
+                    await blind_echo(
+                        ":warning: **Error!** I don't have permission to delete channel `{}`{}".format(
+                            v.id, ' in the "{}" category'.format(v.category) if v.category else ""
+                        ),
+                        guild,
+                    )
                     lock_channel_request(v, 10)
                 except discord.errors.NotFound:
                     log("Failed to delete channel {} in guild {} (NotFound)".format(v.id, guild.id), guild)
@@ -1387,8 +1432,10 @@ async def remove_broken_channels(guild):
     if is_gold(guild):
         text_channels = [x for x in guild.channels if isinstance(x, discord.TextChannel)]
         for c in text_channels:
-            front = (":eye: This channel is only visible to members of your voice channel, "
-                     "and admins of this server. It will be deleted when everyone leaves. VC ID: ")
+            front = (
+                ":eye: This channel is only visible to members of your voice channel, "
+                "and admins of this server. It will be deleted when everyone leaves. VC ID: "
+            )
             if c.topic and c.topic.startswith(front):
                 try:
                     vcid = int(c.topic.split(front)[1])

@@ -4,24 +4,26 @@ from commands.base import Cmd
 help_text = [
     [
         ("Usage:", "<PREFIX><COMMAND>"),
-        ("Description:",
-         "A debugging command to get information about the channel you're in, such as the current bitrate, "
-         "the games people in the channel are playing, and any custom bitrate settings for each user."),
+        (
+            "Description:",
+            "A debugging command to get information about the channel you're in, such as the current bitrate, "
+            "the games people in the channel are playing, and any custom bitrate settings for each user.",
+        ),
     ]
 ]
 
 
 async def execute(ctx, params):
-    settings = ctx['settings']
-    asip = settings['asip'] if 'asip' in settings else False
-    c = ctx['voice_channel']
+    settings = ctx["settings"]
+    asip = settings["asip"] if "asip" in settings else False
+    c = ctx["voice_channel"]
 
-    template = settings['channel_name_template']
-    for p, v in settings['auto_channels'].items():
-        for s in v['secondaries']:
+    template = settings["channel_name_template"]
+    for p, v in settings["auto_channels"].items():
+        for s in v["secondaries"]:
             if s == c.id:
-                if 'template' in v:
-                    template = v['template']
+                if "template" in v:
+                    template = v["template"]
                 break
 
     r = "Current channel name: **{}**\n".format(func.esc_md(c.name))
@@ -31,12 +33,13 @@ async def execute(ctx, params):
     r += "Custom bitrates:"
     any_bitrates = False
     for m in c.members:
-        if 'custom_bitrates' not in settings:
+        if "custom_bitrates" not in settings:
             break
-        if str(m.id) in settings['custom_bitrates']:
+        if str(m.id) in settings["custom_bitrates"]:
             any_bitrates = True
             r += "\n:white_small_square: {}: **{}**".format(
-                func.esc_md(m.display_name), settings['custom_bitrates'][str(m.id)])
+                func.esc_md(m.display_name), settings["custom_bitrates"][str(m.id)]
+            )
     if not any_bitrates:
         r += " **None**"
     r += "\n\n"
@@ -47,18 +50,16 @@ async def execute(ctx, params):
         if m.activity and m.activity.name and not m.bot:
             act = m.activity
             games.append(act.name)
-            r += "\n:white_small_square: {}: **{}**".format(
-                func.esc_md(m.display_name),
-                func.esc_md(act.name))
-            r += '\t'
-            if hasattr(act, 'state') and act.state:
+            r += "\n:white_small_square: {}: **{}**".format(func.esc_md(m.display_name), func.esc_md(act.name))
+            r += "\t"
+            if hasattr(act, "state") and act.state:
                 r += " {}".format(func.esc_md(act.state))
-            if hasattr(act, 'details') and act.details:
+            if hasattr(act, "details") and act.details:
                 r += " ({})".format(func.esc_md(act.details))
-            if hasattr(act, 'party') and act.party:
+            if hasattr(act, "party") and act.party:
                 r += " \tParty: "
-                r += "" if 'id' not in act.party else "`{}` ".format(act.party['id'])
-                r += "" if 'size' not in act.party else ('/'.join(str(v) for v in act.party['size']))
+                r += "" if "id" not in act.party else "`{}` ".format(act.party["id"])
+                r += "" if "size" not in act.party else ("/".join(str(v) for v in act.party["size"]))
     if not games:
         r += " **None**"
 
@@ -67,24 +68,26 @@ async def execute(ctx, params):
         party = func.get_party_info(c, g, asip, default="None")
         if party:
             r += "\n\n**{}**\n".format(g)
-            r += "Size: **{}**".format(party['size'])
-            r += " *(includes {} user{} with no status)*\n".format(
-                party['sneakies'], '' if party['sneakies'] == 1 else 's'
-            ) if party['sneakies'] else "\n"
-            r += "State: **{}**\n".format(party['state'])
-            r += "Details: **{}**".format(party['details'])
+            r += "Size: **{}**".format(party["size"])
+            r += (
+                " *(includes {} user{} with no status)*\n".format(
+                    party["sneakies"], "" if party["sneakies"] == 1 else "s"
+                )
+                if party["sneakies"]
+                else "\n"
+            )
+            r += "State: **{}**\n".format(party["state"])
+            r += "Details: **{}**".format(party["details"])
 
     aliases = {}
     for g in games:
-        if g in settings['aliases']:
-            aliases[g] = settings['aliases'][g]
+        if g in settings["aliases"]:
+            aliases[g] = settings["aliases"][g]
     if aliases:
         r += "\n\n"
         r += "Aliases for these games:"
         for g, a in aliases.items():
-            r += "\n:white_small_square: {}: **{}**".format(
-                func.esc_md(g),
-                func.esc_md(a))
+            r += "\n:white_small_square: {}: **{}**".format(func.esc_md(g), func.esc_md(a))
 
     return True, r
 
