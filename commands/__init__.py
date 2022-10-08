@@ -115,6 +115,10 @@ async def run(c, ctx, params):
 
     cmd = commands[c]
 
+    if isinstance(ctx["channel"], discord.VoiceChannel):
+        # Sending messages to voice channels is currently unsupported until we upgrade d.py version.
+        return False, "Sorry, commands are not supported inside voice channels."
+
     if cmd.admin_required and not ctx["admin"]:
         return False, (
             "You don't have permission to use that command, only managers of this server (i.e. users with "

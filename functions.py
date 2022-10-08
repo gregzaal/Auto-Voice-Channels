@@ -409,6 +409,11 @@ async def echo(msg, channel, user=None):
                     "`#{}` channel of **{}**.".format(channel.name, channel.guild.name),
                 )
             return False
+        except AttributeError:
+            log("Can't echo to voice channel", channel.guild)
+            if user and isinstance(channel, discord.VoiceChannel):
+                await dm_user(user, c)
+            return False
         except Exception:
             log("Failed to echo", channel.guild)
             print(traceback.format_exc())
