@@ -153,12 +153,12 @@ async def admin_command(cmd, ctx):
 
     if cmd == "patrons":
         if patreon_info is None:
-            await channel.send(content="❌")
+            await channel.send(content="❌ No patreon_info.py file")
             return
 
         patrons = patreon_info.fetch_patrons(force_update=True)
         if not patrons:
-            await channel.send(content="❌")
+            await channel.send(content="❌ No patrons?")
             return
         fields = {}
         auths = patreon_info.update_patron_servers(patrons)
