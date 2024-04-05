@@ -2,7 +2,7 @@ import functions as func
 from commands.base import Cmd
 
 try:
-    import patreon_info
+    import patreon_whyyyyyy
 except ImportError:
     patreon_info = None
 

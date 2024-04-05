@@ -13,7 +13,7 @@ import utils
 from functions import echo, log
 
 try:
-    import patreon_info
+    import patreon_whyyyyyy
 except ImportError:
     patreon_info = None
 
