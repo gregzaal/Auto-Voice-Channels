@@ -17,7 +17,7 @@ from utils import log
 import roman
 
 try:
-    import patreon_whyyyyyy
+    import patreon_info
 except ImportError:
     patreon_info = None
 
