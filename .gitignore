@@ -7,10 +7,10 @@ __pycache__
 analytics.json
 config.json
 log*.txt
-patreon_config.json
-patreon_data.json
-patreon_info.py
+patreon_*.json
+patreon_*.py
 patron_auths.json
+restart all sapphires.sh
 push.bat
 secondaries.txt
 venv.bat
