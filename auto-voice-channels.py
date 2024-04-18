@@ -8,6 +8,7 @@ import sys
 from copy import deepcopy
 from datetime import datetime
 from time import time
+from functools import partial
 
 import cfg
 from commands import admin_commands
@@ -208,7 +209,7 @@ async def main_loop(client):
             else:
                 if cfg.NUM_PATRONS != num_patrons:
                     if cfg.NUM_PATRONS != -1:  # Skip first run, since patrons are fetched on startup already.
-                        await func.check_patreon(force_update=(not DEV_BOT), client=client)
+                        await func.check_patreon(force_update=False, client=client)
                     cfg.NUM_PATRONS = num_patrons
 
 
@@ -694,9 +695,19 @@ async def update_status(client):
 
 
 @loop(hours=3)
-async def check_patreon():
-    # Will run at startup too, since it doesn't have to wait for client.is_ready
-    await func.check_patreon(force_update=cfg.SAPPHIRE_ID in [None, 0] and not DEV_BOT)
+async def check_patreon(client):
+    await client.wait_until_ready()
+
+    check_patreon.last_run = datetime.now(pytz.utc)
+    if client.is_ready():
+        await asyncio.get_event_loop().run_in_executor(
+            POOL,
+            partial(
+                lambda: asyncio.run(
+                    func.check_patreon(force_update=cfg.SAPPHIRE_ID in [None, 0] or DEV_BOT, client=client)
+                )
+            ),
+        )
 
 
 loops = {  # loops with client as only arg - passed to admin_commands's `loop` cmd
@@ -710,6 +721,7 @@ loops = {  # loops with client as only arg - passed to admin_commands's `loop` c
     "lingering_secondaries": lingering_secondaries,
     "analytics": analytics,
     "update_status": update_status,
+    "check_patreon": check_patreon,
 }
 if "disable_creation_loop" not in cfg.CONFIG or not cfg.CONFIG["disable_creation_loop"]:
     loops["creation_loop"] = creation_loop
@@ -1319,5 +1331,4 @@ for ln, l in loops.items():
     l.add_exception_type(RuntimeError)
     l.error(loop_error_override)
     l.start(client)
-check_patreon.start()
 client.run(TOKEN)
