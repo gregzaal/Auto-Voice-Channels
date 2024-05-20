@@ -11,6 +11,7 @@ TIER_ICONS = {
     "gold": ":credit_card:",
     "sapphire": ":gem:",
     "diamond": ":diamond_shape_with_a_dot_inside:",
+    "free": ":free:",
 }
 
 # Store settings so we don't have to read them from drive all the time
