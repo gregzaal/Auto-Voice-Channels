@@ -200,17 +200,9 @@ async def main_loop(client):
         if cfg.TIMINGS[fn_name] > 20:
             await func.log_timings(client, fn_name)
 
-        # Check for new patrons using patron role in support server
-        if cfg.SAPPHIRE_ID is None:
-            try:
-                num_patrons = len(client.get_guild(601015720200896512).get_role(606482184043364373).members)
-            except AttributeError:
-                pass
-            else:
-                if cfg.NUM_PATRONS != num_patrons:
-                    if cfg.NUM_PATRONS != -1:  # Skip first run, since patrons are fetched on startup already.
-                        await func.check_patreon(force_update=False, client=client)
-                    cfg.NUM_PATRONS = num_patrons
+        # Ensure patrons var is up to date
+        print("main loop", len(cfg.PATRONS))
+        await func.check_patreon(force_update=False)
 
 
 @loop(seconds=cfg.CONFIG["loop_interval"])
