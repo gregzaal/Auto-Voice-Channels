@@ -62,22 +62,13 @@ describe('GuildSettingsService (integration)', () => {
     expect(config.defaultTemplate).toBe('@@creator@@’s room');
   });
 
-  it('adds and removes aliases by game or alias value', async () => {
+  it('adds aliases by game name', async () => {
     await settings.addAlias(GUILD, 'Counter-Strike 2', 'CS2');
     await settings.addAlias(GUILD, 'Dead by Daylight', 'DbD');
     expect((await settings.getConfig(GUILD)).aliases).toEqual({
       'Counter-Strike 2': 'CS2',
       'Dead by Daylight': 'DbD',
     });
-
-    const byValue = await settings.removeAlias(GUILD, 'CS2');
-    expect(byValue.ok).toBe(true);
-    const byKey = await settings.removeAlias(GUILD, 'Dead by Daylight');
-    expect(byKey.ok).toBe(true);
-    expect((await settings.getConfig(GUILD)).aliases).toEqual({});
-
-    const missing = await settings.removeAlias(GUILD, 'nope');
-    expect(missing.ok).toBe(false);
   });
 
   it('creates a primary (real channel + registration) and lists it', async () => {
@@ -109,32 +100,6 @@ describe('GuildSettingsService (integration)', () => {
       status: 'Status here',
       above: true,
     });
-  });
-
-  it('sets a primary template and default limit, and removes the primary', async () => {
-    await settings.createPrimary(GUILD);
-    const channelId = actions.ofType('create')[0]!.channelId;
-
-    expect((await settings.setPrimaryTemplate(GUILD, channelId, '## [@@num@@]')).ok).toBe(true);
-    expect((await settings.setPrimaryLimit(GUILD, channelId, 4)).ok).toBe(true);
-
-    let config = await settings.getConfig(GUILD);
-    expect(config.primaries[0]).toMatchObject({ template: '## [@@num@@]', limit: 4 });
-
-    expect((await settings.setPrimaryLimit(GUILD, channelId, 500)).ok).toBe(false);
-
-    const removed = await settings.removePrimary(GUILD, channelId);
-    expect(removed.ok).toBe(true);
-    expect(actions.ofType('delete').map((a) => a.channelId)).toContain(channelId);
-    config = await settings.getConfig(GUILD);
-    expect(config.primaries).toHaveLength(0);
-  });
-
-  it('rejects operations on a primary from another guild', async () => {
-    await settings.createPrimary(GUILD);
-    const channelId = actions.ofType('create')[0]!.channelId;
-    const res = await settings.setPrimaryTemplate('other-guild', channelId, 'x');
-    expect(res.ok).toBe(false);
   });
 
   it('sets and resets a custom nick', async () => {

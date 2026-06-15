@@ -9,7 +9,7 @@ import type {
 import type { VoiceActions } from './actions.js';
 import { DEFAULT_CHANNEL_NAME_TEMPLATE } from './nameTemplate.js';
 import { isStringMap, parseVoiceSettings, readLogging } from './guildSettings.js';
-import { MAX_USER_LIMIT, type CommandResult } from './commands.js';
+import { type CommandResult } from './commands.js';
 
 /** Logging verbosity levels (legacy parity): 1 lifecycle, 2 changes, 3 joins/leaves. */
 export type LogLevel = 1 | 2 | 3;
@@ -114,20 +114,6 @@ export class GuildSettingsService {
     return ok(`Alias added: **${g}** → **${a}**`);
   }
 
-  /** Removes an alias matched by either its game key or its alias value. */
-  async removeAlias(guildId: string, name: string): Promise<CommandResult> {
-    const needle = name.trim();
-    const config = await this.getConfig(guildId);
-    const aliases = { ...config.aliases };
-    const keys = Object.keys(aliases).filter((k) => k === needle || aliases[k] === needle);
-    if (keys.length === 0) return fail(`No alias matching **${needle}**.`);
-    for (const k of keys) delete aliases[k];
-    await this.deps.guilds.updateSettings(guildId, { aliases });
-    return ok(
-      `Removed ${keys.length} alias${keys.length === 1 ? '' : 'es'} matching **${needle}**.`,
-    );
-  }
-
   /** Creates a Discord voice channel and registers it as a primary. */
   async createPrimary(guildId: string, opts: CreatePrimaryOptions = {}): Promise<CommandResult> {
     const name = opts.name?.trim() || DEFAULT_PRIMARY_NAME;
@@ -148,41 +134,6 @@ export class GuildSettingsService {
     return ok(
       `Created **${name}**. Join it to spawn a voice channel.\n` +
         'Edit it anytime with `/template`, `/position`, `/defaultlimit`, …',
-    );
-  }
-
-  async removePrimary(guildId: string, channelId: string): Promise<CommandResult> {
-    const primary = await this.deps.autoChannels.get(channelId);
-    if (!primary || primary.guildId !== guildId) return fail('That isn’t a creator channel here.');
-    await this.deps.autoChannels.remove(channelId);
-    await this.deps.actions.deleteChannel(guildId, channelId);
-    return ok('Removed the creator channel.');
-  }
-
-  async setPrimaryTemplate(
-    guildId: string,
-    channelId: string,
-    template: string,
-  ): Promise<CommandResult> {
-    const primary = await this.deps.autoChannels.get(channelId);
-    if (!primary || primary.guildId !== guildId) return fail('That isn’t a creator channel here.');
-    const value = template.trim().replace(/[\r\n]+/g, ' ');
-    if (!value) return fail('The template cannot be empty.');
-    await this.deps.autoChannels.upsert(guildId, channelId, { ...primary.template, name: value });
-    return ok(`Template for this creator channel set to:\n\`${value}\``);
-  }
-
-  async setPrimaryLimit(guildId: string, channelId: string, limit: number): Promise<CommandResult> {
-    const primary = await this.deps.autoChannels.get(channelId);
-    if (!primary || primary.guildId !== guildId) return fail('That isn’t a creator channel here.');
-    if (!Number.isInteger(limit) || limit < 0 || limit > MAX_USER_LIMIT) {
-      return fail(`The limit must be a whole number between 0 and ${MAX_USER_LIMIT}.`);
-    }
-    await this.deps.autoChannels.upsert(guildId, channelId, { ...primary.template, limit });
-    return ok(
-      limit === 0
-        ? 'New channels from this creator will be unlimited.'
-        : `New channels from this creator will default to a limit of ${limit}.`,
     );
   }
 
