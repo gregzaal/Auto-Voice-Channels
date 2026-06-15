@@ -315,6 +315,36 @@ describe('VoiceFeature (integration)', () => {
     expect(ids.indexOf('join-a')).toBe(ids.indexOf('a') - 1);
   });
 
+  it('logs members joining and leaving a secondary at level 3', async () => {
+    const logs: { level: number; message: string }[] = [];
+    const f = new VoiceFeature({
+      autoChannels,
+      secondaries,
+      guilds,
+      actions,
+      voice,
+      selfHosted: true,
+      logger: fakeLogger(),
+      serverLog: (_g, level, message) => logs.push({ level, message }),
+    });
+
+    const alice = member('alice');
+    voice.put(PRIMARY, alice);
+    await f.handleVoiceStateUpdate({ guildId: GUILD, member: alice, afterChannelId: PRIMARY });
+    const sec = actions.ofType('create')[0]!.channelId;
+    voice.put(sec, alice);
+
+    // bob joins the secondary → level-3 "joined".
+    voice.put(sec, member('bob'));
+    await f.handleVoiceStateUpdate({ guildId: GUILD, member: member('bob'), afterChannelId: sec });
+    expect(logs).toContainEqual({ level: 3, message: expect.stringContaining('joined') });
+
+    // bob leaves while alice remains → level-3 "left" (not a deletion).
+    voice.drop(sec, 'bob');
+    await f.handleVoiceStateUpdate({ guildId: GUILD, member: member('bob'), beforeChannelId: sec });
+    expect(logs).toContainEqual({ level: 3, message: expect.stringContaining('left') });
+  });
+
   it('re-renders a secondary when its membership/game changes', async () => {
     const alice = member('alice', ['Halo']);
     voice.put(PRIMARY, alice);

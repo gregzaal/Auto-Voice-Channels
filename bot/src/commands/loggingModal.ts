@@ -46,19 +46,23 @@ export function buildLoggingModal(current: LoggingState): ModalBuilder {
           .setMaxValues(1)
           .addOptions(
             new StringSelectMenuOptionBuilder()
-              .setLabel('Off — disable logging')
+              .setLabel('Off')
+              .setDescription('Don’t post any events')
               .setValue('off')
               .setDefault(!current.enabled),
             new StringSelectMenuOptionBuilder()
-              .setLabel('1 — channel lifecycle')
+              .setLabel('Channels created & deleted')
+              .setDescription('When a voice channel is spawned or removed')
               .setValue('1')
               .setDefault(isLevel('1')),
             new StringSelectMenuOptionBuilder()
-              .setLabel('2 — + config changes')
+              .setLabel('+ Renames & ownership changes')
+              .setDescription('Also channel name changes and ownership handovers')
               .setValue('2')
               .setDefault(isLevel('2')),
             new StringSelectMenuOptionBuilder()
-              .setLabel('3 — + joins/leaves')
+              .setLabel('+ Members joining & leaving')
+              .setDescription('Also every join and leave in managed channels')
               .setValue('3')
               .setDefault(isLevel('3')),
           ),

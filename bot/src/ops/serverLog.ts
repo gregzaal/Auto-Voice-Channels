@@ -14,7 +14,8 @@ export interface ServerLoggerDeps {
  * the operation being logged.
  *
  * Settings (on `guilds.settings`): `logging` = channel id or `false`;
- * `log_level` = 1 (lifecycle) | 2 (+changes) | 3 (+joins/leaves), default 1.
+ * `log_level` = 1 (channels created/deleted) | 2 (+ renames & ownership changes) |
+ * 3 (+ members joining/leaving), default 1.
  */
 export class ServerLogger {
   constructor(private readonly deps: ServerLoggerDeps) {}

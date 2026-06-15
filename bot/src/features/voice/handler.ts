@@ -114,8 +114,9 @@ export interface VoiceFeatureDeps {
    */
   joinCompanionFor?: (secondaryChannelId: string) => Promise<string | undefined>;
   /**
-   * Optional sink for per-guild event logging (`/logging`). Level 1 = lifecycle
-   * (create/delete), 2 = config changes, 3 = joins/leaves. Fire-and-forget.
+   * Optional sink for per-guild event logging (`/logging`). Level 1 = channels
+   * created/deleted, 2 = + renames & ownership changes, 3 = + members
+   * joining/leaving. Fire-and-forget.
    */
   serverLog?: (guildId: string, level: 1 | 2 | 3, message: string) => void;
 }
@@ -262,6 +263,7 @@ export class VoiceFeature {
         // `@@creator@@` resolves to the new owner (not "Unknown") and a private
         // channel's "⇩ Join" follows suit.
         await this.handleSecondaryLeave(guildId, beforeChannelId, event.member.id);
+        this.deps.serverLog?.(guildId, 3, `🚪 <@${event.member.id}> left <#${beforeChannelId}>`);
         touched.push(beforeChannelId);
       }
     }
@@ -272,6 +274,7 @@ export class VoiceFeature {
       // appends the member to its arrival roster.
       if (await this.deps.secondaries.isSecondary(guildId, afterChannelId)) {
         await this.addToRoster(guildId, afterChannelId, event.member.id);
+        this.deps.serverLog?.(guildId, 3, `🔊 <@${event.member.id}> joined <#${afterChannelId}>`);
         touched.push(afterChannelId);
       }
     }
@@ -402,7 +405,7 @@ export class VoiceFeature {
     await this.deps.onSecondaryRemoved?.(guildId, channelId);
 
     this.deps.logger.info({ guildId, secondaryId: channelId }, 'deleted empty secondary channel');
-    this.deps.serverLog?.(guildId, 2, `🗑 Deleted **${secondary.state.name ?? channelId}**`);
+    this.deps.serverLog?.(guildId, 1, `🗑 Deleted **${secondary.state.name ?? channelId}**`);
     return { action: 'deleted' };
   }
 
@@ -534,6 +537,7 @@ export class VoiceFeature {
     let rateLimited = false;
     if (nameChanged) {
       ({ rateLimited } = await this.deps.actions.renameChannel(guildId, channelId, name));
+      this.deps.serverLog?.(guildId, 2, `✏️ <#${channelId}> renamed to **${name}**`);
     }
     if (statusChanged) {
       await this.deps.actions.setVoiceStatus(guildId, channelId, status);
