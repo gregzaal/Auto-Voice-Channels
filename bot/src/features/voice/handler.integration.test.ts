@@ -345,6 +345,29 @@ describe('VoiceFeature (integration)', () => {
     expect(logs).toContainEqual({ level: 3, message: expect.stringContaining('left') });
   });
 
+  it('secondaries.create is create-once: a replay does not clobber live state', async () => {
+    await secondaries.create({
+      channelId: 'co',
+      guildId: GUILD,
+      primaryChannelId: PRIMARY,
+      ownerId: 'alice',
+      state: { roster: ['alice'], seed: 7 },
+    });
+    await secondaries.setOwner('co', 'bob');
+    await secondaries.updateState('co', { roster: ['alice', 'bob'], seed: 7 });
+
+    // A replayed create with the original seed state must leave the live row intact.
+    const replay = await secondaries.create({
+      channelId: 'co',
+      guildId: GUILD,
+      primaryChannelId: PRIMARY,
+      ownerId: 'alice',
+      state: { roster: ['alice'], seed: 7 },
+    });
+    expect(replay.ownerId).toBe('bob');
+    expect(replay.state.roster).toEqual(['alice', 'bob']);
+  });
+
   it('re-renders a secondary when its membership/game changes', async () => {
     const alice = member('alice', ['Halo']);
     voice.put(PRIMARY, alice);

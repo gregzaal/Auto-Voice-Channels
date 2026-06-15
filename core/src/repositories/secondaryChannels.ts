@@ -64,7 +64,12 @@ export interface CreateSecondaryInput {
 export class SecondaryChannelRepository {
   constructor(private readonly db: Database) {}
 
-  /** Records a new secondary. Idempotent on the channel id. */
+  /**
+   * Records a new secondary. Create-once: idempotent on the channel id, and on
+   * conflict it does NOT touch the existing row — so a replayed create can't
+   * clobber live state (roster, seed, owner, private flag). Mutations are owned by
+   * {@link updateState}/{@link setOwner}.
+   */
   async create(input: CreateSecondaryInput): Promise<SecondaryChannelRow> {
     const [row] = await this.db
       .insert(secondaryChannels)
@@ -75,17 +80,13 @@ export class SecondaryChannelRepository {
         ownerId: input.ownerId ?? null,
         state: input.state ?? {},
       })
-      .onConflictDoUpdate({
-        target: secondaryChannels.channelId,
-        set: {
-          primaryChannelId: input.primaryChannelId,
-          ownerId: input.ownerId ?? null,
-          state: input.state ?? {},
-          updatedAt: new Date(),
-        },
-      })
+      .onConflictDoNothing({ target: secondaryChannels.channelId })
       .returning();
-    return secondaryChannelRowSchema.parse(row);
+    if (row) return secondaryChannelRowSchema.parse(row);
+    // Already existed — return the live row unchanged rather than overwriting it.
+    const existing = await this.get(input.channelId);
+    if (!existing) throw new Error(`secondary ${input.channelId} vanished during create`);
+    return existing;
   }
 
   async get(channelId: string): Promise<SecondaryChannelRow | undefined> {
