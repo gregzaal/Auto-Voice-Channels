@@ -3,6 +3,7 @@ export * from './actions.js';
 export * from './nameTemplate.js';
 export * from './commands.js';
 export * from './handler.js';
+export * from './joinPanel.js';
 export * from './joinRequests.js';
 export * from './privacy.js';
 export * from './reconciler.js';

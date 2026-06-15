@@ -15,6 +15,8 @@ import {
 import type { GuildRepository, Logger } from '@avc/core';
 import type { GuildDispatcher } from '../runtime/dispatcher.js';
 import {
+  JOIN_PREFIX,
+  parseJoinId,
   rateLimitNote,
   type ChannelDebug,
   type CommandResult,
@@ -78,7 +80,6 @@ export interface InteractionDeps {
 }
 
 const KICK_PREFIX = 'avc:kick:';
-const JOIN_PREFIX = 'avc:join:';
 const VOTE_TIMEOUT_MS = 2 * 60 * 1000;
 
 /**
@@ -713,9 +714,9 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   /** Owner approves/denies/blocks a "⇩ Join" request via the message buttons. */
   async function handleJoinDecision(interaction: ButtonInteraction): Promise<void> {
     const guildId = interaction.guildId!;
-    // customId: avc:join:<approve|deny|block>:<joinChannelId>:<requesterId>
-    const [, , action, joinChannelId, requesterId] = interaction.customId.split(':');
-    if (!action || !joinChannelId || !requesterId) return;
+    const parsed = parseJoinId(interaction.customId);
+    if (!parsed) return;
+    const { action, joinChannelId, requesterId } = parsed;
 
     const ctx = await deps.privacy.getJoinContext(joinChannelId);
     if (!ctx) {

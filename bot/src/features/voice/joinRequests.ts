@@ -1,11 +1,6 @@
-import {
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  type Client,
-  type VoiceState,
-} from 'discord.js';
+import { type Client, type VoiceState } from 'discord.js';
 import type { Logger } from '@avc/core';
+import { buildJoinRow } from './joinPanel.js';
 import type { PrivacyService } from './privacy.js';
 
 export interface JoinRequestsDeps {
@@ -43,23 +38,9 @@ export function registerJoinRequests(deps: JoinRequestsDeps): () => void {
     const channel = await deps.client.channels.fetch(ctx.requestChannelId);
     if (!channel || !channel.isTextBased() || !('send' in channel)) return;
 
-    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`avc:join:approve:${joinChannelId}:${requesterId}`)
-        .setLabel('Approve')
-        .setStyle(ButtonStyle.Success),
-      new ButtonBuilder()
-        .setCustomId(`avc:join:deny:${joinChannelId}:${requesterId}`)
-        .setLabel('Deny')
-        .setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder()
-        .setCustomId(`avc:join:block:${joinChannelId}:${requesterId}`)
-        .setLabel('Block')
-        .setStyle(ButtonStyle.Danger),
-    );
     await channel.send({
       content: `🔔 <@${ctx.creatorId}>, <@${requesterId}> would like to join your private channel.`,
-      components: [row],
+      components: [buildJoinRow(joinChannelId, requesterId)],
     });
   }
 
