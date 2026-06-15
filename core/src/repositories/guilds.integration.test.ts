@@ -56,6 +56,16 @@ describe('GuildRepository (integration)', () => {
     expect(events[0]?.fromStatus).toBe('trial');
     expect(events[0]?.toStatus).toBe('active');
     expect(events[0]?.actor).toBe('agent');
+
+    // The transition is also mirrored into ops_audit (so blocks/auth changes show
+    // up in v_recent_ops, the operational audit view).
+    const ops = await env.handle.db.query.opsAudit.findMany({
+      where: (o, { eq }) => eq(o.target, 'g-3'),
+    });
+    expect(ops).toHaveLength(1);
+    expect(ops[0]?.action).toBe('guild.auth.active');
+    expect(ops[0]?.actor).toBe('agent');
+    expect(ops[0]?.details).toMatchObject({ from: 'trial', to: 'active', reason: 'payment' });
   });
 
   it('updateSettings merges into the settings jsonb', async () => {

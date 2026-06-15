@@ -63,7 +63,7 @@ async function main(): Promise<void> {
   logger.info({ selfHosted: config.selfHosted, totalShards: config.totalShards }, 'starting bot');
   installProcessGuards(logger);
 
-  const { db, close: closeDb } = createDatabase({ connectionString: config.databaseUrl });
+  const { db, pool, close: closeDb } = createDatabase({ connectionString: config.databaseUrl });
 
   let dbStatus: SubsystemStatus = 'unknown';
   try {
@@ -282,6 +282,22 @@ async function main(): Promise<void> {
   });
   await health.start();
 
+  // Keep the DB subsystem status live (it was only set at boot, so a post-boot
+  // outage would otherwise still read "up"). A cheap periodic ping gates deploys
+  // and readiness on the *current* DB state.
+  const dbPingTimer = setInterval(() => {
+    pool.query('SELECT 1').then(
+      () => {
+        dbStatus = 'up';
+      },
+      (err: unknown) => {
+        dbStatus = 'down';
+        logger.warn({ err }, 'db health ping failed');
+      },
+    );
+  }, 15_000);
+  dbPingTimer.unref();
+
   // Self-register the global slash commands (idempotent upsert). A failure here
   // shouldn't take the bot down — log and continue; the next boot retries.
   try {
@@ -304,6 +320,7 @@ async function main(): Promise<void> {
     client,
     settingsCache,
     notifier,
+    dbPingTimer,
     disposeVoiceGateway,
     disposeJoinRequests,
     disposeInteractions,
@@ -325,6 +342,7 @@ interface ShutdownDeps {
   client: Client;
   settingsCache: SettingsCache;
   notifier: PgNotifier;
+  dbPingTimer: ReturnType<typeof setInterval>;
   disposeVoiceGateway: () => void;
   disposeJoinRequests: () => void;
   disposeInteractions: () => void;
@@ -346,6 +364,7 @@ function installShutdown(deps: ShutdownDeps): (reason: string, exitCode: number)
     deps.logger.info({ reason, exitCode }, 'shutting down (graceful drain)');
     void (async () => {
       try {
+        clearInterval(deps.dbPingTimer);
         deps.reconciler.stopSweep();
         deps.disposeInteractions();
         deps.disposeJoinRequests();

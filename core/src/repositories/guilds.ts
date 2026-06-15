@@ -1,7 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Database } from '../db/client.js';
-import { guildAuthEvents, guilds } from '../db/schema.js';
+import { guildAuthEvents, guilds, opsAudit } from '../db/schema.js';
 import { AUTH_STATUSES, type AuthStatus, isEntitled } from '../domain/auth.js';
 
 /** zod schema validating a guild row read from the DB (boundary validation). */
@@ -95,6 +95,20 @@ export class GuildRepository {
         toStatus: input.toStatus,
         reason: input.reason ?? null,
         actor: input.actor ?? 'system',
+      });
+
+      // Also record it in the operational audit log so auth changes — notably
+      // `blocked` (the per-guild kill-switch) — surface in `v_recent_ops`, the view
+      // an operator/agent queries for recent operational actions.
+      await tx.insert(opsAudit).values({
+        actor: input.actor ?? 'system',
+        action: `guild.auth.${input.toStatus}`,
+        target: input.guildId,
+        details: {
+          from: fromStatus,
+          to: input.toStatus,
+          ...(input.reason ? { reason: input.reason } : {}),
+        },
       });
 
       return guildRowSchema.parse(updated);
