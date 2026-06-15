@@ -28,11 +28,24 @@ export class GuildDispatcher {
       queue = new GuildQueue({
         guildId,
         logger: this.logger,
+        onIdle: () => this.maybeEvict(guildId),
         ...(this.circuit ? { circuit: this.circuit } : {}),
       });
       this.queues.set(guildId, queue);
     }
     return queue;
+  }
+
+  /**
+   * Drops an idle queue whose breaker is closed, so the map doesn't grow without
+   * bound across every guild the shard ever touches. A tripped breaker is kept —
+   * its state (open/half-open) must survive until cooldown.
+   */
+  private maybeEvict(guildId: string): void {
+    const queue = this.queues.get(guildId);
+    if (queue && queue.isIdle && queue.circuitState === 'closed') {
+      this.queues.delete(guildId);
+    }
   }
 
   /** Enqueues `task` onto `guildId`'s queue and returns its result promise. */

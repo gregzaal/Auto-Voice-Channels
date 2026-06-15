@@ -17,9 +17,12 @@ export interface ReconcilerDeps {
   logger: Logger;
   /** Periodic safety-net sweep interval (ms). Defaults to 5 minutes. */
   sweepIntervalMs?: number;
+  /** Max guilds reconciled concurrently (bounds the DB/CPU burst). Default 10. */
+  reconcileConcurrency?: number;
 }
 
 const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+const DEFAULT_RECONCILE_CONCURRENCY = 10;
 
 /**
  * Orchestrates reconciliation: which guilds to converge and when. The actual
@@ -32,9 +35,14 @@ const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 export class Reconciler {
   private timer: ReturnType<typeof setInterval> | undefined;
   private readonly sweepIntervalMs: number;
+  private readonly reconcileConcurrency: number;
 
   constructor(private readonly deps: ReconcilerDeps) {
     this.sweepIntervalMs = deps.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
+    this.reconcileConcurrency = Math.max(
+      1,
+      deps.reconcileConcurrency ?? DEFAULT_RECONCILE_CONCURRENCY,
+    );
   }
 
   /** Reconcile one guild through its per-guild queue (ordered + isolated). */
@@ -54,14 +62,24 @@ export class Reconciler {
       this.deps.logger.warn('reconcile skipped: global pause is set');
       return;
     }
-    const results = await Promise.allSettled(
-      [...guildIds].map((id) => this.reconcileGuild(id, opts)),
-    );
-    for (const r of results) {
-      if (r.status === 'rejected') {
-        this.deps.logger.error({ err: r.reason }, 'guild reconcile failed (isolated)');
+    // Bounded worker pool: reconcile at most `reconcileConcurrency` guilds at once.
+    // Each guild still runs through its own ordered/isolated queue; the cap keeps a
+    // fleet-wide sweep (or a deploy's READY reconcile) from firing thousands of
+    // per-guild query storms simultaneously against the single-primary Postgres.
+    const ids = [...guildIds];
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < ids.length) {
+        const id = ids[next++]!;
+        try {
+          await this.reconcileGuild(id, opts);
+        } catch (err) {
+          this.deps.logger.error({ err, guildId: id }, 'guild reconcile failed (isolated)');
+        }
       }
-    }
+    };
+    const poolSize = Math.min(this.reconcileConcurrency, ids.length);
+    await Promise.all(Array.from({ length: poolSize }, () => worker()));
   }
 
   /**

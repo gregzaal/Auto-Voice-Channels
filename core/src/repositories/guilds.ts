@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Database } from '../db/client.js';
 import { guildAuthEvents, guilds, opsAudit } from '../db/schema.js';
@@ -115,13 +115,21 @@ export class GuildRepository {
     });
   }
 
-  /** Merges partial settings into the guild's settings jsonb. */
+  /**
+   * Merges partial settings into the guild's settings jsonb. The merge happens
+   * **DB-side** (`settings || $patch`) in a single statement — so concurrent
+   * writers (e.g. a future dashboard alongside the bot) can't clobber each other
+   * the way a read-modify-write would. Shallow, like the previous JS spread:
+   * top-level keys in the patch replace existing ones.
+   */
   async updateSettings(guildId: string, patch: Record<string, unknown>): Promise<GuildRow> {
-    const current = await this.ensure(guildId);
-    const merged = { ...current.settings, ...patch };
+    await this.ensure(guildId);
     const [updated] = await this.db
       .update(guilds)
-      .set({ settings: merged, updatedAt: new Date() })
+      .set({
+        settings: sql`${guilds.settings} || ${JSON.stringify(patch)}::jsonb`,
+        updatedAt: new Date(),
+      })
       .where(eq(guilds.guildId, guildId))
       .returning();
     return guildRowSchema.parse(updated);

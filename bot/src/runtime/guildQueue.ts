@@ -14,6 +14,8 @@ export interface GuildQueueOptions {
   guildId: string;
   logger: Logger;
   circuit?: CircuitBreakerOptions;
+  /** Called when the queue goes idle (drained empty), so the owner can evict it. */
+  onIdle?: () => void;
 }
 
 /**
@@ -32,6 +34,7 @@ export class GuildQueue {
   private readonly logger: Logger;
   private readonly breaker: CircuitBreaker;
   private readonly tasks: QueuedTask[] = [];
+  private readonly onIdle: (() => void) | undefined;
   private running = false;
   private inFlight = 0;
   private draining = false;
@@ -40,6 +43,7 @@ export class GuildQueue {
     this.guildId = options.guildId;
     this.logger = options.logger.child({ guildId: options.guildId });
     this.breaker = new CircuitBreaker(options.circuit);
+    this.onIdle = options.onIdle;
   }
 
   get depth(): number {
@@ -91,6 +95,9 @@ export class GuildQueue {
       }
     } finally {
       this.running = false;
+      // Drained empty: let the owner evict this queue so the per-guild map doesn't
+      // grow without bound across every guild ever seen.
+      if (this.isIdle) this.onIdle?.();
     }
   }
 
