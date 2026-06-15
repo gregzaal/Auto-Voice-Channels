@@ -658,11 +658,16 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       await interaction.reply({ content: result.message, ephemeral: true });
       return;
     }
-    if (!deps.votekick.hasSession(channelId!)) {
+    // `start` only succeeds with a channel, so narrow explicitly (no `!`).
+    if (!channelId) return;
+    if (!deps.votekick.hasSession(channelId)) {
       // Resolved immediately (1v1) — already kicked.
       await interaction.reply({ content: `✅ ${result.message}` });
       return;
     }
+    // Arm the lapse timer (tagged with the session epoch) before replying, so a
+    // concurrent vote resolution can't race an un-armed timer.
+    armVoteTimeout(channelId, result.epoch);
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId(`${KICK_PREFIX}${channelId}`)
@@ -676,7 +681,6 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         `Need **${result.required}** votes. (1 so far)`,
       components: [row],
     });
-    armVoteTimeout(channelId!);
   }
 
   async function handleButton(interaction: ButtonInteraction): Promise<void> {
@@ -803,10 +807,12 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     return deps.dispatcher.dispatch(guildId, name, task);
   }
 
-  function armVoteTimeout(channelId: string): void {
+  function armVoteTimeout(channelId: string, epoch?: number): void {
     clearVoteTimeout(channelId);
     const timer = setTimeout(() => {
-      deps.votekick.cancel(channelId);
+      // Pass the epoch so a lapsed timer only cancels *its* session, never a
+      // newer vote that started on the same channel in the meantime.
+      deps.votekick.cancel(channelId, epoch);
       voteTimers.delete(channelId);
     }, VOTE_TIMEOUT_MS);
     timer.unref?.();

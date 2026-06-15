@@ -18,12 +18,16 @@ interface VoteSession {
   required: number;
   eligible: Set<string>;
   votes: Set<string>;
+  /** Monotonic token identifying this session, so a stale timeout can't cancel a newer one. */
+  epoch: number;
 }
 
 export interface StartResult {
   ok: boolean;
   message: string;
   required?: number;
+  /** Token for the started session, to pass back to {@link VoteKickManager.cancel}. */
+  epoch?: number;
 }
 
 export interface VoteResult {
@@ -47,6 +51,7 @@ export interface VoteResult {
  */
 export class VoteKickManager {
   private readonly sessions = new Map<string, VoteSession>();
+  private seq = 0;
 
   constructor(private readonly deps: VoteKickDeps) {}
 
@@ -86,6 +91,7 @@ export class VoteKickManager {
 
     const eligible = new Set(present.map((m) => m.id).filter((id) => id !== targetId));
     const required = VoteKickManager.requiredVotes(eligible.size);
+    const epoch = ++this.seq;
     const session: VoteSession = {
       guildId,
       channelId,
@@ -95,15 +101,16 @@ export class VoteKickManager {
       required,
       eligible,
       votes: new Set([initiatorId]),
+      epoch,
     };
     this.sessions.set(channelId, session);
 
     if (session.votes.size >= required) {
       await this.kick(session);
       this.sessions.delete(channelId);
-      return { ok: true, required, message: `<@${targetId}> was kicked.` };
+      return { ok: true, required, epoch, message: `<@${targetId}> was kicked.` };
     }
-    return { ok: true, required, message: 'Vote started.' };
+    return { ok: true, required, epoch, message: 'Vote started.' };
   }
 
   /** Records a vote from `voterId`. Resolves (and kicks) once a majority agrees. */
@@ -147,8 +154,15 @@ export class VoteKickManager {
     return this.sessions.has(channelId);
   }
 
-  /** Ends a vote without kicking (timeout/cancel). */
-  cancel(channelId: string): void {
+  /**
+   * Ends a vote without kicking (timeout/cancel). When `epoch` is given, only the
+   * session with that token is cancelled — a stale timeout for a since-replaced
+   * session is a no-op (it must not cancel a newer vote on the same channel).
+   */
+  cancel(channelId: string, epoch?: number): void {
+    const session = this.sessions.get(channelId);
+    if (!session) return;
+    if (epoch !== undefined && session.epoch !== epoch) return;
     this.sessions.delete(channelId);
   }
 

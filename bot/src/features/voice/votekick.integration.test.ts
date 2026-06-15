@@ -104,4 +104,23 @@ describe('VoteKickManager (integration)', () => {
     const second = await kicks.start(GUILD, SEC, 'bob', 'target');
     expect(second.ok).toBe(false);
   });
+
+  it('a stale-epoch cancel does not end a newer session on the same channel', async () => {
+    for (const id of ['owner', 'alice', 'bob', 'target']) voice.put(SEC, member(id));
+    const first = await kicks.start(GUILD, SEC, 'alice', 'target'); // 1/2, session A
+    expect(kicks.hasSession(SEC)).toBe(true);
+
+    kicks.cancel(SEC); // session A lapses/ends
+    const second = await kicks.start(GUILD, SEC, 'bob', 'target'); // session B
+    expect(second.epoch).not.toBe(first.epoch);
+    expect(kicks.hasSession(SEC)).toBe(true);
+
+    // A's lapsed timer fires with the OLD epoch → must not touch session B.
+    kicks.cancel(SEC, first.epoch);
+    expect(kicks.hasSession(SEC)).toBe(true);
+
+    // B's own timer (matching epoch) ends it.
+    kicks.cancel(SEC, second.epoch);
+    expect(kicks.hasSession(SEC)).toBe(false);
+  });
 });
