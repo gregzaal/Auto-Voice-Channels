@@ -132,6 +132,23 @@ describe('PrivacyService (integration)', () => {
     expect(await joinChannels.getBySecondary(SEC)).toBeUndefined();
   });
 
+  it('handleOwnerChanged renames the join channel and re-points its creator', async () => {
+    await privacy.makePrivate(GUILD, SEC, 'alice', TEXT);
+    const joinId = actions.ofType('joinChannel')[0]!.channelId;
+
+    await privacy.handleOwnerChanged(GUILD, SEC, 'bob', 'Bob');
+
+    expect(actions.ofType('rename')).toContainEqual(
+      expect.objectContaining({ channelId: joinId, name: '⇩ Join Bob' }),
+    );
+    expect((await joinChannels.getBySecondary(SEC))!.creatorId).toBe('bob');
+  });
+
+  it('handleOwnerChanged is a no-op for a public channel (no join companion)', async () => {
+    await privacy.handleOwnerChanged(GUILD, SEC, 'bob', 'Bob');
+    expect(actions.ofType('rename')).toHaveLength(0);
+  });
+
   it('cleanupForSecondary removes the join channel when the private channel is deleted', async () => {
     await privacy.makePrivate(GUILD, SEC, 'alice', TEXT);
     const joinId = actions.ofType('joinChannel')[0]!.channelId;

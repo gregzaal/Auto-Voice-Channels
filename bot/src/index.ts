@@ -122,6 +122,8 @@ async function main(): Promise<void> {
     selfHosted: config.selfHosted,
     gate: creationGate,
     onSecondaryRemoved: (gid, cid) => privacy.cleanupForSecondary(gid, cid),
+    onOwnerChanged: (gid, cid, ownerId, ownerName) =>
+      privacy.handleOwnerChanged(gid, cid, ownerId, ownerName),
     serverLog: (gid, level, message) => serverLogger.log(gid, level, message),
     logger,
   });

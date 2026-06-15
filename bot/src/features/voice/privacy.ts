@@ -144,6 +144,27 @@ export class PrivacyService {
     await this.removeJoinChannel(guildId, secondaryChannelId);
   }
 
+  /**
+   * Ownership of a private secondary transferred (the creator left). Re-point its
+   * "⇩ Join" companion at the new owner: rename it and update who may answer join
+   * requests. No-ops when the channel has no companion (it isn't private).
+   */
+  async handleOwnerChanged(
+    guildId: string,
+    secondaryChannelId: string,
+    newOwnerId: string,
+    newOwnerName: string,
+  ): Promise<void> {
+    const row = await this.deps.joinChannels.getBySecondary(secondaryChannelId);
+    if (!row) return;
+    await this.deps.joinChannels.setCreatorBySecondary(secondaryChannelId, newOwnerId);
+    await this.deps.actions.renameChannel(guildId, row.channelId, `⇩ Join ${newOwnerName}`);
+    this.deps.logger.info(
+      { guildId, secondaryChannelId, joinChannelId: row.channelId, newOwnerId },
+      're-pointed join channel at new owner',
+    );
+  }
+
   private async removeJoinChannel(guildId: string, secondaryChannelId: string): Promise<void> {
     const row = await this.deps.joinChannels.getBySecondary(secondaryChannelId);
     if (!row) return;

@@ -68,6 +68,17 @@ export class JoinChannelRepository {
     await this.db.delete(joinChannels).where(eq(joinChannels.channelId, channelId));
   }
 
+  /**
+   * Reassigns the owner of a secondary's join channel (when ownership transfers
+   * because the original creator left), so the new owner can answer requests.
+   */
+  async setCreatorBySecondary(secondaryChannelId: string, creatorId: string): Promise<void> {
+    await this.db
+      .update(joinChannels)
+      .set({ creatorId })
+      .where(eq(joinChannels.secondaryChannelId, secondaryChannelId));
+  }
+
   async removeBySecondary(secondaryChannelId: string): Promise<void> {
     await this.db
       .delete(joinChannels)

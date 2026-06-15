@@ -135,6 +135,70 @@ describe('VoiceFeature (integration)', () => {
     expect(await secondaries.get(secondaryId)).toBeDefined();
   });
 
+  it('hands ownership to a remaining member when the owner leaves (no "Unknown")', async () => {
+    await autoChannels.upsert(GUILD, PRIMARY, { name: "@@creator@@'s room" });
+    const ownerChanges: { channelId: string; newOwnerId: string; newOwnerName: string }[] = [];
+    const f = new VoiceFeature({
+      autoChannels,
+      secondaries,
+      guilds,
+      actions,
+      voice,
+      selfHosted: true,
+      logger: fakeLogger(),
+      onOwnerChanged: (_g, channelId, newOwnerId, newOwnerName) => {
+        ownerChanges.push({ channelId, newOwnerId, newOwnerName });
+        return Promise.resolve();
+      },
+    });
+
+    const alice = member('alice');
+    voice.put(PRIMARY, alice);
+    await f.handleVoiceStateUpdate({ guildId: GUILD, member: alice, afterChannelId: PRIMARY });
+    const secondaryId = actions.ofType('create')[0]!.channelId;
+    expect((await secondaries.get(secondaryId))!.ownerId).toBe('alice');
+
+    // alice (owner) + bob both inside; alice leaves, bob remains.
+    voice.put(secondaryId, alice);
+    voice.put(secondaryId, member('bob'));
+    voice.drop(secondaryId, 'alice');
+    await f.handleVoiceStateUpdate({ guildId: GUILD, member: alice, beforeChannelId: secondaryId });
+
+    expect((await secondaries.get(secondaryId))!.ownerId).toBe('bob');
+    // The "⇩ Join" companion hook fires with the new owner.
+    expect(ownerChanges).toEqual([
+      { channelId: secondaryId, newOwnerId: 'bob', newOwnerName: 'bob' },
+    ]);
+
+    // The re-render now resolves the new owner instead of "Unknown".
+    await f.rerenderSecondary(GUILD, secondaryId);
+    const rename = actions.ofType('rename').at(-1)!;
+    expect(rename.name).toBe("bob's room");
+    expect(rename.name).not.toContain('Unknown');
+  });
+
+  it('keeps ownership when a non-owner leaves', async () => {
+    const alice = member('alice');
+    voice.put(PRIMARY, alice);
+    await feature.handleVoiceStateUpdate({
+      guildId: GUILD,
+      member: alice,
+      afterChannelId: PRIMARY,
+    });
+    const secondaryId = actions.ofType('create')[0]!.channelId;
+
+    voice.put(secondaryId, alice);
+    voice.put(secondaryId, member('bob'));
+    voice.drop(secondaryId, 'bob');
+    await feature.handleVoiceStateUpdate({
+      guildId: GUILD,
+      member: member('bob'),
+      beforeChannelId: secondaryId,
+    });
+
+    expect((await secondaries.get(secondaryId))!.ownerId).toBe('alice');
+  });
+
   it('ignores mute/unmute (no channel change)', async () => {
     const alice = member('alice');
     voice.put(PRIMARY, alice);

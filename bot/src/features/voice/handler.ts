@@ -92,6 +92,17 @@ export interface VoiceFeatureDeps {
    */
   onSecondaryRemoved?: (guildId: string, channelId: string) => Promise<void>;
   /**
+   * Called when a secondary's ownership is reassigned because the owner left
+   * (while others remain), so dependent resources (a private channel's "⇩ Join"
+   * companion) can be re-pointed at the new owner. Idempotent.
+   */
+  onOwnerChanged?: (
+    guildId: string,
+    channelId: string,
+    newOwnerId: string,
+    newOwnerName: string,
+  ) => Promise<void>;
+  /**
    * Optional sink for per-guild event logging (`/logging`). Level 1 = lifecycle
    * (create/delete), 2 = config changes, 3 = joins/leaves. Fire-and-forget.
    */
@@ -235,6 +246,10 @@ export class VoiceFeature {
         action !== 'deleted' &&
         (await this.deps.secondaries.isSecondary(guildId, beforeChannelId))
       ) {
+        // If the owner is the one who left, hand the channel to someone still in
+        // it before the re-render, so `@@creator@@` resolves to the new owner
+        // (not "Unknown") and a private channel's "⇩ Join" follows suit.
+        await this.maybeTransferOwnership(guildId, beforeChannelId, event.member.id);
         touched.push(beforeChannelId);
       }
     }
@@ -373,6 +388,44 @@ export class VoiceFeature {
     this.deps.logger.info({ guildId, secondaryId: channelId }, 'deleted empty secondary channel');
     this.deps.serverLog?.(guildId, 2, `🗑 Deleted **${secondary.state.name ?? channelId}**`);
     return { action: 'deleted' };
+  }
+
+  /**
+   * If `leaverId` owned this secondary and members remain, hands ownership to one
+   * of them (the first still present). Keeps `@@creator@@` resolvable after the
+   * creator leaves, and re-points a private channel's "⇩ Join" companion at the
+   * new owner. A no-op when the leaver wasn't the owner or the channel emptied
+   * (cleanup deletes it). Idempotent: a replayed leave sees ownership already
+   * moved off `leaverId` and does nothing.
+   */
+  private async maybeTransferOwnership(
+    guildId: string,
+    channelId: string,
+    leaverId: string,
+  ): Promise<void> {
+    const secondary = await this.deps.secondaries.get(channelId);
+    if (!secondary || secondary.guildId !== guildId) return;
+    if (secondary.ownerId !== leaverId) return; // owner still here, or never set
+
+    const remaining = this.deps.voice.membersInChannel(channelId).filter((m) => !m.bot);
+    const newOwner = remaining[0];
+    if (!newOwner) return; // emptied — cleanup handles deletion
+
+    await this.deps.secondaries.setOwner(channelId, newOwner.id);
+    const guild = await this.deps.guilds.ensure(guildId);
+    const newOwnerName = displayName(parseSettings(guild.settings), newOwner);
+
+    this.deps.logger.info(
+      { guildId, secondaryId: channelId, from: leaverId, to: newOwner.id },
+      'transferred ownership after owner left',
+    );
+    this.deps.serverLog?.(
+      guildId,
+      2,
+      `👑 <@${newOwner.id}> now owns **${secondary.state.name ?? channelId}**`,
+    );
+    // Re-point a private channel's "⇩ Join" companion (no-op if not private).
+    await this.deps.onOwnerChanged?.(guildId, channelId, newOwner.id, newOwnerName);
   }
 
   /**
