@@ -15,7 +15,9 @@ export interface CreateVoiceChannelInput {
   locked?: boolean;
   /**
    * Position the new channel relative to this (primary) channel: inherit its
-   * category, and sit just above (`above: true`, default) or below it.
+   * category, and sit just above (`above: true`) or below it (default). "Below"
+   * is achieved purely via the create-time position (no extra reorder); "above"
+   * additionally bulk-reorders the new channel up one slot.
    */
   nearChannelId?: string;
   above?: boolean;

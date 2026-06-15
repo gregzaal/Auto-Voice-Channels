@@ -75,7 +75,7 @@ export function buildCreateModal(defaults: CreateDefaults): ModalBuilder {
             .setValue(defaults.statusTemplate.slice(0, TEMPLATE_INPUT_MAX)),
         ),
       new LabelBuilder()
-        .setLabel('Secondary position (/toggleposition later)')
+        .setLabel('Secondary position (/position to edit later)')
         .setStringSelectMenuComponent(
           new StringSelectMenuBuilder()
             .setCustomId('position')
@@ -83,10 +83,10 @@ export function buildCreateModal(defaults: CreateDefaults): ModalBuilder {
             .setMaxValues(1)
             .addOptions(
               new StringSelectMenuOptionBuilder()
-                .setLabel('Above primary')
-                .setValue('above')
+                .setLabel('Below primary')
+                .setValue('below')
                 .setDefault(true),
-              new StringSelectMenuOptionBuilder().setLabel('Below primary').setValue('below'),
+              new StringSelectMenuOptionBuilder().setLabel('Above primary').setValue('above'),
             ),
         ),
     );
@@ -94,7 +94,7 @@ export function buildCreateModal(defaults: CreateDefaults): ModalBuilder {
 
 /** What the `/create` modal collected — ready to pass to `createPrimary`. */
 export interface ParsedCreate extends CreatePrimaryOptions {
-  /** Always set by {@link parseCreateModal} (defaults to above). */
+  /** Always set by {@link parseCreateModal} (defaults to below). */
   above: boolean;
 }
 
@@ -110,13 +110,13 @@ export function parseCreateModal(
   const name = fields.getTextInputValue('name').trim();
   const nameTemplate = fields.getTextInputValue('nameTemplate').trim();
   const statusTemplate = fields.getTextInputValue('statusTemplate').trim();
-  const position = fields.getStringSelectValues('position')[0] ?? 'above';
+  const position = fields.getStringSelectValues('position')[0] ?? 'below';
   const parentId = fields.getSelectedChannels('category', false)?.first()?.id;
   return {
     ...(parentId ? { parentId } : {}),
     ...(name ? { name } : {}),
     ...(nameTemplate && nameTemplate !== defaults.nameTemplate ? { nameTemplate } : {}),
     ...(statusTemplate && statusTemplate !== defaults.statusTemplate ? { statusTemplate } : {}),
-    above: position !== 'below',
+    above: position === 'above',
   };
 }

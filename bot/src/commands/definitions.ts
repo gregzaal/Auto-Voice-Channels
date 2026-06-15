@@ -153,8 +153,8 @@ export function buildCommandDefinitions(
     ),
     adminOnly(
       new SlashCommandBuilder()
-        .setName('toggleposition')
-        .setDescription('Toggle whether new channels appear above or below the creator channel.')
+        .setName('position')
+        .setDescription('Choose whether new channels appear above or below the creator channel.')
         .addChannelOption(
           voiceChannelOption('A channel in the group to target (defaults to your current one).'),
         ) as SlashCommandBuilder,

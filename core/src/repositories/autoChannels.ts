@@ -14,7 +14,7 @@ export const primaryTemplateSchema = z.object({
   status: z.string().optional(),
   /** Default user limit applied to spawned secondaries (0 = unlimited). */
   limit: z.number().int().min(0).optional(),
-  /** Position secondaries above (true, default) or below the primary. */
+  /** Position secondaries above (`true`) or below (default — absent/`false`) the primary. */
   above: z.boolean().optional(),
   /**
    * Permission inheritance for spawned secondaries: `primary` (copy the primary

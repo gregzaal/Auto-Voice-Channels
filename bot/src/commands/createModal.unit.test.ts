@@ -31,7 +31,7 @@ describe('createModal', () => {
       'Primary (creation) channel name',
       'Name template (/template to edit later)',
       'Status template (/template to edit later)',
-      'Secondary position (/toggleposition later)',
+      'Secondary position (/position to edit later)',
     ]);
     for (const l of labels) expect(l!.length).toBeLessThanOrEqual(45);
   });
@@ -56,8 +56,8 @@ describe('createModal', () => {
     expect(parsed.nameTemplate).toBeUndefined();
   });
 
-  it('defaults to above with no category when nothing is selected', () => {
+  it('defaults to below with no category when nothing is selected', () => {
     const parsed = parseCreateModal(fields({}), defaults);
-    expect(parsed).toEqual({ above: true });
+    expect(parsed).toEqual({ above: false });
   });
 });

@@ -25,7 +25,7 @@ export interface CreatePrimaryOptions {
   parentId?: string;
   nameTemplate?: string;
   statusTemplate?: string;
-  /** Position spawned secondaries above (default) or below the primary. */
+  /** Position spawned secondaries above the primary; default (false/unset) is below. */
   above?: boolean;
 }
 
@@ -141,17 +141,18 @@ export class GuildSettingsService {
       name,
       ...(opts.parentId ? { parentId: opts.parentId } : {}),
     });
-    // Only persist non-default fields so the primary inherits where unset.
+    // Only persist non-default fields so the primary inherits where unset. Below
+    // is the default placement, so only an explicit "above" is stored.
     const template: PrimaryTemplate = {
       ...(opts.nameTemplate ? { name: opts.nameTemplate } : {}),
       ...(opts.statusTemplate ? { status: opts.statusTemplate } : {}),
-      ...(opts.above === false ? { above: false } : {}),
+      ...(opts.above === true ? { above: true } : {}),
     };
     await this.deps.autoChannels.upsert(guildId, channelId, template);
     this.deps.logger.info({ guildId, channelId, name }, 'created primary channel');
     return ok(
       `Created **${name}**. Join it to spawn a voice channel.\n` +
-        'Edit it anytime with `/template`, `/toggleposition`, `/defaultlimit`, …',
+        'Edit it anytime with `/template`, `/position`, `/defaultlimit`, …',
     );
   }
 
@@ -254,15 +255,28 @@ export class GuildSettingsService {
     return ok(`Channels that show the creator will now call you **${value}**.`);
   }
 
-  /** Toggles whether new secondaries are positioned above/below their primary. */
-  async togglePosition(guildId: string, secondaryChannelId: string): Promise<CommandResult> {
+  /** Reads whether the primary of the channel you're in spawns secondaries above. */
+  async getPosition(
+    guildId: string,
+    secondaryChannelId: string,
+  ): Promise<{ found: boolean; above: boolean }> {
+    const primary = await this.primaryFor(guildId, secondaryChannelId);
+    return { found: primary !== undefined, above: primary?.template.above === true };
+  }
+
+  /** Sets whether new secondaries are positioned above (else below) their primary. */
+  async setPosition(
+    guildId: string,
+    secondaryChannelId: string,
+    above: boolean,
+  ): Promise<CommandResult> {
     const primary = await this.primaryFor(guildId, secondaryChannelId);
     if (!primary) return fail('You need to be in a bot-managed voice channel.');
-    const above = primary.template.above === false; // flip (default is above=true)
-    await this.deps.autoChannels.upsert(guildId, primary.channelId, {
-      ...primary.template,
-      above,
-    });
+    const next = { ...primary.template };
+    // Below is the default, so store nothing for it; only persist an explicit "above".
+    if (above) next.above = true;
+    else delete next.above;
+    await this.deps.autoChannels.upsert(guildId, primary.channelId, next);
     return ok(
       `New channels here will now be positioned **${above ? 'above' : 'below'}** the creator channel.`,
     );

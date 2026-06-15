@@ -97,7 +97,7 @@ describe('GuildSettingsService (integration)', () => {
       parentId: 'cat-1',
       nameTemplate: '## [@@game_name@@]',
       statusTemplate: 'Status here',
-      above: false,
+      above: true,
     });
     expect(res.ok).toBe(true);
     const created = actions.ofType('create')[0]!;
@@ -107,7 +107,7 @@ describe('GuildSettingsService (integration)', () => {
     expect(primary!.template).toMatchObject({
       name: '## [@@game_name@@]',
       status: 'Status here',
-      above: false,
+      above: true,
     });
   });
 
@@ -185,7 +185,7 @@ describe('GuildSettingsService (integration)', () => {
     expect((await autoChannels.get(primaryId))!.template.status).toBeUndefined();
   });
 
-  it('toggles primary position and sets inherit-permissions via the channel you’re in', async () => {
+  it('sets primary position (above/below) and inherit-permissions via the channel you’re in', async () => {
     await settings.createPrimary(GUILD);
     const primaryId = actions.ofType('create')[0]!.channelId;
     await secondaries.create({
@@ -195,9 +195,18 @@ describe('GuildSettingsService (integration)', () => {
       state: {},
     });
 
-    const toggled = await settings.togglePosition(GUILD, 'sec-1');
-    expect(toggled.ok).toBe(true);
-    expect((await autoChannels.get(primaryId))!.template.above).toBe(false);
+    // Default is below: nothing stored, getPosition reports above=false.
+    expect(await settings.getPosition(GUILD, 'sec-1')).toEqual({ found: true, above: false });
+
+    const up = await settings.setPosition(GUILD, 'sec-1', true);
+    expect(up.ok).toBe(true);
+    expect((await autoChannels.get(primaryId))!.template.above).toBe(true);
+    expect((await settings.getPosition(GUILD, 'sec-1')).above).toBe(true);
+
+    // Switching back to below clears the stored field (below is the default).
+    const down = await settings.setPosition(GUILD, 'sec-1', false);
+    expect(down.ok).toBe(true);
+    expect((await autoChannels.get(primaryId))!.template.above).toBeUndefined();
 
     const inh = await settings.setInheritPermissions(GUILD, 'sec-1', 'category');
     expect(inh.ok).toBe(true);

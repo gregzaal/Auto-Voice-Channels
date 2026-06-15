@@ -112,15 +112,19 @@ export class DiscordVoiceActions implements VoiceActions {
     const near = input.nearChannelId
       ? await this.client.channels.fetch(input.nearChannelId).catch(() => null)
       : null;
-    // Capture the primary's sorted sibling index BEFORE the new channel exists,
-    // so we can place the new channel exactly above/below it afterwards. (We can't
-    // do this at create time: Discord lets channels share a position and breaks
-    // ties by id, so a brand-new channel always sorts *below* one at the same
-    // position — which would silently invert "above".)
-    let nearIndex: number | undefined;
+    const placeAbove = input.above === true;
+    // Create the channel *at the primary's own position*: Discord breaks position
+    // ties by id, and the new channel always has the largest id, so it lands
+    // directly below the primary in a single call. For the default "below" that
+    // is already correct, so we do no extra work (no reorder → no flicker). For
+    // "above" we then bulk-reorder it up one slot (Discord can't place a new
+    // channel above an existing one at create time — the id tie-break forbids it).
+    let createPosition: number | undefined;
+    let reorderAboveIndex: number | undefined;
     if (near?.isVoiceBased()) {
       parentId ??= near.parent?.id;
-      nearIndex = near.position;
+      createPosition = near.rawPosition;
+      if (placeAbove) reorderAboveIndex = near.position; // captured before create
     }
 
     // Resolve inherited permission overwrites, if requested.
@@ -132,34 +136,32 @@ export class DiscordVoiceActions implements VoiceActions {
       name: input.name,
       type: ChannelType.GuildVoice,
       ...(parentId ? { parent: parentId } : {}),
+      ...(createPosition !== undefined ? { position: createPosition } : {}),
       ...(input.userLimit !== undefined ? { userLimit: input.userLimit } : {}),
       ...(input.bitrate !== undefined ? { bitrate: input.bitrate } : {}),
       ...(permissionOverwrites ? { permissionOverwrites } : {}),
     });
-    if (nearIndex !== undefined) {
-      await this.positionRelativeTo(channel, nearIndex, input.above !== false);
+    if (reorderAboveIndex !== undefined) {
+      await this.placeAboveSibling(channel, reorderAboveIndex);
     }
     return channel.id;
   }
 
   /**
-   * Moves a just-created voice `channel` directly above (or below) the sibling
-   * whose pre-create sorted index was `nearIndex`, via the bulk channel-reorder
-   * endpoint. discord.js rebuilds the full sibling list with unique sequential
-   * positions, so this is deterministic — no id tie-break. Best-effort: a failure
-   * leaves the channel created (just mis-ordered) rather than aborting creation.
+   * Moves a just-created voice `channel` directly above the sibling whose
+   * pre-create sorted index was `nearIndex`, via the bulk channel-reorder endpoint
+   * (discord.js rebuilds the full sibling list with unique sequential positions,
+   * so it's deterministic — no id tie-break). Only used for "above": "below" is
+   * already correct from the create-time position and needs no reorder. Best-
+   * effort: a failure leaves the channel created (just mis-ordered).
    */
-  private async positionRelativeTo(
-    channel: VoiceBasedChannel,
-    nearIndex: number,
-    above: boolean,
-  ): Promise<void> {
+  private async placeAboveSibling(channel: VoiceBasedChannel, nearIndex: number): Promise<void> {
     try {
       // `setPosition` removes the channel from the sorted list then re-inserts it
-      // at the given index of the *remaining* siblings — which equals the list as
-      // it was before this channel existed. So `nearIndex` lands it in the near
-      // channel's old slot (pushing near down → above); `+1` puts it just below.
-      await channel.setPosition(above ? nearIndex : nearIndex + 1);
+      // at `nearIndex` of the *remaining* siblings — which equals the list as it
+      // was before this channel existed — landing it in the near channel's old
+      // slot (pushing near down → above).
+      await channel.setPosition(nearIndex);
     } catch (err) {
       this.logger?.warn({ err, channelId: channel.id }, 'failed to position new channel');
     }
@@ -306,19 +308,22 @@ export class DiscordVoiceActions implements VoiceActions {
     const guild = await this.client.guilds.fetch(guildId);
     const near = await this.client.channels.fetch(nearChannelId).catch(() => null);
     let parentId: string | undefined;
+    let createPosition: number | undefined;
     let nearIndex: number | undefined;
     if (near?.isVoiceBased()) {
       parentId = near.parent?.id;
+      createPosition = near.rawPosition; // land adjacent, then hop above
       nearIndex = near.position;
     }
     const channel = await guild.channels.create({
       name,
       type: ChannelType.GuildVoice,
       ...(parentId ? { parent: parentId } : {}),
+      ...(createPosition !== undefined ? { position: createPosition } : {}),
     });
     // Sit the "⇩ Join" companion directly above its (private) channel.
     if (nearIndex !== undefined) {
-      await this.positionRelativeTo(channel, nearIndex, true);
+      await this.placeAboveSibling(channel, nearIndex);
     }
     return channel.id;
   }

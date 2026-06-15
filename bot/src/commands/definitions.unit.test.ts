@@ -19,11 +19,11 @@ describe('buildCommandDefinitions', () => {
         'name',
         'nick',
         'ping',
+        'position',
         'private',
         'public',
         'settings',
         'template',
-        'toggleposition',
         'transfer',
         'unlimit',
       ].sort(),
@@ -36,7 +36,7 @@ describe('buildCommandDefinitions', () => {
       'settings',
       'create',
       'template',
-      'toggleposition',
+      'position',
       'inheritpermissions',
       'logging',
     ]) {
@@ -69,7 +69,7 @@ describe('buildCommandDefinitions', () => {
       'public',
       'claim',
       'template',
-      'toggleposition',
+      'position',
       'inheritpermissions',
     ]) {
       const opt = byName.get(name)!.options?.find((o) => o.name === 'channel');

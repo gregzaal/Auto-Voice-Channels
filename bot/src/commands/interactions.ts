@@ -44,6 +44,12 @@ import {
   CREATE_MODAL_ID,
   parseCreateModal,
 } from './createModal.js';
+import {
+  buildPositionModal,
+  parsePositionModal,
+  positionChannelId,
+  POSITION_MODAL_PREFIX,
+} from './positionModal.js';
 
 export interface InteractionDeps {
   client: Client;
@@ -190,13 +196,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       }
       case 'template':
         return openTemplatePanel(interaction);
-      case 'toggleposition':
-        return replyResult(
-          interaction,
-          await run(guildId, 'cmd:toggleposition', () =>
-            deps.settings.togglePosition(guildId, resolveVoiceChannelId(interaction) ?? ''),
-          ),
-        );
+      case 'position':
+        return openPositionModal(interaction);
       case 'inheritpermissions':
         return replyResult(
           interaction,
@@ -250,6 +251,54 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       return;
     }
     await interaction.reply(renderEditorPanel('primary', channelId, state));
+  }
+
+  /** `/position` → a modal to pick above/below for the creator channel you're in. */
+  async function openPositionModal(interaction: ChatInputCommandInteraction): Promise<void> {
+    const guildId = interaction.guildId!;
+    const channelId = resolveVoiceChannelId(interaction);
+    if (!channelId) {
+      await interaction.reply({
+        content:
+          'Join one of that creator channel’s voice channels first, or pass the `channel` option.',
+        ephemeral: true,
+      });
+      return;
+    }
+    const pos = await run(guildId, 'cmd:position', () =>
+      deps.settings.getPosition(guildId, channelId),
+    );
+    if (!pos.found) {
+      await interaction.reply({
+        content: 'This isn’t a bot-managed voice channel.',
+        ephemeral: true,
+      });
+      return;
+    }
+    await interaction.showModal(buildPositionModal(channelId, pos.above));
+  }
+
+  /** The `/position` modal submit: persist the above/below choice for the primary. */
+  async function handlePositionSubmit(
+    interaction: ModalSubmitInteraction,
+    channelId: string,
+  ): Promise<void> {
+    const guildId = interaction.guildId!;
+    if (!hasManageChannels(interaction)) {
+      await interaction.reply({
+        content: 'You need the Manage Channels permission.',
+        ephemeral: true,
+      });
+      return;
+    }
+    const above = parsePositionModal(interaction.fields);
+    const res = await run(guildId, 'cmd:position:set', () =>
+      deps.settings.setPosition(guildId, channelId, above),
+    );
+    await interaction.reply({
+      content: `${res.ok ? '✅' : '⚠️'} ${res.message}`,
+      ephemeral: true,
+    });
   }
 
   async function openNamePanel(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -648,6 +697,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
 
   async function handleModal(interaction: ModalSubmitInteraction): Promise<void> {
     if (interaction.customId === CREATE_MODAL_ID) return handleCreateSubmit(interaction);
+    if (interaction.customId.startsWith(POSITION_MODAL_PREFIX)) {
+      const channelId = positionChannelId(interaction.customId);
+      if (channelId) return handlePositionSubmit(interaction, channelId);
+    }
     if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorModal(interaction);
     const guildId = interaction.guildId!;
     let result: CommandResult | undefined;

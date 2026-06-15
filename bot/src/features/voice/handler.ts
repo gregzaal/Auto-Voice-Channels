@@ -350,7 +350,8 @@ export class VoiceFeature {
       userLimit: primary?.template.limit ?? 0,
       // Place the secondary in the primary's category, above/below per config.
       nearChannelId: channelId,
-      above: primary?.template.above !== false,
+      // Default is below the primary; only `above: true` positions above it.
+      above: primary?.template.above === true,
       ...(primary?.template.inheritperms ? { inheritFrom: primary.template.inheritperms } : {}),
     });
 

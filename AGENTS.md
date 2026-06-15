@@ -113,7 +113,7 @@ events, fault-isolated) and is refused for `blocked` guilds.
 - **Admin (`ManageChannels`):** `/create` (new creator/primary channel, entitlement-gated), `/settings`
   (ephemeral panel: automation, default template, "no game" label, aliases, creator channels — buttons +
   modals, custom-id prefix `avc:settings:`), `/rename` (rename any managed channel by id),
-  `/toggleposition` (new channels above/below the creator), `/inheritpermissions` (copy perms from
+  `/position` (modal: new channels above/below the creator — default below), `/inheritpermissions` (copy perms from
   primary/category/channel), `/logging` (per-guild event log channel + level 1–3).
 
 **Private channels:** `/private` locks the channel to @everyone and spawns a "⇩ Join {creator}" companion
