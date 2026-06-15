@@ -357,6 +357,14 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     if (!(await requireManageChannels(interaction))) return;
     const parsed = parseLoggingModal(interaction.fields);
     const target = parsed.disable ? null : (parsed.channelId ?? interaction.channelId);
+    // Validate the bot can actually post to the chosen/fallback channel before saving.
+    if (target !== null && !canPostTo(interaction, target)) {
+      await interaction.reply({
+        content: 'I can’t post there — pick a text channel I can send messages in.',
+        ephemeral: true,
+      });
+      return;
+    }
     const res = await run(guildId, 'cmd:logging', () =>
       deps.settings.setLogging(guildId, target, parsed.level),
     );
@@ -364,6 +372,19 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       content: `${res.ok ? '✅' : '⚠️'} ${res.message}`,
       ephemeral: true,
     });
+  }
+
+  /** Whether the bot can view + send messages in `channelId` (a guild text channel). */
+  function canPostTo(interaction: ModalSubmitInteraction, channelId: string): boolean {
+    const channel = interaction.guild?.channels.cache.get(channelId);
+    if (!channel?.isTextBased()) return false;
+    const me = interaction.guild?.members.me;
+    const perms = me ? channel.permissionsFor(me) : null;
+    return (
+      (perms?.has(PermissionFlagsBits.ViewChannel) &&
+        perms.has(PermissionFlagsBits.SendMessages)) ??
+      false
+    );
   }
 
   async function openNamePanel(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -410,6 +431,14 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       const state = await run(interaction.guildId!, 'editor:state', () =>
         deps.feature.getEditorState(scope, interaction.guildId!, channelId),
       );
+      // The channel may have been deleted / unmanaged since the panel opened.
+      if (!state.found) {
+        await interaction.reply({
+          content: 'That channel is no longer bot-managed.',
+          ephemeral: true,
+        });
+        return;
+      }
       await interaction.showModal(buildEditorModal(scope, field, channelId, state));
       return;
     }
