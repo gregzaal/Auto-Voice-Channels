@@ -2,6 +2,7 @@ import {
   ActivityType,
   ChannelType,
   DiscordAPIError,
+  OverwriteType,
   type Activity,
   type Client,
   type GuildMember,
@@ -244,7 +245,14 @@ export class DiscordVoiceActions implements VoiceActions {
     try {
       const channel = await this.client.channels.fetch(channelId);
       if (!channel?.isVoiceBased()) return;
-      await channel.permissionOverwrites.edit(memberId, { Connect: allow });
+      // Pass the overwrite type explicitly: with the user cache disabled,
+      // discord.js can't resolve a bare member id to a User to infer the type
+      // (it would throw InvalidType). Given the type, it uses the id directly.
+      await channel.permissionOverwrites.edit(
+        memberId,
+        { Connect: allow },
+        { type: OverwriteType.Member },
+      );
     } catch (err) {
       if (isApiError(err, UNKNOWN_CHANNEL) || isApiError(err, UNKNOWN_MEMBER)) return;
       throw err;
