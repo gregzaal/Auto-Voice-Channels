@@ -2,12 +2,14 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  GuildMember,
   PermissionFlagsBits,
   type ButtonInteraction,
   type ChatInputCommandInteraction,
   type Client,
-  type GuildMember,
   type Interaction,
+  type InteractionReplyOptions,
+  type InteractionUpdateOptions,
   type ModalSubmitInteraction,
 } from 'discord.js';
 import type { GuildRepository, Logger } from '@avc/core';
@@ -512,11 +514,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
 
   async function handlePing(interaction: ChatInputCommandInteraction): Promise<void> {
     const ws = Math.round(deps.client.ws.ping);
-    const sent = await interaction.reply({
-      content: '🏓 Pinging…',
-      ephemeral: true,
-      fetchReply: true,
-    });
+    await interaction.reply({ content: '🏓 Pinging…', ephemeral: true });
+    const sent = await interaction.fetchReply();
     const rtt = sent.createdTimestamp - interaction.createdTimestamp;
     await interaction.editReply(
       `🏓 Pong! Round-trip ${rtt}ms · gateway ${ws < 0 ? '—' : `${ws}ms`}.`,
@@ -836,8 +835,12 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
 }
 
 function currentVoiceChannelId(interaction: ChatInputCommandInteraction): string | undefined {
-  const member = interaction.member as GuildMember | null;
-  return member?.voice?.channelId ?? undefined;
+  // `interaction.member` may be the raw API shape (no `.voice`) when uncached;
+  // use it only when it's a real GuildMember, else resolve from the guild cache.
+  if (interaction.member instanceof GuildMember) {
+    return interaction.member.voice.channelId ?? undefined;
+  }
+  return interaction.guild?.members.cache.get(interaction.user.id)?.voice.channelId ?? undefined;
 }
 
 /** Renders a human-readable `/debug` summary (full detail goes to the logs). */
@@ -900,13 +903,9 @@ async function safeReply(interaction: Interaction, content: string): Promise<voi
   }
 }
 
-/** Strip `ephemeral` (invalid on `update`) but keep embeds/components. */
-function toUpdate(reply: ReturnType<typeof renderSettingsPanel>): {
-  embeds: NonNullable<typeof reply.embeds>;
-  components: NonNullable<typeof reply.components>;
-} {
-  return {
-    embeds: reply.embeds ?? [],
-    components: reply.components ?? [],
-  } as never;
+/** Strips `ephemeral` (invalid on `update`/`editReply`) but keeps embeds/components. */
+function toUpdate(
+  reply: InteractionReplyOptions,
+): Pick<InteractionUpdateOptions, 'embeds' | 'components'> {
+  return { embeds: reply.embeds ?? [], components: reply.components ?? [] };
 }
