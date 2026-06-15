@@ -25,10 +25,18 @@ Licensed **AGPL-3.0**.
 
 Key architecture facts (see `rewrite.md` for detail):
 
-- **discord.js** on Node LTS; Postgres is the source of truth, caches are tuned/disabled.
+- **discord.js** on Node LTS; Postgres is the source of truth. Heavy caches
+  (messages/reactions/users/threads) are off; guild/channel/voice-state, members and **presence** are
+  kept — the game-name templates read `member.presence`, so presence caching is intentionally broad
+  (decision 12; large/presence-heavy guilds are sized onto bigger nodes rather than scoping the cache).
 - **Postgres** (single primary, replica-ready) via **Drizzle**; coordination uses native Postgres
   primitives (advisory locks, `LISTEN/NOTIFY`, `FOR UPDATE SKIP LOCKED`). No Redis.
-- **Shards are claimed via Postgres leases** (heartbeated). At one instance, it claims all shards.
+- **Shards are distributed via Postgres leases** (heartbeated): each instance claims free shards up to
+  `ceil(TOTAL_SHARDS / EXPECTED_INSTANCES)` (at one instance the cap is the full count → it claims all).
+  Identifies are serialized cluster-wide by a Postgres-backed throttler (per-bucket advisory lock +
+  durable spacing in `identify_buckets`, respecting Discord `max_concurrency`).
+- **Guild settings are cached** in-process with `LISTEN/NOTIFY` invalidation (DB stays source of truth),
+  so steady-state voice events don't read/write Postgres per event.
 - **Per-guild in-memory work queues** give ordering + fault isolation + a per-guild circuit-breaker.
 - **Event-driven** with reconcile-on-reconnect and a thin scoped safety-net sweep. All state-changing
   operations are **idempotent**; reconciliation is **convergent**.
@@ -176,24 +184,32 @@ docker compose up             # starts bot + Postgres; migrations auto-run; slas
 - Config is **zod-validated at startup**; the process fails fast on bad/missing config.
 
 See `.env.example` for the full, authoritative variable list (`DISCORD_TOKEN`, `CLIENT_ID`,
-`DATABASE_URL`, `SELF_HOSTED`, `TOTAL_SHARDS`, `INSTANCE_ID`, `HTTP_PORT`, `ADMIN_CHANNEL_ID`,
-`LOG_LEVEL`, `NODE_ENV`).
+`DATABASE_URL`, `SELF_HOSTED`, `TOTAL_SHARDS`, `EXPECTED_INSTANCES`, `INSTANCE_ID`, `HTTP_PORT`,
+`ADMIN_CHANNEL_ID`, `LOG_LEVEL`, `NODE_ENV`). `EXPECTED_INSTANCES` (default 1) is the fleet size used
+to size each instance's shard claim cap; keep it in sync with the running machine count.
 
 ---
 
 ## Deployment (hosted service)
 
 - **Fly rolling deploy** + **graceful drain** (stop new work → finish in-flight per-guild queues →
-  release shard leases) + lease handoff to new instances. Moved shards re-identify **staggered**
-  (respecting Discord `max_concurrency`); reconcile on `READY`.
-- **Readiness-gated with automatic rollback.** Health reports **per subsystem** (gateway connected?
-  shard leases held? DB reachable?) so failures are localizable.
-- Channel automation is not latency-critical: brief, staggered, per-shard reconnect blips are expected
-  and acceptable during a deploy.
+  release shard leases) + lease handoff to new instances; reconcile on `READY`. Cross-instance
+  identifies are **serialized by the Postgres-backed throttler** (per-bucket advisory lock + durable
+  spacing), so simultaneous re-identifies during a deploy can't exceed Discord `max_concurrency` — no
+  manual staggering is needed (or implemented).
+- **Failover is orchestrator-driven:** a crashed or lease-lost machine restarts (Fly `restart` policy)
+  and re-claims its shards on boot; survivors don't poach a dead peer's shards. A lease-loss drains
+  then exits non-zero so the restart is clean. Boot-time claiming retries across the lease-expiry
+  window so a replacement reliably picks up the orphaned shards.
+- **Readiness-gated rolling deploy.** Health reports **per subsystem** (gateway connected? shard leases
+  held? DB reachable? — DB refreshed by a live ping) so a failing `/health` halts the rollout and
+  failures are localizable.
+- Channel automation is not latency-critical: brief reconnect blips during a deploy are acceptable.
 
 Fly config lives under `deploy/fly/` (`fly.toml` + `README.md`). Deploy with
-`fly deploy --config deploy/fly/fly.toml`; the `/health` check gates the rolling deploy and triggers
-auto-rollback. Graceful drain is handled on `SIGTERM` in `bot/src/index.ts`.
+`fly deploy --config deploy/fly/fly.toml`; the `/health` check gates the rolling deploy (a failing
+health check halts/rolls back the rollout — Fly's deploy behavior, not bot-side logic). Graceful drain
+is handled on `SIGTERM` in `bot/src/index.ts`.
 
 ---
 
@@ -285,7 +301,7 @@ TODO: expand from real incidents. Starting set:
 
 | Symptom | Likely cause | First response |
 | --- | --- | --- |
-| Shards offline after deploy | lease not re-claimed / identify backlog | check `shard_leases` heartbeats; verify staggered identify; let reconcile run |
+| Shards offline after deploy | lease not re-claimed / identify backlog | check `shard_leases` heartbeats; check `identify_buckets` spacing (throttler); confirm a replacement machine booted to re-claim; let reconcile run |
 | Duplicate/orphaned channels in one guild | missed event / non-idempotent path | dry-run reconcile that guild, then force-reconcile |
 | One guild misbehaving, others fine | tripped circuit-breaker / bad data | inspect guild via diagnostics; `block` if abusive; fix data |
 | Channel renames not applying | rename rate limit / presence handling | expected debounce; confirm Discord rate-limit headers |
