@@ -1,6 +1,7 @@
 # Reproducible, multi-stage build. The same image serves the hosted service and
 # self-host (differentiated only by config / env).
-FROM node:22-alpine AS base
+# Base image pinned by digest for reproducible builds (tag: node:22-alpine).
+FROM node:22-alpine@sha256:9385cd9f3001dfc3431e8ead12c43e9e1f87cc1b9b5c6cfd0f73865d405b27c4 AS base
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 RUN corepack enable
@@ -33,6 +34,13 @@ RUN pnpm install --frozen-lockfile --prod
 # --- Runtime ---
 FROM base AS runtime
 ENV NODE_ENV=production
+# Build/version stamps surfaced on /health and /diagnostics. Passed at build
+# time (e.g. --build-arg GIT_COMMIT="$(git rev-parse HEAD)"); default to dev so
+# self-host `docker compose up` still builds without extra flags.
+ARG GIT_COMMIT=dev
+ARG APP_VERSION=0.1.0
+ENV GIT_COMMIT=$GIT_COMMIT
+ENV APP_VERSION=$APP_VERSION
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=prod-deps /app/core/node_modules ./core/node_modules
 COPY --from=prod-deps /app/bot/node_modules ./bot/node_modules

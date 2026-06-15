@@ -56,6 +56,14 @@ well-defined components, understandable by a small team over many years.
 - Monetization/billing implementation details.
 - Any new features.
 
+> **Forward note — scale infrastructure by guild size (for the monetization phase).** Presence/member
+> caching is scoped to members in *active managed voice channels*, and only for guilds whose templates
+> actually consume presence data (e.g. `@@game_name@@`), with ~1h retention. The residual cost — RAM
+> for very large guilds running many concurrent voice channels — is acceptable because such guilds are
+> (eventually) required to be paying customers. When monetization lands, include the capability to
+> **place large/paying guilds on more capable Fly nodes** (size infrastructure to guild scale) rather
+> than forcing the entire fleet to absorb the worst-case footprint. See decision 12 (presence).
+
 ---
 
 ## Decision log

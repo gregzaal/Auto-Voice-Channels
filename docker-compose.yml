@@ -2,7 +2,8 @@
 # The same image is used for the scaled hosted service (Fly); only config differs.
 services:
   postgres:
-    image: postgres:16-alpine
+    # Pinned by digest for reproducible builds (tag: postgres:16-alpine).
+    image: postgres:16-alpine@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
