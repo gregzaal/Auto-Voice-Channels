@@ -58,6 +58,12 @@ function randomSeed(): number {
   return Math.floor(Math.random() * 0x7fffffff);
 }
 
+/** Whether two id lists are element-wise equal (to skip no-op roster writes). */
+function sameOrder(a: readonly string[], b: readonly string[] | undefined): boolean {
+  if (!b || a.length !== b.length) return false;
+  return a.every((id, i) => id === b[i]);
+}
+
 /** Decision returned by a {@link CreationGate}. */
 export interface CreateGateDecision {
   allowed: boolean;
@@ -246,18 +252,21 @@ export class VoiceFeature {
         action !== 'deleted' &&
         (await this.deps.secondaries.isSecondary(guildId, beforeChannelId))
       ) {
-        // If the owner is the one who left, hand the channel to someone still in
-        // it before the re-render, so `@@creator@@` resolves to the new owner
-        // (not "Unknown") and a private channel's "⇩ Join" follows suit.
-        await this.maybeTransferOwnership(guildId, beforeChannelId, event.member.id);
+        // Prune the leaver from the arrival roster, and if they owned the channel
+        // hand it to the longest-present remainer before the re-render — so
+        // `@@creator@@` resolves to the new owner (not "Unknown") and a private
+        // channel's "⇩ Join" follows suit.
+        await this.handleSecondaryLeave(guildId, beforeChannelId, event.member.id);
         touched.push(beforeChannelId);
       }
     }
 
     if (afterChannelId !== undefined) {
       await this.maybeCreate(guildId, afterChannelId, event.member);
-      // Joining an existing secondary (not a primary) may change its name.
+      // Joining an existing secondary (not a primary) may change its name, and
+      // appends the member to its arrival roster.
       if (await this.deps.secondaries.isSecondary(guildId, afterChannelId)) {
+        await this.addToRoster(guildId, afterChannelId, event.member.id);
         touched.push(afterChannelId);
       }
     }
@@ -350,7 +359,8 @@ export class VoiceFeature {
       guildId,
       primaryChannelId: channelId,
       ownerId: member.id,
-      state: { name, index, seed },
+      // Seed the arrival roster with the creator (longest-present from birth).
+      state: { name, index, seed, roster: [member.id] },
     });
 
     await this.deps.actions.moveMember(guildId, member.id, newChannelId);
@@ -391,24 +401,37 @@ export class VoiceFeature {
   }
 
   /**
-   * If `leaverId` owned this secondary and members remain, hands ownership to one
-   * of them (the first still present). Keeps `@@creator@@` resolvable after the
-   * creator leaves, and re-points a private channel's "⇩ Join" companion at the
-   * new owner. A no-op when the leaver wasn't the owner or the channel emptied
-   * (cleanup deletes it). Idempotent: a replayed leave sees ownership already
-   * moved off `leaverId` and does nothing.
+   * Handles a member leaving a secondary that still has members: prunes them from
+   * the arrival roster, and — if they owned the channel — hands ownership to the
+   * longest-present remaining member. Keeps `@@creator@@` resolvable after the
+   * creator leaves and re-points a private channel's "⇩ Join" companion at the
+   * new owner. Idempotent: a replayed leave sees the roster already pruned and
+   * ownership already moved, so it writes nothing.
    */
-  private async maybeTransferOwnership(
+  private async handleSecondaryLeave(
     guildId: string,
     channelId: string,
     leaverId: string,
   ): Promise<void> {
     const secondary = await this.deps.secondaries.get(channelId);
     if (!secondary || secondary.guildId !== guildId) return;
-    if (secondary.ownerId !== leaverId) return; // owner still here, or never set
 
-    const remaining = this.deps.voice.membersInChannel(channelId).filter((m) => !m.bot);
-    const newOwner = remaining[0];
+    // Recompute the roster against who's actually present: keep tracked arrival
+    // order for those still here (this drops the leaver and anyone else gone),
+    // then append present-but-untracked members in cache order (self-heal after a
+    // restart/gap). `ordered[0]` is therefore the longest-present member.
+    const members = this.deps.voice.membersInChannel(channelId).filter((m) => !m.bot);
+    const present = new Set(members.map((m) => m.id));
+    const ordered = (secondary.state.roster ?? []).filter((id) => present.has(id));
+    for (const m of members) if (!ordered.includes(m.id)) ordered.push(m.id);
+
+    if (!sameOrder(ordered, secondary.state.roster)) {
+      await this.deps.secondaries.updateState(channelId, { ...secondary.state, roster: ordered });
+    }
+
+    // Ownership only moves when the owner is the one who left and someone remains.
+    if (secondary.ownerId !== leaverId) return;
+    const newOwner = members.find((m) => m.id === ordered[0]);
     if (!newOwner) return; // emptied — cleanup handles deletion
 
     await this.deps.secondaries.setOwner(channelId, newOwner.id);
@@ -426,6 +449,18 @@ export class VoiceFeature {
     );
     // Re-point a private channel's "⇩ Join" companion (no-op if not private).
     await this.deps.onOwnerChanged?.(guildId, channelId, newOwner.id, newOwnerName);
+  }
+
+  /** Appends a member to a secondary's arrival roster (no-op if already tracked). */
+  private async addToRoster(guildId: string, channelId: string, memberId: string): Promise<void> {
+    const secondary = await this.deps.secondaries.get(channelId);
+    if (!secondary || secondary.guildId !== guildId) return;
+    const roster = secondary.state.roster ?? [];
+    if (roster.includes(memberId)) return; // replay-safe: no duplicate, no write
+    await this.deps.secondaries.updateState(channelId, {
+      ...secondary.state,
+      roster: [...roster, memberId],
+    });
   }
 
   /**

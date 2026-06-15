@@ -25,6 +25,14 @@ export const secondaryStateSchema = z.object({
    * creation so a channel's random emoji/word never changes (no rename churn).
    */
   seed: z.number().int().optional(),
+  /**
+   * Member ids in voice-join (arrival) order, maintained as members come and go.
+   * Discord exposes no voice-join timestamp, so we track order ourselves to pick
+   * the longest-present member as the next owner when the creator leaves. Self-
+   * heals after a restart/gap (present-but-untracked members append in cache
+   * order). Stale ids (members who left) are pruned on the next leave.
+   */
+  roster: z.array(z.string()).optional(),
 });
 
 export type SecondaryState = z.infer<typeof secondaryStateSchema>;

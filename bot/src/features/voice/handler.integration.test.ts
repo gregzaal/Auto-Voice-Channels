@@ -199,6 +199,58 @@ describe('VoiceFeature (integration)', () => {
     expect((await secondaries.get(secondaryId))!.ownerId).toBe('alice');
   });
 
+  it('transfers to the longest-present member (arrival order), not an arbitrary one', async () => {
+    const alice = member('alice');
+    voice.put(PRIMARY, alice);
+    await feature.handleVoiceStateUpdate({
+      guildId: GUILD,
+      member: alice,
+      afterChannelId: PRIMARY,
+    });
+    const sec = actions.ofType('create')[0]!.channelId;
+    voice.put(sec, alice); // creator now sitting in the secondary (roster: [alice])
+
+    // carol joins first, then bob → roster becomes [alice, carol, bob].
+    const carol = member('carol');
+    voice.put(sec, carol);
+    await feature.handleVoiceStateUpdate({ guildId: GUILD, member: carol, afterChannelId: sec });
+    const bob = member('bob');
+    voice.put(sec, bob);
+    await feature.handleVoiceStateUpdate({ guildId: GUILD, member: bob, afterChannelId: sec });
+    expect((await secondaries.get(sec))!.state.roster).toEqual(['alice', 'carol', 'bob']);
+
+    // The owner (alice) leaves → carol inherits (joined before bob), not bob.
+    voice.drop(sec, 'alice');
+    await feature.handleVoiceStateUpdate({ guildId: GUILD, member: alice, beforeChannelId: sec });
+
+    expect((await secondaries.get(sec))!.ownerId).toBe('carol');
+    expect((await secondaries.get(sec))!.state.roster).toEqual(['carol', 'bob']);
+  });
+
+  it('self-heals the roster from current members after a gap', async () => {
+    const alice = member('alice');
+    voice.put(PRIMARY, alice);
+    await feature.handleVoiceStateUpdate({
+      guildId: GUILD,
+      member: alice,
+      afterChannelId: PRIMARY,
+    });
+    const sec = actions.ofType('create')[0]!.channelId;
+
+    // Simulate members who joined while untracked (roster still just [alice]).
+    voice.put(sec, alice);
+    voice.put(sec, member('bob'));
+    voice.put(sec, member('carol'));
+    voice.drop(sec, 'alice'); // owner leaves
+
+    await feature.handleVoiceStateUpdate({ guildId: GUILD, member: alice, beforeChannelId: sec });
+
+    // alice pruned; bob/carol appended in cache order; first inherits.
+    const row = await secondaries.get(sec);
+    expect(row!.state.roster).toEqual(['bob', 'carol']);
+    expect(row!.ownerId).toBe('bob');
+  });
+
   it('ignores mute/unmute (no channel change)', async () => {
     const alice = member('alice');
     voice.put(PRIMARY, alice);
