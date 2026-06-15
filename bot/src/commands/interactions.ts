@@ -154,7 +154,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return replyResult(
           interaction,
           await run(guildId, 'cmd:private', () =>
-            deps.privacy.makePrivate(guildId, channelId, userId, interaction.channelId),
+            deps.privacy.makePrivate(guildId, channelId, userId),
           ),
         );
       case 'public':
@@ -505,6 +505,14 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     return interaction.memberPermissions?.has(PermissionFlagsBits.ManageChannels) ?? false;
   }
 
+  /** Best-effort: posts `content` into a channel by id (no-op if it can't). */
+  async function notifyChannel(client: Client, channelId: string, content: string): Promise<void> {
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+    if (channel?.isTextBased() && 'send' in channel) {
+      await channel.send(content).catch(() => undefined);
+    }
+  }
+
   /** Gate an admin action: replies with the permission notice and returns false if lacking it. */
   async function requireManageChannels(
     interaction: ChatInputCommandInteraction | ButtonInteraction | ModalSubmitInteraction,
@@ -718,6 +726,20 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       content: formatResult(result),
       components: [],
     });
+    // The requester can't see the private channel, so post the rejection outcome
+    // to the public "⇩ Join" companion's chat (which they can see). On approve
+    // they're pulled into the channel, so no companion message is needed. Note a
+    // *blocked* user loses access to the companion too, so may not see it — that's
+    // inherent to blocking.
+    if (result.ok && action !== 'approve') {
+      await notifyChannel(
+        deps.client,
+        joinChannelId,
+        action === 'block'
+          ? `⛔ <@${requesterId}>, your request to join was blocked.`
+          : `🚫 <@${requesterId}>, your request to join was declined.`,
+      );
+    }
   }
 
   async function handleKickVote(interaction: ButtonInteraction): Promise<void> {

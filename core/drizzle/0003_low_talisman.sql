@@ -1,0 +1,1 @@
+ALTER TABLE "join_channels" DROP COLUMN "request_channel_id";

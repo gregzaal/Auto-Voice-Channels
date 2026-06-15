@@ -41,7 +41,6 @@ export class PrivacyService {
     guildId: string,
     channelId: string | undefined,
     userId: string,
-    requestChannelId: string,
   ): Promise<CommandResult> {
     if (!channelId) return fail('You need to be in one of this server’s voice channels.');
     const secondary = await this.deps.secondaries.get(channelId);
@@ -68,7 +67,6 @@ export class PrivacyService {
       channelId: joinChannelId,
       guildId,
       secondaryChannelId: channelId,
-      requestChannelId,
       creatorId: userId,
     });
     await this.deps.secondaries.updateState(channelId, {

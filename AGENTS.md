@@ -117,8 +117,19 @@ events, fault-isolated) and is refused for `blocked` guilds.
   primary/category/channel), `/logging` (per-guild event log channel + level 1–3).
 
 **Private channels:** `/private` locks the channel to @everyone and spawns a "⇩ Join {creator}" companion
-channel; joining it posts an Approve/Deny/Block request to the owner (custom-id prefix `avc:join:`). The
-companion is tracked in `join_channels` and deleted on `/public` or when the channel is cleaned up.
+channel. Joining the companion posts an Approve/Deny/Block request (custom-id prefix `avc:join:`) into the
+**private channel's own integrated text chat** — only the owner (inside the channel) and admitted members
+can see it; outsiders and the un-admitted requester cannot. Requester-facing feedback ("request sent",
+"declined"/"blocked") goes to the **public companion's** text chat instead, since the requester can't see
+the private channel. The companion is tracked in `join_channels` (keyed by its own id, with the fronted
+secondary id) and deleted on `/public` or when the channel is cleaned up.
+
+> **Text-in-voice gating (non-obvious):** Discord gates a voice channel's built-in text chat on the
+> *effective `Connect`* permission, **not** `View Channel`. So denying `Connect` to @everyone (what
+> `/private` does) already hides the text chat **and its history** from non-members — and a member later
+> granted `Connect` sees only go-forward messages, never history from before they were admitted. The whole
+> privacy/kick model is therefore built on `Connect` alone; do **not** add `View Channel`/`Read Message
+> History` overwrites for privacy (they're unnecessary, and the bot isn't even invited with RMH).
 
 **Name templates** (`renderChannelName`, all available to every guild): index tokens (`##`, `$0#`, `+#`),
 `@@nato@@`, `@@game_name@@`, `@@num@@`/`@@num_others@@`, `@@creator@@`, `@@stream_name@@`, the

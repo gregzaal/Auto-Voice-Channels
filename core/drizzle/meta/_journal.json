@@ -22,6 +22,13 @@
       "when": 1781419311123,
       "tag": "0002_fat_krista_starr",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1781527526103,
+      "tag": "0003_low_talisman",
+      "breakpoints": true
     }
   ]
 }

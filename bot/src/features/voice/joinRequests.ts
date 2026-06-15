@@ -35,13 +35,26 @@ export function registerJoinRequests(deps: JoinRequestsDeps): () => void {
     if (!ctx) return; // not a join channel
     if (requesterId === ctx.creatorId) return; // owner re-entering their own lobby
 
-    const channel = await deps.client.channels.fetch(ctx.requestChannelId);
-    if (!channel || !channel.isTextBased() || !('send' in channel)) return;
+    // Post the request into the private channel's OWN integrated text chat: only
+    // the owner (who is inside) and admitted members can see it — outsiders and
+    // the un-admitted requester cannot. (Denying Connect already hides this chat.)
+    const secondary = await deps.client.channels.fetch(ctx.secondaryChannelId).catch(() => null);
+    if (secondary?.isTextBased() && 'send' in secondary) {
+      await secondary.send({
+        content: `🔔 <@${ctx.creatorId}>, <@${requesterId}> would like to join.`,
+        components: [buildJoinRow(joinChannelId, requesterId)],
+      });
+    }
 
-    await channel.send({
-      content: `🔔 <@${ctx.creatorId}>, <@${requesterId}> would like to join your private channel.`,
-      components: [buildJoinRow(joinChannelId, requesterId)],
-    });
+    // The requester can't see the private channel, so confirm in the public
+    // "⇩ Join {creator}" companion's text chat (which they can see) that their
+    // request was sent.
+    const lobby = await deps.client.channels.fetch(joinChannelId).catch(() => null);
+    if (lobby?.isTextBased() && 'send' in lobby) {
+      await lobby.send(
+        `🔔 <@${requesterId}>, your request to join was sent — please wait for the owner to respond.`,
+      );
+    }
   }
 
   deps.client.on('voiceStateUpdate', onVoice);

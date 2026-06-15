@@ -9,7 +9,6 @@ import { FakeVoiceView, fakeMember as member } from './voiceTestUtils.js';
 
 const GUILD = 'guild-privacy-test';
 const SEC = 'sec-1';
-const TEXT = 'text-1';
 
 describe('PrivacyService (integration)', () => {
   let env: PgTestEnv;
@@ -52,7 +51,7 @@ describe('PrivacyService (integration)', () => {
   });
 
   it('makes a channel private and spawns a "⇩ Join" companion', async () => {
-    const res = await privacy.makePrivate(GUILD, SEC, 'alice', TEXT);
+    const res = await privacy.makePrivate(GUILD, SEC, 'alice');
     expect(res.ok).toBe(true);
 
     expect(actions.ofType('privacy').at(-1)).toMatchObject({ channelId: SEC, isPrivate: true });
@@ -68,31 +67,30 @@ describe('PrivacyService (integration)', () => {
     const row = await joinChannels.getBySecondary(SEC);
     expect(row).toMatchObject({
       channelId: join[0]!.channelId,
-      requestChannelId: TEXT,
+      secondaryChannelId: SEC,
       creatorId: 'alice',
     });
   });
 
   it('rejects a non-owner and a double-private', async () => {
-    expect((await privacy.makePrivate(GUILD, SEC, 'mallory', TEXT)).ok).toBe(false);
-    await privacy.makePrivate(GUILD, SEC, 'alice', TEXT);
-    expect((await privacy.makePrivate(GUILD, SEC, 'alice', TEXT)).ok).toBe(false);
+    expect((await privacy.makePrivate(GUILD, SEC, 'mallory')).ok).toBe(false);
+    await privacy.makePrivate(GUILD, SEC, 'alice');
+    expect((await privacy.makePrivate(GUILD, SEC, 'alice')).ok).toBe(false);
   });
 
   it('resolves a join channel back to its request context', async () => {
-    await privacy.makePrivate(GUILD, SEC, 'alice', TEXT);
+    await privacy.makePrivate(GUILD, SEC, 'alice');
     const joinId = actions.ofType('joinChannel')[0]!.channelId;
     const ctx = await privacy.getJoinContext(joinId);
     expect(ctx).toMatchObject({
       secondaryChannelId: SEC,
       creatorId: 'alice',
-      requestChannelId: TEXT,
     });
     expect(await privacy.getJoinContext('not-a-join-channel')).toBeUndefined();
   });
 
   it('approves a requester: grants Connect and pulls them in', async () => {
-    await privacy.makePrivate(GUILD, SEC, 'alice', TEXT);
+    await privacy.makePrivate(GUILD, SEC, 'alice');
     const joinId = actions.ofType('joinChannel')[0]!.channelId;
 
     const res = await privacy.approveJoin(joinId, 'bob');
@@ -106,7 +104,7 @@ describe('PrivacyService (integration)', () => {
   });
 
   it('denies a requester, and blocks them on the join channel when asked', async () => {
-    await privacy.makePrivate(GUILD, SEC, 'alice', TEXT);
+    await privacy.makePrivate(GUILD, SEC, 'alice');
     const joinId = actions.ofType('joinChannel')[0]!.channelId;
 
     await privacy.denyJoin(joinId, 'bob', false);
@@ -121,7 +119,7 @@ describe('PrivacyService (integration)', () => {
   });
 
   it('makes a channel public again: deletes the join channel and clears state', async () => {
-    await privacy.makePrivate(GUILD, SEC, 'alice', TEXT);
+    await privacy.makePrivate(GUILD, SEC, 'alice');
     const joinId = actions.ofType('joinChannel')[0]!.channelId;
 
     const res = await privacy.makePublic(GUILD, SEC, 'alice');
@@ -133,7 +131,7 @@ describe('PrivacyService (integration)', () => {
   });
 
   it('reports failure (not "Admitted") when the admit action throws', async () => {
-    await privacy.makePrivate(GUILD, SEC, 'alice', TEXT);
+    await privacy.makePrivate(GUILD, SEC, 'alice');
     const joinId = actions.ofType('joinChannel')[0]!.channelId;
     const throwing: VoiceActions = {
       createVoiceChannel: () => Promise.resolve('x'),
@@ -160,7 +158,7 @@ describe('PrivacyService (integration)', () => {
   });
 
   it('handleOwnerChanged renames the join channel and re-points its creator', async () => {
-    await privacy.makePrivate(GUILD, SEC, 'alice', TEXT);
+    await privacy.makePrivate(GUILD, SEC, 'alice');
     const joinId = actions.ofType('joinChannel')[0]!.channelId;
 
     await privacy.handleOwnerChanged(GUILD, SEC, 'bob', 'Bob');
@@ -177,7 +175,7 @@ describe('PrivacyService (integration)', () => {
   });
 
   it('cleanupForSecondary removes the join channel when the private channel is deleted', async () => {
-    await privacy.makePrivate(GUILD, SEC, 'alice', TEXT);
+    await privacy.makePrivate(GUILD, SEC, 'alice');
     const joinId = actions.ofType('joinChannel')[0]!.channelId;
 
     await privacy.cleanupForSecondary(GUILD, SEC);

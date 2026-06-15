@@ -122,10 +122,8 @@ export const joinChannels = pgTable(
   {
     channelId: text('channel_id').primaryKey(),
     guildId: text('guild_id').notNull(),
-    /** The private secondary this join channel fronts. */
+    /** The private secondary this join channel fronts (and where requests are posted). */
     secondaryChannelId: text('secondary_channel_id').notNull(),
-    /** Text channel where join requests are posted (where `/private` was run). */
-    requestChannelId: text('request_channel_id').notNull(),
     /** The private channel's owner, who approves/denies requests. */
     creatorId: text('creator_id').notNull(),
     createdAt: createdAt(),

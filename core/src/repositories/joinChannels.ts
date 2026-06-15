@@ -7,7 +7,6 @@ export const joinChannelRowSchema = z.object({
   channelId: z.string(),
   guildId: z.string(),
   secondaryChannelId: z.string(),
-  requestChannelId: z.string(),
   creatorId: z.string(),
   createdAt: z.date(),
 });
@@ -18,7 +17,6 @@ export interface CreateJoinChannelInput {
   channelId: string;
   guildId: string;
   secondaryChannelId: string;
-  requestChannelId: string;
   creatorId: string;
 }
 
@@ -38,7 +36,6 @@ export class JoinChannelRepository {
         target: joinChannels.channelId,
         set: {
           secondaryChannelId: input.secondaryChannelId,
-          requestChannelId: input.requestChannelId,
           creatorId: input.creatorId,
         },
       })
