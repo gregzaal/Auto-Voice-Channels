@@ -3,7 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { PgTestEnv } from '../../test/pgContainer.js';
 import { startPostgres } from '../../test/pgContainer.js';
 import { fakeLogger } from '../../runtime/testUtils.js';
-import { RecordingVoiceActions } from './actions.js';
+import { RecordingVoiceActions, type VoiceActions } from './actions.js';
 import { PrivacyService } from './privacy.js';
 import { FakeVoiceView, fakeMember as member } from './voiceTestUtils.js';
 
@@ -130,6 +130,33 @@ describe('PrivacyService (integration)', () => {
     expect(actions.ofType('delete').map((a) => a.channelId)).toContain(joinId);
     expect((await secondaries.get(SEC))!.state.private).toBeUndefined();
     expect(await joinChannels.getBySecondary(SEC)).toBeUndefined();
+  });
+
+  it('reports failure (not "Admitted") when the admit action throws', async () => {
+    await privacy.makePrivate(GUILD, SEC, 'alice', TEXT);
+    const joinId = actions.ofType('joinChannel')[0]!.channelId;
+    const throwing: VoiceActions = {
+      createVoiceChannel: () => Promise.resolve('x'),
+      deleteChannel: () => Promise.resolve(),
+      renameChannel: () => Promise.resolve({ rateLimited: false }),
+      moveMember: () => Promise.reject(new Error('member gone')),
+      setUserLimit: () => Promise.resolve(),
+      setPrivacy: () => Promise.resolve(),
+      setMemberConnect: () => Promise.resolve(),
+      createJoinChannel: () => Promise.resolve('j'),
+      setVoiceStatus: () => Promise.resolve(),
+      repositionSecondaries: () => Promise.resolve(),
+    };
+    const p2 = new PrivacyService({
+      secondaries,
+      joinChannels,
+      actions: throwing,
+      voice,
+      logger: fakeLogger(),
+    });
+    const res = await p2.approveJoin(joinId, 'bob');
+    expect(res.ok).toBe(false);
+    expect(res.message).toContain('Couldn’t admit');
   });
 
   it('handleOwnerChanged renames the join channel and re-points its creator', async () => {

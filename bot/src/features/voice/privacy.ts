@@ -114,13 +114,20 @@ export class PrivacyService {
   async approveJoin(joinChannelId: string, requesterId: string): Promise<CommandResult> {
     const ctx = await this.deps.joinChannels.get(joinChannelId);
     if (!ctx) return fail('That request has expired.');
-    await this.deps.actions.setMemberConnect(
-      ctx.guildId,
-      ctx.secondaryChannelId,
-      requesterId,
-      true,
-    );
-    await this.deps.actions.moveMember(ctx.guildId, requesterId, ctx.secondaryChannelId);
+    try {
+      await this.deps.actions.setMemberConnect(
+        ctx.guildId,
+        ctx.secondaryChannelId,
+        requesterId,
+        true,
+      );
+      await this.deps.actions.moveMember(ctx.guildId, requesterId, ctx.secondaryChannelId);
+    } catch (err) {
+      this.deps.logger.warn({ err, joinChannelId, requesterId }, 'failed to admit join requester');
+      return fail(
+        `Couldn’t admit <@${requesterId}> — they may have left or I’m missing permissions.`,
+      );
+    }
     return ok(`Admitted <@${requesterId}>.`);
   }
 
@@ -132,9 +139,17 @@ export class PrivacyService {
   ): Promise<CommandResult> {
     const ctx = await this.deps.joinChannels.get(joinChannelId);
     if (!ctx) return fail('That request has expired.');
-    await this.deps.actions.moveMember(ctx.guildId, requesterId, null);
-    if (block) {
-      await this.deps.actions.setMemberConnect(ctx.guildId, joinChannelId, requesterId, false);
+    try {
+      await this.deps.actions.moveMember(ctx.guildId, requesterId, null);
+      if (block) {
+        await this.deps.actions.setMemberConnect(ctx.guildId, joinChannelId, requesterId, false);
+      }
+    } catch (err) {
+      this.deps.logger.warn(
+        { err, joinChannelId, requesterId, block },
+        'failed to deny join requester',
+      );
+      return fail(`Couldn’t ${block ? 'block' : 'deny'} <@${requesterId}> — please try again.`);
     }
     return ok(block ? `Blocked <@${requesterId}>.` : `Denied <@${requesterId}>.`);
   }
