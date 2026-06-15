@@ -27,6 +27,14 @@ describe('ShardLeaseRepository (integration)', () => {
     expect(claimed).toEqual([0, 1, 2, 3]);
   });
 
+  it('distributes shards across the fleet via the per-instance cap', async () => {
+    // 4 shards, cap 2 → the first instance packs 0,1; the next packs 2,3.
+    expect(await repo.claimAvailable('inst-A', 4, 30_000, 2)).toEqual([0, 1]);
+    expect(await repo.claimAvailable('inst-B', 4, 30_000, 2)).toEqual([2, 3]);
+    // A third instance gets nothing — the fleet is full (no overlap, none over cap).
+    expect(await repo.claimAvailable('inst-C', 4, 30_000, 2)).toEqual([]);
+  });
+
   it('a second instance cannot steal a freshly-held lease', async () => {
     await repo.claimAvailable('inst-A', 2, 30_000);
     const stolen = await repo.claimAvailable('inst-B', 2, 30_000);
@@ -47,16 +55,25 @@ describe('ShardLeaseRepository (integration)', () => {
     expect(lease?.instanceId).toBe('inst-B');
   });
 
-  it("heartbeat refreshes only the owner's leases", async () => {
+  it("heartbeat refreshes only the owner's leases and returns the owned shard ids", async () => {
     await repo.claimAvailable('inst-A', 3, 30_000);
     const before = await repo.list();
     await new Promise((r) => setTimeout(r, 20));
-    const count = await repo.heartbeat('inst-A');
-    expect(count).toBe(3);
+    const owned = await repo.heartbeat('inst-A');
+    expect(owned).toEqual([0, 1, 2]);
     const after = await repo.list();
     for (let i = 0; i < 3; i++) {
       expect(after[i]!.heartbeatAt!.getTime()).toBeGreaterThan(before[i]!.heartbeatAt!.getTime());
     }
+  });
+
+  it('heartbeat omits a shard stolen by another instance (lease-loss signal)', async () => {
+    await repo.claimAvailable('inst-A', 3, 30_000);
+    // Age A's heartbeat so the lease is expired, then let B steal shard 1.
+    await env.handle.db.update(shardLeases).set({ heartbeatAt: new Date(Date.now() - 60_000) });
+    expect((await repo.claim(1, 'inst-B', 3, 30_000))?.instanceId).toBe('inst-B');
+    // A's heartbeat now refreshes only the shards it still owns (0 and 2).
+    expect(await repo.heartbeat('inst-A')).toEqual([0, 2]);
   });
 
   it('release frees a lease only for its owner', async () => {

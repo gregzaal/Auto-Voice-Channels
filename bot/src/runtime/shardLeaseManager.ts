@@ -5,32 +5,63 @@ export interface ShardLeaseManagerOptions {
   logger: Logger;
   instanceId: string;
   totalShards: number;
+  /**
+   * The most shards this instance will claim (fleet distribution). Defaults to
+   * `totalShards` — the self-host case, where one instance claims everything.
+   */
+  maxShards?: number;
   /** A lease is considered expired after this long without a heartbeat. */
   leaseTtlMs?: number;
   /** How often to heartbeat owned leases. Must be well below the TTL. */
   heartbeatIntervalMs?: number;
+  /** How often a boot-time claim retries while it is below its cap. */
+  claimRetryIntervalMs?: number;
+  /**
+   * How long boot-time claiming keeps retrying for free shards before giving up
+   * with whatever it has. Sized to outlast a fast-restarted peer's lease expiry,
+   * so a replacement machine reliably picks up the orphaned shards.
+   */
+  claimRetryWindowMs?: number;
+  /**
+   * Called when a heartbeat reveals this instance no longer owns shards it was
+   * running (a lease was stolen). Orchestrator-driven failover: the instance
+   * should drain and exit so it re-claims cleanly on restart. Never called for a
+   * lease that merely expired but is still ours (heartbeat re-affirms those).
+   */
+  onLeaseLost?: (lostShardIds: number[]) => void;
   /** Injectable interval scheduler for tests. */
   setInterval?: typeof setInterval;
   clearInterval?: typeof clearInterval;
+  /** Injectable sleep for tests (defaults to a real timer). */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /**
- * Owns this instance's shard leases: claims available shards, heartbeats them,
- * and releases on shutdown. At a single instance it simply claims all shards,
- * so the self-hosted profile pays no behavioural cost.
+ * Owns this instance's shard leases: claims its share of available shards (up to
+ * its cap), heartbeats them, and releases on shutdown. At a single instance the
+ * cap is the full shard count, so it simply claims everything.
  *
- * Re-claiming of a dead instance's shards happens naturally: when its heartbeat
- * lapses past the TTL, another instance's claim loop takes over the lease.
+ * Failover is **orchestrator-driven**: surviving instances do NOT grab a dead
+ * peer's shards mid-life (they are already at their cap). When an instance dies,
+ * its leases expire and its replacement machine claims them at boot — boot-time
+ * claiming retries across the lease-expiry window to make that reliable even on a
+ * fast restart. If a live instance *loses* a lease (stolen under a >TTL stall), it
+ * reacts via {@link ShardLeaseManagerOptions.onLeaseLost} (drain + restart).
  */
 export class ShardLeaseManager {
   private readonly repo: ShardLeaseRepository;
   private readonly logger: Logger;
   private readonly instanceId: string;
   private readonly totalShards: number;
+  private readonly maxShards: number;
   private readonly leaseTtlMs: number;
   private readonly heartbeatIntervalMs: number;
+  private readonly claimRetryIntervalMs: number;
+  private readonly claimRetryWindowMs: number;
+  private readonly onLeaseLost: ((lostShardIds: number[]) => void) | undefined;
   private readonly setIntervalFn: typeof setInterval;
   private readonly clearIntervalFn: typeof clearInterval;
+  private readonly sleepFn: (ms: number) => Promise<void>;
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   private owned = new Set<number>();
 
@@ -39,25 +70,56 @@ export class ShardLeaseManager {
     this.logger = options.logger.child({ component: 'shard-lease-manager' });
     this.instanceId = options.instanceId;
     this.totalShards = options.totalShards;
+    this.maxShards = options.maxShards ?? options.totalShards;
     this.leaseTtlMs = options.leaseTtlMs ?? 30_000;
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? 10_000;
+    this.claimRetryIntervalMs = options.claimRetryIntervalMs ?? 2_000;
+    this.claimRetryWindowMs = options.claimRetryWindowMs ?? this.leaseTtlMs * 1.5;
+    this.onLeaseLost = options.onLeaseLost;
     this.setIntervalFn = options.setInterval ?? setInterval;
     this.clearIntervalFn = options.clearInterval ?? clearInterval;
+    this.sleepFn = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
   get ownedShards(): number[] {
     return [...this.owned].sort((a, b) => a - b);
   }
 
-  /** Claims all currently-available shards. Safe to call repeatedly. */
+  /** Claims this instance's share (up to its cap) in a single pass. */
   async claim(): Promise<number[]> {
     const claimed = await this.repo.claimAvailable(
       this.instanceId,
       this.totalShards,
       this.leaseTtlMs,
+      this.maxShards,
     );
     this.owned = new Set(claimed);
-    this.logger.info({ claimed }, 'claimed shard leases');
+    this.logger.info({ claimed, cap: this.maxShards }, 'claimed shard leases');
+    return claimed;
+  }
+
+  /**
+   * Boot-time claim: claims its share, then retries while below cap until the
+   * retry window elapses — so a replacement instance rides out a dead peer's
+   * lease expiry and picks up its shards. Stops early once at cap, or once it
+   * holds some shards and a pass frees nothing more (the rest are held by live
+   * peers, i.e. this is just our fair share).
+   */
+  async claimWithRetry(): Promise<number[]> {
+    const deadline = Date.now() + this.claimRetryWindowMs;
+    let claimed = await this.claim();
+    while (claimed.length < this.maxShards && Date.now() < deadline) {
+      await this.sleepFn(this.claimRetryIntervalMs);
+      const before = claimed.length;
+      claimed = await this.claim();
+      if (claimed.length === before && claimed.length > 0) break;
+    }
+    if (claimed.length === 0) {
+      this.logger.warn(
+        { cap: this.maxShards, totalShards: this.totalShards },
+        'claimed no shards — fleet may be over-provisioned (more instances than EXPECTED_INSTANCES)',
+      );
+    }
     return claimed;
   }
 
@@ -73,8 +135,16 @@ export class ShardLeaseManager {
 
   async heartbeatOnce(): Promise<void> {
     try {
-      const count = await this.repo.heartbeat(this.instanceId);
-      this.logger.debug({ count }, 'heartbeat refreshed leases');
+      const owned = await this.repo.heartbeat(this.instanceId);
+      const ownedSet = new Set(owned);
+      const lost = [...this.owned].filter((shardId) => !ownedSet.has(shardId));
+      this.owned = ownedSet;
+      if (lost.length > 0) {
+        this.logger.error({ lost, stillOwned: owned }, 'lost shard lease(s) — reacting');
+        this.onLeaseLost?.(lost);
+        return;
+      }
+      this.logger.debug({ count: owned.length }, 'heartbeat refreshed leases');
     } catch (err) {
       this.logger.error({ err }, 'heartbeat failed');
     }

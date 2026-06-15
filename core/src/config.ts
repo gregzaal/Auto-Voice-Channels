@@ -33,6 +33,14 @@ export const configSchema = z.object({
   /** Total shard count across all instances. A managed config value. */
   totalShards: z.coerce.number().int().positive().default(1),
 
+  /**
+   * Expected number of instances in the fleet. Each instance claims free shards
+   * up to `ceil(totalShards / expectedInstances)` (see {@link shardCapFor}), so the
+   * shards spread across the fleet instead of the first instance grabbing them all.
+   * Self-host leaves this at 1 → one instance claims every shard (unchanged).
+   */
+  expectedInstances: z.coerce.number().int().positive().default(1),
+
   /** Stable identifier for this running instance (used for shard leases). */
   instanceId: z.string().min(1).default('local'),
 
@@ -51,6 +59,15 @@ export const configSchema = z.object({
 
 export type Config = z.infer<typeof configSchema>;
 
+/**
+ * Per-instance shard cap: the most shards one instance will claim, given the total
+ * shard count and the expected fleet size. `ceil(total / expected)`, floored at 1.
+ * Self-host (`expected = 1`) → the cap is the full total, so it claims every shard.
+ */
+export function shardCapFor(totalShards: number, expectedInstances: number): number {
+  return Math.max(1, Math.ceil(totalShards / Math.max(1, expectedInstances)));
+}
+
 /** Maps process env to the config schema's input shape. */
 function envToInput(env: NodeJS.ProcessEnv): Record<string, unknown> {
   return {
@@ -60,6 +77,7 @@ function envToInput(env: NodeJS.ProcessEnv): Record<string, unknown> {
     databaseUrl: env.DATABASE_URL,
     selfHosted: env.SELF_HOSTED,
     totalShards: env.TOTAL_SHARDS,
+    expectedInstances: env.EXPECTED_INSTANCES,
     instanceId: env.INSTANCE_ID,
     httpPort: env.HTTP_PORT,
     adminChannelId: env.ADMIN_CHANNEL_ID,

@@ -76,32 +76,41 @@ export class ShardLeaseRepository {
   }
 
   /**
-   * Claims every shard available to this instance (unowned/expired) and returns
-   * the set now owned. At a single instance this claims all shards.
+   * Claims shards available to this instance (unowned/expired/already-ours), up to
+   * `maxShards`, and returns the set now owned. Iterates low→high so the fleet packs
+   * deterministically: the first instance takes `0..cap-1`, the next `cap..2cap-1`,
+   * and so on. With the default cap (`totalShards`) a single instance claims all
+   * shards — the self-host behaviour.
    */
   async claimAvailable(
     instanceId: string,
     totalShards: number,
     leaseTtlMs: number,
+    maxShards: number = totalShards,
   ): Promise<number[]> {
     await this.ensureRows(totalShards);
     const claimed: number[] = [];
-    for (let shardId = 0; shardId < totalShards; shardId++) {
+    for (let shardId = 0; shardId < totalShards && claimed.length < maxShards; shardId++) {
       const lease = await this.claim(shardId, instanceId, totalShards, leaseTtlMs);
       if (lease) claimed.push(shardId);
     }
     return claimed;
   }
 
-  /** Refreshes the heartbeat for all shards currently owned by `instanceId`. */
-  async heartbeat(instanceId: string): Promise<number> {
+  /**
+   * Refreshes the heartbeat for all shards currently owned by `instanceId` and
+   * returns the shard ids still owned. A returned set smaller than what the caller
+   * believed it owned means a lease was lost (expired under a stall, or stolen) —
+   * the caller must stop serving those shards.
+   */
+  async heartbeat(instanceId: string): Promise<number[]> {
     const now = new Date();
     const updated = await this.db
       .update(shardLeases)
       .set({ heartbeatAt: now, updatedAt: now })
       .where(eq(shardLeases.instanceId, instanceId))
       .returning({ shardId: shardLeases.shardId });
-    return updated.length;
+    return updated.map((r) => r.shardId).sort((a, b) => a - b);
   }
 
   /** Releases a shard if (and only if) this instance still owns it. */

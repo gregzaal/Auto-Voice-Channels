@@ -9,6 +9,7 @@ import {
   RUNTIME_FLAGS,
   RuntimeFlagsRepository,
   SecondaryChannelRepository,
+  shardCapFor,
   ShardLeaseRepository,
   type Config,
   type Logger,
@@ -73,17 +74,29 @@ async function main(): Promise<void> {
   }
 
   const leaseRepo = new ShardLeaseRepository(db);
+  // Distribute shards across the fleet: each instance claims up to its cap. At one
+  // instance (self-host) the cap is the full shard count, so it claims everything.
+  const maxShards = shardCapFor(config.totalShards, config.expectedInstances);
   const leaseManager = new ShardLeaseManager({
     repo: leaseRepo,
     logger,
     instanceId: config.instanceId,
     totalShards: config.totalShards,
+    maxShards,
+    // Orchestrator-driven failover: if a lease is stolen out from under us, drain
+    // and exit so the orchestrator restarts us into a clean re-claim. The SIGTERM
+    // path (installShutdown) releases leases and finishes in-flight work first.
+    onLeaseLost: (lost) => {
+      logger.error({ lost }, 'shard lease lost — draining for clean re-claim on restart');
+      process.kill(process.pid, 'SIGTERM');
+    },
   });
 
   const dispatcher = new GuildDispatcher({ logger });
 
-  const claimed = await leaseManager.claim();
-  leaseManager.startHeartbeat();
+  // Boot-time claim retries across the lease-expiry window so a replacement
+  // instance reliably picks up a dead peer's orphaned shards.
+  const claimed = await leaseManager.claimWithRetry();
 
   // Gateway + voice feature. The lease manager decides which shards this
   // instance owns; the gateway client connects only those.
@@ -271,6 +284,10 @@ async function main(): Promise<void> {
     disposeInteractions,
     closeDb,
   });
+
+  // Start heartbeating only now that the graceful-drain handler is installed, so a
+  // lease-loss reaction (which triggers SIGTERM) always drains cleanly.
+  leaseManager.startHeartbeat();
 }
 
 interface ShutdownDeps {
