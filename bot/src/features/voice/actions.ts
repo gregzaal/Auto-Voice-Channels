@@ -71,7 +71,14 @@ export interface VoiceActions {
 }
 
 export type RecordedAction =
-  | { type: 'create'; guildId: string; channelId: string; name: string; locked: boolean }
+  | {
+      type: 'create';
+      guildId: string;
+      channelId: string;
+      name: string;
+      locked: boolean;
+      parentId?: string;
+    }
   | { type: 'delete'; guildId: string; channelId: string }
   | { type: 'rename'; guildId: string; channelId: string; name: string }
   | { type: 'move'; guildId: string; memberId: string; channelId: string | null }
@@ -109,6 +116,7 @@ export class RecordingVoiceActions implements VoiceActions {
       channelId,
       name: input.name,
       locked: input.locked ?? false,
+      ...(input.parentId ? { parentId: input.parentId } : {}),
     });
     return Promise.resolve(channelId);
   }

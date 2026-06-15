@@ -38,6 +38,12 @@ import {
   parseEditorId,
   renderEditorPanel,
 } from './templatePanel.js';
+import {
+  buildCreateModal,
+  CREATE_AGAIN_ID,
+  CREATE_MODAL_ID,
+  parseCreateModal,
+} from './createModal.js';
 
 export interface InteractionDeps {
   client: Client;
@@ -206,7 +212,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       case 'debug':
         return handleDebug(interaction);
       case 'create':
-        return handleCreate(interaction);
+        return openCreateModal(interaction);
       case 'settings':
         return openSettings(interaction);
       default:
@@ -449,7 +455,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     };
   }
 
-  async function handleCreate(interaction: ChatInputCommandInteraction): Promise<void> {
+  /** `/create` (and the "Create another" button) → open the setup modal. */
+  async function openCreateModal(
+    interaction: ChatInputCommandInteraction | ButtonInteraction,
+  ): Promise<void> {
     const guildId = interaction.guildId!;
     if (!(await deps.guilds.isEntitled(guildId, deps.selfHosted))) {
       await interaction.reply({
@@ -458,10 +467,56 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       });
       return;
     }
-    await replyResult(
-      interaction,
-      await run(guildId, 'cmd:create', () => deps.settings.createPrimary(guildId)),
+    if (!hasManageChannels(interaction)) {
+      await interaction.reply({
+        content: 'You need the Manage Channels permission.',
+        ephemeral: true,
+      });
+      return;
+    }
+    // Prefill the template fields with the guild's current defaults (a quick read,
+    // well within the 3s window before showModal — which must be the first response).
+    const config = await deps.settings.getConfig(guildId);
+    await interaction.showModal(
+      buildCreateModal({
+        nameTemplate: config.defaultTemplate,
+        statusTemplate: config.defaultStatus,
+      }),
     );
+  }
+
+  /** The `/create` modal submit: create the primary from the selections, confirm. */
+  async function handleCreateSubmit(interaction: ModalSubmitInteraction): Promise<void> {
+    const guildId = interaction.guildId!;
+    if (!(await isEntitledOrReject(interaction, guildId))) return;
+    const config = await deps.settings.getConfig(guildId);
+    const opts = parseCreateModal(interaction.fields, {
+      nameTemplate: config.defaultTemplate,
+      statusTemplate: config.defaultStatus,
+    });
+    const result = await run(guildId, 'create:submit', () =>
+      deps.settings.createPrimary(guildId, opts),
+    );
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(CREATE_AGAIN_ID)
+        .setLabel('Create another')
+        .setStyle(ButtonStyle.Secondary),
+    );
+    await interaction.reply({
+      content: `${result.ok ? '✅' : '⚠️'} ${result.message}`,
+      components: [row],
+      ephemeral: true,
+    });
+  }
+
+  async function isEntitledOrReject(
+    interaction: ModalSubmitInteraction,
+    guildId: string,
+  ): Promise<boolean> {
+    if (await deps.guilds.isEntitled(guildId, deps.selfHosted)) return true;
+    await interaction.reply({ content: 'This server isn’t currently entitled.', ephemeral: true });
+    return false;
   }
 
   async function openSettings(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -505,6 +560,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   }
 
   async function handleButton(interaction: ButtonInteraction): Promise<void> {
+    if (interaction.customId === CREATE_AGAIN_ID) return openCreateModal(interaction);
     if (interaction.customId.startsWith(KICK_PREFIX)) return handleKickVote(interaction);
     if (interaction.customId.startsWith(JOIN_PREFIX)) return handleJoinDecision(interaction);
     if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorButton(interaction);
@@ -587,6 +643,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   }
 
   async function handleModal(interaction: ModalSubmitInteraction): Promise<void> {
+    if (interaction.customId === CREATE_MODAL_ID) return handleCreateSubmit(interaction);
     if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorModal(interaction);
     const guildId = interaction.guildId!;
     let result: CommandResult | undefined;

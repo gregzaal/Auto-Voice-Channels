@@ -3,10 +3,11 @@ import type {
   AutoChannelRow,
   GuildRepository,
   Logger,
+  PrimaryTemplate,
   SecondaryChannelRepository,
 } from '@avc/core';
 import type { VoiceActions } from './actions.js';
-import { DEFAULT_CHANNEL_NAME_TEMPLATE } from './nameTemplate.js';
+import { DEFAULT_CHANNEL_NAME_TEMPLATE, DEFAULT_STATUS_TEMPLATE } from './nameTemplate.js';
 import { MAX_USER_LIMIT, type CommandResult } from './commands.js';
 
 /** Logging verbosity levels (legacy parity): 1 lifecycle, 2 changes, 3 joins/leaves. */
@@ -18,11 +19,22 @@ const fail = (message: string): CommandResult => ({ ok: false, message });
 /** The default name for a freshly-created primary ("creator") channel. */
 export const DEFAULT_PRIMARY_NAME = '➕ New Session';
 
+/** Options for creating a primary (the `/create` setup modal collects these). */
+export interface CreatePrimaryOptions {
+  name?: string;
+  parentId?: string;
+  nameTemplate?: string;
+  statusTemplate?: string;
+  /** Position spawned secondaries above (default) or below the primary. */
+  above?: boolean;
+}
+
 /** A normalized read-model of a guild's voice configuration, for the panel. */
 export interface GuildConfig {
   enabled: boolean;
   general: string;
   defaultTemplate: string;
+  defaultStatus: string;
   aliases: Record<string, string>;
   primaries: { channelId: string; template: string; limit: number }[];
 }
@@ -65,6 +77,10 @@ export class GuildSettingsService {
         typeof s.channel_name_template === 'string'
           ? s.channel_name_template
           : DEFAULT_CHANNEL_NAME_TEMPLATE,
+      defaultStatus:
+        typeof s.channel_status_template === 'string'
+          ? s.channel_status_template
+          : DEFAULT_STATUS_TEMPLATE,
       aliases: isStringMap(s.aliases) ? s.aliases : {},
       primaries: primaries.map((p) => toPrimaryView(p)),
     };
@@ -118,13 +134,24 @@ export class GuildSettingsService {
   }
 
   /** Creates a Discord voice channel and registers it as a primary. */
-  async createPrimary(guildId: string, name = DEFAULT_PRIMARY_NAME): Promise<CommandResult> {
-    const channelId = await this.deps.actions.createVoiceChannel({ guildId, name });
-    await this.deps.autoChannels.upsert(guildId, channelId, {});
+  async createPrimary(guildId: string, opts: CreatePrimaryOptions = {}): Promise<CommandResult> {
+    const name = opts.name?.trim() || DEFAULT_PRIMARY_NAME;
+    const channelId = await this.deps.actions.createVoiceChannel({
+      guildId,
+      name,
+      ...(opts.parentId ? { parentId: opts.parentId } : {}),
+    });
+    // Only persist non-default fields so the primary inherits where unset.
+    const template: PrimaryTemplate = {
+      ...(opts.nameTemplate ? { name: opts.nameTemplate } : {}),
+      ...(opts.statusTemplate ? { status: opts.statusTemplate } : {}),
+      ...(opts.above === false ? { above: false } : {}),
+    };
+    await this.deps.autoChannels.upsert(guildId, channelId, template);
     this.deps.logger.info({ guildId, channelId, name }, 'created primary channel');
     return ok(
-      `Created a new creator channel: **${name}**. Join it to spawn a voice channel.\n` +
-        'Use `/template` to change the channel name template.',
+      `Created **${name}**. Join it to spawn a voice channel.\n` +
+        'Edit it anytime with `/template`, `/toggleposition`, `/defaultlimit`, …',
     );
   }
 

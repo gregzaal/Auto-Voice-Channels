@@ -91,6 +91,26 @@ describe('GuildSettingsService (integration)', () => {
     expect(config.primaries[0]!.channelId).toBe(created[0]!.channelId);
   });
 
+  it('creates a primary with the /create modal options (category, templates, position)', async () => {
+    const res = await settings.createPrimary(GUILD, {
+      name: 'Game Lobby',
+      parentId: 'cat-1',
+      nameTemplate: '## [@@game_name@@]',
+      statusTemplate: 'Status here',
+      above: false,
+    });
+    expect(res.ok).toBe(true);
+    const created = actions.ofType('create')[0]!;
+    expect(created).toMatchObject({ name: 'Game Lobby', parentId: 'cat-1' });
+
+    const primary = await autoChannels.get(created.channelId);
+    expect(primary!.template).toMatchObject({
+      name: '## [@@game_name@@]',
+      status: 'Status here',
+      above: false,
+    });
+  });
+
   it('sets a primary template and default limit, and removes the primary', async () => {
     await settings.createPrimary(GUILD);
     const channelId = actions.ofType('create')[0]!.channelId;
