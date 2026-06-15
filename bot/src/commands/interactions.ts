@@ -227,14 +227,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
 
   async function openTemplatePanel(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
-    const channelId = currentVoiceChannelId(interaction);
-    if (!channelId) {
-      await interaction.reply({
-        content: 'Join one of that creator channel’s voice channels first.',
-        ephemeral: true,
-      });
-      return;
-    }
+    const channelId = await requireVoiceChannel(interaction);
+    if (!channelId) return;
     const state = await run(guildId, 'cmd:template', () =>
       deps.feature.getEditorState('primary', guildId, channelId),
     );
@@ -251,14 +245,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   /** `/position` → a modal to pick above/below for the creator channel you're in. */
   async function openPositionModal(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
-    const channelId = currentVoiceChannelId(interaction);
-    if (!channelId) {
-      await interaction.reply({
-        content: 'Join one of that creator channel’s voice channels first.',
-        ephemeral: true,
-      });
-      return;
-    }
+    const channelId = await requireVoiceChannel(interaction);
+    if (!channelId) return;
     const pos = await run(guildId, 'cmd:position', () =>
       deps.settings.getPosition(guildId, channelId),
     );
@@ -307,14 +295,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   /** `/inheritpermissions` → a modal to choose the permission source. */
   async function openInheritModal(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
-    const channelId = currentVoiceChannelId(interaction);
-    if (!channelId) {
-      await interaction.reply({
-        content: 'Join one of that creator channel’s voice channels first.',
-        ephemeral: true,
-      });
-      return;
-    }
+    const channelId = await requireVoiceChannel(interaction);
+    if (!channelId) return;
     const pos = await run(guildId, 'cmd:inherit', () =>
       deps.settings.getPosition(guildId, channelId),
     );
@@ -340,7 +322,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       deps.settings.setInheritPermissions(guildId, channelId, source),
     );
     await interaction.reply({
-      content: `${res.ok ? '✅' : '⚠️'} ${res.message}`,
+      content: formatResult(res),
       ephemeral: true,
     });
   }
@@ -370,7 +352,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       deps.settings.setLogging(guildId, target, parsed.level),
     );
     await interaction.reply({
-      content: `${res.ok ? '✅' : '⚠️'} ${res.message}`,
+      content: formatResult(res),
       ephemeral: true,
     });
   }
@@ -391,14 +373,11 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   async function openNamePanel(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
-    const target = currentVoiceChannelId(interaction);
-    if (!target) {
-      await interaction.reply({
-        content: 'Join the voice channel you want to rename first.',
-        ephemeral: true,
-      });
-      return;
-    }
+    const target = await requireVoiceChannel(
+      interaction,
+      'Join the voice channel you want to rename first.',
+    );
+    if (!target) return;
     const state = await run(guildId, 'cmd:name', () =>
       deps.feature.getEditorState('channel', guildId, target),
     );
@@ -644,7 +623,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         .setStyle(ButtonStyle.Secondary),
     );
     await interaction.reply({
-      content: `${result.ok ? '✅' : '⚠️'} ${result.message}`,
+      content: formatResult(result),
       components: [row],
       ephemeral: true,
     });
@@ -736,7 +715,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         : deps.privacy.denyJoin(joinChannelId, requesterId, action === 'block'),
     );
     await interaction.update({
-      content: `${result.ok ? '✅' : '⚠️'} ${result.message}`,
+      content: formatResult(result),
       components: [],
     });
   }
@@ -872,6 +851,22 @@ function currentVoiceChannelId(interaction: ChatInputCommandInteraction): string
   return interaction.guild?.members.cache.get(interaction.user.id)?.voice.channelId ?? undefined;
 }
 
+/** The caller's current voice channel, or undefined after replying `joinMessage`. */
+async function requireVoiceChannel(
+  interaction: ChatInputCommandInteraction,
+  joinMessage = 'Join one of that creator channel’s voice channels first.',
+): Promise<string | undefined> {
+  const channelId = currentVoiceChannelId(interaction);
+  if (channelId) return channelId;
+  await interaction.reply({ content: joinMessage, ephemeral: true });
+  return undefined;
+}
+
+/** Standard `✅/⚠️ message` formatting for a CommandResult reply. */
+function formatResult(result: CommandResult): string {
+  return `${result.ok ? '✅' : '⚠️'} ${result.message}`;
+}
+
 /** Renders a human-readable `/debug` summary (full detail goes to the logs). */
 function formatDebug(info: ChannelDebug, permissions: Record<string, boolean>): string {
   const perms = Object.entries(permissions)
@@ -913,10 +908,7 @@ async function replyResult(
   interaction: ChatInputCommandInteraction,
   result: CommandResult,
 ): Promise<void> {
-  await interaction.reply({
-    content: `${result.ok ? '✅' : '⚠️'} ${result.message}`,
-    ephemeral: true,
-  });
+  await interaction.reply({ content: formatResult(result), ephemeral: true });
 }
 
 async function safeReply(interaction: Interaction, content: string): Promise<void> {
