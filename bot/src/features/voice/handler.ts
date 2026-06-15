@@ -154,6 +154,30 @@ type CreateOutcome =
 
 type CleanupOutcome = { action: 'deleted' | 'would-delete' | 'skip' };
 
+/** Which template an editor panel acts on. */
+export type EditorKind = 'name' | 'template';
+
+/** Data backing a `/name` or `/template` editor panel. */
+export interface EditorState {
+  /** Whether the target is a managed secondary. */
+  found: boolean;
+  /**
+   * The currently-saved template text for this editor — the per-channel override
+   * for `name`, the primary's template for `template`. Undefined → inheriting the
+   * server default.
+   */
+  currentTemplate?: string;
+  /** The template actually in effect (used as the modal prefill base). */
+  effectiveTemplate: string;
+  /** What the effective template renders to for the channel right now. */
+  preview: string;
+  /** The secondary's owner (for the `/name` permission check). */
+  ownerId?: string | null;
+  primaryChannelId?: string;
+  /** The guild's default template (shown when inheriting). */
+  serverDefault: string;
+}
+
 /** What a single-guild reconcile changed (or, under dry-run, would change). */
 export interface GuildDrift {
   guildId: string;
@@ -516,6 +540,53 @@ export class VoiceFeature {
       computedGame: getGameName(members, { aliases: settings.aliases, general: settings.general }),
       ...(renderedName !== undefined ? { renderedName } : {}),
       ...(inGuild && secondary.state.seed !== undefined ? { seed: secondary.state.seed } : {}),
+    };
+  }
+
+  /**
+   * Resolves the state behind a `/name` (per-channel override) or `/template`
+   * (per-primary) editor panel: the currently-saved template, the effective one,
+   * and a live preview rendered against the channel's current members.
+   */
+  async getEditorState(kind: EditorKind, guildId: string, channelId: string): Promise<EditorState> {
+    const guild = await this.deps.guilds.ensure(guildId);
+    const settings = parseSettings(guild.settings);
+    const secondary = await this.deps.secondaries.get(channelId);
+    if (!secondary || secondary.guildId !== guildId) {
+      return {
+        found: false,
+        effectiveTemplate: settings.channelNameTemplate,
+        preview: '',
+        serverDefault: settings.channelNameTemplate,
+      };
+    }
+    const primary = await this.deps.autoChannels.get(secondary.primaryChannelId);
+    const members = this.deps.voice.membersInChannel(channelId);
+    const owner = secondary.ownerId ? members.find((m) => m.id === secondary.ownerId) : undefined;
+
+    const currentTemplate = kind === 'name' ? secondary.state.template : primary?.template.name;
+    const effectiveTemplate =
+      kind === 'name'
+        ? (currentTemplate ?? primary?.template.name ?? settings.channelNameTemplate)
+        : (currentTemplate ?? settings.channelNameTemplate);
+
+    const preview = renderChannelName(effectiveTemplate, {
+      index: secondary.state.index ?? 0,
+      members,
+      aliases: settings.aliases,
+      general: settings.general,
+      ...(secondary.state.seed !== undefined ? { seed: secondary.state.seed } : {}),
+      ...(owner ? { creatorName: displayName(settings, owner), creator: owner } : {}),
+    });
+
+    return {
+      found: true,
+      ...(currentTemplate !== undefined ? { currentTemplate } : {}),
+      effectiveTemplate,
+      preview,
+      ownerId: secondary.ownerId,
+      primaryChannelId: secondary.primaryChannelId,
+      serverDefault: settings.channelNameTemplate,
     };
   }
 

@@ -2,6 +2,7 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  PermissionFlagsBits,
   type ButtonInteraction,
   type ChatInputCommandInteraction,
   type Client,
@@ -15,6 +16,8 @@ import {
   rateLimitNote,
   type ChannelDebug,
   type CommandResult,
+  type EditorKind,
+  type EditorState,
   type GuildSettingsService,
   type PrivacyService,
   type VoiceCommands,
@@ -28,6 +31,12 @@ import {
   SETTINGS_PREFIX,
   settingsId,
 } from './settingsPanel.js';
+import {
+  buildEditorModal,
+  EDITOR_PREFIX,
+  parseEditorId,
+  renderEditorPanel,
+} from './templatePanel.js';
 
 export interface InteractionDeps {
   client: Client;
@@ -117,17 +126,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
           ),
         );
       case 'name':
-        return replyResult(
-          interaction,
-          await run(guildId, 'cmd:name', () =>
-            deps.voiceCommands.setName(
-              guildId,
-              channelId,
-              userId,
-              interaction.options.getString('name', true),
-            ),
-          ),
-        );
+        return openNamePanel(interaction);
       case 'private':
         return replyResult(
           interaction,
@@ -177,24 +176,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
           message: res.message + rateLimitNote(summary.rateLimited),
         });
       }
-      case 'template': {
-        const res = await run(guildId, 'cmd:template', () =>
-          deps.settings.setTemplate(
-            guildId,
-            channelId ?? '',
-            interaction.options.getString('template', true),
-          ),
-        );
-        if (!res.ok) return replyResult(interaction, res);
-        // Re-render all of this creator channel's secondaries with the new template.
-        const summary = await run(guildId, 'cmd:template:render', () =>
-          deps.feature.rerenderSiblings(guildId, channelId ?? ''),
-        );
-        return replyResult(interaction, {
-          ok: true,
-          message: res.message + rateLimitNote(summary.rateLimited),
-        });
-      }
+      case 'template':
+        return openTemplatePanel(interaction);
       case 'toggleposition':
         return replyResult(
           interaction,
@@ -210,17 +193,6 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
               guildId,
               channelId ?? '',
               interaction.options.getString('source', true),
-            ),
-          ),
-        );
-      case 'rename':
-        return replyResult(
-          interaction,
-          await run(guildId, 'cmd:rename', () =>
-            deps.voiceCommands.renameById(
-              guildId,
-              interaction.options.getChannel('channel', true).id,
-              interaction.options.getString('name', true),
             ),
           ),
         );
@@ -240,6 +212,155 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         await interaction.reply({ content: 'Unknown command.', ephemeral: true });
         return;
     }
+  }
+
+  // -- /name + /template editor panel --------------------------------------
+
+  async function openTemplatePanel(interaction: ChatInputCommandInteraction): Promise<void> {
+    const guildId = interaction.guildId!;
+    const channelId = currentVoiceChannelId(interaction);
+    if (!channelId) {
+      await interaction.reply({
+        content: 'Join one of that creator channel’s voice channels first.',
+        ephemeral: true,
+      });
+      return;
+    }
+    const state = await run(guildId, 'cmd:template', () =>
+      deps.feature.getEditorState('template', guildId, channelId),
+    );
+    if (!state.found) {
+      await interaction.reply({
+        content: 'This isn’t a bot-managed voice channel.',
+        ephemeral: true,
+      });
+      return;
+    }
+    await interaction.reply(renderEditorPanel('template', channelId, state));
+  }
+
+  async function openNamePanel(interaction: ChatInputCommandInteraction): Promise<void> {
+    const guildId = interaction.guildId!;
+    const userId = interaction.user.id;
+    const target =
+      interaction.options.getChannel('channel')?.id ?? currentVoiceChannelId(interaction);
+    if (!target) {
+      await interaction.reply({
+        content: 'Join a voice channel, or pick one with the `channel` option.',
+        ephemeral: true,
+      });
+      return;
+    }
+    const state = await run(guildId, 'cmd:name', () =>
+      deps.feature.getEditorState('name', guildId, target),
+    );
+    if (!state.found) {
+      await interaction.reply({
+        content: 'That isn’t a bot-managed voice channel.',
+        ephemeral: true,
+      });
+      return;
+    }
+    // Anyone may rename their own channel; renaming another needs admin.
+    if (!hasManageChannels(interaction) && state.ownerId && state.ownerId !== userId) {
+      await interaction.reply({
+        content: 'Only the channel’s owner or a server admin can rename it.',
+        ephemeral: true,
+      });
+      return;
+    }
+    await interaction.reply(renderEditorPanel('name', target, state));
+  }
+
+  async function handleEditorButton(interaction: ButtonInteraction): Promise<void> {
+    const parsed = parseEditorId(interaction.customId);
+    if (!parsed) return;
+    const { action, kind, channelId } = parsed;
+    if (action === 'close') {
+      await interaction.update({ content: 'Closed.', embeds: [], components: [] });
+      return;
+    }
+    if (action === 'edit') {
+      const state = await run(interaction.guildId!, 'editor:state', () =>
+        deps.feature.getEditorState(kind, interaction.guildId!, channelId),
+      );
+      await interaction.showModal(buildEditorModal(kind, channelId, state));
+      return;
+    }
+    if (action === 'reset') {
+      // Defer first: the rerender can hit the rate-limit probe and brush the 3s ack.
+      await interaction.deferUpdate();
+      await refreshEditorPanel(interaction, kind, channelId, 'reset');
+    }
+  }
+
+  async function handleEditorModal(interaction: ModalSubmitInteraction): Promise<void> {
+    const parsed = parseEditorId(interaction.customId);
+    if (!parsed || parsed.action !== 'save') return;
+    if (!interaction.isFromMessage()) return; // editor modals are always panel-driven
+    const value = interaction.fields.getTextInputValue('template');
+    await interaction.deferUpdate();
+    await refreshEditorPanel(interaction, parsed.kind, parsed.channelId, value);
+  }
+
+  /** Applies a change and edits the (already-deferred) panel in place. */
+  async function refreshEditorPanel(
+    interaction: ButtonInteraction | ModalSubmitInteraction,
+    kind: EditorKind,
+    channelId: string,
+    value: string,
+  ): Promise<void> {
+    const applied = await applyEditor(interaction, kind, channelId, value);
+    if (applied.ok) {
+      await interaction.editReply(
+        toUpdate(renderEditorPanel(kind, channelId, applied.state, applied.opts)),
+      );
+    } else {
+      await interaction.followUp({ content: `⚠️ ${applied.message}`, ephemeral: true });
+    }
+  }
+
+  /** Applies a `/name` or `/template` change; returns the refreshed panel state. */
+  async function applyEditor(
+    interaction: ButtonInteraction | ModalSubmitInteraction,
+    kind: EditorKind,
+    channelId: string,
+    value: string,
+  ): Promise<
+    | { ok: true; state: EditorState; opts: { updated: true; note?: string } }
+    | { ok: false; message: string }
+  > {
+    const guildId = interaction.guildId!;
+    const admin = hasManageChannels(interaction);
+    let result: CommandResult;
+    if (kind === 'name') {
+      result = await run(guildId, 'editor:name', () =>
+        deps.voiceCommands.setName(guildId, channelId, interaction.user.id, value, { admin }),
+      );
+    } else {
+      result = await run(guildId, 'editor:template', () =>
+        deps.settings.setTemplate(guildId, channelId, value),
+      );
+      if (result.ok) {
+        const summary = await run(guildId, 'editor:template:render', () =>
+          deps.feature.rerenderSiblings(guildId, channelId),
+        );
+        result = { ok: true, message: result.message + rateLimitNote(summary.rateLimited) };
+      }
+    }
+    if (!result.ok) return { ok: false, message: result.message };
+    const state = await run(guildId, 'editor:refresh', () =>
+      deps.feature.getEditorState(kind, guildId, channelId),
+    );
+    return {
+      ok: true,
+      state,
+      opts: { updated: true, ...(result.message ? { note: result.message } : {}) },
+    };
+  }
+
+  function hasManageChannels(interaction: Interaction): boolean {
+    return interaction.memberPermissions?.has(PermissionFlagsBits.ManageChannels) ?? false;
   }
 
   async function handleLogging(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -378,6 +499,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   async function handleButton(interaction: ButtonInteraction): Promise<void> {
     if (interaction.customId.startsWith(KICK_PREFIX)) return handleKickVote(interaction);
     if (interaction.customId.startsWith(JOIN_PREFIX)) return handleJoinDecision(interaction);
+    if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorButton(interaction);
     if (interaction.customId.startsWith(SETTINGS_PREFIX)) return handleSettingsButton(interaction);
   }
 
@@ -457,6 +579,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   }
 
   async function handleModal(interaction: ModalSubmitInteraction): Promise<void> {
+    if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorModal(interaction);
     const guildId = interaction.guildId!;
     let result: CommandResult | undefined;
     if (interaction.customId === SETTINGS_MODAL_IDS.general) {

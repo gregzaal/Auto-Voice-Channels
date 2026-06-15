@@ -72,21 +72,27 @@ export class VoiceCommands {
   /**
    * Overrides the channel's name (or `reset`s to the primary's template). The
    * value may use template tokens (`@@game_name@@`, `##`, …) and is re-evaluated
-   * on game/membership changes. Owner only.
+   * on game/membership changes. Owner only, unless `opts.admin` (a server admin
+   * may rename any managed channel — this absorbs the old `/rename`).
    */
   async setName(
     guildId: string,
     channelId: string | undefined,
     userId: string,
     name: string,
+    opts: { admin?: boolean } = {},
   ): Promise<CommandResult> {
-    const secondary = await this.requireOwned(guildId, channelId, userId);
-    if ('error' in secondary) return secondary.error;
-    const id = secondary.row.channelId;
+    const found = await this.resolveSecondary(guildId, channelId);
+    if ('error' in found) return found.error;
+    const row = found.row;
+    if (!opts.admin && row.ownerId && row.ownerId !== userId) {
+      return fail('Only the channel owner can rename it. Use `/claim` if the owner has left.');
+    }
+    const id = row.channelId;
     const trimmed = name.trim();
 
     if (trimmed.toLowerCase() === 'reset' || trimmed === '') {
-      const { template: _drop, ...rest } = secondary.row.state;
+      const { template: _drop, ...rest } = row.state;
       await this.deps.secondaries.updateState(id, rest);
       const r = await this.deps.feature.rerenderSecondary(guildId, id);
       return ok(
@@ -96,30 +102,9 @@ export class VoiceCommands {
 
     // Newlines aren't valid in channel names; flatten to spaces (legacy parity).
     const template = trimmed.replace(/[\r\n]+/g, ' ');
-    await this.deps.secondaries.updateState(id, { ...secondary.row.state, template });
+    await this.deps.secondaries.updateState(id, { ...row.state, template });
     const r = await this.deps.feature.rerenderSecondary(guildId, id);
     return ok(`Updated this channel’s name.${rateLimitNote(r.rateLimited ? 1 : 0)}`);
-  }
-
-  /**
-   * Admin rename of a secondary by id, from anywhere (legacy `/rename`). Like
-   * {@link setName} but keyed by channel id with no owner check — the caller
-   * enforces the admin gate.
-   */
-  async renameById(guildId: string, channelId: string, name: string): Promise<CommandResult> {
-    const row = await this.deps.secondaries.get(channelId);
-    if (!row || row.guildId !== guildId) return fail('That isn’t one of my channels.');
-    const trimmed = name.trim();
-    if (trimmed.toLowerCase() === 'reset' || trimmed === '') {
-      const { template: _drop, ...rest } = row.state;
-      await this.deps.secondaries.updateState(channelId, rest);
-      const r = await this.deps.feature.rerenderSecondary(guildId, channelId);
-      return ok(`Reset that channel’s name.${rateLimitNote(r.rateLimited ? 1 : 0)}`);
-    }
-    const template = trimmed.replace(/[\r\n]+/g, ' ');
-    await this.deps.secondaries.updateState(channelId, { ...row.state, template });
-    const r = await this.deps.feature.rerenderSecondary(guildId, channelId);
-    return ok(`Renamed <#${channelId}>.${rateLimitNote(r.rateLimited ? 1 : 0)}`);
   }
 
   /** Transfers ownership to another member who is in the channel. Owner only. */

@@ -110,18 +110,19 @@ describe('VoiceCommands (integration)', () => {
     expect(res.message).toMatch(/rate-limit/i);
   });
 
-  it('renames a channel by id (admin override), and resets it', async () => {
+  it('blocks a non-owner from renaming, but allows an admin override', async () => {
     voice.put(SEC, member('alice', ['Halo']));
-    const res = await commands.renameById(GUILD, SEC, 'Admin Named');
-    expect(res.ok).toBe(true);
+
+    // Mallory doesn't own SEC (alice does) and isn't admin → rejected.
+    const denied = await commands.setName(GUILD, SEC, 'mallory', 'Hijacked');
+    expect(denied.ok).toBe(false);
+    expect((await secondaries.get(SEC))!.state.template).toBeUndefined();
+
+    // Same call with the admin flag succeeds (absorbs the old /rename).
+    const allowed = await commands.setName(GUILD, SEC, 'mallory', 'Admin Named', { admin: true });
+    expect(allowed.ok).toBe(true);
     expect((await secondaries.get(SEC))!.state.template).toBe('Admin Named');
     expect(actions.ofType('rename').at(-1)!.name).toBe('Admin Named');
-
-    expect((await commands.renameById(GUILD, 'nope', 'x')).ok).toBe(false);
-
-    const reset = await commands.renameById(GUILD, SEC, 'reset');
-    expect(reset.ok).toBe(true);
-    expect((await secondaries.get(SEC))!.state.template).toBeUndefined();
   });
 
   it('transfers ownership to a member in the channel', async () => {

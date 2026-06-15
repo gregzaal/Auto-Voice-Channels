@@ -302,6 +302,36 @@ describe('VoiceFeature (integration)', () => {
     expect(summary).toMatchObject({ considered: 2, renamed: 2, rateLimited: 2 });
   });
 
+  it('getEditorState returns current value + live preview for both editors', async () => {
+    await secondaries.create({
+      channelId: 'ed',
+      guildId: GUILD,
+      primaryChannelId: PRIMARY,
+      ownerId: 'alice',
+      state: { name: '#1 [Halo]', index: 0, template: 'My Room' },
+    });
+    voice.put('ed', member('alice', ['Halo']));
+
+    // /name editor: the per-channel override and its rendered preview.
+    const nameState = await feature.getEditorState('name', GUILD, 'ed');
+    expect(nameState).toMatchObject({
+      found: true,
+      currentTemplate: 'My Room',
+      preview: 'My Room',
+    });
+    expect(nameState.ownerId).toBe('alice');
+
+    // /template editor: the primary's template (PRIMARY uses '## [@@game_name@@]').
+    const tmplState = await feature.getEditorState('template', GUILD, 'ed');
+    expect(tmplState).toMatchObject({
+      found: true,
+      currentTemplate: '## [@@game_name@@]',
+      preview: '#1 [Halo]', // primary template, ignoring the per-channel override
+    });
+
+    expect((await feature.getEditorState('name', GUILD, 'missing')).found).toBe(false);
+  });
+
   it('debugChannel reports the data behind a channel name', async () => {
     await secondaries.create({
       channelId: 'dbg',

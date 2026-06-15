@@ -21,7 +21,6 @@ describe('buildCommandDefinitions', () => {
         'ping',
         'private',
         'public',
-        'rename',
         'settings',
         'template',
         'toggleposition',
@@ -39,7 +38,6 @@ describe('buildCommandDefinitions', () => {
       'template',
       'toggleposition',
       'inheritpermissions',
-      'rename',
       'logging',
     ]) {
       expect(byName.get(name)!.default_member_permissions).toBe(manage);

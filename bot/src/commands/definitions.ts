@@ -52,13 +52,12 @@ export function buildCommandDefinitions(
     guildOnly(
       new SlashCommandBuilder()
         .setName('name')
-        .setDescription('Rename your voice channel (use “reset” to revert).')
-        .addStringOption((o) =>
+        .setDescription('Open a panel to rename your voice channel.')
+        .addChannelOption((o) =>
           o
-            .setName('name')
-            .setDescription('New name or template (or “reset”).')
-            .setRequired(true)
-            .setMaxLength(100),
+            .setName('channel')
+            .setDescription('Channel to rename (admins; defaults to your current one).')
+            .addChannelTypes(ChannelType.GuildVoice),
         ) as SlashCommandBuilder,
     ),
     guildOnly(
@@ -131,16 +130,7 @@ export function buildCommandDefinitions(
     adminOnly(
       new SlashCommandBuilder()
         .setName('template')
-        .setDescription(
-          'Set the name template for the creator channel you’re in (all its channels).',
-        )
-        .addStringOption((o) =>
-          o
-            .setName('template')
-            .setDescription('Name template (tokens like @@game_name@@, ##), or “reset”.')
-            .setRequired(true)
-            .setMaxLength(100),
-        ) as SlashCommandBuilder,
+        .setDescription('Open a panel to set the name template for the creator channel you’re in.'),
     ),
     adminOnly(
       new SlashCommandBuilder()
@@ -156,25 +146,6 @@ export function buildCommandDefinitions(
             .setName('source')
             .setDescription('“primary”, “category”, or a voice-channel id.')
             .setRequired(true),
-        ) as SlashCommandBuilder,
-    ),
-    adminOnly(
-      new SlashCommandBuilder()
-        .setName('rename')
-        .setDescription('Rename a bot-managed voice channel by picking it (admin override).')
-        .addChannelOption((o) =>
-          o
-            .setName('channel')
-            .setDescription('The voice channel to rename.')
-            .addChannelTypes(ChannelType.GuildVoice)
-            .setRequired(true),
-        )
-        .addStringOption((o) =>
-          o
-            .setName('name')
-            .setDescription('New name/template, or “reset”.')
-            .setRequired(true)
-            .setMaxLength(100),
         ) as SlashCommandBuilder,
     ),
     adminOnly(
