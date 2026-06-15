@@ -8,50 +8,8 @@ import type {
 import { isEntitled } from '@avc/core';
 import type { VoiceActions } from './actions.js';
 import type { GuildVoiceView, MemberActivity, VoiceMember, VoiceStateEvent } from './types.js';
-import {
-  DEFAULT_CHANNEL_NAME_TEMPLATE,
-  DEFAULT_STATUS_TEMPLATE,
-  getGameName,
-  MAX_STATUS_LENGTH,
-  renderChannelName,
-} from './nameTemplate.js';
-
-/** Guild settings relevant to the voice feature (read from `guilds.settings`). */
-interface VoiceSettings {
-  enabled: boolean;
-  channelNameTemplate: string;
-  channelStatusTemplate: string;
-  aliases: Record<string, string>;
-  general: string;
-  /** Per-user custom display names for `@@creator@@` (set via `/nick`). */
-  customNicks: Record<string, string>;
-}
-
-function asStringMap(value: unknown): Record<string, string> {
-  return typeof value === 'object' && value !== null ? (value as Record<string, string>) : {};
-}
-
-function parseSettings(settings: Record<string, unknown>): VoiceSettings {
-  return {
-    enabled: settings.enabled !== false,
-    channelNameTemplate:
-      typeof settings.channel_name_template === 'string'
-        ? settings.channel_name_template
-        : DEFAULT_CHANNEL_NAME_TEMPLATE,
-    channelStatusTemplate:
-      typeof settings.channel_status_template === 'string'
-        ? settings.channel_status_template
-        : DEFAULT_STATUS_TEMPLATE,
-    aliases: asStringMap(settings.aliases),
-    general: typeof settings.general === 'string' ? settings.general : 'General',
-    customNicks: asStringMap(settings.custom_nicks),
-  };
-}
-
-/** The display name to use for a member, honouring their `/nick` override. */
-function displayName(settings: VoiceSettings, member: VoiceMember): string {
-  return settings.customNicks[member.id] ?? member.displayName;
-}
+import { getGameName, MAX_STATUS_LENGTH, renderChannelName } from './nameTemplate.js';
+import { displayName, parseVoiceSettings } from './guildSettings.js';
 
 /** A fresh 31-bit random seed for a channel's `[[random]]` picks. */
 function randomSeed(): number {
@@ -296,7 +254,7 @@ export class VoiceFeature {
     if (!(await this.deps.autoChannels.isPrimary(guildId, channelId))) return { action: 'skip' };
 
     const guild = await this.deps.guilds.ensure(guildId);
-    const settings = parseSettings(guild.settings);
+    const settings = parseVoiceSettings(guild.settings);
     if (!settings.enabled) return { action: 'skip' };
     if (!isEntitled({ status: guild.authStatus, selfHosted: this.deps.selfHosted })) {
       this.deps.logger.debug({ guildId }, 'skipping creation: not entitled');
@@ -445,7 +403,7 @@ export class VoiceFeature {
 
     await this.deps.secondaries.setOwner(channelId, newOwner.id);
     const guild = await this.deps.guilds.ensure(guildId);
-    const newOwnerName = displayName(parseSettings(guild.settings), newOwner);
+    const newOwnerName = displayName(parseVoiceSettings(guild.settings), newOwner);
 
     this.deps.logger.info(
       { guildId, secondaryId: channelId, from: leaverId, to: newOwner.id },
@@ -493,7 +451,7 @@ export class VoiceFeature {
     if (members.filter((m) => !m.bot).length === 0) return {};
 
     const guild = await this.deps.guilds.ensure(guildId);
-    const settings = parseSettings(guild.settings);
+    const settings = parseVoiceSettings(guild.settings);
     const primary = await this.deps.autoChannels.get(secondary.primaryChannelId);
     const owner = secondary.ownerId ? members.find((m) => m.id === secondary.ownerId) : undefined;
     // Reconciliation may pass a freshly-computed sibling position to renumber
@@ -647,7 +605,7 @@ export class VoiceFeature {
    */
   async debugChannel(guildId: string, channelId: string): Promise<ChannelDebug> {
     const guild = await this.deps.guilds.ensure(guildId);
-    const settings = parseSettings(guild.settings);
+    const settings = parseVoiceSettings(guild.settings);
     const secondary = await this.deps.secondaries.get(channelId);
     const inGuild = secondary !== undefined && secondary.guildId === guildId;
     const isPrimary = await this.deps.autoChannels.isPrimary(guildId, channelId);
@@ -721,7 +679,7 @@ export class VoiceFeature {
     channelId: string,
   ): Promise<EditorState> {
     const guild = await this.deps.guilds.ensure(guildId);
-    const settings = parseSettings(guild.settings);
+    const settings = parseVoiceSettings(guild.settings);
     const empty: EditorFieldState = { effectiveTemplate: '', preview: '' };
     const secondary = await this.deps.secondaries.get(channelId);
     if (!secondary || secondary.guildId !== guildId) {

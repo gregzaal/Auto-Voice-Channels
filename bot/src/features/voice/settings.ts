@@ -7,7 +7,8 @@ import type {
   SecondaryChannelRepository,
 } from '@avc/core';
 import type { VoiceActions } from './actions.js';
-import { DEFAULT_CHANNEL_NAME_TEMPLATE, DEFAULT_STATUS_TEMPLATE } from './nameTemplate.js';
+import { DEFAULT_CHANNEL_NAME_TEMPLATE } from './nameTemplate.js';
+import { isStringMap, parseVoiceSettings, readLogging } from './guildSettings.js';
 import { MAX_USER_LIMIT, type CommandResult } from './commands.js';
 
 /** Logging verbosity levels (legacy parity): 1 lifecycle, 2 changes, 3 joins/leaves. */
@@ -68,20 +69,14 @@ export class GuildSettingsService {
 
   async getConfig(guildId: string): Promise<GuildConfig> {
     const guild = await this.deps.guilds.ensure(guildId);
-    const s = guild.settings;
+    const s = parseVoiceSettings(guild.settings);
     const primaries = await this.deps.autoChannels.listByGuild(guildId);
     return {
-      enabled: s.enabled !== false,
-      general: typeof s.general === 'string' ? s.general : 'General',
-      defaultTemplate:
-        typeof s.channel_name_template === 'string'
-          ? s.channel_name_template
-          : DEFAULT_CHANNEL_NAME_TEMPLATE,
-      defaultStatus:
-        typeof s.channel_status_template === 'string'
-          ? s.channel_status_template
-          : DEFAULT_STATUS_TEMPLATE,
-      aliases: isStringMap(s.aliases) ? s.aliases : {},
+      enabled: s.enabled,
+      general: s.general,
+      defaultTemplate: s.channelNameTemplate,
+      defaultStatus: s.channelStatusTemplate,
+      aliases: s.aliases,
       primaries: primaries.map((p) => toPrimaryView(p)),
     };
   }
@@ -311,10 +306,7 @@ export class GuildSettingsService {
     guildId: string,
   ): Promise<{ enabled: boolean; level: LogLevel; channelId: string | null }> {
     const guild = await this.deps.guilds.ensure(guildId);
-    const s = guild.settings;
-    const channelId = typeof s.logging === 'string' ? s.logging : null;
-    const level: LogLevel = s.log_level === 2 || s.log_level === 3 ? s.log_level : 1;
-    return { enabled: channelId !== null, level, channelId };
+    return readLogging(guild.settings);
   }
 
   /** Configures the per-guild logging channel + level, or turns logging off. */
@@ -348,12 +340,4 @@ function toPrimaryView(p: AutoChannelRow): { channelId: string; template: string
     template: p.template.name ?? DEFAULT_CHANNEL_NAME_TEMPLATE,
     limit: p.template.limit ?? 0,
   };
-}
-
-function isStringMap(value: unknown): value is Record<string, string> {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    Object.values(value).every((v) => typeof v === 'string')
-  );
 }
