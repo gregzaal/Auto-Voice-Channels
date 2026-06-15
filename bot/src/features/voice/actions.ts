@@ -11,8 +11,6 @@ export interface CreateVoiceChannelInput {
   /** User limit (0 = unlimited). */
   userLimit?: number;
   bitrate?: number;
-  /** Lock the channel to @everyone (private). */
-  locked?: boolean;
   /**
    * Position the new channel relative to this (primary) channel: inherit its
    * category, and sit just above (`above: true`) or below it (default). "Below"
@@ -91,7 +89,6 @@ export type RecordedAction =
       guildId: string;
       channelId: string;
       name: string;
-      locked: boolean;
       parentId?: string;
     }
   | { type: 'delete'; guildId: string; channelId: string }
@@ -137,7 +134,6 @@ export class RecordingVoiceActions implements VoiceActions {
       guildId: input.guildId,
       channelId,
       name: input.name,
-      locked: input.locked ?? false,
       ...(input.parentId ? { parentId: input.parentId } : {}),
     });
     return Promise.resolve(channelId);
