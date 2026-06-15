@@ -1,0 +1,24 @@
+{
+  // Editor behavior
+  "editor.formatOnSave": false,
+  "editor.formatOnPaste": false,
+  "editor.defaultFormatter": null,
+  "editor.codeActionsOnSave": {},
+
+  // File exclusions
+  "files.exclude": {
+    "**/.DS_Store": true,
+    "**/.git": true,
+    "**/.gitignore": false,
+    "**/node_modules": true,
+    "**/.venv": true,
+    "**/__pycache__": true
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/dist": true,
+    "**/build": true,
+    "**/.turbo": true,
+    "**/.pnpm": true
+  }
+}

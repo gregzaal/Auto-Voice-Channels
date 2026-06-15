@@ -1,0 +1,24 @@
+# Keep the build context clean and — critically — never copy the host's
+# node_modules over the image's. Host pnpm node_modules are symlinks into a
+# host-specific store (absolute paths), which dangle inside the container and
+# break `COPY . .` (e.g. `tsc` not found during the build stage).
+node_modules
+**/node_modules
+
+# Built output is regenerated inside the image.
+dist
+**/dist
+*.tsbuildinfo
+
+# VCS, local env/secrets, and logs.
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*.log
+
+# Editor / OS cruft.
+.vscode
+.idea
+.DS_Store

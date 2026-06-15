@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    # GitHub-hosted Ubuntu runners include a working Docker daemon, which
+    # Testcontainers needs for the DB / LISTEN-NOTIFY / advisory-lock tests.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      # Hard gates — all must pass before merge/deploy.
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Lint + format check
+        run: pnpm run lint
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Unit tests
+        run: pnpm run test:unit
+
+      - name: Integration tests (Testcontainers)
+        run: pnpm run test:integration

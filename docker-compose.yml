@@ -1,0 +1,44 @@
+# Self-host: bot + Postgres. `docker compose up` and you're running.
+# The same image is used for the scaled hosted service (Fly); only config differs.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: avc
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d avc']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - '5432:5432'
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DISCORD_TOKEN: ${DISCORD_TOKEN}
+      CLIENT_ID: ${CLIENT_ID}
+      # Optional: register slash commands to one guild (instant) for local testing.
+      DEV_GUILD_ID: ${DEV_GUILD_ID:-}
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/avc
+      SELF_HOSTED: 'true'
+      TOTAL_SHARDS: '1'
+      INSTANCE_ID: selfhost
+      HTTP_PORT: '8080'
+      LOG_LEVEL: info
+      NODE_ENV: production
+    ports:
+      - '8080:8080'
+    restart: unless-stopped
+
+volumes:
+  pgdata:

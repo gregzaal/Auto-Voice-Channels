@@ -1,0 +1,47 @@
+# Fly.io deployment config for the scaled hosted service.
+# The application is deployment-agnostic; everything Fly-specific lives here so
+# the app never hard-depends on Fly. Self-host uses docker-compose instead.
+#
+# Secrets (set via `fly secrets set ...`, never committed):
+#   DISCORD_TOKEN, CLIENT_ID, DATABASE_URL
+#
+# TODO: set `app`, region, and Postgres attachment when provisioning.
+app = "auto-voice-channels"
+primary_region = "iad"
+
+[build]
+  dockerfile = "../../Dockerfile"
+
+[env]
+  SELF_HOSTED = "false"
+  HTTP_PORT = "8080"
+  LOG_LEVEL = "info"
+  NODE_ENV = "production"
+  # TOTAL_SHARDS is a managed value; set per scale.
+  TOTAL_SHARDS = "1"
+
+# Rolling deploys with a health gate + auto-rollback (per AGENTS.md). Channel
+# automation is not latency-critical, so brief staggered reconnects are fine.
+[deploy]
+  strategy = "rolling"
+
+# INSTANCE_ID should be unique per machine; Fly exposes its machine id which the
+# entrypoint can map to INSTANCE_ID (TODO wire in deploy/fly entry script).
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/health"
+    interval = "10s"
+    timeout = "2s"
+    grace_period = "30s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

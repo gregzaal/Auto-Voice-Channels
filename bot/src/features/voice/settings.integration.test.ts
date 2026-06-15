@@ -1,0 +1,180 @@
+import { AutoChannelRepository, GuildRepository, SecondaryChannelRepository, db } from '@avc/core';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import type { PgTestEnv } from '../../test/pgContainer.js';
+import { startPostgres } from '../../test/pgContainer.js';
+import { fakeLogger } from '../../runtime/testUtils.js';
+import { RecordingVoiceActions } from './actions.js';
+import { DEFAULT_CHANNEL_NAME_TEMPLATE } from './nameTemplate.js';
+import { GuildSettingsService } from './settings.js';
+
+const GUILD = 'guild-settings-test';
+
+describe('GuildSettingsService (integration)', () => {
+  let env: PgTestEnv;
+  let guilds: GuildRepository;
+  let autoChannels: AutoChannelRepository;
+  let secondaries: SecondaryChannelRepository;
+  let actions: RecordingVoiceActions;
+  let settings: GuildSettingsService;
+
+  beforeAll(async () => {
+    env = await startPostgres();
+    guilds = new GuildRepository(env.handle.db);
+    autoChannels = new AutoChannelRepository(env.handle.db);
+    secondaries = new SecondaryChannelRepository(env.handle.db);
+  });
+
+  afterAll(async () => {
+    await env?.stop();
+  });
+
+  beforeEach(async () => {
+    await env.handle.db.delete(db.schema.secondaryChannels);
+    await env.handle.db.delete(db.schema.autoChannels);
+    await env.handle.db.delete(db.schema.guilds);
+    actions = new RecordingVoiceActions();
+    settings = new GuildSettingsService({
+      guilds,
+      autoChannels,
+      secondaries,
+      actions,
+      logger: fakeLogger(),
+    });
+  });
+
+  it('reports defaults for a fresh guild', async () => {
+    const config = await settings.getConfig(GUILD);
+    expect(config.enabled).toBe(true);
+    expect(config.general).toBe('General');
+    expect(config.defaultTemplate).toBe(DEFAULT_CHANNEL_NAME_TEMPLATE);
+    expect(config.aliases).toEqual({});
+    expect(config.primaries).toEqual([]);
+  });
+
+  it('toggles enabled, general word and default template', async () => {
+    await settings.setEnabled(GUILD, false);
+    await settings.setGeneral(GUILD, 'Hangout');
+    await settings.setDefaultTemplate(GUILD, '@@creator@@’s room');
+
+    const config = await settings.getConfig(GUILD);
+    expect(config.enabled).toBe(false);
+    expect(config.general).toBe('Hangout');
+    expect(config.defaultTemplate).toBe('@@creator@@’s room');
+  });
+
+  it('adds and removes aliases by game or alias value', async () => {
+    await settings.addAlias(GUILD, 'Counter-Strike 2', 'CS2');
+    await settings.addAlias(GUILD, 'Dead by Daylight', 'DbD');
+    expect((await settings.getConfig(GUILD)).aliases).toEqual({
+      'Counter-Strike 2': 'CS2',
+      'Dead by Daylight': 'DbD',
+    });
+
+    const byValue = await settings.removeAlias(GUILD, 'CS2');
+    expect(byValue.ok).toBe(true);
+    const byKey = await settings.removeAlias(GUILD, 'Dead by Daylight');
+    expect(byKey.ok).toBe(true);
+    expect((await settings.getConfig(GUILD)).aliases).toEqual({});
+
+    const missing = await settings.removeAlias(GUILD, 'nope');
+    expect(missing.ok).toBe(false);
+  });
+
+  it('creates a primary (real channel + registration) and lists it', async () => {
+    const res = await settings.createPrimary(GUILD);
+    expect(res.ok).toBe(true);
+    const created = actions.ofType('create');
+    expect(created).toHaveLength(1);
+
+    const config = await settings.getConfig(GUILD);
+    expect(config.primaries).toHaveLength(1);
+    expect(config.primaries[0]!.channelId).toBe(created[0]!.channelId);
+  });
+
+  it('sets a primary template and default limit, and removes the primary', async () => {
+    await settings.createPrimary(GUILD);
+    const channelId = actions.ofType('create')[0]!.channelId;
+
+    expect((await settings.setPrimaryTemplate(GUILD, channelId, '## [@@num@@]')).ok).toBe(true);
+    expect((await settings.setPrimaryLimit(GUILD, channelId, 4)).ok).toBe(true);
+
+    let config = await settings.getConfig(GUILD);
+    expect(config.primaries[0]).toMatchObject({ template: '## [@@num@@]', limit: 4 });
+
+    expect((await settings.setPrimaryLimit(GUILD, channelId, 500)).ok).toBe(false);
+
+    const removed = await settings.removePrimary(GUILD, channelId);
+    expect(removed.ok).toBe(true);
+    expect(actions.ofType('delete').map((a) => a.channelId)).toContain(channelId);
+    config = await settings.getConfig(GUILD);
+    expect(config.primaries).toHaveLength(0);
+  });
+
+  it('rejects operations on a primary from another guild', async () => {
+    await settings.createPrimary(GUILD);
+    const channelId = actions.ofType('create')[0]!.channelId;
+    const res = await settings.setPrimaryTemplate('other-guild', channelId, 'x');
+    expect(res.ok).toBe(false);
+  });
+
+  it('sets and resets a custom nick', async () => {
+    await settings.setNick(GUILD, 'user-1', 'Big G');
+    expect((await guilds.get(GUILD))!.settings.custom_nicks).toEqual({ 'user-1': 'Big G' });
+    await settings.setNick(GUILD, 'user-1', 'reset');
+    expect((await guilds.get(GUILD))!.settings.custom_nicks).toEqual({});
+  });
+
+  it('sets and resets a primary template via the channel you’re in (/template)', async () => {
+    await settings.createPrimary(GUILD);
+    const primaryId = actions.ofType('create')[0]!.channelId;
+    await secondaries.create({
+      channelId: 'sec-t',
+      guildId: GUILD,
+      primaryChannelId: primaryId,
+      state: {},
+    });
+
+    const set = await settings.setTemplate(GUILD, 'sec-t', '## [@@game_name@@]');
+    expect(set.ok).toBe(true);
+    expect((await autoChannels.get(primaryId))!.template.name).toBe('## [@@game_name@@]');
+
+    const reset = await settings.setTemplate(GUILD, 'sec-t', 'reset');
+    expect(reset.ok).toBe(true);
+    expect((await autoChannels.get(primaryId))!.template.name).toBeUndefined();
+
+    // Must be in a managed channel.
+    expect((await settings.setTemplate(GUILD, 'not-a-channel', 'x')).ok).toBe(false);
+  });
+
+  it('toggles primary position and sets inherit-permissions via the channel you’re in', async () => {
+    await settings.createPrimary(GUILD);
+    const primaryId = actions.ofType('create')[0]!.channelId;
+    await secondaries.create({
+      channelId: 'sec-1',
+      guildId: GUILD,
+      primaryChannelId: primaryId,
+      state: {},
+    });
+
+    const toggled = await settings.togglePosition(GUILD, 'sec-1');
+    expect(toggled.ok).toBe(true);
+    expect((await autoChannels.get(primaryId))!.template.above).toBe(false);
+
+    const inh = await settings.setInheritPermissions(GUILD, 'sec-1', 'category');
+    expect(inh.ok).toBe(true);
+    expect((await autoChannels.get(primaryId))!.template.inheritperms).toBe('category');
+
+    expect((await settings.setInheritPermissions(GUILD, 'sec-1', 'bogus')).ok).toBe(false);
+  });
+
+  it('configures and disables logging', async () => {
+    await settings.setLogging(GUILD, 'log-channel', 2);
+    let s = (await guilds.get(GUILD))!.settings;
+    expect(s.logging).toBe('log-channel');
+    expect(s.log_level).toBe(2);
+
+    await settings.setLogging(GUILD, null, 1);
+    s = (await guilds.get(GUILD))!.settings;
+    expect(s.logging).toBe(false);
+  });
+});

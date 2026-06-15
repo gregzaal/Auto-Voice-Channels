@@ -1,0 +1,5 @@
+dist/
+node_modules/
+core/drizzle/
+pnpm-lock.yaml
+*.md
