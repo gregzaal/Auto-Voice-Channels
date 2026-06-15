@@ -5,10 +5,12 @@ import {
   GuildRepository,
   JoinChannelRepository,
   loadConfig,
+  PgNotifier,
   runMigrations,
   RUNTIME_FLAGS,
   RuntimeFlagsRepository,
   SecondaryChannelRepository,
+  SettingsCache,
   shardCapFor,
   ShardLeaseRepository,
   type Config,
@@ -129,7 +131,16 @@ async function main(): Promise<void> {
     ? new AdminChannelReporter({ client, channelId: config.adminChannelId, logger })
     : new NullErrorReporter();
   const creationGate = new RuntimeCreationGate({ flags, logger });
-  const serverLogger = new ServerLogger({ client, guilds: guildsRepo, logger });
+  // Guild settings cache: avoids a Postgres read/write on every voice event, with
+  // cross-instance invalidation over LISTEN/NOTIFY (the DB stays source of truth).
+  // Reads on the hot path go through it; writes (settings/auth) route through it so
+  // every instance evicts. A TTL + reconnect-resync bound staleness if a NOTIFY is
+  // missed. Self-host (one instance) just talks to its own cache + DB.
+  const notifier = new PgNotifier(config.databaseUrl, logger);
+  await notifier.connect();
+  const settingsCache = new SettingsCache(guildsRepo, notifier);
+  await settingsCache.start();
+  const serverLogger = new ServerLogger({ client, guilds: settingsCache, logger });
   // Private-channel "⇩ Join" mechanism. Wired into the feature's cleanup hook so
   // a private channel's companion is deleted whenever the channel goes away.
   const privacy = new PrivacyService({
@@ -142,7 +153,7 @@ async function main(): Promise<void> {
   const voiceFeature = new VoiceFeature({
     autoChannels,
     secondaries,
-    guilds: guildsRepo,
+    guilds: settingsCache,
     actions,
     voice,
     selfHosted: config.selfHosted,
@@ -172,7 +183,7 @@ async function main(): Promise<void> {
     logger,
   });
   const settingsService = new GuildSettingsService({
-    guilds: guildsRepo,
+    guilds: settingsCache,
     autoChannels,
     secondaries,
     actions,
@@ -291,6 +302,8 @@ async function main(): Promise<void> {
     reconciler,
     health,
     client,
+    settingsCache,
+    notifier,
     disposeVoiceGateway,
     disposeJoinRequests,
     disposeInteractions,
@@ -310,6 +323,8 @@ interface ShutdownDeps {
   reconciler: Reconciler;
   health: HealthServer;
   client: Client;
+  settingsCache: SettingsCache;
+  notifier: PgNotifier;
   disposeVoiceGateway: () => void;
   disposeJoinRequests: () => void;
   disposeInteractions: () => void;
@@ -339,6 +354,8 @@ function installShutdown(deps: ShutdownDeps): (reason: string, exitCode: number)
         await deps.dispatcher.drainAll();
         await deps.leaseManager.releaseAll();
         await deps.client.destroy();
+        await deps.settingsCache.stop();
+        await deps.notifier.close();
         await deps.health.stop();
         await deps.closeDb();
         deps.logger.info('shutdown complete');

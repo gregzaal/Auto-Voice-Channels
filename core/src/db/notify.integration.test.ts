@@ -45,7 +45,7 @@ describe('PgNotifier + SettingsCache (integration)', () => {
     await cache.start();
 
     // Warm the cache.
-    const first = await cache.get('cache-1');
+    const first = await cache.ensure('cache-1');
     expect(first.guildId).toBe('cache-1');
 
     // A separate publisher broadcasts an invalidation for this guild.
@@ -57,7 +57,7 @@ describe('PgNotifier + SettingsCache (integration)', () => {
     await repo.updateSettings('cache-1', { theme: 'dark' });
     await waitFor(async () => true); // allow notify delivery
     await new Promise((r) => setTimeout(r, 50));
-    const refreshed = await cache.get('cache-1');
+    const refreshed = await cache.ensure('cache-1');
     expect(refreshed.settings).toMatchObject({ theme: 'dark' });
 
     await cache.stop();

@@ -1,6 +1,6 @@
 import type {
   AutoChannelRepository,
-  GuildRepository,
+  GuildSettingsReader,
   Logger,
   SecondaryChannelRepository,
   SecondaryChannelRow,
@@ -42,7 +42,7 @@ export interface CreationGate {
 export interface VoiceFeatureDeps {
   autoChannels: AutoChannelRepository;
   secondaries: SecondaryChannelRepository;
-  guilds: GuildRepository;
+  guilds: GuildSettingsReader;
   actions: VoiceActions;
   voice: GuildVoiceView;
   selfHosted: boolean;

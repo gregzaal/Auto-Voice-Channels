@@ -1,10 +1,10 @@
 import { type Client } from 'discord.js';
-import type { GuildRepository, Logger } from '@avc/core';
+import type { GuildSettingsReader, Logger } from '@avc/core';
 import { readLogging } from '../features/voice/guildSettings.js';
 
 export interface ServerLoggerDeps {
   client: Client;
-  guilds: GuildRepository;
+  guilds: GuildSettingsReader;
   logger: Logger;
 }
 
@@ -28,8 +28,7 @@ export class ServerLogger {
   }
 
   private async emit(guildId: string, level: number, message: string): Promise<void> {
-    const guild = await this.deps.guilds.get(guildId);
-    if (!guild) return;
+    const guild = await this.deps.guilds.ensure(guildId);
     const { channelId, level: configured } = readLogging(guild.settings);
     if (channelId === null || level > configured) return;
 

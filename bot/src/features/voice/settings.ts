@@ -1,7 +1,7 @@
 import type {
   AutoChannelRepository,
   AutoChannelRow,
-  GuildRepository,
+  GuildSettingsStore,
   Logger,
   PrimaryTemplate,
   SecondaryChannelRepository,
@@ -41,7 +41,7 @@ export interface GuildConfig {
 }
 
 export interface GuildSettingsServiceDeps {
-  guilds: GuildRepository;
+  guilds: GuildSettingsStore;
   autoChannels: AutoChannelRepository;
   secondaries: SecondaryChannelRepository;
   actions: VoiceActions;
