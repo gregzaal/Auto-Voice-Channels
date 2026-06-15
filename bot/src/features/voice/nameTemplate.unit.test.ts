@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { VoiceMember } from './types.js';
 import {
+  DEFAULT_CHANNEL_NAME_TEMPLATE,
   DEFAULT_STATUS_TEMPLATE,
   getAlias,
   getChannelGames,
   getGameName,
+  RANDOM_EMOJIS,
   renderChannelName,
   toRoman,
 } from './nameTemplate.js';
@@ -300,5 +302,27 @@ describe('renderChannelName — rich tokens', () => {
   it('allowEmpty keeps an empty status empty (vs "-" for names)', () => {
     expect(renderChannelName('', { index: 0, members: [] })).toBe('-');
     expect(renderChannelName('', { index: 0, members: [] }, { allowEmpty: true })).toBe('');
+  });
+
+  it('@@random_emoji@@ is a stable per-seed pick from the emoji pool', () => {
+    const render = (seed: number) =>
+      renderChannelName('@@random_emoji@@', { index: 0, members: [], seed });
+    expect(render(1)).toBe(render(1)); // stable for a seed
+    expect(RANDOM_EMOJIS).toContain(render(1));
+    const picks = new Set([1, 2, 3, 4, 5, 6, 7, 8].map(render));
+    expect(picks.size).toBeGreaterThan(1); // varies across seeds
+  });
+
+  it('the default template uses @@random_emoji@@ and stays short', () => {
+    expect(DEFAULT_CHANNEL_NAME_TEMPLATE).toContain('@@random_emoji@@');
+    // The bug was a ~250-char default; it should now comfortably fit any template input.
+    expect(DEFAULT_CHANNEL_NAME_TEMPLATE.length).toBeLessThan(150);
+    const name = renderChannelName(DEFAULT_CHANNEL_NAME_TEMPLATE, {
+      index: 0,
+      members: [member({ id: 'a' })],
+      creatorName: 'Greg',
+      seed: 42,
+    });
+    expect(name).toMatch(/^.+ Greg's \w+$/u); // emoji + creator + word
   });
 });

@@ -37,6 +37,8 @@ export function parseEditorId(
   return { action, scope, field, channelId };
 }
 
+/** Max length of a template in the edit modal (well above any rendered-output cap). */
+const TEMPLATE_INPUT_MAX = 1000;
 const DOCS_LINK = 'https://wiki.dotsbots.com/en/commands/template';
 const VARIABLES_HELP =
   '`##` number · `@@game_name@@` game · `@@creator@@` owner · `@@num@@` members\n' +
@@ -128,13 +130,16 @@ export function buildEditorModal(
     .setLabel(field === 'name' ? 'Name template' : 'Status template')
     .setStyle(TextInputStyle.Paragraph)
     .setRequired(false)
-    .setMaxLength(field === 'name' ? 100 : 500)
+    // A *template* (with tokens) can be far longer than the *rendered* output it
+    // produces, so the input limit is the generous template cap — not the 100/500
+    // output limits (that truncated the default template's prefill).
+    .setMaxLength(TEMPLATE_INPUT_MAX)
     .setPlaceholder(
       field === 'name'
         ? 'e.g. ## [@@game_name@@]  or  My Lounge'
         : 'e.g. Playing @@game_name@@  (blank = no status)',
     )
-    .setValue(prefill.slice(0, field === 'name' ? 100 : 500));
+    .setValue(prefill.slice(0, TEMPLATE_INPUT_MAX));
   return new ModalBuilder()
     .setCustomId(editorId('save', scope, field, channelId))
     .setTitle(field === 'name' ? 'Edit name template' : 'Edit status template')

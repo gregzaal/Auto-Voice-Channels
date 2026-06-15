@@ -16,13 +16,13 @@ import type { VoiceMember } from './types.js';
  */
 
 /**
- * The default channel-name template. Picks a stable random emoji + word per
- * channel (resolved once, so it never triggers later renames) around the
- * creator's name — deliberately free of `##`/`@@game_name@@` so the default
+ * The default channel-name template. Picks a stable random emoji (`@@random_emoji@@`)
+ * + word per channel (resolved once, so it never triggers later renames) around
+ * the creator's name — deliberately free of `##`/`@@game_name@@` so the default
  * experience generates almost no renames over a channel's life.
  */
 export const DEFAULT_CHANNEL_NAME_TEMPLATE =
-  "[[😸/🙀/🚀/☕/🍆/🍌/🍕/🐍/🐗/🐙/🐝/🐞/🐭/🐶/👻/👽/👾/💀/🔥/🔫/🐀/🐁/🐆/🐇/🐋/🐉/🐓/🦊/🐺/🦁/🐯/🦄/🐲/🦅/🦉/🐢/🦖]] @@creator@@'s [[den/gang/crew/platoon/cave/room/party/hangout/lounge/lair/squad/club/nest/base/zone/spot]]";
+  "@@random_emoji@@ @@creator@@'s [[den/gang/crew/platoon/cave/room/party/hangout/lounge/lair/squad/club/nest/base/zone/spot]]";
 
 /**
  * The default voice-channel-status template: blank when nobody's playing, and
@@ -184,6 +184,56 @@ export function resolveRandom(template: string, seed: number): string {
     group++;
   }
   return name;
+}
+
+/** The built-in pool for `@@random_emoji@@` (and the legacy default template). */
+export const RANDOM_EMOJIS = [
+  '😸',
+  '🙀',
+  '🚀',
+  '☕',
+  '🍆',
+  '🍌',
+  '🍕',
+  '🐍',
+  '🐗',
+  '🐙',
+  '🐝',
+  '🐞',
+  '🐭',
+  '🐶',
+  '👻',
+  '👽',
+  '👾',
+  '💀',
+  '🔥',
+  '🔫',
+  '🐀',
+  '🐁',
+  '🐆',
+  '🐇',
+  '🐋',
+  '🐉',
+  '🐓',
+  '🦊',
+  '🐺',
+  '🦁',
+  '🐯',
+  '🦄',
+  '🐲',
+  '🦅',
+  '🦉',
+  '🐢',
+  '🦖',
+];
+
+/**
+ * Picks a `@@random_emoji@@` for a channel — stable per channel via the seed (so
+ * it never causes a rename), using a distinct salt so it's independent of any
+ * `[[…]]` random groups in the same template.
+ */
+export function pickRandomEmoji(seed: number): string {
+  return RANDOM_EMOJIS[mixHash(seed, 0x6d6f_6a69) % RANDOM_EMOJIS.length]!;
 }
 
 // ---------------------------------------------------------------------------
@@ -519,6 +569,9 @@ export function renderChannelName(
 
   // 1. Random picks first, fixed per channel by the stored seed.
   if (name.includes('[[')) name = resolveRandom(name, ctx.seed ?? 0);
+  if (name.includes('@@random_emoji@@')) {
+    name = name.split('@@random_emoji@@').join(pickRandomEmoji(ctx.seed ?? 0));
+  }
 
   // 2. Channel-number variants (padded/roman before `##`).
   name = name.split('+#').join(ctx.index === -1 ? '?' : toRoman(ctx.index + 1));
