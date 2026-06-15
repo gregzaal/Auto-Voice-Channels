@@ -1,6 +1,6 @@
 import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
-import { shardLeases } from '../db/schema.js';
+import { identifyBuckets, shardLeases } from '../db/schema.js';
 
 export type ShardLease = typeof shardLeases.$inferSelect;
 
@@ -140,13 +140,39 @@ export class ShardLeaseRepository {
   }
 
   /**
-   * Runs `fn` while holding the identify advisory lock, serializing shard
-   * identifies cluster-wide. Uses a transaction-scoped lock (auto-released).
+   * Reserves an identify slot for `bucket`, enforcing ≥`spacingMs` between
+   * identifies in the same `max_concurrency` bucket across the whole fleet.
+   * Serialized via the identify advisory lock (keyed per bucket, held only for
+   * this short check then released at commit). Returns `{ ok: true }` when the
+   * caller may identify now, or `{ ok: false, waitMs }` with how long until the
+   * bucket frees. The durable timestamp enforces spacing for same-instance *and*
+   * cross-instance identifies alike (a held lock would not — advisory locks are
+   * re-entrant within a session).
    */
-  async withIdentifyLock<T>(fn: () => Promise<T>): Promise<T> {
+  async reserveIdentify(
+    bucket: number,
+    spacingMs: number,
+  ): Promise<{ ok: boolean; waitMs: number }> {
     return this.db.transaction(async (tx) => {
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(${IDENTIFY_ADVISORY_LOCK})`);
-      return fn();
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${IDENTIFY_ADVISORY_LOCK}, ${bucket})`);
+      const [row] = await tx
+        .select({ lastIdentifyAt: identifyBuckets.lastIdentifyAt })
+        .from(identifyBuckets)
+        .where(eq(identifyBuckets.bucket, bucket));
+      const last = row?.lastIdentifyAt?.getTime() ?? 0;
+      const elapsed = Date.now() - last;
+      if (last !== 0 && elapsed < spacingMs) {
+        return { ok: false, waitMs: spacingMs - elapsed };
+      }
+      const at = new Date();
+      await tx
+        .insert(identifyBuckets)
+        .values({ bucket, lastIdentifyAt: at, updatedAt: at })
+        .onConflictDoUpdate({
+          target: identifyBuckets.bucket,
+          set: { lastIdentifyAt: at, updatedAt: at },
+        });
+      return { ok: true, waitMs: 0 };
     });
   }
 }

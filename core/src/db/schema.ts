@@ -166,6 +166,18 @@ export const shardLeases = pgTable(
   (t) => [index('shard_leases_instance_idx').on(t.instanceId)],
 );
 
+/**
+ * Per-bucket identify spacing. Discord requires identifies within a
+ * `max_concurrency` bucket (`shardId % max_concurrency`) to be spaced apart; this
+ * row records the last identify time per bucket so the identify throttler can
+ * serialize them cluster-wide (checked under the identify advisory lock).
+ */
+export const identifyBuckets = pgTable('identify_buckets', {
+  bucket: integer('bucket').primaryKey(),
+  lastIdentifyAt: timestamp('last_identify_at', { withTimezone: true }),
+  updatedAt: updatedAt(),
+});
+
 /** DB-backed feature flags / kill-switches togglable without a deploy. */
 export const runtimeFlags = pgTable('runtime_flags', {
   key: text('key').primaryKey(),

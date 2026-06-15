@@ -14,10 +14,11 @@ import {
   type Config,
   type Logger,
 } from '@avc/core';
-import type { Client } from 'discord.js';
+import { REST, Routes, type Client } from 'discord.js';
 import { GuildDispatcher } from './runtime/dispatcher.js';
 import { RuntimeCreationGate } from './runtime/creationGate.js';
 import { ShardLeaseManager } from './runtime/shardLeaseManager.js';
+import { PgIdentifyThrottler } from './runtime/identifyThrottler.js';
 import { HealthServer, type HealthReport, type SubsystemStatus } from './ops/health.js';
 import {
   AdminChannelReporter,
@@ -74,6 +75,9 @@ async function main(): Promise<void> {
   }
 
   const leaseRepo = new ShardLeaseRepository(db);
+  // Populated once the shutdown handler is installed; lets the lease-loss reaction
+  // reuse the graceful-drain path. Until then a lease-loss falls back to exit(1).
+  const shutdown: { request?: (reason: string, exitCode: number) => void } = {};
   // Distribute shards across the fleet: each instance claims up to its cap. At one
   // instance (self-host) the cap is the full shard count, so it claims everything.
   const maxShards = shardCapFor(config.totalShards, config.expectedInstances);
@@ -84,11 +88,12 @@ async function main(): Promise<void> {
     totalShards: config.totalShards,
     maxShards,
     // Orchestrator-driven failover: if a lease is stolen out from under us, drain
-    // and exit so the orchestrator restarts us into a clean re-claim. The SIGTERM
-    // path (installShutdown) releases leases and finishes in-flight work first.
+    // and exit *non-zero* so the orchestrator restarts us into a clean re-claim
+    // (a clean exit could read as "completed" and not restart). The drain still
+    // releases our remaining leases and finishes in-flight work first.
     onLeaseLost: (lost) => {
       logger.error({ lost }, 'shard lease lost — draining for clean re-claim on restart');
-      process.kill(process.pid, 'SIGTERM');
+      (shutdown.request ?? ((_r, code) => process.exit(code)))('lease-loss', 1);
     },
   });
 
@@ -98,11 +103,18 @@ async function main(): Promise<void> {
   // instance reliably picks up a dead peer's orphaned shards.
   const claimed = await leaseManager.claimWithRetry();
 
+  // Serialize identifies cluster-wide so a multi-instance deploy can't exceed
+  // Discord's max_concurrency. We read the live concurrency from the gateway and
+  // back the throttler with the Postgres-coordinated per-bucket spacing.
+  const maxConcurrency = await fetchIdentifyConcurrency(config.discordToken, logger);
+  const identifyThrottler = new PgIdentifyThrottler({ repo: leaseRepo, maxConcurrency, logger });
+
   // Gateway + voice feature. The lease manager decides which shards this
   // instance owns; the gateway client connects only those.
   const client = buildGatewayClient({
     totalShards: config.totalShards,
     shardIds: leaseManager.ownedShards,
+    buildIdentifyThrottler: () => identifyThrottler,
   });
   const autoChannels = new AutoChannelRepository(db);
   const secondaries = new SecondaryChannelRepository(db);
@@ -271,7 +283,7 @@ async function main(): Promise<void> {
 
   logger.info({ claimedShards: claimed }, 'bot ready');
 
-  installShutdown({
+  shutdown.request = installShutdown({
     logger,
     config,
     leaseManager,
@@ -286,7 +298,7 @@ async function main(): Promise<void> {
   });
 
   // Start heartbeating only now that the graceful-drain handler is installed, so a
-  // lease-loss reaction (which triggers SIGTERM) always drains cleanly.
+  // lease-loss reaction always drains cleanly before exiting for a restart.
   leaseManager.startHeartbeat();
 }
 
@@ -306,14 +318,17 @@ interface ShutdownDeps {
 
 /**
  * Graceful drain: stop new work → finish in-flight per-guild queues → release
- * shard leases → close DB. Triggered on SIGINT/SIGTERM (rolling deploys).
+ * shard leases → close DB, then exit with `exitCode`. Triggered on SIGINT/SIGTERM
+ * (rolling deploys → exit 0) and on lease-loss (→ exit 1, so the orchestrator
+ * restarts us into a clean re-claim). Returns the handler so callers can trigger
+ * a drain programmatically.
  */
-function installShutdown(deps: ShutdownDeps): void {
+function installShutdown(deps: ShutdownDeps): (reason: string, exitCode: number) => void {
   let shuttingDown = false;
-  const handler = (signal: string): void => {
+  const handler = (reason: string, exitCode = 0): void => {
     if (shuttingDown) return;
     shuttingDown = true;
-    deps.logger.info({ signal }, 'shutting down (graceful drain)');
+    deps.logger.info({ reason, exitCode }, 'shutting down (graceful drain)');
     void (async () => {
       try {
         deps.reconciler.stopSweep();
@@ -327,15 +342,36 @@ function installShutdown(deps: ShutdownDeps): void {
         await deps.health.stop();
         await deps.closeDb();
         deps.logger.info('shutdown complete');
-        process.exit(0);
+        process.exit(exitCode);
       } catch (err) {
         deps.logger.error({ err }, 'error during shutdown');
         process.exit(1);
       }
     })();
   };
-  process.once('SIGINT', () => handler('SIGINT'));
-  process.once('SIGTERM', () => handler('SIGTERM'));
+  process.once('SIGINT', () => handler('SIGINT', 0));
+  process.once('SIGTERM', () => handler('SIGTERM', 0));
+  return handler;
+}
+
+/**
+ * Reads Discord's identify `max_concurrency` (how many shards may identify in
+ * parallel per 5s window) from `GET /gateway/bot`. Falls back to 1 — the safe,
+ * universal floor — if the call fails, so the throttler still serializes.
+ */
+async function fetchIdentifyConcurrency(token: string, logger: Logger): Promise<number> {
+  try {
+    const rest = new REST({ version: '10' }).setToken(token);
+    const info = (await rest.get(Routes.gatewayBot())) as {
+      session_start_limit?: { max_concurrency?: number };
+    };
+    const maxConcurrency = Math.max(1, info.session_start_limit?.max_concurrency ?? 1);
+    logger.info({ maxConcurrency }, 'fetched gateway identify concurrency');
+    return maxConcurrency;
+  } catch (err) {
+    logger.warn({ err }, 'failed to fetch gateway bot info; defaulting max_concurrency=1');
+    return 1;
+  }
 }
 
 /**

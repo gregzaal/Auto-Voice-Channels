@@ -5,6 +5,12 @@ export interface GatewayOptions {
   totalShards: number;
   /** Specific shard ids this instance owns (from the lease manager). */
   shardIds: number[];
+  /**
+   * Cluster-wide identify throttler factory (see {@link PgIdentifyThrottler}).
+   * Wired into `@discordjs/ws` so identifies are serialized across instances and
+   * respect Discord's `max_concurrency`. Omitted → discord.js's per-process default.
+   */
+  buildIdentifyThrottler?: NonNullable<ClientOptions['ws']>['buildIdentifyThrottler'];
 }
 
 /**
@@ -52,6 +58,9 @@ export function buildGatewayClient(options: GatewayOptions): Client {
       ThreadManager: 0,
     }),
     sweepers: Options.DefaultSweeperSettings,
+    ...(options.buildIdentifyThrottler
+      ? { ws: { buildIdentifyThrottler: options.buildIdentifyThrottler } }
+      : {}),
   };
   return new Client(clientOptions);
 }

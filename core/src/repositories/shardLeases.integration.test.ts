@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import { ShardLeaseRepository } from './shardLeases.js';
 import type { PgTestEnv } from '../test/pgContainer.js';
 import { startPostgres } from '../test/pgContainer.js';
-import { shardLeases } from '../db/schema.js';
+import { identifyBuckets, shardLeases } from '../db/schema.js';
 
 describe('ShardLeaseRepository (integration)', () => {
   let env: PgTestEnv;
@@ -20,6 +20,7 @@ describe('ShardLeaseRepository (integration)', () => {
 
   beforeEach(async () => {
     await env.handle.db.delete(shardLeases);
+    await env.handle.db.delete(identifyBuckets);
   });
 
   it('a single instance claims all shards', async () => {
@@ -92,17 +93,29 @@ describe('ShardLeaseRepository (integration)', () => {
     expect(leases.every((l) => l.instanceId === null)).toBe(true);
   });
 
-  it('withIdentifyLock serializes concurrent critical sections', async () => {
-    const order: string[] = [];
-    const run = (label: string) =>
-      repo.withIdentifyLock(async () => {
-        order.push(`${label}-start`);
-        await new Promise((r) => setTimeout(r, 40));
-        order.push(`${label}-end`);
-      });
-    await Promise.all([run('A'), run('B')]);
-    // Whichever started first must fully finish before the other starts.
-    expect(order).toHaveLength(4);
-    expect(order[1]).toBe(order[0]!.replace('-start', '-end'));
+  it('reserveIdentify enforces per-bucket spacing across the fleet', async () => {
+    // First identify in a bucket is granted immediately.
+    expect((await repo.reserveIdentify(0, 10_000)).ok).toBe(true);
+    // A second, within the spacing window, is refused with the remaining wait.
+    const again = await repo.reserveIdentify(0, 10_000);
+    expect(again.ok).toBe(false);
+    expect(again.waitMs).toBeGreaterThan(0);
+    expect(again.waitMs).toBeLessThanOrEqual(10_000);
+    // A different bucket is independent (parallel identify under max_concurrency).
+    expect((await repo.reserveIdentify(1, 10_000)).ok).toBe(true);
+    // Once the spacing elapses, the bucket frees again.
+    await repo.reserveIdentify(2, 50);
+    await new Promise((r) => setTimeout(r, 70));
+    expect((await repo.reserveIdentify(2, 50)).ok).toBe(true);
+  });
+
+  it('reserveIdentify serializes concurrent reservations on the same bucket', async () => {
+    // Two simultaneous reservations on one bucket: the advisory lock serializes the
+    // check, so exactly one wins and the other is refused.
+    const [a, b] = await Promise.all([
+      repo.reserveIdentify(0, 10_000),
+      repo.reserveIdentify(0, 10_000),
+    ]);
+    expect([a.ok, b.ok].filter(Boolean)).toHaveLength(1);
   });
 });
