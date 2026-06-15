@@ -302,7 +302,7 @@ describe('VoiceFeature (integration)', () => {
     expect(summary).toMatchObject({ considered: 2, renamed: 2, rateLimited: 2 });
   });
 
-  it('getEditorState returns current value + live preview for both editors', async () => {
+  it('getEditorState returns name + status (current + preview) for both scopes', async () => {
     await secondaries.create({
       channelId: 'ed',
       guildId: GUILD,
@@ -312,24 +312,47 @@ describe('VoiceFeature (integration)', () => {
     });
     voice.put('ed', member('alice', ['Halo']));
 
-    // /name editor: the per-channel override and its rendered preview.
-    const nameState = await feature.getEditorState('name', GUILD, 'ed');
-    expect(nameState).toMatchObject({
-      found: true,
-      currentTemplate: 'My Room',
-      preview: 'My Room',
-    });
-    expect(nameState.ownerId).toBe('alice');
+    // channel scope (/name): per-channel name override + inherited status.
+    const ch = await feature.getEditorState('channel', GUILD, 'ed');
+    expect(ch.found).toBe(true);
+    expect(ch.name).toMatchObject({ currentTemplate: 'My Room', preview: 'My Room' });
+    // No status override → inherits the default ("Playing @@game_name@@" since Halo).
+    expect(ch.status.currentTemplate).toBeUndefined();
+    expect(ch.status.preview).toBe('Playing Halo');
+    expect(ch.ownerId).toBe('alice');
 
-    // /template editor: the primary's template (PRIMARY uses '## [@@game_name@@]').
-    const tmplState = await feature.getEditorState('template', GUILD, 'ed');
-    expect(tmplState).toMatchObject({
-      found: true,
-      currentTemplate: '## [@@game_name@@]',
-      preview: '#1 [Halo]', // primary template, ignoring the per-channel override
-    });
+    // primary scope (/template): the primary's name template (ignores the override).
+    const pr = await feature.getEditorState('primary', GUILD, 'ed');
+    expect(pr.name).toMatchObject({ currentTemplate: '## [@@game_name@@]', preview: '#1 [Halo]' });
 
-    expect((await feature.getEditorState('name', GUILD, 'missing')).found).toBe(false);
+    expect((await feature.getEditorState('channel', GUILD, 'missing')).found).toBe(false);
+  });
+
+  it('rerenderSecondary sets the voice status from the status template, and clears it when idle', async () => {
+    await secondaries.create({
+      channelId: 'st',
+      guildId: GUILD,
+      primaryChannelId: PRIMARY,
+      ownerId: 'alice',
+      state: { name: '#1 [Halo]', index: 0 },
+    });
+    // Playing Blender → default status template renders "Playing Blender".
+    voice.put('st', member('alice', ['Blender']));
+    await feature.rerenderSecondary(GUILD, 'st');
+    expect(actions.ofType('status').at(-1)).toMatchObject({
+      channelId: 'st',
+      status: 'Playing Blender',
+    });
+    expect((await secondaries.get('st'))!.state.status).toBe('Playing Blender');
+
+    // Stops playing → status clears (empty), and a redundant rerender is a no-op.
+    voice.put('st', member('alice'));
+    await feature.rerenderSecondary(GUILD, 'st');
+    expect(actions.ofType('status').at(-1)).toMatchObject({ channelId: 'st', status: '' });
+
+    const before = actions.ofType('status').length;
+    await feature.rerenderSecondary(GUILD, 'st');
+    expect(actions.ofType('status').length).toBe(before); // no change → no extra status call
   });
 
   it('debugChannel reports the data behind a channel name', async () => {

@@ -70,41 +70,70 @@ export class VoiceCommands {
   }
 
   /**
-   * Overrides the channel's name (or `reset`s to the primary's template). The
+   * Overrides the channel's name (or `reset`s to the inherited template). The
    * value may use template tokens (`@@game_name@@`, `##`, …) and is re-evaluated
    * on game/membership changes. Owner only, unless `opts.admin` (a server admin
    * may rename any managed channel — this absorbs the old `/rename`).
    */
-  async setName(
+  setName(
     guildId: string,
     channelId: string | undefined,
     userId: string,
     name: string,
     opts: { admin?: boolean } = {},
   ): Promise<CommandResult> {
+    return this.setChannelField(guildId, channelId, userId, 'name', name, opts);
+  }
+
+  /**
+   * Overrides the channel's voice **status** template (or `reset`s it). Same
+   * permission model as {@link setName}. An empty value clears the status.
+   */
+  setStatus(
+    guildId: string,
+    channelId: string | undefined,
+    userId: string,
+    status: string,
+    opts: { admin?: boolean } = {},
+  ): Promise<CommandResult> {
+    return this.setChannelField(guildId, channelId, userId, 'status', status, opts);
+  }
+
+  /** Shared per-channel override setter for the name + status templates. */
+  private async setChannelField(
+    guildId: string,
+    channelId: string | undefined,
+    userId: string,
+    field: 'name' | 'status',
+    value: string,
+    opts: { admin?: boolean },
+  ): Promise<CommandResult> {
     const found = await this.resolveSecondary(guildId, channelId);
     if ('error' in found) return found.error;
     const row = found.row;
     if (!opts.admin && row.ownerId && row.ownerId !== userId) {
-      return fail('Only the channel owner can rename it. Use `/claim` if the owner has left.');
+      return fail('Only the channel owner can change that. Use `/claim` if the owner has left.');
     }
     const id = row.channelId;
-    const trimmed = name.trim();
+    const stateKey = field === 'name' ? 'template' : 'statusTemplate';
+    const trimmed = value.trim();
+    const isReset = trimmed.toLowerCase() === 'reset' || trimmed === '';
 
-    if (trimmed.toLowerCase() === 'reset' || trimmed === '') {
-      const { template: _drop, ...rest } = row.state;
-      await this.deps.secondaries.updateState(id, rest);
-      const r = await this.deps.feature.rerenderSecondary(guildId, id);
-      return ok(
-        `Reset this channel’s name to the server template.${rateLimitNote(r.rateLimited ? 1 : 0)}`,
-      );
+    const next = { ...row.state };
+    if (isReset) {
+      delete next[stateKey];
+    } else {
+      // Newlines aren't valid in channel names; flatten to spaces (legacy parity).
+      next[stateKey] = field === 'name' ? trimmed.replace(/[\r\n]+/g, ' ') : trimmed;
     }
-
-    // Newlines aren't valid in channel names; flatten to spaces (legacy parity).
-    const template = trimmed.replace(/[\r\n]+/g, ' ');
-    await this.deps.secondaries.updateState(id, { ...row.state, template });
+    await this.deps.secondaries.updateState(id, next);
     const r = await this.deps.feature.rerenderSecondary(guildId, id);
-    return ok(`Updated this channel’s name.${rateLimitNote(r.rateLimited ? 1 : 0)}`);
+    const note = rateLimitNote(r.rateLimited ? 1 : 0);
+    return ok(
+      isReset
+        ? `Reset this channel’s ${field} to the inherited template.${note}`
+        : `Updated this channel’s ${field}.${note}`,
+    );
   }
 
   /** Transfers ownership to another member who is in the channel. Owner only. */

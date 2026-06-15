@@ -16,7 +16,8 @@ import {
   rateLimitNote,
   type ChannelDebug,
   type CommandResult,
-  type EditorKind,
+  type EditorField,
+  type EditorScope,
   type EditorState,
   type GuildSettingsService,
   type PrivacyService,
@@ -227,7 +228,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       return;
     }
     const state = await run(guildId, 'cmd:template', () =>
-      deps.feature.getEditorState('template', guildId, channelId),
+      deps.feature.getEditorState('primary', guildId, channelId),
     );
     if (!state.found) {
       await interaction.reply({
@@ -236,7 +237,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       });
       return;
     }
-    await interaction.reply(renderEditorPanel('template', channelId, state));
+    await interaction.reply(renderEditorPanel('primary', channelId, state));
   }
 
   async function openNamePanel(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -252,7 +253,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       return;
     }
     const state = await run(guildId, 'cmd:name', () =>
-      deps.feature.getEditorState('name', guildId, target),
+      deps.feature.getEditorState('channel', guildId, target),
     );
     if (!state.found) {
       await interaction.reply({
@@ -261,36 +262,36 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       });
       return;
     }
-    // Anyone may rename their own channel; renaming another needs admin.
+    // Anyone may edit their own channel; editing another's needs admin.
     if (!hasManageChannels(interaction) && state.ownerId && state.ownerId !== userId) {
       await interaction.reply({
-        content: 'Only the channel’s owner or a server admin can rename it.',
+        content: 'Only the channel’s owner or a server admin can edit it.',
         ephemeral: true,
       });
       return;
     }
-    await interaction.reply(renderEditorPanel('name', target, state));
+    await interaction.reply(renderEditorPanel('channel', target, state));
   }
 
   async function handleEditorButton(interaction: ButtonInteraction): Promise<void> {
     const parsed = parseEditorId(interaction.customId);
     if (!parsed) return;
-    const { action, kind, channelId } = parsed;
+    const { action, scope, field, channelId } = parsed;
     if (action === 'close') {
       await interaction.update({ content: 'Closed.', embeds: [], components: [] });
       return;
     }
     if (action === 'edit') {
       const state = await run(interaction.guildId!, 'editor:state', () =>
-        deps.feature.getEditorState(kind, interaction.guildId!, channelId),
+        deps.feature.getEditorState(scope, interaction.guildId!, channelId),
       );
-      await interaction.showModal(buildEditorModal(kind, channelId, state));
+      await interaction.showModal(buildEditorModal(scope, field, channelId, state));
       return;
     }
     if (action === 'reset') {
       // Defer first: the rerender can hit the rate-limit probe and brush the 3s ack.
       await interaction.deferUpdate();
-      await refreshEditorPanel(interaction, kind, channelId, 'reset');
+      await refreshEditorPanel(interaction, scope, field, channelId, 'reset');
     }
   }
 
@@ -300,30 +301,32 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     if (!interaction.isFromMessage()) return; // editor modals are always panel-driven
     const value = interaction.fields.getTextInputValue('template');
     await interaction.deferUpdate();
-    await refreshEditorPanel(interaction, parsed.kind, parsed.channelId, value);
+    await refreshEditorPanel(interaction, parsed.scope, parsed.field, parsed.channelId, value);
   }
 
   /** Applies a change and edits the (already-deferred) panel in place. */
   async function refreshEditorPanel(
     interaction: ButtonInteraction | ModalSubmitInteraction,
-    kind: EditorKind,
+    scope: EditorScope,
+    field: EditorField,
     channelId: string,
     value: string,
   ): Promise<void> {
-    const applied = await applyEditor(interaction, kind, channelId, value);
+    const applied = await applyEditor(interaction, scope, field, channelId, value);
     if (applied.ok) {
       await interaction.editReply(
-        toUpdate(renderEditorPanel(kind, channelId, applied.state, applied.opts)),
+        toUpdate(renderEditorPanel(scope, channelId, applied.state, applied.opts)),
       );
     } else {
       await interaction.followUp({ content: `⚠️ ${applied.message}`, ephemeral: true });
     }
   }
 
-  /** Applies a `/name` or `/template` change; returns the refreshed panel state. */
+  /** Applies a name/status change for a channel override or a primary template. */
   async function applyEditor(
     interaction: ButtonInteraction | ModalSubmitInteraction,
-    kind: EditorKind,
+    scope: EditorScope,
+    field: EditorField,
     channelId: string,
     value: string,
   ): Promise<
@@ -333,16 +336,21 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     const guildId = interaction.guildId!;
     const admin = hasManageChannels(interaction);
     let result: CommandResult;
-    if (kind === 'name') {
-      result = await run(guildId, 'editor:name', () =>
-        deps.voiceCommands.setName(guildId, channelId, interaction.user.id, value, { admin }),
+    if (scope === 'channel') {
+      const userId = interaction.user.id;
+      result = await run(guildId, `editor:channel:${field}`, () =>
+        field === 'name'
+          ? deps.voiceCommands.setName(guildId, channelId, userId, value, { admin })
+          : deps.voiceCommands.setStatus(guildId, channelId, userId, value, { admin }),
       );
     } else {
-      result = await run(guildId, 'editor:template', () =>
-        deps.settings.setTemplate(guildId, channelId, value),
+      result = await run(guildId, `editor:primary:${field}`, () =>
+        field === 'name'
+          ? deps.settings.setTemplate(guildId, channelId, value)
+          : deps.settings.setStatusTemplate(guildId, channelId, value),
       );
       if (result.ok) {
-        const summary = await run(guildId, 'editor:template:render', () =>
+        const summary = await run(guildId, 'editor:primary:render', () =>
           deps.feature.rerenderSiblings(guildId, channelId),
         );
         result = { ok: true, message: result.message + rateLimitNote(summary.rateLimited) };
@@ -350,7 +358,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     }
     if (!result.ok) return { ok: false, message: result.message };
     const state = await run(guildId, 'editor:refresh', () =>
-      deps.feature.getEditorState(kind, guildId, channelId),
+      deps.feature.getEditorState(scope, guildId, channelId),
     );
     return {
       ok: true,

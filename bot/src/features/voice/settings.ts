@@ -168,24 +168,46 @@ export class GuildSettingsService {
    * default for all of that creator channel's secondaries (legacy `/template`).
    * `reset`/empty clears it, falling back to the server-default template.
    */
-  async setTemplate(
+  setTemplate(
     guildId: string,
     secondaryChannelId: string,
+    template: string,
+  ): Promise<CommandResult> {
+    return this.setPrimaryField(guildId, secondaryChannelId, 'name', template);
+  }
+
+  /** Sets the voice-status template for the primary of the channel you're in. */
+  setStatusTemplate(
+    guildId: string,
+    secondaryChannelId: string,
+    template: string,
+  ): Promise<CommandResult> {
+    return this.setPrimaryField(guildId, secondaryChannelId, 'status', template);
+  }
+
+  /** Shared per-primary template setter for the name + status templates. */
+  private async setPrimaryField(
+    guildId: string,
+    secondaryChannelId: string,
+    field: 'name' | 'status',
     template: string,
   ): Promise<CommandResult> {
     const primary = await this.primaryFor(guildId, secondaryChannelId);
     if (!primary) return fail('You need to be in a bot-managed voice channel.');
     const value = template.trim().replace(/[\r\n]+/g, ' ');
+    const next = { ...primary.template };
     if (value.toLowerCase() === 'reset' || value === '') {
-      const { name: _drop, ...rest } = primary.template;
-      await this.deps.autoChannels.upsert(guildId, primary.channelId, rest);
-      return ok('Reset this creator channel’s template to the server default.');
+      delete next[field];
+      await this.deps.autoChannels.upsert(guildId, primary.channelId, next);
+      return ok(`Reset this creator channel’s ${field} template to the default.`);
     }
-    await this.deps.autoChannels.upsert(guildId, primary.channelId, {
-      ...primary.template,
-      name: value,
-    });
-    return ok(`New channels from this creator will be named:\n\`${value}\``);
+    next[field] = value;
+    await this.deps.autoChannels.upsert(guildId, primary.channelId, next);
+    return ok(
+      field === 'name'
+        ? `New channels from this creator will be named:\n\`${value}\``
+        : `New channels from this creator will show the status:\n\`${value}\``,
+    );
   }
 
   /** Sets (or resets) a member's custom display name for `@@creator@@`. `/nick`. */

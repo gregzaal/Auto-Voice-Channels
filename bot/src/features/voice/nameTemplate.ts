@@ -24,6 +24,16 @@ import type { VoiceMember } from './types.js';
 export const DEFAULT_CHANNEL_NAME_TEMPLATE =
   "[[😸/🙀/🚀/☕/🍆/🍌/🍕/🐍/🐗/🐙/🐝/🐞/🐭/🐶/👻/👽/👾/💀/🔥/🔫/🐀/🐁/🐆/🐇/🐋/🐉/🐓/🦊/🐺/🦁/🐯/🦄/🐲/🦅/🦉/🐢/🦖]] @@creator@@'s [[den/gang/crew/platoon/cave/room/party/hangout/lounge/lair/squad/club/nest/base/zone/spot]]";
 
+/**
+ * The default voice-channel-status template: blank when nobody's playing, and
+ * "Playing <game>" once a game is detected (the `PLAYING` conditional has no
+ * `// false` branch, so it renders empty — clearing the status — when idle).
+ */
+export const DEFAULT_STATUS_TEMPLATE = '{{PLAYING ?? Playing @@game_name@@}}';
+
+/** Discord's max length for a voice channel status. */
+export const MAX_STATUS_LENGTH = 500;
+
 /** Built-in game-name aliases (ported from the legacy `std_aliases`). */
 const STD_ALIASES: Record<string, string> = {
   'Apex Legends': 'Apex',
@@ -337,6 +347,8 @@ export interface ExpressionVars {
   LIVE_DISCORD: boolean;
   LIVE_EXTERNAL: boolean;
   GAME: string;
+  /** True when a real game is detected (not the "no game" fallback). */
+  PLAYING: boolean;
   PLAYERS: number;
   MAX: number;
   RICH: boolean;
@@ -432,6 +444,8 @@ function buildExpressionVars(
     LIVE_DISCORD: liveDiscord,
     LIVE_EXTERNAL: liveExternal,
     GAME: gameName,
+    // A real game is detected when the resolved name isn't the "no game" label.
+    PLAYING: gameName !== (ctx.general ?? 'General'),
     PLAYERS: Number.parseInt(party.numPlaying, 10) || 0,
     MAX: Number.parseInt(party.size, 10) || 0,
     RICH: party.rich,
@@ -485,7 +499,18 @@ export interface RenderContext {
  * Processing order follows the legacy `rename_channel` so tokens can nest inside
  * `[[…]]`, `<<…>>` and `{{…}}`.
  */
-export function renderChannelName(template: string, ctx: RenderContext): string {
+export interface RenderOptions {
+  /** Max output length (default 100 for names; ~500 for voice statuses). */
+  maxLength?: number;
+  /** When true, an empty result stays empty (statuses); else falls back to "-". */
+  allowEmpty?: boolean;
+}
+
+export function renderChannelName(
+  template: string,
+  ctx: RenderContext,
+  opts: RenderOptions = {},
+): string {
   let name = template;
   const iStr = ctx.index === -1 ? '?' : String(ctx.index + 1);
   const nonBot = ctx.members.filter((m) => !m.bot);
@@ -545,13 +570,13 @@ export function renderChannelName(template: string, ctx: RenderContext): string 
     name = name.split('@@stream_name@@').join(streamName(ctx));
   }
 
-  // Discord caps channel names at 100 characters; a long game/creator name could
-  // otherwise push past it and make the rename API call fail. An empty result
-  // isn't a valid channel name, so fall back to "-" (legacy behaviour).
+  // Clamp to the platform limit (100 for names, ~500 for statuses). An empty
+  // channel name isn't valid (fall back to "-"), but an empty status is — it
+  // clears the status — so `allowEmpty` keeps it empty.
+  const max = opts.maxLength ?? MAX_CHANNEL_NAME_LENGTH;
   const trimmed = name.trim();
-  const clamped =
-    trimmed.length > MAX_CHANNEL_NAME_LENGTH ? trimmed.slice(0, MAX_CHANNEL_NAME_LENGTH) : trimmed;
-  return clamped === '' ? '-' : clamped;
+  const clamped = trimmed.length > max ? trimmed.slice(0, max) : trimmed;
+  return clamped === '' && !opts.allowEmpty ? '-' : clamped;
 }
 
 /** Discord's hard limit on a channel name's length. */

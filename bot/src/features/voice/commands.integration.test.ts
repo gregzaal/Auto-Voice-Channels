@@ -125,6 +125,18 @@ describe('VoiceCommands (integration)', () => {
     expect(actions.ofType('rename').at(-1)!.name).toBe('Admin Named');
   });
 
+  it('sets and resets the per-channel status override', async () => {
+    voice.put(SEC, member('alice'));
+    const set = await commands.setStatus(GUILD, SEC, 'alice', 'AFK 💤');
+    expect(set.ok).toBe(true);
+    expect((await secondaries.get(SEC))!.state.statusTemplate).toBe('AFK 💤');
+    expect(actions.ofType('status').at(-1)).toMatchObject({ channelId: SEC, status: 'AFK 💤' });
+
+    const reset = await commands.setStatus(GUILD, SEC, 'alice', 'reset');
+    expect(reset.ok).toBe(true);
+    expect((await secondaries.get(SEC))!.state.statusTemplate).toBeUndefined();
+  });
+
   it('transfers ownership to a member in the channel', async () => {
     voice.put(SEC, member('bob'));
     const res = await commands.transfer(GUILD, SEC, 'alice', 'bob');

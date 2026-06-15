@@ -10,6 +10,8 @@ import { autoChannels } from '../db/schema.js';
 export const primaryTemplateSchema = z.object({
   /** Channel-name template for secondaries spawned from this primary. */
   name: z.string().optional(),
+  /** Voice-channel-status template for secondaries spawned from this primary. */
+  status: z.string().optional(),
   /** Default user limit applied to spawned secondaries (0 = unlimited). */
   limit: z.number().int().min(0).optional(),
   /** Position secondaries above (true, default) or below the primary. */

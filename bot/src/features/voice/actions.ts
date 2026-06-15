@@ -66,6 +66,8 @@ export interface VoiceActions {
    * (same category, adjacent position, @everyone may connect). Returns its id.
    */
   createJoinChannel(guildId: string, name: string, nearChannelId: string): Promise<string>;
+  /** Sets a voice channel's status (`''` clears it). Separate, laxer rate limit. */
+  setVoiceStatus(guildId: string, channelId: string, status: string): Promise<void>;
 }
 
 export type RecordedAction =
@@ -82,7 +84,8 @@ export type RecordedAction =
       channelId: string;
       name: string;
       nearChannelId: string;
-    };
+    }
+  | { type: 'status'; guildId: string; channelId: string; status: string };
 
 /**
  * In-memory recorder used by tests. Records every action and assigns synthetic
@@ -151,6 +154,11 @@ export class RecordingVoiceActions implements VoiceActions {
     this.created.add(channelId);
     this.actions.push({ type: 'joinChannel', guildId, channelId, name, nearChannelId });
     return Promise.resolve(channelId);
+  }
+
+  setVoiceStatus(guildId: string, channelId: string, status: string): Promise<void> {
+    this.actions.push({ type: 'status', guildId, channelId, status });
+    return Promise.resolve();
   }
 
   /** Convenience for assertions. */

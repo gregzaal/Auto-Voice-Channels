@@ -146,6 +146,25 @@ describe('GuildSettingsService (integration)', () => {
     expect((await settings.setTemplate(GUILD, 'not-a-channel', 'x')).ok).toBe(false);
   });
 
+  it('sets and resets a primary status template', async () => {
+    await settings.createPrimary(GUILD);
+    const primaryId = actions.ofType('create')[0]!.channelId;
+    await secondaries.create({
+      channelId: 'sec-st',
+      guildId: GUILD,
+      primaryChannelId: primaryId,
+      state: {},
+    });
+
+    const set = await settings.setStatusTemplate(GUILD, 'sec-st', 'In a meeting');
+    expect(set.ok).toBe(true);
+    expect((await autoChannels.get(primaryId))!.template.status).toBe('In a meeting');
+
+    const reset = await settings.setStatusTemplate(GUILD, 'sec-st', 'reset');
+    expect(reset.ok).toBe(true);
+    expect((await autoChannels.get(primaryId))!.template.status).toBeUndefined();
+  });
+
   it('toggles primary position and sets inherit-permissions via the channel you’re in', async () => {
     await settings.createPrimary(GUILD);
     const primaryId = actions.ofType('create')[0]!.channelId;

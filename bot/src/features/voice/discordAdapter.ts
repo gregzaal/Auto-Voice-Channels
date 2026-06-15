@@ -251,6 +251,19 @@ export class DiscordVoiceActions implements VoiceActions {
     }
   }
 
+  async setVoiceStatus(_guildId: string, channelId: string, status: string): Promise<void> {
+    // discord.js has no helper for voice channel status yet, so call the raw
+    // endpoint. Its rate limit is far laxer than channel renames. `''` clears it.
+    try {
+      await this.client.rest.put(`/channels/${channelId}/voice-status`, {
+        body: { status },
+      });
+    } catch (err) {
+      if (isApiError(err, UNKNOWN_CHANNEL)) return;
+      this.logger?.warn({ err, channelId }, 'failed to set voice channel status');
+    }
+  }
+
   async createJoinChannel(guildId: string, name: string, nearChannelId: string): Promise<string> {
     const guild = await this.client.guilds.fetch(guildId);
     const near = await this.client.channels.fetch(nearChannelId);

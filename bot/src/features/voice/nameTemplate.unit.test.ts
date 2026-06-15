@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { VoiceMember } from './types.js';
 import {
+  DEFAULT_STATUS_TEMPLATE,
   getAlias,
   getChannelGames,
   getGameName,
@@ -270,5 +271,34 @@ describe('renderChannelName — rich tokens', () => {
       creator: a,
     });
     expect(name).toBe('FULLISH [VIP]');
+  });
+
+  it('exposes a PLAYING boolean for the default status template', () => {
+    const opts = { maxLength: 500, allowEmpty: true };
+    // A game is playing → "Playing <game>"; idle → blank (status cleared).
+    const playing = renderChannelName(
+      DEFAULT_STATUS_TEMPLATE,
+      {
+        index: 0,
+        members: [member({ id: 'a', playing: ['Blender'] })],
+      },
+      opts,
+    );
+    expect(playing).toBe('Playing Blender');
+
+    const idle = renderChannelName(
+      DEFAULT_STATUS_TEMPLATE,
+      {
+        index: 0,
+        members: [member({ id: 'a' })],
+      },
+      opts,
+    );
+    expect(idle).toBe('');
+  });
+
+  it('allowEmpty keeps an empty status empty (vs "-" for names)', () => {
+    expect(renderChannelName('', { index: 0, members: [] })).toBe('-');
+    expect(renderChannelName('', { index: 0, members: [] }, { allowEmpty: true })).toBe('');
   });
 });

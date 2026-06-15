@@ -8,12 +8,19 @@ import type {
 import { isEntitled } from '@avc/core';
 import type { VoiceActions } from './actions.js';
 import type { GuildVoiceView, MemberActivity, VoiceMember, VoiceStateEvent } from './types.js';
-import { DEFAULT_CHANNEL_NAME_TEMPLATE, getGameName, renderChannelName } from './nameTemplate.js';
+import {
+  DEFAULT_CHANNEL_NAME_TEMPLATE,
+  DEFAULT_STATUS_TEMPLATE,
+  getGameName,
+  MAX_STATUS_LENGTH,
+  renderChannelName,
+} from './nameTemplate.js';
 
 /** Guild settings relevant to the voice feature (read from `guilds.settings`). */
 interface VoiceSettings {
   enabled: boolean;
   channelNameTemplate: string;
+  channelStatusTemplate: string;
   aliases: Record<string, string>;
   general: string;
   /** Per-user custom display names for `@@creator@@` (set via `/nick`). */
@@ -31,6 +38,10 @@ function parseSettings(settings: Record<string, unknown>): VoiceSettings {
       typeof settings.channel_name_template === 'string'
         ? settings.channel_name_template
         : DEFAULT_CHANNEL_NAME_TEMPLATE,
+    channelStatusTemplate:
+      typeof settings.channel_status_template === 'string'
+        ? settings.channel_status_template
+        : DEFAULT_STATUS_TEMPLATE,
     aliases: asStringMap(settings.aliases),
     general: typeof settings.general === 'string' ? settings.general : 'General',
     customNicks: asStringMap(settings.custom_nicks),
@@ -102,6 +113,8 @@ export interface RerenderOptions extends ReconcileOptions {
 export interface RerenderResult {
   /** The new name when it changed (or would, under dry-run); absent when unchanged. */
   name?: string;
+  /** The new voice status when it changed (`''` = cleared); absent when unchanged. */
+  status?: string;
   /** True when the rename was deferred by Discord's per-channel rate limit. */
   rateLimited?: boolean;
 }
@@ -154,28 +167,30 @@ type CreateOutcome =
 
 type CleanupOutcome = { action: 'deleted' | 'would-delete' | 'skip' };
 
-/** Which template an editor panel acts on. */
-export type EditorKind = 'name' | 'template';
+/** Whose templates an editor panel edits: one channel (`/name`) or a primary (`/template`). */
+export type EditorScope = 'channel' | 'primary';
+/** Which template within a scope. */
+export type EditorField = 'name' | 'status';
 
-/** Data backing a `/name` or `/template` editor panel. */
-export interface EditorState {
-  /** Whether the target is a managed secondary. */
-  found: boolean;
-  /**
-   * The currently-saved template text for this editor — the per-channel override
-   * for `name`, the primary's template for `template`. Undefined → inheriting the
-   * server default.
-   */
+/** The state of one template (name or status) within an editor panel. */
+export interface EditorFieldState {
+  /** The saved override/template; undefined → inheriting the default. */
   currentTemplate?: string;
-  /** The template actually in effect (used as the modal prefill base). */
+  /** The template in effect (modal-prefill base). */
   effectiveTemplate: string;
-  /** What the effective template renders to for the channel right now. */
+  /** What it renders to for the channel right now. */
   preview: string;
+}
+
+/** Data backing a `/name` or `/template` editor panel (both name + status). */
+export interface EditorState {
+  found: boolean;
+  scope: EditorScope;
+  name: EditorFieldState;
+  status: EditorFieldState;
   /** The secondary's owner (for the `/name` permission check). */
   ownerId?: string | null;
   primaryChannelId?: string;
-  /** The guild's default template (shown when inheriting). */
-  serverDefault: string;
 }
 
 /** What a single-guild reconcile changed (or, under dry-run, would change). */
@@ -383,45 +398,70 @@ export class VoiceFeature {
     const guild = await this.deps.guilds.ensure(guildId);
     const settings = parseSettings(guild.settings);
     const primary = await this.deps.autoChannels.get(secondary.primaryChannelId);
-    // A per-channel `/name` override wins over the primary's template.
-    const template =
-      secondary.state.template ?? primary?.template.name ?? settings.channelNameTemplate;
     const owner = secondary.ownerId ? members.find((m) => m.id === secondary.ownerId) : undefined;
     // Reconciliation may pass a freshly-computed sibling position to renumber
     // `##` tokens after a middle channel was deleted; otherwise use the stored one.
     const index = opts.index ?? secondary.state.index ?? 0;
-    const name = renderChannelName(template, {
+    const renderCtx = {
       index,
       members,
       aliases: settings.aliases,
       general: settings.general,
       ...(secondary.state.seed !== undefined ? { seed: secondary.state.seed } : {}),
       ...(owner ? { creatorName: displayName(settings, owner), creator: owner } : {}),
+    };
+
+    // Name: per-channel `/name` override → primary template → server default.
+    const nameTemplate =
+      secondary.state.template ?? primary?.template.name ?? settings.channelNameTemplate;
+    const name = renderChannelName(nameTemplate, renderCtx);
+    // Status: per-channel override → primary status template → server default.
+    // It allows an empty result (which clears the channel status).
+    const statusTemplate =
+      secondary.state.statusTemplate ?? primary?.template.status ?? settings.channelStatusTemplate;
+    const status = renderChannelName(statusTemplate, renderCtx, {
+      maxLength: MAX_STATUS_LENGTH,
+      allowEmpty: true,
     });
 
+    const nameChanged = name !== secondary.state.name;
+    const statusChanged = status !== (secondary.state.status ?? '');
+
     this.deps.logger.debug(
-      {
-        guildId,
-        secondaryId: channelId,
-        currentName: secondary.state.name,
-        computedName: name,
-        members: members.map((m) => ({ id: m.id, bot: m.bot, playing: m.playing })),
-      },
+      { guildId, secondaryId: channelId, name, status, nameChanged, statusChanged },
       'rerenderSecondary evaluated',
     );
 
-    if (name === secondary.state.name) return {};
-    if (opts.dryRun) return { name };
+    if (!nameChanged && !statusChanged) return {};
+    if (opts.dryRun) {
+      return { ...(nameChanged ? { name } : {}), ...(statusChanged ? { status } : {}) };
+    }
 
-    const { rateLimited } = await this.deps.actions.renameChannel(guildId, channelId, name);
-    // Persist the index + name even when deferred — the queued rename will apply.
-    await this.deps.secondaries.updateState(channelId, { ...secondary.state, name, index });
+    let rateLimited = false;
+    if (nameChanged) {
+      ({ rateLimited } = await this.deps.actions.renameChannel(guildId, channelId, name));
+    }
+    if (statusChanged) {
+      await this.deps.actions.setVoiceStatus(guildId, channelId, status);
+    }
+    // Persist both even if only one changed (and even if a rename was deferred —
+    // the queued rename will still apply).
+    await this.deps.secondaries.updateState(channelId, {
+      ...secondary.state,
+      name,
+      status,
+      index,
+    });
 
     this.deps.logger.info(
-      { guildId, secondaryId: channelId, name, rateLimited },
-      're-rendered secondary channel name',
+      { guildId, secondaryId: channelId, name, status, rateLimited },
+      're-rendered secondary channel',
     );
-    return { name, ...(rateLimited ? { rateLimited: true } : {}) };
+    return {
+      ...(nameChanged ? { name } : {}),
+      ...(statusChanged ? { status } : {}),
+      ...(rateLimited ? { rateLimited: true } : {}),
+    };
   }
 
   /** Re-renders every secondary owned by a member (after `/nick`). */
@@ -548,45 +588,62 @@ export class VoiceFeature {
    * (per-primary) editor panel: the currently-saved template, the effective one,
    * and a live preview rendered against the channel's current members.
    */
-  async getEditorState(kind: EditorKind, guildId: string, channelId: string): Promise<EditorState> {
+  async getEditorState(
+    scope: EditorScope,
+    guildId: string,
+    channelId: string,
+  ): Promise<EditorState> {
     const guild = await this.deps.guilds.ensure(guildId);
     const settings = parseSettings(guild.settings);
+    const empty: EditorFieldState = { effectiveTemplate: '', preview: '' };
     const secondary = await this.deps.secondaries.get(channelId);
     if (!secondary || secondary.guildId !== guildId) {
-      return {
-        found: false,
-        effectiveTemplate: settings.channelNameTemplate,
-        preview: '',
-        serverDefault: settings.channelNameTemplate,
-      };
+      return { found: false, scope, name: empty, status: empty };
     }
     const primary = await this.deps.autoChannels.get(secondary.primaryChannelId);
     const members = this.deps.voice.membersInChannel(channelId);
     const owner = secondary.ownerId ? members.find((m) => m.id === secondary.ownerId) : undefined;
-
-    const currentTemplate = kind === 'name' ? secondary.state.template : primary?.template.name;
-    const effectiveTemplate =
-      kind === 'name'
-        ? (currentTemplate ?? primary?.template.name ?? settings.channelNameTemplate)
-        : (currentTemplate ?? settings.channelNameTemplate);
-
-    const preview = renderChannelName(effectiveTemplate, {
+    const renderCtx = {
       index: secondary.state.index ?? 0,
       members,
       aliases: settings.aliases,
       general: settings.general,
       ...(secondary.state.seed !== undefined ? { seed: secondary.state.seed } : {}),
       ...(owner ? { creatorName: displayName(settings, owner), creator: owner } : {}),
-    });
+    };
+
+    // The current/effective template for a field depends on the editor's scope:
+    // a `/name` panel edits the per-channel override; `/template` edits the primary.
+    const nameCurrent = scope === 'channel' ? secondary.state.template : primary?.template.name;
+    const nameEffective =
+      scope === 'channel'
+        ? (nameCurrent ?? primary?.template.name ?? settings.channelNameTemplate)
+        : (nameCurrent ?? settings.channelNameTemplate);
+    const statusCurrent =
+      scope === 'channel' ? secondary.state.statusTemplate : primary?.template.status;
+    const statusEffective =
+      scope === 'channel'
+        ? (statusCurrent ?? primary?.template.status ?? settings.channelStatusTemplate)
+        : (statusCurrent ?? settings.channelStatusTemplate);
 
     return {
       found: true,
-      ...(currentTemplate !== undefined ? { currentTemplate } : {}),
-      effectiveTemplate,
-      preview,
+      scope,
+      name: {
+        ...(nameCurrent !== undefined ? { currentTemplate: nameCurrent } : {}),
+        effectiveTemplate: nameEffective,
+        preview: renderChannelName(nameEffective, renderCtx),
+      },
+      status: {
+        ...(statusCurrent !== undefined ? { currentTemplate: statusCurrent } : {}),
+        effectiveTemplate: statusEffective,
+        preview: renderChannelName(statusEffective, renderCtx, {
+          maxLength: MAX_STATUS_LENGTH,
+          allowEmpty: true,
+        }),
+      },
       ownerId: secondary.ownerId,
       primaryChannelId: secondary.primaryChannelId,
-      serverDefault: settings.channelNameTemplate,
     };
   }
 

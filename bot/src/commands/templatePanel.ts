@@ -9,97 +9,138 @@ import {
   type APIEmbed,
   type InteractionReplyOptions,
 } from 'discord.js';
-import type { EditorKind, EditorState } from '../features/voice/index.js';
+import type { EditorField, EditorScope, EditorState } from '../features/voice/index.js';
 
 /** Custom-id namespace for the `/name` and `/template` editor panel. */
 export const EDITOR_PREFIX = 'avc:tpl:';
-export const editorId = (action: string, kind: EditorKind, channelId: string): string =>
-  `${EDITOR_PREFIX}${action}:${kind}:${channelId}`;
-/** Parses `avc:tpl:<action>:<kind>:<channelId>`. */
+export const editorId = (
+  action: string,
+  scope: EditorScope,
+  field: EditorField,
+  channelId: string,
+): string => `${EDITOR_PREFIX}${action}:${scope}:${field}:${channelId}`;
+
+/** Parses `avc:tpl:<action>:<scope>:<field>:<channelId>`. */
 export function parseEditorId(
   customId: string,
-): { action: string; kind: EditorKind; channelId: string } | null {
+): { action: string; scope: EditorScope; field: EditorField; channelId: string } | null {
   if (!customId.startsWith(EDITOR_PREFIX)) return null;
-  const [, , action, kind, channelId] = customId.split(':');
-  if (!action || (kind !== 'name' && kind !== 'template') || !channelId) return null;
-  return { action, kind, channelId };
+  const [, , action, scope, field, channelId] = customId.split(':');
+  if (
+    !action ||
+    (scope !== 'channel' && scope !== 'primary') ||
+    (field !== 'name' && field !== 'status') ||
+    !channelId
+  ) {
+    return null;
+  }
+  return { action, scope, field, channelId };
 }
 
+const DOCS_LINK = 'https://wiki.dotsbots.com/en/commands/template';
 const VARIABLES_HELP =
-  '`##` number · `@@game_name@@` current game · `@@creator@@` owner · `@@num@@` members\n' +
+  '`##` number · `@@game_name@@` game · `@@creator@@` owner · `@@num@@` members\n' +
   '`@@nato@@` Alpha/Bravo… · `[[a/b]]` random · `<<one/many>>` plural · `{{cond ?? a // b}}` if\n' +
-  '_Plain text works too — e.g. `My Lounge`. See `/debug` for the full picture._';
+  `_Plain text works too. **[Full documentation & variables ↗](${DOCS_LINK})**_`;
 
-/** Builds the ephemeral editor panel for a `/name` or `/template` target. */
+function fieldValue(template: string | undefined, fallbackHint: string): string {
+  if (template === undefined) return fallbackHint;
+  return template === '' ? '_(empty — no status)_' : `\`${truncate(template)}\``;
+}
+
+/** Builds the ephemeral editor panel showing both the name and status templates. */
 export function renderEditorPanel(
-  kind: EditorKind,
+  scope: EditorScope,
   channelId: string,
   state: EditorState,
   opts: { updated?: boolean; note?: string } = {},
 ): InteractionReplyOptions {
-  const isName = kind === 'name';
-  const current = state.currentTemplate ?? `(inheriting \`${state.serverDefault}\`)`;
+  const isChannel = scope === 'channel';
   const embed: APIEmbed = new EmbedBuilder()
-    .setTitle(isName ? '✏️ Channel name' : '🧩 Creator-channel template')
+    .setTitle(isChannel ? '✏️ Channel name & status' : '🧩 Creator-channel templates')
     .setColor(0x5865f2)
     .setDescription(
-      isName
-        ? `Editing <#${channelId}> — only this channel.`
-        : `Editing the template for **all** channels of <#${channelId}>’s creator channel.`,
+      isChannel
+        ? `Editing <#${channelId}> — just this channel.`
+        : `Editing the templates for **all** channels of <#${channelId}>’s creator channel.`,
     )
     .addFields(
-      { name: 'Current', value: `\`${truncate(current)}\`` },
-      { name: 'Preview', value: state.preview ? `\`${truncate(state.preview)}\`` : '—' },
+      {
+        name: '📛 Name',
+        value:
+          `${fieldValue(state.name.currentTemplate, '_(inheriting default)_')}\n` +
+          `Preview: \`${truncate(state.name.preview) || '—'}\``,
+      },
+      {
+        name: '💬 Status',
+        value:
+          `${fieldValue(state.status.currentTemplate, '_(inheriting default)_')}\n` +
+          `Preview: ${state.status.preview ? `\`${truncate(state.status.preview)}\`` : '_(none)_'}`,
+      },
       { name: 'Variables', value: VARIABLES_HELP },
     )
     .toJSON();
   if (opts.note) embed.fields!.push({ name: '​', value: opts.note });
   if (opts.updated) embed.footer = { text: '✅ Saved' };
 
-  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+  const editRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
-      .setCustomId(editorId('edit', kind, channelId))
-      .setLabel('Edit')
-      .setEmoji('✏️')
+      .setCustomId(editorId('edit', scope, 'name', channelId))
+      .setLabel('Edit name template')
+      .setEmoji('📛')
       .setStyle(ButtonStyle.Primary),
     new ButtonBuilder()
-      .setCustomId(editorId('reset', kind, channelId))
-      .setLabel('Reset to default')
+      .setCustomId(editorId('edit', scope, 'status', channelId))
+      .setLabel('Edit status template')
+      .setEmoji('💬')
+      .setStyle(ButtonStyle.Primary),
+  );
+  const manageRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(editorId('reset', scope, 'name', channelId))
+      .setLabel('Reset name')
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
-      .setCustomId(editorId('close', kind, channelId))
+      .setCustomId(editorId('reset', scope, 'status', channelId))
+      .setLabel('Reset status')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(editorId('close', scope, 'name', channelId))
       .setLabel('Close')
       .setStyle(ButtonStyle.Secondary),
   );
-  return { embeds: [embed], components: [row], ephemeral: true };
+  return { embeds: [embed], components: [editRow, manageRow], ephemeral: true };
 }
 
-/** The "Edit" modal: a single multi-line input prefilled with the current value. */
+/** The "Edit" modal for one field, prefilled with the current/effective value. */
 export function buildEditorModal(
-  kind: EditorKind,
+  scope: EditorScope,
+  field: EditorField,
   channelId: string,
   state: EditorState,
 ): ModalBuilder {
-  // Prefill: a name override starts blank (people usually type a literal); a
-  // template starts from the current/effective so it can be tweaked.
-  const prefill =
-    kind === 'name'
-      ? (state.currentTemplate ?? '')
-      : (state.currentTemplate ?? state.effectiveTemplate);
+  const fs = state[field];
+  // Per-channel overrides start blank (people type a literal); a primary template
+  // (and any existing override) starts from the current value so it can be tweaked.
+  const prefill = fs.currentTemplate ?? (scope === 'primary' ? fs.effectiveTemplate : '');
   const input = new TextInputBuilder()
     .setCustomId('template')
-    .setLabel(kind === 'name' ? 'New name (tokens allowed)' : 'Name template')
+    .setLabel(field === 'name' ? 'Name template' : 'Status template')
     .setStyle(TextInputStyle.Paragraph)
-    .setRequired(true)
-    .setMaxLength(100)
-    .setPlaceholder('e.g. ## [@@game_name@@]  or  My Lounge')
-    .setValue(prefill.slice(0, 100));
+    .setRequired(false)
+    .setMaxLength(field === 'name' ? 100 : 500)
+    .setPlaceholder(
+      field === 'name'
+        ? 'e.g. ## [@@game_name@@]  or  My Lounge'
+        : 'e.g. Playing @@game_name@@  (blank = no status)',
+    )
+    .setValue(prefill.slice(0, field === 'name' ? 100 : 500));
   return new ModalBuilder()
-    .setCustomId(editorId('save', kind, channelId))
-    .setTitle(kind === 'name' ? 'Rename channel' : 'Set template')
+    .setCustomId(editorId('save', scope, field, channelId))
+    .setTitle(field === 'name' ? 'Edit name template' : 'Edit status template')
     .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
 }
 
-function truncate(s: string, max = 200): string {
+function truncate(s: string, max = 180): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }

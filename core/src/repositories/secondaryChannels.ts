@@ -6,6 +6,10 @@ import { secondaryChannels } from '../db/schema.js';
 export const secondaryStateSchema = z.object({
   /** Last rendered channel name. */
   name: z.string().optional(),
+  /** Last rendered voice-channel status (for change detection; '' = cleared). */
+  status: z.string().optional(),
+  /** Per-channel voice-status template override (set via `/name` status edit). */
+  statusTemplate: z.string().optional(),
   /** Whether the channel was created private (locked to @everyone). */
   private: z.boolean().optional(),
   /** Stable sibling index (`i`) captured at creation, for `##`-style tokens. */

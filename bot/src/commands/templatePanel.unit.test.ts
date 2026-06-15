@@ -4,45 +4,63 @@ import { buildEditorModal, editorId, parseEditorId, renderEditorPanel } from './
 
 const state: EditorState = {
   found: true,
-  currentTemplate: 'My Room',
-  effectiveTemplate: 'My Room',
-  preview: 'My Room',
+  scope: 'channel',
+  name: { currentTemplate: 'My Room', effectiveTemplate: 'My Room', preview: 'My Room' },
+  status: { effectiveTemplate: '{{PLAYING ?? Playing @@game_name@@}}', preview: 'Playing Halo' },
   ownerId: 'alice',
   primaryChannelId: 'p',
-  serverDefault: '## [@@game_name@@]',
 };
 
 describe('templatePanel', () => {
   it('round-trips custom ids', () => {
-    expect(parseEditorId(editorId('edit', 'name', '123'))).toEqual({
+    expect(parseEditorId(editorId('edit', 'channel', 'name', '123'))).toEqual({
       action: 'edit',
-      kind: 'name',
+      scope: 'channel',
+      field: 'name',
       channelId: '123',
     });
+    expect(parseEditorId(editorId('save', 'primary', 'status', '9'))).toMatchObject({
+      scope: 'primary',
+      field: 'status',
+    });
     expect(parseEditorId('something:else')).toBeNull();
-    expect(parseEditorId('avc:tpl:save:bogus:123')).toBeNull(); // invalid kind
+    expect(parseEditorId('avc:tpl:save:bogus:name:123')).toBeNull(); // invalid scope
   });
 
-  it('renders an ephemeral panel with the preview and Edit/Reset/Close buttons', () => {
-    const panel = renderEditorPanel('name', '123', state);
+  it('renders a panel with name + status sections, the docs link, and the buttons', () => {
+    const panel = renderEditorPanel('channel', '123', state);
     expect(panel.ephemeral).toBe(true);
     const json = JSON.stringify(panel);
-    expect(json).toContain('My Room'); // current + preview
-    const labels = (
-      panel.components![0] as { components: { data: { label?: string } }[] }
-    ).components.map((c) => c.data.label);
-    expect(labels).toEqual(['Edit', 'Reset to default', 'Close']);
+    expect(json).toContain('My Room'); // name current + preview
+    expect(json).toContain('Playing Halo'); // status preview
+    expect(json).toContain('https://wiki.dotsbots.com/en/commands/template'); // docs link
+
+    const labels = (panel.components as { components: { data: { label?: string } }[] }[]).flatMap(
+      (row) => row.components.map((c) => c.data.label),
+    );
+    expect(labels).toEqual([
+      'Edit name template',
+      'Edit status template',
+      'Reset name',
+      'Reset status',
+      'Close',
+    ]);
   });
 
-  it('builds an edit modal prefilled appropriately per kind', () => {
-    // A name override starts from the override (blank if none); a template from current.
-    const nameModal = buildEditorModal('name', '123', state).toJSON();
-    const tmplModal = buildEditorModal('template', '123', {
-      ...state,
-      currentTemplate: undefined,
-      effectiveTemplate: '## [@@game_name@@]',
-    }).toJSON();
-    expect(JSON.stringify(nameModal)).toContain('My Room');
-    expect(JSON.stringify(tmplModal)).toContain('@@game_name@@'); // falls back to effective
+  it('prefills the edit modal from the current value (blank for an unset channel override)', () => {
+    const nameModal = JSON.stringify(buildEditorModal('channel', 'name', '123', state).toJSON());
+    expect(nameModal).toContain('My Room');
+
+    // Status has no per-channel override → channel-scope modal starts blank.
+    const statusModal = JSON.stringify(
+      buildEditorModal('channel', 'status', '123', state).toJSON(),
+    );
+    expect(statusModal).not.toContain('PLAYING');
+
+    // A primary-scope status modal falls back to the effective template.
+    const primaryStatus = JSON.stringify(
+      buildEditorModal('primary', 'status', '123', state).toJSON(),
+    );
+    expect(primaryStatus).toContain('PLAYING');
   });
 });
