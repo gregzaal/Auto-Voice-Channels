@@ -138,21 +138,26 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return replyResult(
           interaction,
           await run(guildId, 'cmd:private', () =>
-            deps.privacy.makePrivate(guildId, channelId, userId, interaction.channelId),
+            deps.privacy.makePrivate(
+              guildId,
+              resolveVoiceChannelId(interaction),
+              userId,
+              interaction.channelId,
+            ),
           ),
         );
       case 'public':
         return replyResult(
           interaction,
           await run(guildId, 'cmd:public', () =>
-            deps.privacy.makePublic(guildId, channelId, userId),
+            deps.privacy.makePublic(guildId, resolveVoiceChannelId(interaction), userId),
           ),
         );
       case 'claim':
         return replyResult(
           interaction,
           await run(guildId, 'cmd:claim', () =>
-            deps.voiceCommands.claim(guildId, channelId, userId),
+            deps.voiceCommands.claim(guildId, resolveVoiceChannelId(interaction), userId),
           ),
         );
       case 'transfer':
@@ -189,7 +194,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return replyResult(
           interaction,
           await run(guildId, 'cmd:toggleposition', () =>
-            deps.settings.togglePosition(guildId, channelId ?? ''),
+            deps.settings.togglePosition(guildId, resolveVoiceChannelId(interaction) ?? ''),
           ),
         );
       case 'inheritpermissions':
@@ -198,7 +203,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
           await run(guildId, 'cmd:inheritpermissions', () =>
             deps.settings.setInheritPermissions(
               guildId,
-              channelId ?? '',
+              resolveVoiceChannelId(interaction) ?? '',
               interaction.options.getString('source', true),
             ),
           ),
@@ -225,10 +230,11 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
 
   async function openTemplatePanel(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
-    const channelId = currentVoiceChannelId(interaction);
+    const channelId = resolveVoiceChannelId(interaction);
     if (!channelId) {
       await interaction.reply({
-        content: 'Join one of that creator channel’s voice channels first.',
+        content:
+          'Join one of that creator channel’s voice channels first, or pass the `channel` option.',
         ephemeral: true,
       });
       return;
@@ -249,8 +255,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   async function openNamePanel(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
-    const target =
-      interaction.options.getChannel('channel')?.id ?? currentVoiceChannelId(interaction);
+    const target = resolveVoiceChannelId(interaction);
     if (!target) {
       await interaction.reply({
         content: 'Join a voice channel, or pick one with the `channel` option.',
@@ -418,8 +423,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   /** Dev-only: dump the data behind a channel's name + config + permissions. */
   async function handleDebug(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
-    const channelId =
-      interaction.options.getChannel('channel')?.id ?? currentVoiceChannelId(interaction);
+    const channelId = resolveVoiceChannelId(interaction);
     if (!channelId) {
       await interaction.reply({
         content: 'Join a voice channel or pass one with the `channel` option to debug it.',
@@ -703,6 +707,15 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
 function currentVoiceChannelId(interaction: ChatInputCommandInteraction): string | undefined {
   const member = interaction.member as GuildMember | null;
   return member?.voice?.channelId ?? undefined;
+}
+
+/**
+ * The channel a command should act on: the explicit `channel` option when the
+ * caller passed one (e.g. they're not sitting in a VC), otherwise their current
+ * voice channel. Commands without a `channel` option just fall back to the VC.
+ */
+function resolveVoiceChannelId(interaction: ChatInputCommandInteraction): string | undefined {
+  return interaction.options.getChannel('channel')?.id ?? currentVoiceChannelId(interaction);
 }
 
 /** Renders a human-readable `/debug` summary (full detail goes to the logs). */

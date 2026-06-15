@@ -62,6 +62,23 @@ describe('buildCommandDefinitions', () => {
     }
   });
 
+  it('offers an optional voice "channel" fallback on the VC-dependent commands', () => {
+    for (const name of [
+      'name',
+      'private',
+      'public',
+      'claim',
+      'template',
+      'toggleposition',
+      'inheritpermissions',
+    ]) {
+      const opt = byName.get(name)!.options?.find((o) => o.name === 'channel');
+      expect(opt, `${name} should expose a channel option`).toBeDefined();
+      // Optional (not required), so in-VC callers never have to supply it.
+      expect((opt as { required?: boolean }).required ?? false).toBe(false);
+    }
+  });
+
   it('constrains the limit option to 0..99', () => {
     const opt = byName.get('limit')!.options?.[0] as { min_value: number; max_value: number };
     expect(opt.min_value).toBe(0);

@@ -5,6 +5,7 @@ import {
   Routes,
   SlashCommandBuilder,
   type RESTPostAPIApplicationCommandsJSONBody,
+  type SlashCommandChannelOption,
 } from 'discord.js';
 import type { Logger } from '@avc/core';
 import { MAX_USER_LIMIT } from '../features/voice/index.js';
@@ -29,6 +30,12 @@ export function buildCommandDefinitions(
     guildOnly(b).setDefaultMemberPermissions(
       PermissionFlagsBits.ManageChannels,
     ) as SlashCommandBuilder;
+  // Optional "pick a voice channel" fallback for commands that otherwise act on
+  // the channel you're sitting in — lets you target one when you're not in a VC.
+  const voiceChannelOption =
+    (description: string) =>
+    (o: SlashCommandChannelOption): SlashCommandChannelOption =>
+      o.setName('channel').setDescription(description).addChannelTypes(ChannelType.GuildVoice);
 
   const commands: SlashCommandBuilder[] = [
     guildOnly(
@@ -63,17 +70,26 @@ export function buildCommandDefinitions(
     guildOnly(
       new SlashCommandBuilder()
         .setName('private')
-        .setDescription('Make your voice channel private (lock out @everyone).'),
+        .setDescription('Make your voice channel private (lock out @everyone).')
+        .addChannelOption(
+          voiceChannelOption('Voice channel to act on (defaults to your current one).'),
+        ) as SlashCommandBuilder,
     ),
     guildOnly(
       new SlashCommandBuilder()
         .setName('public')
-        .setDescription('Reopen your voice channel to @everyone.'),
+        .setDescription('Reopen your voice channel to @everyone.')
+        .addChannelOption(
+          voiceChannelOption('Voice channel to act on (defaults to your current one).'),
+        ) as SlashCommandBuilder,
     ),
     guildOnly(
       new SlashCommandBuilder()
         .setName('claim')
-        .setDescription('Claim your voice channel when its owner has left.'),
+        .setDescription('Claim your voice channel when its owner has left.')
+        .addChannelOption(
+          voiceChannelOption('Voice channel to claim (defaults to your current one).'),
+        ) as SlashCommandBuilder,
     ),
     guildOnly(
       new SlashCommandBuilder()
@@ -130,12 +146,18 @@ export function buildCommandDefinitions(
     adminOnly(
       new SlashCommandBuilder()
         .setName('template')
-        .setDescription('Open a panel to set the name template for the creator channel you’re in.'),
+        .setDescription('Open a panel to set the name template for the creator channel you’re in.')
+        .addChannelOption(
+          voiceChannelOption('A channel in the group to target (defaults to your current one).'),
+        ) as SlashCommandBuilder,
     ),
     adminOnly(
       new SlashCommandBuilder()
         .setName('toggleposition')
-        .setDescription('Toggle whether new channels appear above or below the creator channel.'),
+        .setDescription('Toggle whether new channels appear above or below the creator channel.')
+        .addChannelOption(
+          voiceChannelOption('A channel in the group to target (defaults to your current one).'),
+        ) as SlashCommandBuilder,
     ),
     adminOnly(
       new SlashCommandBuilder()
@@ -146,6 +168,9 @@ export function buildCommandDefinitions(
             .setName('source')
             .setDescription('“primary”, “category”, or a voice-channel id.')
             .setRequired(true),
+        )
+        .addChannelOption(
+          voiceChannelOption('A channel in the group to target (defaults to your current one).'),
         ) as SlashCommandBuilder,
     ),
     adminOnly(

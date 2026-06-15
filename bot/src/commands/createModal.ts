@@ -34,18 +34,16 @@ export function buildCreateModal(defaults: CreateDefaults): ModalBuilder {
     .setCustomId(CREATE_MODAL_ID)
     .setTitle('Create a creator channel')
     .addLabelComponents(
-      new LabelBuilder()
-        .setLabel('Category')
-        .setChannelSelectMenuComponent(
-          new ChannelSelectMenuBuilder()
-            .setCustomId('category')
-            .setChannelTypes(ChannelType.GuildCategory)
-            // Optional: a modal select needs required=false to allow min_values 0.
-            .setRequired(false)
-            .setMinValues(0)
-            .setMaxValues(1)
-            .setPlaceholder('Pick a category (optional)'),
-        ),
+      new LabelBuilder().setLabel('Category').setChannelSelectMenuComponent(
+        new ChannelSelectMenuBuilder()
+          .setCustomId('category')
+          .setChannelTypes(ChannelType.GuildCategory)
+          // Optional: a modal select needs required=false to allow min_values 0.
+          .setRequired(false)
+          .setMinValues(0)
+          .setMaxValues(1)
+          .setPlaceholder('Pick a category (optional)'),
+      ),
       new LabelBuilder()
         .setLabel('Primary (creation) channel name')
         .setTextInputComponent(
