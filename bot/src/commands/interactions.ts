@@ -282,19 +282,21 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     const guildId = interaction.guildId!;
     if (!(await requireManageChannels(interaction))) return;
     const above = parsePositionModal(interaction.fields);
-    const before = await run(guildId, 'cmd:position:get', () =>
-      deps.settings.getPosition(guildId, channelId),
-    );
-    const res = await run(guildId, 'cmd:position:set', () =>
-      deps.settings.setPosition(guildId, channelId, above),
-    );
-    let message = res.message;
-    if (res.ok && before.primaryChannelId && before.above !== above) {
-      const moved = await run(guildId, 'cmd:position:reposition', () =>
-        deps.feature.repositionSecondaries(guildId, before.primaryChannelId!, above),
-      );
-      if (moved > 0) message += ` Moved ${moved} existing channel${moved === 1 ? '' : 's'}.`;
-    }
+    // Read → set → reposition in ONE dispatched task so it's ordered atomically
+    // against other guild work (no interleaving between the read and the writes).
+    const { res, moved } = await run(guildId, 'cmd:position', async () => {
+      const before = await deps.settings.getPosition(guildId, channelId);
+      const result = await deps.settings.setPosition(guildId, channelId, above);
+      const count =
+        result.ok && before.primaryChannelId && before.above !== above
+          ? await deps.feature.repositionSecondaries(guildId, before.primaryChannelId, above)
+          : 0;
+      return { res: result, moved: count };
+    });
+    const message =
+      moved > 0
+        ? `${res.message} Moved ${moved} existing channel${moved === 1 ? '' : 's'}.`
+        : res.message;
     await interaction.reply({
       content: `${res.ok ? '✅' : '⚠️'} ${message}`,
       ephemeral: true,
