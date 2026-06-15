@@ -13,14 +13,14 @@ import {
   SettingsCache,
   shardCapFor,
   ShardLeaseRepository,
-  type Config,
   type Logger,
 } from '@avc/core';
-import { REST, Routes, type Client } from 'discord.js';
+import { REST, Routes } from 'discord.js';
 import { GuildDispatcher } from './runtime/dispatcher.js';
 import { RuntimeCreationGate } from './runtime/creationGate.js';
 import { ShardLeaseManager } from './runtime/shardLeaseManager.js';
 import { PgIdentifyThrottler } from './runtime/identifyThrottler.js';
+import { installShutdown } from './runtime/shutdown.js';
 import { HealthServer, type HealthReport, type SubsystemStatus } from './ops/health.js';
 import {
   AdminChannelReporter,
@@ -330,64 +330,6 @@ async function main(): Promise<void> {
   // Start heartbeating only now that the graceful-drain handler is installed, so a
   // lease-loss reaction always drains cleanly before exiting for a restart.
   leaseManager.startHeartbeat();
-}
-
-interface ShutdownDeps {
-  logger: Logger;
-  config: Config;
-  leaseManager: ShardLeaseManager;
-  dispatcher: GuildDispatcher;
-  reconciler: Reconciler;
-  health: HealthServer;
-  client: Client;
-  settingsCache: SettingsCache;
-  notifier: PgNotifier;
-  dbPingTimer: ReturnType<typeof setInterval>;
-  disposeVoiceGateway: () => void;
-  disposeJoinRequests: () => void;
-  disposeInteractions: () => void;
-  closeDb: () => Promise<void>;
-}
-
-/**
- * Graceful drain: stop new work → finish in-flight per-guild queues → release
- * shard leases → close DB, then exit with `exitCode`. Triggered on SIGINT/SIGTERM
- * (rolling deploys → exit 0) and on lease-loss (→ exit 1, so the orchestrator
- * restarts us into a clean re-claim). Returns the handler so callers can trigger
- * a drain programmatically.
- */
-function installShutdown(deps: ShutdownDeps): (reason: string, exitCode: number) => void {
-  let shuttingDown = false;
-  const handler = (reason: string, exitCode = 0): void => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    deps.logger.info({ reason, exitCode }, 'shutting down (graceful drain)');
-    void (async () => {
-      try {
-        clearInterval(deps.dbPingTimer);
-        deps.reconciler.stopSweep();
-        deps.disposeInteractions();
-        deps.disposeJoinRequests();
-        deps.disposeVoiceGateway();
-        deps.client.removeAllListeners();
-        await deps.dispatcher.drainAll();
-        await deps.leaseManager.releaseAll();
-        await deps.client.destroy();
-        await deps.settingsCache.stop();
-        await deps.notifier.close();
-        await deps.health.stop();
-        await deps.closeDb();
-        deps.logger.info('shutdown complete');
-        process.exit(exitCode);
-      } catch (err) {
-        deps.logger.error({ err }, 'error during shutdown');
-        process.exit(1);
-      }
-    })();
-  };
-  process.once('SIGINT', () => handler('SIGINT', 0));
-  process.once('SIGTERM', () => handler('SIGTERM', 0));
-  return handler;
 }
 
 /**

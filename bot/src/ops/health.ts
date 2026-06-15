@@ -55,6 +55,12 @@ export class HealthServer {
     this.options = options;
   }
 
+  /** The actual bound TCP port once started (useful when port 0 was requested). */
+  get boundPort(): number | undefined {
+    const addr = this.server?.address();
+    return addr && typeof addr === 'object' ? addr.port : undefined;
+  }
+
   start(): Promise<void> {
     return new Promise((resolve) => {
       this.server = createServer((req, res) => {
