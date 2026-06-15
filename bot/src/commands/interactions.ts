@@ -280,13 +280,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     channelId: string,
   ): Promise<void> {
     const guildId = interaction.guildId!;
-    if (!hasManageChannels(interaction)) {
-      await interaction.reply({
-        content: 'You need the Manage Channels permission.',
-        ephemeral: true,
-      });
-      return;
-    }
+    if (!(await requireManageChannels(interaction))) return;
     const above = parsePositionModal(interaction.fields);
     const before = await run(guildId, 'cmd:position:get', () =>
       deps.settings.getPosition(guildId, channelId),
@@ -337,13 +331,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     channelId: string,
   ): Promise<void> {
     const guildId = interaction.guildId!;
-    if (!hasManageChannels(interaction)) {
-      await interaction.reply({
-        content: 'You need the Manage Channels permission.',
-        ephemeral: true,
-      });
-      return;
-    }
+    if (!(await requireManageChannels(interaction))) return;
     const source = parseInheritModal(interaction.fields);
     const res = await run(guildId, 'cmd:inheritpermissions', () =>
       deps.settings.setInheritPermissions(guildId, channelId, source),
@@ -364,13 +352,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   /** The `/logging` modal submit. */
   async function handleLoggingSubmit(interaction: ModalSubmitInteraction): Promise<void> {
     const guildId = interaction.guildId!;
-    if (!hasManageChannels(interaction)) {
-      await interaction.reply({
-        content: 'You need the Manage Channels permission.',
-        ephemeral: true,
-      });
-      return;
-    }
+    if (!(await requireManageChannels(interaction))) return;
     const parsed = parseLoggingModal(interaction.fields);
     const target = parsed.disable ? null : (parsed.channelId ?? interaction.channelId);
     const res = await run(guildId, 'cmd:logging', () =>
@@ -512,6 +494,18 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     return interaction.memberPermissions?.has(PermissionFlagsBits.ManageChannels) ?? false;
   }
 
+  /** Gate an admin action: replies with the permission notice and returns false if lacking it. */
+  async function requireManageChannels(
+    interaction: ChatInputCommandInteraction | ButtonInteraction | ModalSubmitInteraction,
+  ): Promise<boolean> {
+    if (hasManageChannels(interaction)) return true;
+    await interaction.reply({
+      content: 'You need the Manage Channels permission.',
+      ephemeral: true,
+    });
+    return false;
+  }
+
   async function handlePing(interaction: ChatInputCommandInteraction): Promise<void> {
     const ws = Math.round(deps.client.ws.ping);
     await interaction.reply({ content: '🏓 Pinging…', ephemeral: true });
@@ -586,13 +580,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       });
       return;
     }
-    if (!hasManageChannels(interaction)) {
-      await interaction.reply({
-        content: 'You need the Manage Channels permission.',
-        ephemeral: true,
-      });
-      return;
-    }
+    if (!(await requireManageChannels(interaction))) return;
     // Prefill the template fields with the guild's current defaults (a quick read,
     // well within the 3s window before showModal — which must be the first response).
     const config = await deps.settings.getConfig(guildId);
@@ -607,6 +595,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   /** The `/create` modal submit: create the primary from the selections, confirm. */
   async function handleCreateSubmit(interaction: ModalSubmitInteraction): Promise<void> {
     const guildId = interaction.guildId!;
+    if (!(await requireManageChannels(interaction))) return;
     if (!(await isEntitledOrReject(interaction, guildId))) return;
     const config = await deps.settings.getConfig(guildId);
     const opts = parseCreateModal(interaction.fields, {
@@ -739,6 +728,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   }
 
   async function handleSettingsButton(interaction: ButtonInteraction): Promise<void> {
+    if (!(await requireManageChannels(interaction))) return;
     const guildId = interaction.guildId!;
     const modal = modalForButton(interaction);
     if (modal) {
@@ -778,6 +768,13 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     if (interaction.customId === LOGGING_MODAL_ID) return handleLoggingSubmit(interaction);
     if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorModal(interaction);
     const guildId = interaction.guildId!;
+    // The remaining ids are the admin /settings panel modals — re-gate on submit.
+    const settingsModalIds: string[] = Object.values(SETTINGS_MODAL_IDS);
+    if (
+      settingsModalIds.includes(interaction.customId) &&
+      !(await requireManageChannels(interaction))
+    )
+      return;
     let result: CommandResult | undefined;
     if (interaction.customId === SETTINGS_MODAL_IDS.general) {
       result = await run(guildId, 'settings:general', () =>
