@@ -57,6 +57,7 @@ async function main(): Promise<void> {
   });
 
   logger.info({ selfHosted: config.selfHosted, totalShards: config.totalShards }, 'starting bot');
+  installProcessGuards(logger);
 
   const { db, close: closeDb } = createDatabase({ connectionString: config.databaseUrl });
 
@@ -318,6 +319,23 @@ function installShutdown(deps: ShutdownDeps): void {
   };
   process.once('SIGINT', () => handler('SIGINT'));
   process.once('SIGTERM', () => handler('SIGTERM'));
+}
+
+/**
+ * Last-resort process guards: per-handler code already `.catch`es its own work,
+ * so these only fire on a genuinely-missed rejection or a synchronous throw
+ * outside any handler. A stray rejection is logged (the bot stays up); an
+ * uncaught exception leaves the process in an undefined state, so we log and exit
+ * non-zero for the orchestrator to restart cleanly.
+ */
+function installProcessGuards(logger: Logger): void {
+  process.on('unhandledRejection', (reason) => {
+    logger.error({ err: reason }, 'unhandled promise rejection');
+  });
+  process.on('uncaughtException', (err) => {
+    logger.error({ err }, 'uncaught exception — exiting');
+    process.exit(1);
+  });
 }
 
 main().catch((err) => {
