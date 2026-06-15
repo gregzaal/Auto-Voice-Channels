@@ -109,6 +109,11 @@ export interface VoiceFeatureDeps {
     newOwnerName: string,
   ) => Promise<void>;
   /**
+   * Resolves a secondary's "⇩ Join" companion channel id, if it has one (private
+   * channels). Used by `/position` so a companion moves with its secondary.
+   */
+  joinCompanionFor?: (secondaryChannelId: string) => Promise<string | undefined>;
+  /**
    * Optional sink for per-guild event logging (`/logging`). Level 1 = lifecycle
    * (create/delete), 2 = config changes, 3 = joins/leaves. Fire-and-forget.
    */
@@ -565,6 +570,35 @@ export class VoiceFeature {
       rows.map((r) => r.channelId),
       opts,
     );
+  }
+
+  /**
+   * Repositions every existing secondary of a primary to match a changed
+   * above/below setting (after `/position`). Orders them by creation time so they
+   * stack the same way new channels do. Returns how many were moved.
+   */
+  async repositionSecondaries(
+    guildId: string,
+    primaryChannelId: string,
+    above: boolean,
+  ): Promise<number> {
+    const rows = await this.deps.secondaries.listByPrimary(primaryChannelId);
+    if (rows.length === 0) return 0;
+    const ordered = [...rows].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    // Build the move list: each secondary preceded by its "⇩ Join" companion (if
+    // private) so the pair stays adjacent — the companion always sits just above.
+    const channelBlock: string[] = [];
+    for (const row of ordered) {
+      const companion = await this.deps.joinCompanionFor?.(row.channelId);
+      if (companion) channelBlock.push(companion);
+      channelBlock.push(row.channelId);
+    }
+    await this.deps.actions.repositionSecondaries(guildId, primaryChannelId, channelBlock, above);
+    this.deps.logger.info(
+      { guildId, primaryChannelId, above, count: ordered.length },
+      'repositioned secondaries',
+    );
+    return ordered.length;
   }
 
   /** Re-renders all secondaries sharing a primary with `channelId` (after `/template`). */

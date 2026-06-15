@@ -5,7 +5,6 @@ import {
   Routes,
   SlashCommandBuilder,
   type RESTPostAPIApplicationCommandsJSONBody,
-  type SlashCommandChannelOption,
 } from 'discord.js';
 import type { Logger } from '@avc/core';
 import { MAX_USER_LIMIT } from '../features/voice/index.js';
@@ -30,12 +29,6 @@ export function buildCommandDefinitions(
     guildOnly(b).setDefaultMemberPermissions(
       PermissionFlagsBits.ManageChannels,
     ) as SlashCommandBuilder;
-  // Optional "pick a voice channel" fallback for commands that otherwise act on
-  // the channel you're sitting in — lets you target one when you're not in a VC.
-  const voiceChannelOption =
-    (description: string) =>
-    (o: SlashCommandChannelOption): SlashCommandChannelOption =>
-      o.setName('channel').setDescription(description).addChannelTypes(ChannelType.GuildVoice);
 
   const commands: SlashCommandBuilder[] = [
     guildOnly(
@@ -59,37 +52,22 @@ export function buildCommandDefinitions(
     guildOnly(
       new SlashCommandBuilder()
         .setName('name')
-        .setDescription('Open a panel to rename your voice channel.')
-        .addChannelOption((o) =>
-          o
-            .setName('channel')
-            .setDescription('Channel to rename (admins; defaults to your current one).')
-            .addChannelTypes(ChannelType.GuildVoice),
-        ) as SlashCommandBuilder,
+        .setDescription('Open a panel to rename your voice channel.'),
     ),
     guildOnly(
       new SlashCommandBuilder()
         .setName('private')
-        .setDescription('Make your voice channel private (lock out @everyone).')
-        .addChannelOption(
-          voiceChannelOption('Voice channel to act on (defaults to your current one).'),
-        ) as SlashCommandBuilder,
+        .setDescription('Make your voice channel private (lock out @everyone).'),
     ),
     guildOnly(
       new SlashCommandBuilder()
         .setName('public')
-        .setDescription('Reopen your voice channel to @everyone.')
-        .addChannelOption(
-          voiceChannelOption('Voice channel to act on (defaults to your current one).'),
-        ) as SlashCommandBuilder,
+        .setDescription('Reopen your voice channel to @everyone.'),
     ),
     guildOnly(
       new SlashCommandBuilder()
         .setName('claim')
-        .setDescription('Claim your voice channel when its owner has left.')
-        .addChannelOption(
-          voiceChannelOption('Voice channel to claim (defaults to your current one).'),
-        ) as SlashCommandBuilder,
+        .setDescription('Claim your voice channel when its owner has left.'),
     ),
     guildOnly(
       new SlashCommandBuilder()
@@ -146,56 +124,22 @@ export function buildCommandDefinitions(
     adminOnly(
       new SlashCommandBuilder()
         .setName('template')
-        .setDescription('Open a panel to set the name template for the creator channel you’re in.')
-        .addChannelOption(
-          voiceChannelOption('A channel in the group to target (defaults to your current one).'),
-        ) as SlashCommandBuilder,
+        .setDescription('Open a panel to set the name template for the creator channel you’re in.'),
     ),
     adminOnly(
       new SlashCommandBuilder()
         .setName('position')
-        .setDescription('Choose whether new channels appear above or below the creator channel.')
-        .addChannelOption(
-          voiceChannelOption('A channel in the group to target (defaults to your current one).'),
-        ) as SlashCommandBuilder,
+        .setDescription('Choose whether new channels appear above or below the creator channel.'),
     ),
     adminOnly(
       new SlashCommandBuilder()
         .setName('inheritpermissions')
-        .setDescription('Set where new channels copy their permissions from.')
-        .addStringOption((o) =>
-          o
-            .setName('source')
-            .setDescription('“primary”, “category”, or a voice-channel id.')
-            .setRequired(true),
-        )
-        .addChannelOption(
-          voiceChannelOption('A channel in the group to target (defaults to your current one).'),
-        ) as SlashCommandBuilder,
+        .setDescription('Choose where new channels copy their permissions from.'),
     ),
     adminOnly(
       new SlashCommandBuilder()
         .setName('logging')
-        .setDescription('Log channel events to a text channel (or turn logging off).')
-        .addChannelOption((o) =>
-          o
-            .setName('channel')
-            .setDescription('Where to send logs (defaults to here).')
-            .addChannelTypes(ChannelType.GuildText),
-        )
-        .addIntegerOption((o) =>
-          o
-            .setName('level')
-            .setDescription('1: lifecycle · 2: changes · 3: joins/leaves.')
-            .addChoices(
-              { name: '1 — channel lifecycle', value: 1 },
-              { name: '2 — + changes', value: 2 },
-              { name: '3 — + joins/leaves', value: 3 },
-            ),
-        )
-        .addBooleanOption((o) =>
-          o.setName('disable').setDescription('Turn logging off.'),
-        ) as SlashCommandBuilder,
+        .setDescription('Configure event logging to a text channel (or turn it off).'),
     ),
   ];
 

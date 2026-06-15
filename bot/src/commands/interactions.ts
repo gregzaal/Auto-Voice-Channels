@@ -50,6 +50,13 @@ import {
   positionChannelId,
   POSITION_MODAL_PREFIX,
 } from './positionModal.js';
+import {
+  buildInheritModal,
+  inheritChannelId,
+  INHERIT_MODAL_PREFIX,
+  parseInheritModal,
+} from './inheritModal.js';
+import { buildLoggingModal, LOGGING_MODAL_ID, parseLoggingModal } from './loggingModal.js';
 
 export interface InteractionDeps {
   client: Client;
@@ -144,26 +151,21 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return replyResult(
           interaction,
           await run(guildId, 'cmd:private', () =>
-            deps.privacy.makePrivate(
-              guildId,
-              resolveVoiceChannelId(interaction),
-              userId,
-              interaction.channelId,
-            ),
+            deps.privacy.makePrivate(guildId, channelId, userId, interaction.channelId),
           ),
         );
       case 'public':
         return replyResult(
           interaction,
           await run(guildId, 'cmd:public', () =>
-            deps.privacy.makePublic(guildId, resolveVoiceChannelId(interaction), userId),
+            deps.privacy.makePublic(guildId, channelId, userId),
           ),
         );
       case 'claim':
         return replyResult(
           interaction,
           await run(guildId, 'cmd:claim', () =>
-            deps.voiceCommands.claim(guildId, resolveVoiceChannelId(interaction), userId),
+            deps.voiceCommands.claim(guildId, channelId, userId),
           ),
         );
       case 'transfer':
@@ -199,18 +201,9 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       case 'position':
         return openPositionModal(interaction);
       case 'inheritpermissions':
-        return replyResult(
-          interaction,
-          await run(guildId, 'cmd:inheritpermissions', () =>
-            deps.settings.setInheritPermissions(
-              guildId,
-              resolveVoiceChannelId(interaction) ?? '',
-              interaction.options.getString('source', true),
-            ),
-          ),
-        );
+        return openInheritModal(interaction);
       case 'logging':
-        return handleLogging(interaction);
+        return openLoggingModal(interaction);
       case 'ping':
         return handlePing(interaction);
       case 'invite':
@@ -231,11 +224,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
 
   async function openTemplatePanel(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
-    const channelId = resolveVoiceChannelId(interaction);
+    const channelId = currentVoiceChannelId(interaction);
     if (!channelId) {
       await interaction.reply({
-        content:
-          'Join one of that creator channel’s voice channels first, or pass the `channel` option.',
+        content: 'Join one of that creator channel’s voice channels first.',
         ephemeral: true,
       });
       return;
@@ -256,11 +248,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   /** `/position` → a modal to pick above/below for the creator channel you're in. */
   async function openPositionModal(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
-    const channelId = resolveVoiceChannelId(interaction);
+    const channelId = currentVoiceChannelId(interaction);
     if (!channelId) {
       await interaction.reply({
-        content:
-          'Join one of that creator channel’s voice channels first, or pass the `channel` option.',
+        content: 'Join one of that creator channel’s voice channels first.',
         ephemeral: true,
       });
       return;
@@ -278,7 +269,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     await interaction.showModal(buildPositionModal(channelId, pos.above));
   }
 
-  /** The `/position` modal submit: persist the above/below choice for the primary. */
+  /**
+   * The `/position` modal submit: persist the above/below choice, then reposition
+   * the primary's existing secondaries to match (only when the setting changed).
+   */
   async function handlePositionSubmit(
     interaction: ModalSubmitInteraction,
     channelId: string,
@@ -292,8 +286,93 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       return;
     }
     const above = parsePositionModal(interaction.fields);
+    const before = await run(guildId, 'cmd:position:get', () =>
+      deps.settings.getPosition(guildId, channelId),
+    );
     const res = await run(guildId, 'cmd:position:set', () =>
       deps.settings.setPosition(guildId, channelId, above),
+    );
+    let message = res.message;
+    if (res.ok && before.primaryChannelId && before.above !== above) {
+      const moved = await run(guildId, 'cmd:position:reposition', () =>
+        deps.feature.repositionSecondaries(guildId, before.primaryChannelId!, above),
+      );
+      if (moved > 0) message += ` Moved ${moved} existing channel${moved === 1 ? '' : 's'}.`;
+    }
+    await interaction.reply({
+      content: `${res.ok ? '✅' : '⚠️'} ${message}`,
+      ephemeral: true,
+    });
+  }
+
+  /** `/inheritpermissions` → a modal to choose the permission source. */
+  async function openInheritModal(interaction: ChatInputCommandInteraction): Promise<void> {
+    const guildId = interaction.guildId!;
+    const channelId = currentVoiceChannelId(interaction);
+    if (!channelId) {
+      await interaction.reply({
+        content: 'Join one of that creator channel’s voice channels first.',
+        ephemeral: true,
+      });
+      return;
+    }
+    const pos = await run(guildId, 'cmd:inherit', () =>
+      deps.settings.getPosition(guildId, channelId),
+    );
+    if (!pos.found) {
+      await interaction.reply({
+        content: 'This isn’t a bot-managed voice channel.',
+        ephemeral: true,
+      });
+      return;
+    }
+    await interaction.showModal(buildInheritModal(channelId));
+  }
+
+  /** The `/inheritpermissions` modal submit. */
+  async function handleInheritSubmit(
+    interaction: ModalSubmitInteraction,
+    channelId: string,
+  ): Promise<void> {
+    const guildId = interaction.guildId!;
+    if (!hasManageChannels(interaction)) {
+      await interaction.reply({
+        content: 'You need the Manage Channels permission.',
+        ephemeral: true,
+      });
+      return;
+    }
+    const source = parseInheritModal(interaction.fields);
+    const res = await run(guildId, 'cmd:inheritpermissions', () =>
+      deps.settings.setInheritPermissions(guildId, channelId, source),
+    );
+    await interaction.reply({
+      content: `${res.ok ? '✅' : '⚠️'} ${res.message}`,
+      ephemeral: true,
+    });
+  }
+
+  /** `/logging` → a modal to set the log channel + detail level (or turn it off). */
+  async function openLoggingModal(interaction: ChatInputCommandInteraction): Promise<void> {
+    const guildId = interaction.guildId!;
+    const current = await run(guildId, 'cmd:logging:get', () => deps.settings.getLogging(guildId));
+    await interaction.showModal(buildLoggingModal(current));
+  }
+
+  /** The `/logging` modal submit. */
+  async function handleLoggingSubmit(interaction: ModalSubmitInteraction): Promise<void> {
+    const guildId = interaction.guildId!;
+    if (!hasManageChannels(interaction)) {
+      await interaction.reply({
+        content: 'You need the Manage Channels permission.',
+        ephemeral: true,
+      });
+      return;
+    }
+    const parsed = parseLoggingModal(interaction.fields);
+    const target = parsed.disable ? null : (parsed.channelId ?? interaction.channelId);
+    const res = await run(guildId, 'cmd:logging', () =>
+      deps.settings.setLogging(guildId, target, parsed.level),
     );
     await interaction.reply({
       content: `${res.ok ? '✅' : '⚠️'} ${res.message}`,
@@ -304,10 +383,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   async function openNamePanel(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
-    const target = resolveVoiceChannelId(interaction);
+    const target = currentVoiceChannelId(interaction);
     if (!target) {
       await interaction.reply({
-        content: 'Join a voice channel, or pick one with the `channel` option.',
+        content: 'Join the voice channel you want to rename first.',
         ephemeral: true,
       });
       return;
@@ -431,19 +510,6 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     return interaction.memberPermissions?.has(PermissionFlagsBits.ManageChannels) ?? false;
   }
 
-  async function handleLogging(interaction: ChatInputCommandInteraction): Promise<void> {
-    const guildId = interaction.guildId!;
-    const disable = interaction.options.getBoolean('disable') ?? false;
-    const target = disable
-      ? null
-      : (interaction.options.getChannel('channel')?.id ?? interaction.channelId);
-    const level = (interaction.options.getInteger('level') ?? 1) as 1 | 2 | 3;
-    await replyResult(
-      interaction,
-      await run(guildId, 'cmd:logging', () => deps.settings.setLogging(guildId, target, level)),
-    );
-  }
-
   async function handlePing(interaction: ChatInputCommandInteraction): Promise<void> {
     const ws = Math.round(deps.client.ws.ping);
     const sent = await interaction.reply({
@@ -472,7 +538,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   /** Dev-only: dump the data behind a channel's name + config + permissions. */
   async function handleDebug(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
-    const channelId = resolveVoiceChannelId(interaction);
+    const channelId =
+      interaction.options.getChannel('channel')?.id ?? currentVoiceChannelId(interaction);
     if (!channelId) {
       await interaction.reply({
         content: 'Join a voice channel or pass one with the `channel` option to debug it.',
@@ -701,6 +768,11 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       const channelId = positionChannelId(interaction.customId);
       if (channelId) return handlePositionSubmit(interaction, channelId);
     }
+    if (interaction.customId.startsWith(INHERIT_MODAL_PREFIX)) {
+      const channelId = inheritChannelId(interaction.customId);
+      if (channelId) return handleInheritSubmit(interaction, channelId);
+    }
+    if (interaction.customId === LOGGING_MODAL_ID) return handleLoggingSubmit(interaction);
     if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorModal(interaction);
     const guildId = interaction.guildId!;
     let result: CommandResult | undefined;
@@ -760,15 +832,6 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
 function currentVoiceChannelId(interaction: ChatInputCommandInteraction): string | undefined {
   const member = interaction.member as GuildMember | null;
   return member?.voice?.channelId ?? undefined;
-}
-
-/**
- * The channel a command should act on: the explicit `channel` option when the
- * caller passed one (e.g. they're not sitting in a VC), otherwise their current
- * voice channel. Commands without a `channel` option just fall back to the VC.
- */
-function resolveVoiceChannelId(interaction: ChatInputCommandInteraction): string | undefined {
-  return interaction.options.getChannel('channel')?.id ?? currentVoiceChannelId(interaction);
 }
 
 /** Renders a human-readable `/debug` summary (full detail goes to the logs). */

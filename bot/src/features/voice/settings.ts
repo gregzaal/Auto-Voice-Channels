@@ -259,9 +259,14 @@ export class GuildSettingsService {
   async getPosition(
     guildId: string,
     secondaryChannelId: string,
-  ): Promise<{ found: boolean; above: boolean }> {
+  ): Promise<{ found: boolean; above: boolean; primaryChannelId?: string }> {
     const primary = await this.primaryFor(guildId, secondaryChannelId);
-    return { found: primary !== undefined, above: primary?.template.above === true };
+    if (!primary) return { found: false, above: false };
+    return {
+      found: true,
+      above: primary.template.above === true,
+      primaryChannelId: primary.channelId,
+    };
   }
 
   /** Sets whether new secondaries are positioned above (else below) their primary. */
@@ -299,6 +304,17 @@ export class GuildSettingsService {
       inheritperms: normalized,
     });
     return ok(`New channels here will inherit permissions from **${normalized}**.`);
+  }
+
+  /** Reads the current logging configuration (for pre-filling the `/logging` modal). */
+  async getLogging(
+    guildId: string,
+  ): Promise<{ enabled: boolean; level: LogLevel; channelId: string | null }> {
+    const guild = await this.deps.guilds.ensure(guildId);
+    const s = guild.settings;
+    const channelId = typeof s.logging === 'string' ? s.logging : null;
+    const level: LogLevel = s.log_level === 2 || s.log_level === 3 ? s.log_level : 1;
+    return { enabled: channelId !== null, level, channelId };
   }
 
   /** Configures the per-guild logging channel + level, or turns logging off. */

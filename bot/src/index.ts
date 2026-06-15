@@ -124,6 +124,8 @@ async function main(): Promise<void> {
     onSecondaryRemoved: (gid, cid) => privacy.cleanupForSecondary(gid, cid),
     onOwnerChanged: (gid, cid, ownerId, ownerName) =>
       privacy.handleOwnerChanged(gid, cid, ownerId, ownerName),
+    joinCompanionFor: async (cid) =>
+      (await joinChannelsRepo.getBySecondary(cid))?.channelId ?? undefined,
     serverLog: (gid, level, message) => serverLogger.log(gid, level, message),
     logger,
   });

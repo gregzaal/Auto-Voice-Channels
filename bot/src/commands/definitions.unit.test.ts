@@ -62,21 +62,12 @@ describe('buildCommandDefinitions', () => {
     }
   });
 
-  it('offers an optional voice "channel" fallback on the VC-dependent commands', () => {
-    for (const name of [
-      'name',
-      'private',
-      'public',
-      'claim',
-      'template',
-      'position',
-      'inheritpermissions',
-    ]) {
-      const opt = byName.get(name)!.options?.find((o) => o.name === 'channel');
-      expect(opt, `${name} should expose a channel option`).toBeDefined();
-      // Optional (not required), so in-VC callers never have to supply it.
-      expect((opt as { required?: boolean }).required ?? false).toBe(false);
+  it('keeps the VC-dependent commands option-less (act on your current channel)', () => {
+    for (const name of ['name', 'private', 'public', 'claim', 'template', 'position', 'logging']) {
+      expect(byName.get(name)!.options ?? [], `${name} should have no options`).toHaveLength(0);
     }
+    // inheritpermissions is now modal-driven too (no slash options).
+    expect(byName.get('inheritpermissions')!.options ?? []).toHaveLength(0);
   });
 
   it('constrains the limit option to 0..99', () => {

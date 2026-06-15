@@ -70,6 +70,19 @@ export interface VoiceActions {
   createJoinChannel(guildId: string, name: string, nearChannelId: string): Promise<string>;
   /** Sets a voice channel's status (`''` clears it). Separate, laxer rate limit. */
   setVoiceStatus(guildId: string, channelId: string, status: string): Promise<void>;
+  /**
+   * Repositions a set of channels as a contiguous block directly above or below a
+   * primary, in the given top-to-bottom order, via a single bulk reorder. Used by
+   * `/position` to make existing channels match a changed above/below setting; the
+   * list interleaves each secondary with its "⇩ Join" companion so they stay
+   * adjacent.
+   */
+  repositionSecondaries(
+    guildId: string,
+    primaryChannelId: string,
+    orderedChannelIds: string[],
+    above: boolean,
+  ): Promise<void>;
 }
 
 export type RecordedAction =
@@ -94,7 +107,14 @@ export type RecordedAction =
       name: string;
       nearChannelId: string;
     }
-  | { type: 'status'; guildId: string; channelId: string; status: string };
+  | { type: 'status'; guildId: string; channelId: string; status: string }
+  | {
+      type: 'reposition';
+      guildId: string;
+      primaryChannelId: string;
+      channelIds: string[];
+      above: boolean;
+    };
 
 /**
  * In-memory recorder used by tests. Records every action and assigns synthetic
@@ -168,6 +188,22 @@ export class RecordingVoiceActions implements VoiceActions {
 
   setVoiceStatus(guildId: string, channelId: string, status: string): Promise<void> {
     this.actions.push({ type: 'status', guildId, channelId, status });
+    return Promise.resolve();
+  }
+
+  repositionSecondaries(
+    guildId: string,
+    primaryChannelId: string,
+    orderedChannelIds: string[],
+    above: boolean,
+  ): Promise<void> {
+    this.actions.push({
+      type: 'reposition',
+      guildId,
+      primaryChannelId,
+      channelIds: orderedChannelIds,
+      above,
+    });
     return Promise.resolve();
   }
 

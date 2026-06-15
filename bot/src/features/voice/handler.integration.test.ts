@@ -263,6 +263,58 @@ describe('VoiceFeature (integration)', () => {
     expect(actions.actions).toHaveLength(0);
   });
 
+  it('repositionSecondaries hands all the primary’s secondaries to the action seam', async () => {
+    for (const id of ['a', 'b', 'c']) {
+      await secondaries.create({
+        channelId: id,
+        guildId: GUILD,
+        primaryChannelId: PRIMARY,
+        state: {},
+      });
+    }
+    const moved = await feature.repositionSecondaries(GUILD, PRIMARY, true);
+    expect(moved).toBe(3);
+    const action = actions.ofType('reposition')[0]!;
+    expect(action.primaryChannelId).toBe(PRIMARY);
+    expect(action.above).toBe(true);
+    expect([...action.channelIds].sort()).toEqual(['a', 'b', 'c']);
+  });
+
+  it('repositionSecondaries is a no-op when the primary has no secondaries', async () => {
+    const moved = await feature.repositionSecondaries(GUILD, PRIMARY, false);
+    expect(moved).toBe(0);
+    expect(actions.ofType('reposition')).toHaveLength(0);
+  });
+
+  it('repositionSecondaries moves each private channel’s “⇩ Join” companion with it', async () => {
+    for (const id of ['a', 'b']) {
+      await secondaries.create({
+        channelId: id,
+        guildId: GUILD,
+        primaryChannelId: PRIMARY,
+        state: {},
+      });
+    }
+    const f = new VoiceFeature({
+      autoChannels,
+      secondaries,
+      guilds,
+      actions,
+      voice,
+      selfHosted: true,
+      logger: fakeLogger(),
+      // 'a' is private (has a Join companion); 'b' is public.
+      joinCompanionFor: (id) => Promise.resolve(id === 'a' ? 'join-a' : undefined),
+    });
+    await f.repositionSecondaries(GUILD, PRIMARY, true);
+
+    const ids = actions.ofType('reposition')[0]!.channelIds;
+    expect(ids).toHaveLength(3);
+    expect(ids).toContain('b');
+    // The companion sits directly above its secondary.
+    expect(ids.indexOf('join-a')).toBe(ids.indexOf('a') - 1);
+  });
+
   it('re-renders a secondary when its membership/game changes', async () => {
     const alice = member('alice', ['Halo']);
     voice.put(PRIMARY, alice);

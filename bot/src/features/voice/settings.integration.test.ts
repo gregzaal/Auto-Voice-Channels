@@ -196,7 +196,11 @@ describe('GuildSettingsService (integration)', () => {
     });
 
     // Default is below: nothing stored, getPosition reports above=false.
-    expect(await settings.getPosition(GUILD, 'sec-1')).toEqual({ found: true, above: false });
+    expect(await settings.getPosition(GUILD, 'sec-1')).toEqual({
+      found: true,
+      above: false,
+      primaryChannelId: primaryId,
+    });
 
     const up = await settings.setPosition(GUILD, 'sec-1', true);
     expect(up.ok).toBe(true);
