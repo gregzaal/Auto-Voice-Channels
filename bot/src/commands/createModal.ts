@@ -25,9 +25,11 @@ const TEMPLATE_INPUT_MAX = 1000;
 
 /**
  * Builds the `/create` setup modal using the newer Label-component modals, so
- * Category is a real category picker and Position a dropdown (the templates +
- * name stay text inputs). Field labels point at `/template` / `/toggleposition`
- * for editing later.
+ * Category is a real category picker and Default privacy a dropdown (the
+ * templates + name stay text inputs). A modal is capped at 5 components; position
+ * is intentionally left out (new channels default to below the creator — editable
+ * later with `/position`) so the 5th slot is the privacy selector. Field labels
+ * point at `/template` / `/alwaysprivate` for editing later.
  */
 export function buildCreateModal(defaults: CreateDefaults): ModalBuilder {
   return new ModalBuilder()
@@ -74,61 +76,49 @@ export function buildCreateModal(defaults: CreateDefaults): ModalBuilder {
             .setMaxLength(TEMPLATE_INPUT_MAX)
             .setValue(defaults.statusTemplate.slice(0, TEMPLATE_INPUT_MAX)),
         ),
-      // A modal allows at most 5 top-level components, and the four above fill
-      // four slots — so position and privacy share this one multi-select rather
-      // than each taking a slot. Nothing selected = the defaults (below, public);
-      // both are still editable later via `/position` and `/alwaysprivate`.
+      // The 5th (final) slot: whether new channels are public or private by
+      // default. Editable per-creator later with `/alwaysprivate`.
       new LabelBuilder()
-        .setLabel('Options (/position, /alwaysprivate later)')
+        .setLabel('Default privacy (/alwaysprivate later)')
         .setStringSelectMenuComponent(
           new StringSelectMenuBuilder()
-            .setCustomId('options')
-            // min 0 needs required=false (a modal select defaults to required).
-            .setRequired(false)
-            .setMinValues(0)
-            .setMaxValues(2)
-            .setPlaceholder('Defaults: below the creator, public')
+            .setCustomId('privacy')
+            .setMinValues(1)
+            .setMaxValues(1)
             .addOptions(
               new StringSelectMenuOptionBuilder()
-                .setLabel('Position new channels above the creator')
-                .setDescription('Default is below the creator channel.')
-                .setValue('above'),
+                .setLabel('Open — anyone can join')
+                .setValue('open')
+                .setDefault(true),
               new StringSelectMenuOptionBuilder()
-                .setLabel('Make new channels private')
-                .setDescription('Locked to @everyone; others request to join.')
+                .setLabel('Private — locked; others request to join')
                 .setValue('private'),
             ),
         ),
     );
 }
 
-/** What the `/create` modal collected — ready to pass to `createPrimary`. */
-export interface ParsedCreate extends CreatePrimaryOptions {
-  /** Always set by {@link parseCreateModal} (defaults to below). */
-  above: boolean;
-}
-
 /**
  * Reads the submitted modal: text inputs via `getTextInputValue`, the category
- * via the channel select, and the position/privacy toggles via the combined
- * `options` multi-select. Templates left at the guild default are dropped (so the
- * primary inherits rather than pins them).
+ * via the channel select, and the public/private default via the `privacy`
+ * select. Templates left at the guild default are dropped (so the primary
+ * inherits rather than pins them). Position isn't collected here — new channels
+ * default to below the creator (change later with `/position`).
  */
 export function parseCreateModal(
   fields: ModalSubmitFields,
   defaults: CreateDefaults,
-): ParsedCreate {
+): CreatePrimaryOptions {
   const name = fields.getTextInputValue('name').trim();
   const nameTemplate = fields.getTextInputValue('nameTemplate').trim();
   const statusTemplate = fields.getTextInputValue('statusTemplate').trim();
-  const options = fields.getStringSelectValues('options');
+  const privacy = fields.getStringSelectValues('privacy')[0] ?? 'open';
   const parentId = fields.getSelectedChannels('category', false)?.first()?.id;
   return {
     ...(parentId ? { parentId } : {}),
     ...(name ? { name } : {}),
     ...(nameTemplate && nameTemplate !== defaults.nameTemplate ? { nameTemplate } : {}),
     ...(statusTemplate && statusTemplate !== defaults.statusTemplate ? { statusTemplate } : {}),
-    ...(options.includes('private') ? { defaultPrivate: true } : {}),
-    above: options.includes('above'),
+    ...(privacy === 'private' ? { defaultPrivate: true } : {}),
   };
 }

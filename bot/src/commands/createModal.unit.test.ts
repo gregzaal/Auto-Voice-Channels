@@ -9,12 +9,13 @@ function fields(values: {
   name?: string;
   nameTemplate?: string;
   statusTemplate?: string;
-  options?: string[];
+  privacy?: string;
   category?: string;
 }): ModalSubmitFields {
   return {
     getTextInputValue: (id: string) => (values as Record<string, string>)[id] ?? '',
-    getStringSelectValues: (id: string) => (id === 'options' ? (values.options ?? []) : []),
+    getStringSelectValues: (id: string) =>
+      id === 'privacy' && values.privacy ? [values.privacy] : [],
     getSelectedChannels: () =>
       values.category ? { first: () => ({ id: values.category }) } : null,
   } as unknown as ModalSubmitFields;
@@ -30,21 +31,21 @@ describe('createModal', () => {
       'Primary (creation) channel name',
       'Name template (/template to edit later)',
       'Status template (/template to edit later)',
-      'Options (/position, /alwaysprivate later)',
+      'Default privacy (/alwaysprivate later)',
     ]);
     // Discord caps a modal at 5 top-level components — never exceed it.
     expect(labels).toHaveLength(5);
     for (const l of labels) expect(l!.length).toBeLessThanOrEqual(45);
   });
 
-  it('parses the category channel select, options multi-select, and templates', () => {
+  it('parses the category channel select, privacy selector, and templates', () => {
     const parsed = parseCreateModal(
       fields({
         category: 'cat-123',
         name: '  Lobby  ',
         nameTemplate: 'DEFAULT NAME', // unchanged → inherit
         statusTemplate: 'Custom status',
-        options: ['above', 'private'],
+        privacy: 'private',
       }),
       defaults,
     );
@@ -53,19 +54,19 @@ describe('createModal', () => {
       name: 'Lobby',
       statusTemplate: 'Custom status',
       defaultPrivate: true,
-      above: true,
     });
     expect(parsed.nameTemplate).toBeUndefined();
   });
 
-  it('defaults to below + public with no category when nothing is selected', () => {
-    const parsed = parseCreateModal(fields({}), defaults);
-    expect(parsed).toEqual({ above: false });
-    expect(parsed.defaultPrivate).toBeUndefined();
+  it('defaults to public (no defaultPrivate) with no category when privacy is open', () => {
+    expect(parseCreateModal(fields({ privacy: 'open' }), defaults)).toEqual({});
+    // Position is no longer collected here — the parse never sets `above`.
+    expect(parseCreateModal(fields({ privacy: 'open' }), defaults)).not.toHaveProperty('above');
   });
 
-  it('treats only the privacy toggle independently of position', () => {
-    const parsed = parseCreateModal(fields({ options: ['private'] }), defaults);
-    expect(parsed).toEqual({ defaultPrivate: true, above: false });
+  it('marks private only when the privacy selector is private', () => {
+    expect(parseCreateModal(fields({ privacy: 'private' }), defaults)).toEqual({
+      defaultPrivate: true,
+    });
   });
 });
