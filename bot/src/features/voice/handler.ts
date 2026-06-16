@@ -363,7 +363,11 @@ export class VoiceFeature {
     await this.deps.onSecondaryRemoved?.(guildId, channelId);
 
     this.deps.logger.info({ guildId, secondaryId: channelId }, 'deleted empty secondary channel');
-    this.deps.serverLog?.(guildId, 1, `🗑 Deleted **${secondary.state.name ?? channelId}** (\`${channelId}\`)`);
+    this.deps.serverLog?.(
+      guildId,
+      1,
+      `🗑 Deleted **${secondary.state.name ?? channelId}** (\`${channelId}\`)`,
+    );
     return { action: 'deleted' };
   }
 
@@ -409,11 +413,7 @@ export class VoiceFeature {
       { guildId, secondaryId: channelId, from: leaverId, to: newOwner.id },
       'transferred ownership after owner left',
     );
-    this.deps.serverLog?.(
-      guildId,
-      2,
-      `👑 <@${newOwner.id}> now owns <#${channelId}>`,
-    );
+    this.deps.serverLog?.(guildId, 2, `👑 <@${newOwner.id}> now owns <#${channelId}>`);
     // Re-point a private channel's "⇩ Join" companion (no-op if not private).
     await this.deps.onOwnerChanged?.(guildId, channelId, newOwner.id, newOwnerName);
   }
