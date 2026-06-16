@@ -36,8 +36,9 @@ primary_region = "iad"
   policy = "on-failure"
   max_retries = 10
 
-# INSTANCE_ID should be unique per machine; Fly exposes its machine id which the
-# entrypoint can map to INSTANCE_ID (TODO wire in deploy/fly entry script).
+# INSTANCE_ID must be unique per machine (shard-lease identity). We do NOT set it
+# here — config falls back to Fly's per-machine FLY_MACHINE_ID when INSTANCE_ID is
+# unset, so each machine gets a distinct, stable id automatically.
 
 [http_service]
   internal_port = 8080

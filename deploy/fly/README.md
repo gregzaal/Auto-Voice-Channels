@@ -45,8 +45,14 @@ claims every shard.
 refreshed by a live ping. The Fly health check gates the rolling deploy; a failing
 check halts/rolls back the rollout (Fly's deploy behavior, not bot-side logic).
 
+`INSTANCE_ID` is sourced automatically from Fly's per-machine `FLY_MACHINE_ID`
+(config falls back to it when `INSTANCE_ID` is unset), so every machine gets a
+unique shard-lease identity — no entry script needed. **Run a Discord bot as a
+single machine per shard** (`fly scale count <n>` = your machine count); Fly's
+default of 2 machines for a new app must be scaled to match `TOTAL_SHARDS` /
+`EXPECTED_INSTANCES`, or instances contend for the same shard.
+
 ## TODO
 
-- Map the Fly machine id to `INSTANCE_ID` via a small entry script.
 - Confirm `TOTAL_SHARDS` + `EXPECTED_INSTANCES` per scale and the Postgres attachment.
 - Add `fly.toml` `[mounts]`/regions as the topology is finalized.

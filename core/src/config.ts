@@ -41,7 +41,12 @@ export const configSchema = z.object({
    */
   expectedInstances: z.coerce.number().int().positive().default(1),
 
-  /** Stable identifier for this running instance (used for shard leases). */
+  /**
+   * Stable identifier for this running instance (used for shard leases). MUST be
+   * unique per running process — two instances sharing an id corrupt the shard
+   * leases (each thinks it owns the other's shards). On Fly this is sourced from
+   * the per-machine `FLY_MACHINE_ID`; self-host sets it explicitly; else `local`.
+   */
   instanceId: z.string().min(1).default('local'),
 
   /** HTTP port for the health / diagnostics endpoint. */
@@ -78,7 +83,9 @@ function envToInput(env: NodeJS.ProcessEnv): Record<string, unknown> {
     selfHosted: env.SELF_HOSTED,
     totalShards: env.TOTAL_SHARDS,
     expectedInstances: env.EXPECTED_INSTANCES,
-    instanceId: env.INSTANCE_ID,
+    // Prefer an explicit INSTANCE_ID; on Fly fall back to the per-machine
+    // FLY_MACHINE_ID so each machine gets a unique, stable lease identity.
+    instanceId: env.INSTANCE_ID ?? env.FLY_MACHINE_ID,
     httpPort: env.HTTP_PORT,
     adminChannelId: env.ADMIN_CHANNEL_ID,
     logLevel: env.LOG_LEVEL,

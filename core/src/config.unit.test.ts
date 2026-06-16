@@ -31,6 +31,15 @@ describe('loadConfig', () => {
     expect(config.httpPort).toBe(9000);
   });
 
+  it('resolves instanceId: explicit > FLY_MACHINE_ID > "local"', () => {
+    expect(loadConfig(baseEnv).instanceId).toBe('local');
+    expect(loadConfig({ ...baseEnv, FLY_MACHINE_ID: 'mach-1' }).instanceId).toBe('mach-1');
+    // An explicit INSTANCE_ID always wins over the Fly fallback.
+    expect(
+      loadConfig({ ...baseEnv, INSTANCE_ID: 'selfhost', FLY_MACHINE_ID: 'mach-1' }).instanceId,
+    ).toBe('selfhost');
+  });
+
   it('throws ConfigError listing all missing required fields', () => {
     try {
       loadConfig({});
