@@ -169,14 +169,20 @@ export class GuildSettingsService {
     const primary = await this.primaryFor(guildId, secondaryChannelId);
     if (!primary) return fail('You need to be in a bot-managed voice channel.');
     const value = template.trim().replace(/[\r\n]+/g, ' ');
+    // A blank name template is invalid (resets to the default); a blank status
+    // template is a legitimate "no status", so only `reset` clears the status.
+    const isReset = value.toLowerCase() === 'reset' || (field === 'name' && value === '');
     const next = { ...primary.template };
-    if (value.toLowerCase() === 'reset' || value === '') {
+    if (isReset) {
       delete next[field];
       await this.deps.autoChannels.upsert(guildId, primary.channelId, next);
       return ok(`Reset this creator channel’s ${field} template to the default.`);
     }
     next[field] = value;
     await this.deps.autoChannels.upsert(guildId, primary.channelId, next);
+    if (field === 'status' && value === '') {
+      return ok('New channels from this creator will show no status (blank).');
+    }
     return ok(
       field === 'name'
         ? `New channels from this creator will be named:\n\`${value}\``

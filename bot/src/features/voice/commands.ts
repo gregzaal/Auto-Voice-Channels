@@ -117,7 +117,11 @@ export class VoiceCommands {
     const id = row.channelId;
     const stateKey = field === 'name' ? 'template' : 'statusTemplate';
     const trimmed = value.trim();
-    const isReset = trimmed.toLowerCase() === 'reset' || trimmed === '';
+    // A blank channel NAME is invalid, so an empty name resets to the inherited
+    // template. A blank STATUS is a legitimate intent ("no status"), so only the
+    // explicit `reset` keyword (or the panel's Reset button) clears that override.
+    const isReset = trimmed.toLowerCase() === 'reset' || (field === 'name' && trimmed === '');
+    const clearedStatus = field === 'status' && !isReset && trimmed === '';
 
     const next = { ...row.state };
     if (isReset) {
@@ -132,7 +136,9 @@ export class VoiceCommands {
     return ok(
       isReset
         ? `Reset this channel’s ${field} to the inherited template.${note}`
-        : `Updated this channel’s ${field}.${note}`,
+        : clearedStatus
+          ? `Cleared this channel’s status — it will stay blank.${note}`
+          : `Updated this channel’s ${field}.${note}`,
     );
   }
 

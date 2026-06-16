@@ -137,6 +137,24 @@ describe('VoiceCommands (integration)', () => {
     expect((await secondaries.get(SEC))!.state.statusTemplate).toBeUndefined();
   });
 
+  it('stores an empty status as a blank override (not a reset) and clears it', async () => {
+    voice.put(SEC, member('alice'));
+    await commands.setStatus(GUILD, SEC, 'alice', 'AFK 💤');
+    expect((await secondaries.get(SEC))!.state.statusTemplate).toBe('AFK 💤');
+
+    const blank = await commands.setStatus(GUILD, SEC, 'alice', '');
+    expect(blank.ok).toBe(true);
+    // Stored as an empty string (a deliberate blank), NOT deleted/inherited.
+    expect((await secondaries.get(SEC))!.state.statusTemplate).toBe('');
+    // …and the channel status is cleared on Discord.
+    expect(actions.ofType('status').at(-1)).toMatchObject({ channelId: SEC, status: '' });
+
+    // An explicit `reset` still removes the override entirely.
+    const reset = await commands.setStatus(GUILD, SEC, 'alice', 'reset');
+    expect(reset.ok).toBe(true);
+    expect((await secondaries.get(SEC))!.state.statusTemplate).toBeUndefined();
+  });
+
   it('transfers ownership to a member in the channel', async () => {
     voice.put(SEC, member('bob'));
     const res = await commands.transfer(GUILD, SEC, 'alice', 'bob');
