@@ -3,3 +3,7 @@ node_modules/
 core/drizzle/
 pnpm-lock.yaml
 *.md
+
+# Generated data (compact maps; regenerate with scripts/gen-unicode-fonts.py)
+bot/src/features/voice/unicodeFonts.generated.ts
+scripts/migrate-run.generated.mjs

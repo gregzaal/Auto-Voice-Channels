@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { VoiceMember } from './types.js';
 import {
+  applyStringTransforms,
   DEFAULT_CHANNEL_NAME_TEMPLATE,
   DEFAULT_STATUS_TEMPLATE,
   getAlias,
@@ -210,6 +211,33 @@ describe('renderChannelName — rich tokens', () => {
     expect(many).toBe('2 players');
   });
 
+  it('resolves NESTED <<…>> groups for a three-way select', () => {
+    // outer `/` selects on total members; inner `\` selects on non-creator count.
+    const tmpl = '<<alone/<<duo\\group of @@num_others@@>>>>';
+    const render = (members: VoiceMember[]) =>
+      renderChannelName(tmpl, { index: 0, members, creator: members[0] });
+    const a = member({ id: 'a' });
+    const b = member({ id: 'b' });
+    const c = member({ id: 'c' });
+    expect(render([a])).toBe('alone'); // 1 total
+    expect(render([a, b])).toBe('duo'); // 2 total, 1 other
+    expect(render([a, b, c])).toBe('group of 2'); // 3 total, 2 others
+  });
+
+  it("doesn't leave a dangling >> on the nested singular case (the reported bug)", () => {
+    const out = renderChannelName(
+      "<<pls join im so lonely/<<@@creator@@'s room\\@@creator@@ and the @@num_others@@ rats>>>>",
+      {
+        index: 0,
+        members: [member({ id: 'a' })],
+        creatorName: 'Greg',
+        creator: member({ id: 'a' }),
+      },
+    );
+    expect(out).toBe('pls join im so lonely');
+    expect(out).not.toContain('>>');
+  });
+
   it('renders rich-presence party tokens', () => {
     const players = [
       member({
@@ -324,5 +352,55 @@ describe('renderChannelName — rich tokens', () => {
       seed: 42,
     });
     expect(name).toMatch(/^.+ Greg's \w+$/u); // emoji + creator + word
+  });
+});
+
+describe('applyStringTransforms (legacy ""mode:text"")', () => {
+  it('lower+scaps lowercases then small-caps (the reported migration bug)', () => {
+    expect(applyStringTransforms('""lower+scaps:Onza\'s Crew""')).toBe("ᴏɴᴢᴀ'ꜱ ᴄʀᴇᴡ");
+  });
+
+  it('<N>w keeps the first N words', () => {
+    expect(applyStringTransforms('""1w:Greg Zaal""\'s chat')).toBe("Greg's chat");
+    expect(applyStringTransforms('""2w:a b c d""')).toBe('a b');
+  });
+
+  it('supports the common pure-string modes', () => {
+    expect(applyStringTransforms('""upper:hi there""')).toBe('HI THERE');
+    expect(applyStringTransforms('""caps:hi""')).toBe('HI');
+    expect(applyStringTransforms('""lower:HELLO""')).toBe('hello');
+    expect(applyStringTransforms('""title:hello world""')).toBe('Hello World');
+    expect(applyStringTransforms('""swap:Hello""')).toBe('hELLO');
+    expect(applyStringTransforms('""acro:deep rock galactic""')).toBe('drg');
+    expect(applyStringTransforms('""remshort:lord of the rings""')).toBe('lord rings');
+    expect(applyStringTransforms('""spaces:a   b""')).toBe('a b');
+  });
+
+  it('only transforms the wrapped span and strips the markers', () => {
+    expect(applyStringTransforms('x ""lower:AB"" y')).toBe('x ab y');
+  });
+
+  it('applies math-font modes (e.g. bold) end to end', () => {
+    expect(applyStringTransforms('""bold:hi""')).toBe('𝐡𝐢');
+  });
+
+  it('passes a genuinely unknown mode through without the literal wrapper', () => {
+    expect(applyStringTransforms('""nope:hi""')).toBe('hi');
+  });
+
+  it('leaves a non-transform pair (no colon) literal, matching the legacy guard', () => {
+    expect(applyStringTransforms('""just quoted""')).toBe('""just quoted""');
+  });
+
+  it('applies as the final step of renderChannelName', () => {
+    const onza = member({ id: 'c', displayName: 'Onza' });
+    const out = renderChannelName('""lower+scaps:@@creator@@\'s crew""', {
+      index: 0,
+      members: [onza],
+      creatorName: 'Onza',
+      creator: onza,
+    });
+    expect(out).toBe("ᴏɴᴢᴀ'ꜱ ᴄʀᴇᴡ");
+    expect(out).not.toContain('""');
   });
 });

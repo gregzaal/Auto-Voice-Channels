@@ -1,3 +1,4 @@
+import { applyMode } from './stringTransforms.js';
 import type { VoiceMember } from './types.js';
 
 /**
@@ -357,6 +358,12 @@ export function getPartyInfo(
  * Resolves `<<singular/plural>>` (count = total members) and
  * `<<singular\\plural>>` (count = members excluding the creator): the singular
  * form when the count is exactly 1, else the plural.
+ *
+ * Processed INNERMOST-first (first `>>`, then the nearest `<<` before it) so that
+ * NESTED groups work — e.g. `<<a/<<b\\c>>>>` gives a 3-way select. The legacy bot
+ * (and an earlier version here) paired the first `<<` with the first `>>`, which
+ * mis-parsed any nesting: it matched the outer `<<` to the inner `>>`, resolved
+ * the wrong span, and left a dangling `>>`. Mirrors {@link resolveConditionals}.
  */
 export function resolveSingularPlural(
   template: string,
@@ -365,10 +372,10 @@ export function resolveSingularPlural(
 ): string {
   let name = template;
   for (let guard = 0; guard < 50; guard++) {
-    const open = name.indexOf('<<');
-    if (open === -1) break;
-    const close = name.indexOf('>>', open + 2);
+    const close = name.indexOf('>>');
     if (close === -1) break;
+    const open = name.lastIndexOf('<<', close);
+    if (open === -1) break;
     const inner = name.slice(open + 2, close);
     let parts: string[] | undefined;
     let count: number | undefined;
@@ -507,6 +514,39 @@ function streamName(ctx: RenderContext): string {
   return (ctx.creator?.activities ?? []).find((a) => a.kind === 'streaming')?.name ?? '';
 }
 
+// ---------------------------------------------------------------------------
+// ""mode:text"" — string transforms applied to already-substituted text
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolves the legacy `""mode:text""` string-transform wrapper, ported from the
+ * `while '""' in cname …` block of the legacy `rename_channel`. Each `""…""` pair
+ * of the form `mode:text` has its (already token-substituted) text transformed by
+ * the `+`-chained modes — e.g. `""lower+scaps:Foo""`. Runs LAST, so transforms see
+ * the final text. The first pair must be a transform (contain `:`), matching the
+ * legacy guard. The individual modes live in {@link applyMode}; an unrecognised
+ * mode leaves its text unchanged rather than emitting the literal wrapper.
+ */
+export function applyStringTransforms(template: string): string {
+  let name = template;
+  for (let guard = 0; guard < 50; guard++) {
+    const pairs = name.split('""').length - 1;
+    if (pairs < 2 || pairs % 2 !== 0) break;
+    const first = name.indexOf('""');
+    const second = name.indexOf('""', first + 2);
+    if (second === -1) break;
+    const inner = name.slice(first + 2, second);
+    const colon = inner.indexOf(':');
+    if (colon === -1) break;
+    let text = inner.slice(colon + 1).trim();
+    for (const mode of inner.slice(0, colon).split('+')) {
+      text = applyMode(mode.trim().toLowerCase(), text);
+    }
+    name = name.slice(0, first) + text + name.slice(second + 2);
+  }
+  return name;
+}
+
 export interface RenderContext {
   /** Zero-based sibling index of this secondary (legacy `i`). -1 → "?". */
   index: number;
@@ -545,6 +585,13 @@ export interface RenderContext {
  * - `[[a/b/c]]`                   → random pick, fixed per channel (via `seed`)
  * - `<<one/many>>` / `<<one\\many>>` → singular/plural by member / non-creator count
  * - `{{cond ?? yes // no}}`        → conditional (see {@link evalExpression})
+ * - `""mode:text""`                → string transform of the substituted text;
+ *                                    case (`lower`/`upper`/`caps`/`title`/`swap`),
+ *                                    `scaps`, the 13 math-font styles (`bold`,
+ *                                    `italic`, `script`, `fraktur`, `mono`, …),
+ *                                    `uwu`, `usd`, `rand`, `spaces`, `acro`,
+ *                                    `remshort`, `<N>w` — chain with `+` (see
+ *                                    {@link applyMode})
  *
  * Processing order follows the legacy `rename_channel` so tokens can nest inside
  * `[[…]]`, `<<…>>` and `{{…}}`.
@@ -622,6 +669,10 @@ export function renderChannelName(
   if (name.includes('@@stream_name@@')) {
     name = name.split('@@stream_name@@').join(streamName(ctx));
   }
+
+  // 10. Legacy ""mode:text"" string transforms — applied LAST, to the fully
+  //     substituted text (case, small-caps, math fonts, uwu, …; see applyMode).
+  if (name.includes('""')) name = applyStringTransforms(name);
 
   // Clamp to the platform limit (100 for names, ~500 for statuses). An empty
   // channel name isn't valid (fall back to "-"), but an empty status is — it
