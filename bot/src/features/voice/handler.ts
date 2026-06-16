@@ -25,6 +25,18 @@ function sameOrder(a: readonly string[], b: readonly string[] | undefined): bool
   return a.every((id, i) => id === b[i]);
 }
 
+/**
+ * The per-guild event-log line for a rename (`/logging` level 2). When Discord
+ * deferred the rename under its per-channel edit limit (2 / 10 min), say so — the
+ * new name is queued and applies once the limit clears — rather than claiming the
+ * rename already happened.
+ */
+function renameLogMessage(channelId: string, name: string, rateLimited: boolean): string {
+  return rateLimited
+    ? `⏳ Rename of <#${channelId}> to **${name}** deferred — Discord is rate-limiting renames on this channel; the new name will apply within a few minutes.`
+    : `✏️ <#${channelId}> renamed to **${name}**`;
+}
+
 /** Decision returned by a {@link CreationGate}. */
 export interface CreateGateDecision {
   allowed: boolean;
@@ -590,7 +602,7 @@ export class VoiceFeature {
         result.name,
       );
       if (rateLimited) result.rateLimited = true;
-      this.deps.serverLog?.(guildId, 2, `✏️ <#${channelId}> renamed to **${result.name}**`);
+      this.deps.serverLog?.(guildId, 2, renameLogMessage(channelId, result.name, rateLimited));
     }
     if (result.status !== undefined) {
       await this.deps.actions.setVoiceStatus(guildId, channelId, result.status);
@@ -846,7 +858,7 @@ export class VoiceFeature {
     let rateLimited = false;
     if (nameChanged) {
       ({ rateLimited } = await this.deps.actions.renameChannel(guildId, channelId, name));
-      this.deps.serverLog?.(guildId, 2, `✏️ <#${channelId}> renamed to **${name}**`);
+      this.deps.serverLog?.(guildId, 2, renameLogMessage(channelId, name, rateLimited));
     }
     if (statusChanged) {
       await this.deps.actions.setVoiceStatus(guildId, channelId, status);

@@ -357,6 +357,44 @@ describe('VoiceFeature (integration)', () => {
     expect(logs).toContainEqual({ level: 3, message: expect.stringContaining('left') });
   });
 
+  it('logs a rate-limited rename as deferred (level 2), and a normal rename as applied', async () => {
+    const logs: { level: number; message: string }[] = [];
+    const f = new VoiceFeature({
+      autoChannels,
+      secondaries,
+      guilds,
+      actions,
+      voice,
+      selfHosted: true,
+      logger: fakeLogger(),
+      serverLog: (_g, level, message) => logs.push({ level, message }),
+    });
+    await secondaries.create({
+      channelId: 'rl',
+      guildId: GUILD,
+      primaryChannelId: PRIMARY,
+      ownerId: 'alice',
+      state: { name: 'stale', index: 0 },
+    });
+    voice.put('rl', member('alice', ['Halo']));
+
+    // Discord defers the rename → the log says so, at the renames level (2).
+    actions.simulateRenameRateLimit = true;
+    await f.rerenderSecondary(GUILD, 'rl');
+    const deferred = logs.find((l) => l.message.includes('deferred'));
+    expect(deferred?.level).toBe(2);
+    expect(deferred?.message).toContain('rate-limiting');
+    expect(deferred?.message).not.toContain('renamed to');
+
+    // When the limit clears, a real rename logs as applied (no "deferred").
+    logs.length = 0;
+    actions.simulateRenameRateLimit = false;
+    voice.put('rl', member('alice', ['Doom'])); // change the game so the name drifts again
+    await f.rerenderSecondary(GUILD, 'rl');
+    expect(logs).toContainEqual({ level: 2, message: expect.stringContaining('renamed to') });
+    expect(logs.some((l) => l.message.includes('deferred'))).toBe(false);
+  });
+
   it('secondaries.create is create-once: a replay does not clobber live state', async () => {
     await secondaries.create({
       channelId: 'co',
