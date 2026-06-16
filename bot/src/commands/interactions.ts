@@ -64,6 +64,13 @@ import {
   parseInheritModal,
 } from './inheritModal.js';
 import { buildLoggingModal, LOGGING_MODAL_ID, parseLoggingModal } from './loggingModal.js';
+import {
+  buildGroupDisablePanel,
+  buildGroupEnablePanel,
+  GROUP_PREFIX,
+  parseGroupId,
+} from './groupPanel.js';
+import { groupKeyFor, ROOT_GROUP_KEY } from '../features/voice/guildSettings.js';
 
 export interface InteractionDeps {
   client: Client;
@@ -208,6 +215,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return openPositionModal(interaction);
       case 'alwaysprivate':
         return handleAlwaysPrivate(interaction);
+      case 'group':
+        return openGroupPanel(interaction);
       case 'inheritpermissions':
         return openInheritModal(interaction);
       case 'logging':
@@ -255,11 +264,20 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     await interaction.reply(buildAdoptPrompt(channelId, name));
   }
 
-  /** `/position` → a modal to pick above/below for the creator channel you're in. */
+  /** `/position` → a modal to pick above/below for the creator channel (or group) you're in. */
   async function openPositionModal(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
     const channelId = await requireVoiceChannel(interaction);
     if (!channelId) return;
+    // If this channel's category is grouped, /position sets the whole group's direction.
+    const categoryKey = categoryKeyForChannel(interaction, channelId);
+    const group = await run(guildId, 'cmd:position:group', () =>
+      deps.settings.getGroup(guildId, categoryKey),
+    );
+    if (group) {
+      await interaction.showModal(buildPositionModal(channelId, group.above));
+      return;
+    }
     const pos = await run(guildId, 'cmd:position', () =>
       deps.settings.getPosition(guildId, channelId),
     );
@@ -274,8 +292,9 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   }
 
   /**
-   * The `/position` modal submit: persist the above/below choice, then reposition
-   * the primary's existing secondaries to match (only when the setting changed).
+   * The `/position` modal submit. For a **grouped** category it sets the group's
+   * direction and re-syncs the whole group; otherwise it persists the per-primary
+   * choice and repositions that primary's secondaries (only when it changed).
    */
   async function handlePositionSubmit(
     interaction: ModalSubmitInteraction,
@@ -284,6 +303,25 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     const guildId = interaction.guildId!;
     if (!(await requireManageChannels(interaction))) return;
     const above = parsePositionModal(interaction.fields);
+
+    const categoryKey = categoryKeyForChannel(interaction, channelId);
+    const group = await run(guildId, 'cmd:position:group:get', () =>
+      deps.settings.getGroup(guildId, categoryKey),
+    );
+    if (group) {
+      const summary = await run(guildId, 'cmd:position:group:set', async () => {
+        await deps.settings.setGroup(guildId, categoryKey, above);
+        return deps.feature.resyncCategory(guildId, categoryKey);
+      });
+      await interaction.reply({
+        content:
+          `✅ This category’s channels are now grouped **${above ? 'above' : 'below'}** the ` +
+          `creator channels.${rateLimitNote(summary.rateLimited)}`,
+        ephemeral: true,
+      });
+      return;
+    }
+
     // Read → set → reposition in ONE dispatched task so it's ordered atomically
     // against other guild work (no interleaving between the read and the writes).
     const { res, moved } = await run(guildId, 'cmd:position', async () => {
@@ -314,6 +352,71 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       deps.settings.toggleDefaultPrivate(guildId, channelId),
     );
     await interaction.reply({ content: formatResult(res), ephemeral: true });
+  }
+
+  /** `/group` → explain + confirm grouping (or offer to turn it off) for this category. */
+  async function openGroupPanel(interaction: ChatInputCommandInteraction): Promise<void> {
+    const guildId = interaction.guildId!;
+    const channelId = await requireVoiceChannel(
+      interaction,
+      'Join a voice channel in the category you want to group.',
+    );
+    if (!channelId) return;
+    const categoryKey = categoryKeyForChannel(interaction, channelId);
+    const primaryIds = await run(guildId, 'cmd:group:info', () =>
+      deps.feature.categoryPrimaryIds(guildId, categoryKey),
+    );
+    if (primaryIds.length === 0) {
+      await interaction.reply({
+        content:
+          'This category has no creator channels to group. Join a voice channel in the ' +
+          'category you want to group, then run `/group` again.',
+        ephemeral: true,
+      });
+      return;
+    }
+    const categoryName =
+      categoryKey === ROOT_GROUP_KEY
+        ? null
+        : (interaction.guild?.channels.cache.get(categoryKey)?.name ?? null);
+    const group = await run(guildId, 'cmd:group:get', () =>
+      deps.settings.getGroup(guildId, categoryKey),
+    );
+    await interaction.reply(
+      group
+        ? buildGroupDisablePanel(categoryKey, categoryName, group.above)
+        : buildGroupEnablePanel(categoryKey, categoryName, primaryIds.length),
+    );
+  }
+
+  /** The `/group` buttons: enable (below/above), turn off, or cancel. */
+  async function handleGroupButton(interaction: ButtonInteraction): Promise<void> {
+    if (!(await requireManageChannels(interaction))) return;
+    const parsed = parseGroupId(interaction.customId);
+    if (!parsed) return;
+    const guildId = interaction.guildId!;
+    const { action, categoryKey } = parsed;
+    if (action === 'cancel') {
+      await interaction.update({
+        content: 'Cancelled — nothing changed.',
+        embeds: [],
+        components: [],
+      });
+      return;
+    }
+    const enabling = action !== 'off';
+    const above = action === 'above';
+    const summary = await run(guildId, `group:${action}`, async () => {
+      await deps.settings.setGroup(guildId, categoryKey, enabling ? above : null);
+      return deps.feature.resyncCategory(guildId, categoryKey);
+    });
+    const note = rateLimitNote(summary.rateLimited);
+    const message = enabling
+      ? `✅ Grouped this category’s channels **${above ? 'above' : 'below'}** the creator ` +
+        `channels${summary.considered ? ` (${summary.considered} channel${summary.considered === 1 ? '' : 's'})` : ''}.${note}`
+      : `✅ Turned grouping off — each creator channel goes back to its own numbering and ` +
+        `placement.${note}`;
+    await interaction.update({ content: message, embeds: [], components: [] });
   }
 
   /** `/inheritpermissions` → a modal to choose the permission source. */
@@ -776,6 +879,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     if (interaction.customId.startsWith(KICK_PREFIX)) return handleKickVote(interaction);
     if (interaction.customId.startsWith(JOIN_PREFIX)) return handleJoinDecision(interaction);
     if (interaction.customId.startsWith(ADOPT_PREFIX)) return handleAdoptButton(interaction);
+    if (interaction.customId.startsWith(GROUP_PREFIX)) return handleGroupButton(interaction);
     if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorButton(interaction);
     if (interaction.customId.startsWith(SETTINGS_PREFIX)) return handleSettingsButton(interaction);
   }
@@ -953,6 +1057,15 @@ function currentVoiceChannelId(interaction: ChatInputCommandInteraction): string
     return interaction.member.voice.channelId ?? undefined;
   }
   return interaction.guild?.members.cache.get(interaction.user.id)?.voice.channelId ?? undefined;
+}
+
+/** The grouping `categoryKey` for a channel: its parent category id, or the root sentinel. */
+function categoryKeyForChannel(
+  interaction: ChatInputCommandInteraction | ButtonInteraction | ModalSubmitInteraction,
+  channelId: string,
+): string {
+  const channel = interaction.guild?.channels.cache.get(channelId);
+  return groupKeyFor(channel && 'parentId' in channel ? channel.parentId : null);
 }
 
 /** The caller's current voice channel, or undefined after replying `joinMessage`. */

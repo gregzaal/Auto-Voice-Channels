@@ -12,6 +12,7 @@ describe('buildCommandDefinitions', () => {
         'alwaysprivate',
         'claim',
         'create',
+        'group',
         'inheritpermissions',
         'invite',
         'kick',
@@ -39,6 +40,7 @@ describe('buildCommandDefinitions', () => {
       'template',
       'position',
       'alwaysprivate',
+      'group',
       'inheritpermissions',
       'logging',
     ]) {
@@ -73,6 +75,7 @@ describe('buildCommandDefinitions', () => {
       'template',
       'position',
       'alwaysprivate',
+      'group',
       'logging',
     ]) {
       expect(byName.get(name)!.options ?? [], `${name} should have no options`).toHaveLength(0);

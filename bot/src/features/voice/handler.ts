@@ -958,14 +958,19 @@ export class VoiceFeature {
    * making up one grouping category. The category is resolved live from each
    * primary's parent, so it reflects channels having been moved between categories.
    */
+  /** The primary (creator) channel ids that resolve to `categoryKey` right now. */
+  async categoryPrimaryIds(guildId: string, categoryKey: string): Promise<string[]> {
+    const primaries = await this.deps.autoChannels.listByGuild(guildId);
+    return primaries
+      .filter((p) => groupKeyFor(this.deps.voice.categoryOf?.(p.channelId)) === categoryKey)
+      .map((p) => p.channelId);
+  }
+
   private async groupMembers(
     guildId: string,
     categoryKey: string,
   ): Promise<{ primaryIds: string[]; secondaries: SecondaryChannelRow[] }> {
-    const primaries = await this.deps.autoChannels.listByGuild(guildId);
-    const primaryIds = primaries
-      .filter((p) => groupKeyFor(this.deps.voice.categoryOf?.(p.channelId)) === categoryKey)
-      .map((p) => p.channelId);
+    const primaryIds = await this.categoryPrimaryIds(guildId, categoryKey);
     const lists = await Promise.all(
       primaryIds.map((id) => this.deps.secondaries.listByPrimary(id)),
     );

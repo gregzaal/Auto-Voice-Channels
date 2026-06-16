@@ -228,6 +228,23 @@ describe('GuildSettingsService (integration)', () => {
     expect((await settings.toggleDefaultPrivate(GUILD, 'not-a-channel')).ok).toBe(false);
   });
 
+  it('reads and writes per-category grouping config (/group)', async () => {
+    expect(await settings.getGroup(GUILD, 'cat-1')).toBeUndefined();
+
+    await settings.setGroup(GUILD, 'cat-1', true); // group above
+    expect(await settings.getGroup(GUILD, 'cat-1')).toEqual({ above: true });
+
+    // A second category is independent; the root sentinel is just another key.
+    await settings.setGroup(GUILD, '@root', false);
+    expect(await settings.getGroup(GUILD, '@root')).toEqual({ above: false });
+    expect(await settings.getGroup(GUILD, 'cat-1')).toEqual({ above: true });
+
+    // Disable (null) removes only that category's entry.
+    await settings.setGroup(GUILD, 'cat-1', null);
+    expect(await settings.getGroup(GUILD, 'cat-1')).toBeUndefined();
+    expect(await settings.getGroup(GUILD, '@root')).toEqual({ above: false });
+  });
+
   it('configures and disables logging', async () => {
     await settings.setLogging(GUILD, 'log-channel', 2);
     let s = (await guilds.get(GUILD))!.settings;

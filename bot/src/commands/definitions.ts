@@ -138,6 +138,11 @@ export function buildCommandDefinitions(
     ),
     adminOnly(
       new SlashCommandBuilder()
+        .setName('group')
+        .setDescription('Group this category’s channels into one numbered block (or turn it off).'),
+    ),
+    adminOnly(
+      new SlashCommandBuilder()
         .setName('inheritpermissions')
         .setDescription('Choose where new channels copy their permissions from.'),
     ),
