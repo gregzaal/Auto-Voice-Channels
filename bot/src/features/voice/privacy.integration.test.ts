@@ -182,4 +182,53 @@ describe('PrivacyService (integration)', () => {
     expect(actions.ofType('delete').map((a) => a.channelId)).toContain(joinId);
     expect(await joinChannels.getBySecondary(SEC)).toBeUndefined();
   });
+
+  describe('makePrivateForCreation (default-private primaries)', () => {
+    const FRESH = 'sec-fresh';
+
+    beforeEach(async () => {
+      // A just-spawned secondary whose creator's move hasn't landed in the voice
+      // cache yet — so the channel reads as empty.
+      await secondaries.create({
+        channelId: FRESH,
+        guildId: GUILD,
+        primaryChannelId: 'p',
+        ownerId: 'dave',
+        state: { name: 'Dave’s den', roster: ['dave'] },
+      });
+    });
+
+    it('grants Connect to the creator by id even when the voice cache is empty', async () => {
+      await privacy.makePrivateForCreation(GUILD, FRESH, 'dave', 'Dave');
+
+      expect(actions.ofType('privacy').at(-1)).toMatchObject({ channelId: FRESH, isPrivate: true });
+      expect(actions.ofType('connect')).toContainEqual(
+        expect.objectContaining({ channelId: FRESH, memberId: 'dave', allow: true }),
+      );
+      const join = actions.ofType('joinChannel').filter((a) => a.nearChannelId === FRESH);
+      expect(join).toHaveLength(1);
+      expect(join[0]!.name).toBe('⇩ Join Dave');
+
+      const row = (await secondaries.get(FRESH))!;
+      expect(row.state.private).toBe(true);
+      // It preserves the rest of the freshly-created state (roster, name).
+      expect(row.state.roster).toEqual(['dave']);
+      expect(await joinChannels.getBySecondary(FRESH)).toMatchObject({ creatorId: 'dave' });
+    });
+
+    it('is idempotent: a replay does not spawn a second companion', async () => {
+      await privacy.makePrivateForCreation(GUILD, FRESH, 'dave', 'Dave');
+      await privacy.makePrivateForCreation(GUILD, FRESH, 'dave', 'Dave');
+      expect(actions.ofType('joinChannel').filter((a) => a.nearChannelId === FRESH)).toHaveLength(
+        1,
+      );
+    });
+
+    it('no-ops for an unknown secondary', async () => {
+      await privacy.makePrivateForCreation(GUILD, 'ghost', 'dave', 'Dave');
+      expect(actions.ofType('joinChannel').filter((a) => a.nearChannelId === 'ghost')).toHaveLength(
+        0,
+      );
+    });
+  });
 });

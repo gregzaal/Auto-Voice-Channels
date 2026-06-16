@@ -203,6 +203,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return openTemplatePanel(interaction);
       case 'position':
         return openPositionModal(interaction);
+      case 'alwaysprivate':
+        return handleAlwaysPrivate(interaction);
       case 'inheritpermissions':
         return openInheritModal(interaction);
       case 'logging':
@@ -290,6 +292,17 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       content: `${res.ok ? '✅' : '⚠️'} ${message}`,
       ephemeral: true,
     });
+  }
+
+  /** `/alwaysprivate` → toggle default-private for the creator channel you're in. */
+  async function handleAlwaysPrivate(interaction: ChatInputCommandInteraction): Promise<void> {
+    const guildId = interaction.guildId!;
+    const channelId = await requireVoiceChannel(interaction);
+    if (!channelId) return;
+    const res = await run(guildId, 'cmd:alwaysprivate', () =>
+      deps.settings.toggleDefaultPrivate(guildId, channelId),
+    );
+    await interaction.reply({ content: formatResult(res), ephemeral: true });
   }
 
   /** `/inheritpermissions` → a modal to choose the permission source. */

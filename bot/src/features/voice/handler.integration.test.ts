@@ -1,10 +1,17 @@
-import { AutoChannelRepository, GuildRepository, SecondaryChannelRepository, db } from '@avc/core';
+import {
+  AutoChannelRepository,
+  GuildRepository,
+  JoinChannelRepository,
+  SecondaryChannelRepository,
+  db,
+} from '@avc/core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { PgTestEnv } from '../../test/pgContainer.js';
 import { startPostgres } from '../../test/pgContainer.js';
 import { fakeLogger } from '../../runtime/testUtils.js';
 import { RecordingVoiceActions } from './actions.js';
 import { VoiceFeature } from './handler.js';
+import { PrivacyService } from './privacy.js';
 import type { VoiceStateEvent } from './types.js';
 import { FakeVoiceView, fakeMember as member } from './voiceTestUtils.js';
 
@@ -32,6 +39,7 @@ describe('VoiceFeature (integration)', () => {
   });
 
   beforeEach(async () => {
+    await env.handle.db.delete(db.schema.joinChannels);
     await env.handle.db.delete(db.schema.secondaryChannels);
     await env.handle.db.delete(db.schema.autoChannels);
     voice = new FakeVoiceView();
@@ -594,5 +602,74 @@ describe('VoiceFeature (integration)', () => {
     expect(info.seed).toBe(7);
     expect(info.members).toHaveLength(1);
     expect(info.members[0]).toMatchObject({ id: 'alice', playing: ['Halo'] });
+  });
+
+  it('a default-private primary spawns its secondaries private (locked + companion)', async () => {
+    await env.handle.db.delete(db.schema.joinChannels);
+    const joinChannels = new JoinChannelRepository(env.handle.db);
+    const privacy = new PrivacyService({
+      secondaries,
+      joinChannels,
+      actions,
+      voice,
+      logger: fakeLogger(),
+    });
+    const f = new VoiceFeature({
+      autoChannels,
+      secondaries,
+      guilds,
+      actions,
+      voice,
+      selfHosted: true,
+      logger: fakeLogger(),
+      makePrivateOnCreate: (g, c, ownerId, ownerName) =>
+        privacy.makePrivateForCreation(g, c, ownerId, ownerName),
+    });
+    // A prior test may have left the guild blocked; ensure it's entitled to create.
+    await guilds.transitionAuth({ guildId: GUILD, toStatus: 'trial' });
+    await autoChannels.upsert(GUILD, PRIMARY, { name: "@@creator@@'s room", defaultPrivate: true });
+
+    const alice = member('alice');
+    voice.put(PRIMARY, alice);
+    await f.handleVoiceStateUpdate({ guildId: GUILD, member: alice, afterChannelId: PRIMARY });
+
+    const secondaryId = actions.ofType('create')[0]!.channelId;
+    // Locked to @everyone, the creator granted Connect by id, and a companion spawned.
+    expect(actions.ofType('privacy')).toContainEqual(
+      expect.objectContaining({ channelId: secondaryId, isPrivate: true }),
+    );
+    expect(actions.ofType('connect')).toContainEqual(
+      expect.objectContaining({ channelId: secondaryId, memberId: 'alice', allow: true }),
+    );
+    expect(actions.ofType('joinChannel')).toHaveLength(1);
+    expect((await secondaries.get(secondaryId))!.state.private).toBe(true);
+    // The channel is locked before the creator is moved into it.
+    const privacyIdx = actions.actions.findIndex(
+      (a) => a.type === 'privacy' && a.channelId === secondaryId,
+    );
+    const moveIdx = actions.actions.findIndex((a) => a.type === 'move' && a.memberId === 'alice');
+    expect(privacyIdx).toBeLessThan(moveIdx);
+  });
+
+  it('a public (default) primary spawns secondaries without locking them', async () => {
+    const f = new VoiceFeature({
+      autoChannels,
+      secondaries,
+      guilds,
+      actions,
+      voice,
+      selfHosted: true,
+      logger: fakeLogger(),
+      makePrivateOnCreate: () => Promise.reject(new Error('should not be called')),
+    });
+    await guilds.transitionAuth({ guildId: GUILD, toStatus: 'trial' });
+    await autoChannels.upsert(GUILD, PRIMARY, { name: "@@creator@@'s room" });
+
+    const alice = member('alice');
+    voice.put(PRIMARY, alice);
+    await f.handleVoiceStateUpdate({ guildId: GUILD, member: alice, afterChannelId: PRIMARY });
+
+    expect(actions.ofType('privacy')).toHaveLength(0);
+    expect(actions.ofType('joinChannel')).toHaveLength(0);
   });
 });

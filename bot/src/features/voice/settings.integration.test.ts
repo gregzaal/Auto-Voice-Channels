@@ -201,6 +201,33 @@ describe('GuildSettingsService (integration)', () => {
     expect((await settings.setInheritPermissions(GUILD, 'sec-1', 'bogus')).ok).toBe(false);
   });
 
+  it('toggles default-private for the primary via the channel you’re in', async () => {
+    await settings.createPrimary(GUILD);
+    const primaryId = actions.ofType('create')[0]!.channelId;
+    await secondaries.create({
+      channelId: 'sec-1',
+      guildId: GUILD,
+      primaryChannelId: primaryId,
+      state: {},
+    });
+
+    // Default (public): nothing stored.
+    expect((await autoChannels.get(primaryId))!.template.defaultPrivate).toBeUndefined();
+
+    const on = await settings.toggleDefaultPrivate(GUILD, 'sec-1');
+    expect(on.ok).toBe(true);
+    expect(on.message).toContain('private');
+    expect((await autoChannels.get(primaryId))!.template.defaultPrivate).toBe(true);
+
+    // Toggling again clears the stored field (public is the default).
+    const off = await settings.toggleDefaultPrivate(GUILD, 'sec-1');
+    expect(off.ok).toBe(true);
+    expect(off.message).toContain('public');
+    expect((await autoChannels.get(primaryId))!.template.defaultPrivate).toBeUndefined();
+
+    expect((await settings.toggleDefaultPrivate(GUILD, 'not-a-channel')).ok).toBe(false);
+  });
+
   it('configures and disables logging', async () => {
     await settings.setLogging(GUILD, 'log-channel', 2);
     let s = (await guilds.get(GUILD))!.settings;

@@ -72,6 +72,18 @@ export interface VoiceFeatureDeps {
    */
   joinCompanionFor?: (secondaryChannelId: string) => Promise<string | undefined>;
   /**
+   * Applies the private treatment to a just-spawned secondary when its primary is
+   * `defaultPrivate` (mirrors `/private`, but grants Connect to the creator by id
+   * since their move may not be in the voice cache yet). Idempotent; no-op when
+   * unset.
+   */
+  makePrivateOnCreate?: (
+    guildId: string,
+    channelId: string,
+    ownerId: string,
+    ownerName: string,
+  ) => Promise<void>;
+  /**
    * Optional sink for per-guild event logging (`/logging`). Level 1 = channels
    * created/deleted, 2 = + renames & ownership changes, 3 = + members
    * joining/leaving. Fire-and-forget.
@@ -329,6 +341,17 @@ export class VoiceFeature {
       // Seed the arrival roster with the creator (longest-present from birth).
       state: { name, index, seed, roster: [member.id] },
     });
+
+    // Default-private primaries: lock the new channel before the creator lands in
+    // it (granting Connect to them by id, since their move isn't cached yet).
+    if (primary?.template.defaultPrivate) {
+      await this.deps.makePrivateOnCreate?.(
+        guildId,
+        newChannelId,
+        member.id,
+        displayName(settings, member),
+      );
+    }
 
     await this.deps.actions.moveMember(guildId, member.id, newChannelId);
 

@@ -17,6 +17,12 @@ export const primaryTemplateSchema = z.object({
   /** Position secondaries above (`true`) or below (default — absent/`false`) the primary. */
   above: z.boolean().optional(),
   /**
+   * When `true`, secondaries spawned from this primary are made private on
+   * creation (locked to @everyone, with a "⇩ Join" companion) — the same
+   * treatment as `/private`. Toggled via `/alwaysprivate` or the `/create` modal.
+   */
+  defaultPrivate: z.boolean().optional(),
+  /**
    * Permission inheritance for spawned secondaries: `primary` (copy the primary
    * channel's overwrites), `category` (copy the primary's category), or a
    * specific channel id to copy. Unset → Discord defaults.

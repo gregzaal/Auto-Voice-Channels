@@ -28,6 +28,8 @@ export interface CreatePrimaryOptions {
   statusTemplate?: string;
   /** Position spawned secondaries above the primary; default (false/unset) is below. */
   above?: boolean;
+  /** Make spawned secondaries private on creation; default (false/unset) is public. */
+  defaultPrivate?: boolean;
 }
 
 /** A normalized read-model of a guild's voice configuration, for the panel. */
@@ -128,6 +130,7 @@ export class GuildSettingsService {
       ...(opts.nameTemplate ? { name: opts.nameTemplate } : {}),
       ...(opts.statusTemplate ? { status: opts.statusTemplate } : {}),
       ...(opts.above === true ? { above: true } : {}),
+      ...(opts.defaultPrivate === true ? { defaultPrivate: true } : {}),
     };
     await this.deps.autoChannels.upsert(guildId, channelId, template);
     this.deps.logger.info({ guildId, channelId, name }, 'created primary channel');
@@ -236,6 +239,26 @@ export class GuildSettingsService {
     await this.deps.autoChannels.upsert(guildId, primary.channelId, next);
     return ok(
       `New channels here will now be positioned **${above ? 'above' : 'below'}** the creator channel.`,
+    );
+  }
+
+  /**
+   * Toggles whether new secondaries of the primary you're in are made private on
+   * creation (legacy had no equivalent; `/alwaysprivate`). Returns the new state
+   * in its reply. Stores nothing for the default (public) so primaries stay lean.
+   */
+  async toggleDefaultPrivate(guildId: string, secondaryChannelId: string): Promise<CommandResult> {
+    const primary = await this.primaryFor(guildId, secondaryChannelId);
+    if (!primary) return fail('You need to be in a bot-managed voice channel.');
+    const enabled = primary.template.defaultPrivate !== true;
+    const next = { ...primary.template };
+    if (enabled) next.defaultPrivate = true;
+    else delete next.defaultPrivate;
+    await this.deps.autoChannels.upsert(guildId, primary.channelId, next);
+    return ok(
+      enabled
+        ? '🔒 New channels from this creator will be created **private** automatically.'
+        : '🔓 New channels from this creator will be created **public** (the default).',
     );
   }
 

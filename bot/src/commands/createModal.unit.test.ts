@@ -9,13 +9,12 @@ function fields(values: {
   name?: string;
   nameTemplate?: string;
   statusTemplate?: string;
-  position?: string;
+  options?: string[];
   category?: string;
 }): ModalSubmitFields {
   return {
     getTextInputValue: (id: string) => (values as Record<string, string>)[id] ?? '',
-    getStringSelectValues: (id: string) =>
-      id === 'position' && values.position ? [values.position] : [],
+    getStringSelectValues: (id: string) => (id === 'options' ? (values.options ?? []) : []),
     getSelectedChannels: () =>
       values.category ? { first: () => ({ id: values.category }) } : null,
   } as unknown as ModalSubmitFields;
@@ -31,19 +30,21 @@ describe('createModal', () => {
       'Primary (creation) channel name',
       'Name template (/template to edit later)',
       'Status template (/template to edit later)',
-      'Secondary position (/position to edit later)',
+      'Options (/position, /alwaysprivate later)',
     ]);
+    // Discord caps a modal at 5 top-level components — never exceed it.
+    expect(labels).toHaveLength(5);
     for (const l of labels) expect(l!.length).toBeLessThanOrEqual(45);
   });
 
-  it('parses the category channel select, position dropdown, and templates', () => {
+  it('parses the category channel select, options multi-select, and templates', () => {
     const parsed = parseCreateModal(
       fields({
         category: 'cat-123',
         name: '  Lobby  ',
         nameTemplate: 'DEFAULT NAME', // unchanged → inherit
         statusTemplate: 'Custom status',
-        position: 'below',
+        options: ['above', 'private'],
       }),
       defaults,
     );
@@ -51,13 +52,20 @@ describe('createModal', () => {
       parentId: 'cat-123',
       name: 'Lobby',
       statusTemplate: 'Custom status',
-      above: false,
+      defaultPrivate: true,
+      above: true,
     });
     expect(parsed.nameTemplate).toBeUndefined();
   });
 
-  it('defaults to below with no category when nothing is selected', () => {
+  it('defaults to below + public with no category when nothing is selected', () => {
     const parsed = parseCreateModal(fields({}), defaults);
     expect(parsed).toEqual({ above: false });
+    expect(parsed.defaultPrivate).toBeUndefined();
+  });
+
+  it('treats only the privacy toggle independently of position', () => {
+    const parsed = parseCreateModal(fields({ options: ['private'] }), defaults);
+    expect(parsed).toEqual({ defaultPrivate: true, above: false });
   });
 });

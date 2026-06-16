@@ -74,19 +74,29 @@ export function buildCreateModal(defaults: CreateDefaults): ModalBuilder {
             .setMaxLength(TEMPLATE_INPUT_MAX)
             .setValue(defaults.statusTemplate.slice(0, TEMPLATE_INPUT_MAX)),
         ),
+      // A modal allows at most 5 top-level components, and the four above fill
+      // four slots — so position and privacy share this one multi-select rather
+      // than each taking a slot. Nothing selected = the defaults (below, public);
+      // both are still editable later via `/position` and `/alwaysprivate`.
       new LabelBuilder()
-        .setLabel('Secondary position (/position to edit later)')
+        .setLabel('Options (/position, /alwaysprivate later)')
         .setStringSelectMenuComponent(
           new StringSelectMenuBuilder()
-            .setCustomId('position')
-            .setMinValues(1)
-            .setMaxValues(1)
+            .setCustomId('options')
+            // min 0 needs required=false (a modal select defaults to required).
+            .setRequired(false)
+            .setMinValues(0)
+            .setMaxValues(2)
+            .setPlaceholder('Defaults: below the creator, public')
             .addOptions(
               new StringSelectMenuOptionBuilder()
-                .setLabel('Below primary')
-                .setValue('below')
-                .setDefault(true),
-              new StringSelectMenuOptionBuilder().setLabel('Above primary').setValue('above'),
+                .setLabel('Position new channels above the creator')
+                .setDescription('Default is below the creator channel.')
+                .setValue('above'),
+              new StringSelectMenuOptionBuilder()
+                .setLabel('Make new channels private')
+                .setDescription('Locked to @everyone; others request to join.')
+                .setValue('private'),
             ),
         ),
     );
@@ -100,8 +110,9 @@ export interface ParsedCreate extends CreatePrimaryOptions {
 
 /**
  * Reads the submitted modal: text inputs via `getTextInputValue`, the category
- * via the channel select, and position via the string select. Templates left at
- * the guild default are dropped (so the primary inherits rather than pins them).
+ * via the channel select, and the position/privacy toggles via the combined
+ * `options` multi-select. Templates left at the guild default are dropped (so the
+ * primary inherits rather than pins them).
  */
 export function parseCreateModal(
   fields: ModalSubmitFields,
@@ -110,13 +121,14 @@ export function parseCreateModal(
   const name = fields.getTextInputValue('name').trim();
   const nameTemplate = fields.getTextInputValue('nameTemplate').trim();
   const statusTemplate = fields.getTextInputValue('statusTemplate').trim();
-  const position = fields.getStringSelectValues('position')[0] ?? 'below';
+  const options = fields.getStringSelectValues('options');
   const parentId = fields.getSelectedChannels('category', false)?.first()?.id;
   return {
     ...(parentId ? { parentId } : {}),
     ...(name ? { name } : {}),
     ...(nameTemplate && nameTemplate !== defaults.nameTemplate ? { nameTemplate } : {}),
     ...(statusTemplate && statusTemplate !== defaults.statusTemplate ? { statusTemplate } : {}),
-    above: position === 'above',
+    ...(options.includes('private') ? { defaultPrivate: true } : {}),
+    above: options.includes('above'),
   };
 }

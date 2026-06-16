@@ -78,6 +78,42 @@ export class PrivacyService {
     return ok('🔒 Your channel is now private. Others can ask to join via the **⇩ Join** channel.');
   }
 
+  /**
+   * Applies the private treatment to a freshly-spawned secondary whose primary is
+   * `defaultPrivate`. Unlike {@link makePrivate}, the creator's move into the new
+   * channel may not have landed in the voice cache yet, so it grants Connect to
+   * the known creator id directly rather than reading the roster. Idempotent: a
+   * no-op when the secondary is gone or already private.
+   */
+  async makePrivateForCreation(
+    guildId: string,
+    channelId: string,
+    ownerId: string,
+    ownerName: string,
+  ): Promise<void> {
+    const secondary = await this.deps.secondaries.get(channelId);
+    if (!secondary || secondary.guildId !== guildId || secondary.state.private) return;
+
+    await this.deps.actions.setPrivacy(guildId, channelId, true);
+    await this.deps.actions.setMemberConnect(guildId, channelId, ownerId, true);
+    const joinChannelId = await this.deps.actions.createJoinChannel(
+      guildId,
+      `⇩ Join ${ownerName}`,
+      channelId,
+    );
+    await this.deps.joinChannels.create({
+      channelId: joinChannelId,
+      guildId,
+      secondaryChannelId: channelId,
+      creatorId: ownerId,
+    });
+    await this.deps.secondaries.updateState(channelId, { ...secondary.state, private: true });
+    this.deps.logger.info(
+      { guildId, channelId, joinChannelId, ownerId },
+      'secondary made private on creation',
+    );
+  }
+
   /** Reopens the channel and deletes its "⇩ Join" companion. */
   async makePublic(
     guildId: string,

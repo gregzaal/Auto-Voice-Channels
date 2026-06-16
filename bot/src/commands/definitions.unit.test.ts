@@ -9,6 +9,7 @@ describe('buildCommandDefinitions', () => {
   it('exposes the full hybrid command surface', () => {
     expect([...byName.keys()].sort()).toEqual(
       [
+        'alwaysprivate',
         'claim',
         'create',
         'inheritpermissions',
@@ -37,6 +38,7 @@ describe('buildCommandDefinitions', () => {
       'create',
       'template',
       'position',
+      'alwaysprivate',
       'inheritpermissions',
       'logging',
     ]) {
@@ -63,7 +65,16 @@ describe('buildCommandDefinitions', () => {
   });
 
   it('keeps the VC-dependent commands option-less (act on your current channel)', () => {
-    for (const name of ['name', 'private', 'public', 'claim', 'template', 'position', 'logging']) {
+    for (const name of [
+      'name',
+      'private',
+      'public',
+      'claim',
+      'template',
+      'position',
+      'alwaysprivate',
+      'logging',
+    ]) {
       expect(byName.get(name)!.options ?? [], `${name} should have no options`).toHaveLength(0);
     }
     // inheritpermissions is now modal-driven too (no slash options).

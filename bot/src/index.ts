@@ -163,6 +163,8 @@ async function main(): Promise<void> {
       privacy.handleOwnerChanged(gid, cid, ownerId, ownerName),
     joinCompanionFor: async (cid) =>
       (await joinChannelsRepo.getBySecondary(cid))?.channelId ?? undefined,
+    makePrivateOnCreate: (gid, cid, ownerId, ownerName) =>
+      privacy.makePrivateForCreation(gid, cid, ownerId, ownerName),
     serverLog: (gid, level, message) => serverLogger.log(gid, level, message),
     logger,
   });

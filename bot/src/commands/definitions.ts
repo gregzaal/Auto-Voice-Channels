@@ -133,6 +133,11 @@ export function buildCommandDefinitions(
     ),
     adminOnly(
       new SlashCommandBuilder()
+        .setName('alwaysprivate')
+        .setDescription('Toggle whether this creator channel spawns private channels by default.'),
+    ),
+    adminOnly(
+      new SlashCommandBuilder()
         .setName('inheritpermissions')
         .setDescription('Choose where new channels copy their permissions from.'),
     ),
