@@ -15,7 +15,21 @@ export const SETTINGS_KEYS = {
   customNicks: 'custom_nicks',
   logging: 'logging',
   logLevel: 'log_level',
+  groups: 'groups',
 } as const;
+
+/** Settings-key sentinel for grouping creator channels that sit at the server root. */
+export const ROOT_GROUP_KEY = '@root';
+
+/** The `groups` settings key for a category id (or `null`/`undefined` → server root). */
+export function groupKeyFor(categoryId: string | null | undefined): string {
+  return categoryId ?? ROOT_GROUP_KEY;
+}
+
+/** One category's grouping config: present ⇒ grouped; `above` is the single direction. */
+export interface GroupConfig {
+  above: boolean;
+}
 
 /** Guild settings relevant to the voice feature (names, aliases, nicks, …). */
 export interface VoiceSettings {
@@ -86,4 +100,30 @@ export function readLogging(settings: Record<string, unknown>): LoggingConfig {
   const lvl = settings[SETTINGS_KEYS.logLevel];
   const level: 1 | 2 | 3 = lvl === 2 || lvl === 3 ? lvl : 1;
   return { enabled: channelId !== null, level, channelId };
+}
+
+/**
+ * Reads the per-category grouping map from the settings blob: `categoryKey →
+ * { above }`, where a present key means that category is grouped. Keys are
+ * category ids or the {@link ROOT_GROUP_KEY} sentinel. Defensive against malformed
+ * data (a corrupt entry is skipped, not thrown).
+ */
+export function readGroups(settings: Record<string, unknown>): Record<string, GroupConfig> {
+  const raw = settings[SETTINGS_KEYS.groups];
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {};
+  const out: Record<string, GroupConfig> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+      out[key] = { above: (value as { above?: unknown }).above === true };
+    }
+  }
+  return out;
+}
+
+/** One category's grouping config, or `undefined` when that category isn't grouped. */
+export function readGroup(
+  settings: Record<string, unknown>,
+  categoryKey: string,
+): GroupConfig | undefined {
+  return readGroups(settings)[categoryKey];
 }

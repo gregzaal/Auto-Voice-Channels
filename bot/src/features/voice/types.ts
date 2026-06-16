@@ -53,6 +53,14 @@ export interface GuildVoiceView {
    * DB record) — both yield `[]` from {@link membersInChannel}.
    */
   channelExists(channelId: string): boolean;
+  /**
+   * The channel's parent **category** id, or `null` when it sits at the server
+   * root, or `undefined` when the channel/category isn't known. Optional so the
+   * many test fakes (and any caller without a live cache) keep compiling; absent
+   * → callers treat the category as unknown and fall back to per-primary behavior
+   * (no grouping). Used by the `/group` feature to scope a category's channels.
+   */
+  categoryOf?(channelId: string): string | null | undefined;
 }
 
 /** A normalized voice-state transition (a member moved between channels). */

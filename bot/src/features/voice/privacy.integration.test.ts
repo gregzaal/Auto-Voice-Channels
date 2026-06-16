@@ -144,6 +144,7 @@ describe('PrivacyService (integration)', () => {
       createJoinChannel: () => Promise.resolve('j'),
       setVoiceStatus: () => Promise.resolve(),
       repositionSecondaries: () => Promise.resolve(),
+      repositionGroup: () => Promise.resolve(),
     };
     const p2 = new PrivacyService({
       secondaries,

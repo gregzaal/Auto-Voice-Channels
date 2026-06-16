@@ -8,7 +8,8 @@ import type {
 } from '@avc/core';
 import type { VoiceActions } from './actions.js';
 import { DEFAULT_CHANNEL_NAME_TEMPLATE } from './nameTemplate.js';
-import { isStringMap, parseVoiceSettings, readLogging } from './guildSettings.js';
+import { isStringMap, parseVoiceSettings, readGroups, readLogging } from './guildSettings.js';
+import type { GroupConfig } from './guildSettings.js';
 import { type CommandResult } from './commands.js';
 
 /** Logging verbosity levels (legacy parity): 1 lifecycle, 2 changes, 3 joins/leaves. */
@@ -240,6 +241,25 @@ export class GuildSettingsService {
     return ok(
       `New channels here will now be positioned **${above ? 'above' : 'below'}** the creator channel.`,
     );
+  }
+
+  /** Reads a category's grouping config (or `undefined` when it isn't grouped). `/group`. */
+  async getGroup(guildId: string, categoryKey: string): Promise<GroupConfig | undefined> {
+    const guild = await this.deps.guilds.ensure(guildId);
+    return readGroups(guild.settings)[categoryKey];
+  }
+
+  /**
+   * Enables grouping for a category (`above` = the single direction) or disables it
+   * (`above === null` → removes the entry). Persists only; the caller renumbers and
+   * repositions the category via `VoiceFeature.resyncCategory`.
+   */
+  async setGroup(guildId: string, categoryKey: string, above: boolean | null): Promise<void> {
+    const guild = await this.deps.guilds.ensure(guildId);
+    const groups = { ...readGroups(guild.settings) };
+    if (above === null) delete groups[categoryKey];
+    else groups[categoryKey] = { above };
+    await this.deps.guilds.updateSettings(guildId, { groups });
   }
 
   /**

@@ -337,6 +337,55 @@ export class DiscordVoiceActions implements VoiceActions {
     }
   }
 
+  async repositionGroup(
+    guildId: string,
+    primaryChannelIds: string[],
+    orderedSecondaryIds: string[],
+    above: boolean,
+  ): Promise<void> {
+    if (primaryChannelIds.length === 0 || orderedSecondaryIds.length === 0) return;
+    try {
+      const guild = await this.client.guilds.fetch(guildId);
+      // Resolve the group's category from the first primary that's in cache. `null`
+      // parent = the server root (a valid group too).
+      const anchor = primaryChannelIds
+        .map((id) => guild.channels.cache.get(id))
+        .find((c): c is VoiceBasedChannel => !!c && c.isVoiceBased());
+      if (!anchor) return;
+      const parentId = anchor.parentId ?? null;
+      const sort = (list: VoiceBasedChannel[]): VoiceBasedChannel[] =>
+        list.sort(
+          (a, b) => a.rawPosition - b.rawPosition || (BigInt(a.id) < BigInt(b.id) ? -1 : 1),
+        );
+
+      const moving = new Set(orderedSecondaryIds);
+      const inCategory = (c: VoiceBasedChannel): boolean => (c.parentId ?? null) === parentId;
+      // The secondaries to move, in the requested (group) order.
+      const secs = orderedSecondaryIds
+        .map((id) => guild.channels.cache.get(id))
+        .filter(
+          (c): c is VoiceBasedChannel =>
+            !!c && c.isVoiceBased() && inCategory(c) && moving.has(c.id),
+        );
+      // Everything else in the category, in current display order.
+      const rest = sort(
+        [...guild.channels.cache.values()].filter(
+          (c): c is VoiceBasedChannel => c.isVoiceBased() && inCategory(c) && !moving.has(c.id),
+        ),
+      );
+      if (secs.length === 0) return;
+      const primarySet = new Set(primaryChannelIds);
+      const primaryIdxs = rest.flatMap((c, i) => (primarySet.has(c.id) ? [i] : []));
+      if (primaryIdxs.length === 0) return;
+      // Below → just under the bottommost primary; above → just over the topmost.
+      const insertAt = above ? Math.min(...primaryIdxs) : Math.max(...primaryIdxs) + 1;
+      const desired = [...rest.slice(0, insertAt), ...secs, ...rest.slice(insertAt)];
+      await guild.channels.setPositions(desired.map((c, i) => ({ channel: c.id, position: i })));
+    } catch (err) {
+      this.logger?.warn({ err, primaryChannelIds }, 'failed to reposition group');
+    }
+  }
+
   async setVoiceStatus(_guildId: string, channelId: string, status: string): Promise<void> {
     // discord.js has no helper for voice channel status yet, so call the raw
     // endpoint. Its rate limit is far laxer than channel renames. `''` clears it.
@@ -394,6 +443,12 @@ export class DiscordVoiceView implements GuildVoiceView {
 
   channelExists(channelId: string): boolean {
     return this.client.channels.cache.has(channelId);
+  }
+
+  categoryOf(channelId: string): string | null | undefined {
+    const channel = this.client.channels.cache.get(channelId);
+    if (!channel || !('parentId' in channel)) return undefined;
+    return channel.parentId ?? null;
   }
 }
 

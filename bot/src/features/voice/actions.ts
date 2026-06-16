@@ -81,6 +81,18 @@ export interface VoiceActions {
     orderedChannelIds: string[],
     above: boolean,
   ): Promise<void>;
+  /**
+   * Repositions a whole category **group**: the ordered secondary block is placed
+   * above all the group's primaries (`above`) or below all of them, in one bulk
+   * reorder. Like {@link repositionSecondaries} but spanning every primary in the
+   * category (used by the `/group` feature).
+   */
+  repositionGroup(
+    guildId: string,
+    primaryChannelIds: string[],
+    orderedSecondaryIds: string[],
+    above: boolean,
+  ): Promise<void>;
 }
 
 export type RecordedAction =
@@ -109,6 +121,13 @@ export type RecordedAction =
       type: 'reposition';
       guildId: string;
       primaryChannelId: string;
+      channelIds: string[];
+      above: boolean;
+    }
+  | {
+      type: 'repositionGroup';
+      guildId: string;
+      primaryChannelIds: string[];
       channelIds: string[];
       above: boolean;
     };
@@ -198,6 +217,22 @@ export class RecordingVoiceActions implements VoiceActions {
       guildId,
       primaryChannelId,
       channelIds: orderedChannelIds,
+      above,
+    });
+    return Promise.resolve();
+  }
+
+  repositionGroup(
+    guildId: string,
+    primaryChannelIds: string[],
+    orderedSecondaryIds: string[],
+    above: boolean,
+  ): Promise<void> {
+    this.actions.push({
+      type: 'repositionGroup',
+      guildId,
+      primaryChannelIds,
+      channelIds: orderedSecondaryIds,
       above,
     });
     return Promise.resolve();

@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_CHANNEL_NAME_TEMPLATE } from './nameTemplate.js';
-import { isStringMap, parseVoiceSettings, readLogging } from './guildSettings.js';
+import {
+  groupKeyFor,
+  isStringMap,
+  parseVoiceSettings,
+  readGroup,
+  readGroups,
+  ROOT_GROUP_KEY,
+  readLogging,
+} from './guildSettings.js';
 
 describe('guildSettings', () => {
   it('applies defaults for an empty blob', () => {
@@ -56,5 +64,29 @@ describe('guildSettings', () => {
       level: 1,
       channelId: null,
     });
+  });
+
+  it('groupKeyFor maps a category id to itself and null/undefined to the root sentinel', () => {
+    expect(groupKeyFor('cat-1')).toBe('cat-1');
+    expect(groupKeyFor(null)).toBe(ROOT_GROUP_KEY);
+    expect(groupKeyFor(undefined)).toBe(ROOT_GROUP_KEY);
+  });
+
+  it('readGroups parses the grouping map and skips malformed entries', () => {
+    expect(readGroups({})).toEqual({});
+    expect(readGroups({ groups: { 'cat-1': { above: true }, '@root': { above: false } } })).toEqual(
+      { 'cat-1': { above: true }, '@root': { above: false } },
+    );
+    // Missing/odd `above` defaults to false; non-object entries and arrays are skipped.
+    expect(readGroups({ groups: { 'cat-2': {}, 'cat-3': 'nope', 'cat-4': ['x'] } })).toEqual({
+      'cat-2': { above: false },
+    });
+    expect(readGroups({ groups: 'not-an-object' })).toEqual({});
+  });
+
+  it('readGroup returns one category config or undefined', () => {
+    const settings = { groups: { 'cat-1': { above: true } } };
+    expect(readGroup(settings, 'cat-1')).toEqual({ above: true });
+    expect(readGroup(settings, 'cat-9')).toBeUndefined();
   });
 });

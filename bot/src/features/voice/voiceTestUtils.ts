@@ -8,6 +8,8 @@ import type { GuildVoiceView, VoiceMember } from './types.js';
 export class FakeVoiceView implements GuildVoiceView {
   private readonly members = new Map<string, VoiceMember[]>();
   private readonly existing = new Set<string>();
+  /** channelId → parent category id (or null = server root). Unset → undefined. */
+  private readonly parents = new Map<string, string | null>();
 
   membersInChannel(channelId: string): VoiceMember[] {
     return this.members.get(channelId) ?? [];
@@ -15,6 +17,15 @@ export class FakeVoiceView implements GuildVoiceView {
 
   channelExists(channelId: string): boolean {
     return this.existing.has(channelId);
+  }
+
+  categoryOf(channelId: string): string | null | undefined {
+    return this.parents.get(channelId);
+  }
+
+  /** Sets a channel's parent category (or `null` for the server root), for grouping tests. */
+  setParent(channelId: string, categoryId: string | null): void {
+    this.parents.set(channelId, categoryId);
   }
 
   /** Marks a channel as existing in Discord (possibly empty). */

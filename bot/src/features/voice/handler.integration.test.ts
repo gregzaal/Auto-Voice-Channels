@@ -847,4 +847,171 @@ describe('VoiceFeature (integration)', () => {
       expect(await managed.get('gone-vc')).toBeUndefined(); // stale record dropped
     });
   });
+
+  describe('category grouping (/group)', () => {
+    const CAT = 'cat-1';
+    const A = 'primary-A';
+    const B = 'primary-B';
+
+    beforeEach(async () => {
+      await autoChannels.upsert(GUILD, A, { name: '## room' });
+      await autoChannels.upsert(GUILD, B, { name: '## room' });
+      voice.setParent(A, CAT);
+      voice.setParent(B, CAT);
+      await guilds.transitionAuth({ guildId: GUILD, toStatus: 'trial' });
+      // The guilds row persists across tests, so clear any grouping from a prior one.
+      await guilds.updateSettings(GUILD, { groups: {} });
+    });
+
+    const enableGroup = (above = false): Promise<unknown> =>
+      guilds.updateSettings(GUILD, { groups: { [CAT]: { above } } });
+
+    it('numbers group-wide and positions one block across primaries on create', async () => {
+      await enableGroup(false); // below
+      const alice = member('alice');
+      voice.put(A, alice);
+      await feature.handleVoiceStateUpdate({ guildId: GUILD, member: alice, afterChannelId: A });
+      const sA = actions.ofType('create').at(-1)!.channelId;
+      voice.put(sA, alice);
+      voice.drop(A, 'alice');
+
+      const bob = member('bob');
+      voice.put(B, bob);
+      await feature.handleVoiceStateUpdate({ guildId: GUILD, member: bob, afterChannelId: B });
+      const sB = actions.ofType('create').at(-1)!.channelId;
+
+      // Group-wide numbering across the two primaries: #1 then #2.
+      expect((await secondaries.get(sA))!.state.index).toBe(0);
+      expect((await secondaries.get(sB))!.state.index).toBe(1);
+      expect(actions.ofType('create').map((a) => a.name)).toEqual(['#1 room', '#2 room']);
+
+      // One block of both secondaries, below all primaries.
+      const rg = actions.ofType('repositionGroup').at(-1)!;
+      expect(rg.channelIds).toEqual([sA, sB]);
+      expect(new Set(rg.primaryChannelIds)).toEqual(new Set([A, B]));
+      expect(rg.above).toBe(false);
+
+      // Appending a new channel never renames the existing ones (no churn).
+      expect(actions.ofType('rename')).toHaveLength(0);
+    });
+
+    it('resyncCategory renumbers group-wide and repositions the block', async () => {
+      await enableGroup(true); // above
+      await secondaries.create({
+        channelId: 's1',
+        guildId: GUILD,
+        primaryChannelId: A,
+        ownerId: 'a',
+        state: { name: 'stale', index: 5 },
+      });
+      await secondaries.create({
+        channelId: 's2',
+        guildId: GUILD,
+        primaryChannelId: B,
+        ownerId: 'b',
+        state: { name: 'stale', index: 9 },
+      });
+      voice.put('s1', member('a'));
+      voice.put('s2', member('b'));
+
+      const summary = await feature.resyncCategory(GUILD, CAT);
+      expect(summary.considered).toBe(2);
+      expect((await secondaries.get('s1'))!.state.index).toBe(0);
+      expect((await secondaries.get('s2'))!.state.index).toBe(1);
+      expect(actions.ofType('rename').map((a) => a.name)).toEqual(['#1 room', '#2 room']);
+      const rg = actions.ofType('repositionGroup').at(-1)!;
+      expect(rg.channelIds).toEqual(['s1', 's2']);
+      expect(rg.above).toBe(true);
+    });
+
+    it('resyncCategory reverts to per-primary numbering + positioning when not grouped', async () => {
+      // No group config → ungrouped path.
+      for (const [p, id] of [
+        [A, 'a1'],
+        [A, 'a2'],
+        [B, 'b1'],
+      ] as const) {
+        await secondaries.create({
+          channelId: id,
+          guildId: GUILD,
+          primaryChannelId: p,
+          ownerId: 'o',
+          state: { name: 'stale', index: 7 },
+        });
+        voice.put(id, member('o'));
+      }
+
+      await feature.resyncCategory(GUILD, CAT);
+      // Per-primary numbering: A → 0,1 ; B → 0.
+      expect((await secondaries.get('a1'))!.state.index).toBe(0);
+      expect((await secondaries.get('a2'))!.state.index).toBe(1);
+      expect((await secondaries.get('b1'))!.state.index).toBe(0);
+      // Per-primary reposition for each primary — not a single group reposition.
+      expect(actions.ofType('repositionGroup')).toHaveLength(0);
+      expect(
+        actions
+          .ofType('reposition')
+          .map((a) => a.primaryChannelId)
+          .sort(),
+      ).toEqual([A, B].sort());
+    });
+
+    it('reconcile compacts group numbering + repositions, and never deletes', async () => {
+      await enableGroup(false);
+      await secondaries.create({
+        channelId: 's1',
+        guildId: GUILD,
+        primaryChannelId: A,
+        ownerId: 'a',
+        state: { name: 'STALE', index: 3 },
+      });
+      await secondaries.create({
+        channelId: 's2',
+        guildId: GUILD,
+        primaryChannelId: B,
+        ownerId: 'b',
+        state: { name: 'STALE', index: 8 },
+      });
+      voice.put('s1', member('a'));
+      voice.put('s2', member('b'));
+
+      await feature.reconcileGuild(GUILD);
+      expect((await secondaries.get('s1'))!.state.index).toBe(0);
+      expect((await secondaries.get('s2'))!.state.index).toBe(1);
+      const names = actions.ofType('rename').map((a) => a.name);
+      expect(names).toContain('#1 room');
+      expect(names).toContain('#2 room');
+      expect(actions.ofType('repositionGroup').length).toBeGreaterThan(0);
+      expect(actions.ofType('delete')).toHaveLength(0);
+    });
+
+    it('groups root-level primaries via the @root sentinel', async () => {
+      voice.setParent(A, null);
+      voice.setParent(B, null);
+      await guilds.updateSettings(GUILD, { groups: { '@root': { above: true } } });
+      await secondaries.create({
+        channelId: 'r1',
+        guildId: GUILD,
+        primaryChannelId: A,
+        ownerId: 'a',
+        state: { name: 'x', index: 0 },
+      });
+      await secondaries.create({
+        channelId: 'r2',
+        guildId: GUILD,
+        primaryChannelId: B,
+        ownerId: 'b',
+        state: { name: 'x', index: 0 },
+      });
+      voice.put('r1', member('a'));
+      voice.put('r2', member('b'));
+
+      await feature.resyncCategory(GUILD, '@root');
+      expect((await secondaries.get('r1'))!.state.index).toBe(0);
+      expect((await secondaries.get('r2'))!.state.index).toBe(1);
+      const rg = actions.ofType('repositionGroup').at(-1)!;
+      expect(rg.channelIds).toEqual(['r1', 'r2']);
+      expect(rg.above).toBe(true);
+    });
+  });
 });

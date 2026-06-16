@@ -11,7 +11,7 @@ import { isEntitled } from '@avc/core';
 import type { VoiceActions } from './actions.js';
 import type { GuildVoiceView, MemberActivity, VoiceMember, VoiceStateEvent } from './types.js';
 import { getGameName, MAX_STATUS_LENGTH, renderChannelName } from './nameTemplate.js';
-import { displayName, parseVoiceSettings } from './guildSettings.js';
+import { displayName, groupKeyFor, parseVoiceSettings, readGroups } from './guildSettings.js';
 import type { CommandResult } from './commands.js';
 
 /** A fresh 31-bit random seed for a channel's `[[random]]` picks. */
@@ -344,7 +344,13 @@ export class VoiceFeature {
     );
 
     const primary = await this.deps.autoChannels.get(channelId);
-    const index = await this.deps.secondaries.countByPrimary(channelId);
+    // When the primary's category is grouped, number group-wide (across all the
+    // category's primaries) and append at the bottom; otherwise number per-primary.
+    const categoryKey = groupKeyFor(this.deps.voice.categoryOf?.(channelId));
+    const group = readGroups(guild.settings)[categoryKey];
+    const index = group
+      ? (await this.groupMembers(guildId, categoryKey)).secondaries.length
+      : await this.deps.secondaries.countByPrimary(channelId);
     const template = primary?.template.name ?? settings.channelNameTemplate;
     // Generate the per-channel random seed once, here, so `[[random]]` picks are
     // fixed for this channel's lifetime and never trigger a later rename.
@@ -392,6 +398,19 @@ export class VoiceFeature {
     }
 
     await this.deps.actions.moveMember(guildId, member.id, newChannelId);
+
+    // Grouped category: slot the new channel into the group block (at the bottom,
+    // since it's the newest) with one bulk reorder. Positions aren't rate-limited,
+    // and existing siblings keep their numbers, so this adds no rename churn.
+    if (group) {
+      const { primaryIds, secondaries } = await this.groupMembers(guildId, categoryKey);
+      await this.deps.actions.repositionGroup(
+        guildId,
+        primaryIds,
+        await this.companionBlock(secondaries.map((s) => s.channelId)),
+        group.above,
+      );
+    }
 
     this.deps.logger.info(
       { guildId, primaryId: channelId, secondaryId: newChannelId, name, creator: member.id },
@@ -910,20 +929,111 @@ export class VoiceFeature {
     const rows = await this.deps.secondaries.listByPrimary(primaryChannelId);
     if (rows.length === 0) return 0;
     const ordered = [...rows].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
-    // Build the move list: each secondary preceded by its "⇩ Join" companion (if
-    // private) so the pair stays adjacent — the companion always sits just above.
-    const channelBlock: string[] = [];
-    for (const row of ordered) {
-      const companion = await this.deps.joinCompanionFor?.(row.channelId);
-      if (companion) channelBlock.push(companion);
-      channelBlock.push(row.channelId);
-    }
+    const channelBlock = await this.companionBlock(ordered.map((r) => r.channelId));
     await this.deps.actions.repositionSecondaries(guildId, primaryChannelId, channelBlock, above);
     this.deps.logger.info(
       { guildId, primaryChannelId, above, count: ordered.length },
       'repositioned secondaries',
     );
     return ordered.length;
+  }
+
+  /**
+   * Expands an ordered secondary list into the reorder block Discord receives: each
+   * secondary preceded by its "⇩ Join" companion (if private) so the pair stays
+   * adjacent — the companion always sits just above its channel.
+   */
+  private async companionBlock(orderedSecondaryIds: string[]): Promise<string[]> {
+    const block: string[] = [];
+    for (const id of orderedSecondaryIds) {
+      const companion = await this.deps.joinCompanionFor?.(id);
+      if (companion) block.push(companion);
+      block.push(id);
+    }
+    return block;
+  }
+
+  /**
+   * The primaries (by category) and their secondaries (ordered by creation time)
+   * making up one grouping category. The category is resolved live from each
+   * primary's parent, so it reflects channels having been moved between categories.
+   */
+  private async groupMembers(
+    guildId: string,
+    categoryKey: string,
+  ): Promise<{ primaryIds: string[]; secondaries: SecondaryChannelRow[] }> {
+    const primaries = await this.deps.autoChannels.listByGuild(guildId);
+    const primaryIds = primaries
+      .filter((p) => groupKeyFor(this.deps.voice.categoryOf?.(p.channelId)) === categoryKey)
+      .map((p) => p.channelId);
+    const lists = await Promise.all(
+      primaryIds.map((id) => this.deps.secondaries.listByPrimary(id)),
+    );
+    const secondaries = lists
+      .flat()
+      .sort(
+        (a, b) =>
+          a.createdAt.getTime() - b.createdAt.getTime() || a.channelId.localeCompare(b.channelId),
+      );
+    return { primaryIds, secondaries };
+  }
+
+  /**
+   * Re-numbers and re-positions a whole category to match its current grouping
+   * config: **grouped** → one group-wide block, numbered across all the category's
+   * primaries; **ungrouped** → per-primary numbering, each primary's own block.
+   * Used when grouping is toggled, when `/position` changes a grouped category, and
+   * by reconcile. Idempotent.
+   */
+  async resyncCategory(guildId: string, categoryKey: string): Promise<RerenderSummary> {
+    const guild = await this.deps.guilds.ensure(guildId);
+    const config = readGroups(guild.settings)[categoryKey];
+    const { primaryIds, secondaries } = await this.groupMembers(guildId, categoryKey);
+    let renamed = 0;
+    let rateLimited = 0;
+
+    if (config) {
+      // Group-wide: number by group order, then one bulk reorder of the block.
+      for (let i = 0; i < secondaries.length; i++) {
+        const r = await this.rerenderSecondary(guildId, secondaries[i]!.channelId, { index: i });
+        if (r.name !== undefined) renamed += 1;
+        if (r.rateLimited) rateLimited += 1;
+      }
+      if (secondaries.length > 0) {
+        await this.deps.actions.repositionGroup(
+          guildId,
+          primaryIds,
+          await this.companionBlock(secondaries.map((s) => s.channelId)),
+          config.above,
+        );
+      }
+      return { considered: secondaries.length, renamed, rateLimited };
+    }
+
+    // Ungrouped: renumber + reposition each primary's own block independently.
+    let considered = 0;
+    for (const primaryId of primaryIds) {
+      const rows = (await this.deps.secondaries.listByPrimary(primaryId)).sort(
+        (a, b) =>
+          a.createdAt.getTime() - b.createdAt.getTime() || a.channelId.localeCompare(b.channelId),
+      );
+      for (let i = 0; i < rows.length; i++) {
+        const r = await this.rerenderSecondary(guildId, rows[i]!.channelId, { index: i });
+        considered += 1;
+        if (r.name !== undefined) renamed += 1;
+        if (r.rateLimited) rateLimited += 1;
+      }
+      if (rows.length > 0) {
+        const primary = await this.deps.autoChannels.get(primaryId);
+        await this.deps.actions.repositionSecondaries(
+          guildId,
+          primaryId,
+          await this.companionBlock(rows.map((r) => r.channelId)),
+          primary?.template.above === true,
+        );
+      }
+    }
+    return { considered, renamed, rateLimited };
   }
 
   /** Re-renders all secondaries sharing a primary with `channelId` (after `/template`). */
@@ -1145,26 +1255,54 @@ export class VoiceFeature {
       survivors.push(secondary);
     }
 
-    // Second pass: renumber surviving secondaries by creation order within each
-    // primary, so `##` compacts after a middle channel was deleted (and a number
-    // can never be duplicated). This mirrors the legacy periodic `check_rename`.
-    const byPrimary = new Map<string, SecondaryChannelRow[]>();
+    // Second pass: renumber survivors so `##` compacts after a deletion and a
+    // number is never duplicated within its scope. A **grouped** category numbers
+    // across ALL its primaries as one block; ungrouped primaries number
+    // independently (the legacy per-primary `check_rename`).
+    const groups = readGroups((await this.deps.guilds.ensure(guildId)).settings);
+    const byCreated = (a: SecondaryChannelRow, b: SecondaryChannelRow): number =>
+      a.createdAt.getTime() - b.createdAt.getTime() || a.channelId.localeCompare(b.channelId);
+    const groupedByCategory = new Map<string, SecondaryChannelRow[]>();
+    const ungroupedByPrimary = new Map<string, SecondaryChannelRow[]>();
     for (const s of survivors) {
-      const group = byPrimary.get(s.primaryChannelId) ?? [];
-      group.push(s);
-      byPrimary.set(s.primaryChannelId, group);
+      const categoryKey = groupKeyFor(this.deps.voice.categoryOf?.(s.primaryChannelId));
+      const grouped = groups[categoryKey] !== undefined;
+      const target = grouped ? groupedByCategory : ungroupedByPrimary;
+      const key = grouped ? categoryKey : s.primaryChannelId;
+      const bucket = target.get(key) ?? [];
+      bucket.push(s);
+      target.set(key, bucket);
     }
-    for (const group of byPrimary.values()) {
-      group.sort(
-        (a: SecondaryChannelRow, b: SecondaryChannelRow) =>
-          a.createdAt.getTime() - b.createdAt.getTime() || a.channelId.localeCompare(b.channelId),
-      );
-      for (let i = 0; i < group.length; i++) {
-        const { name } = await this.rerenderSecondary(guildId, group[i]!.channelId, {
+    for (const rows of ungroupedByPrimary.values()) {
+      rows.sort(byCreated);
+      for (let i = 0; i < rows.length; i++) {
+        const { name } = await this.rerenderSecondary(guildId, rows[i]!.channelId, {
           dryRun,
           index: i,
         });
-        if (name !== undefined) drift.renamed.push({ channelId: group[i]!.channelId, to: name });
+        if (name !== undefined) drift.renamed.push({ channelId: rows[i]!.channelId, to: name });
+      }
+    }
+    for (const [categoryKey, rows] of groupedByCategory) {
+      rows.sort(byCreated);
+      for (let i = 0; i < rows.length; i++) {
+        const { name } = await this.rerenderSecondary(guildId, rows[i]!.channelId, {
+          dryRun,
+          index: i,
+        });
+        if (name !== undefined) drift.renamed.push({ channelId: rows[i]!.channelId, to: name });
+      }
+      // Converge the block's position too (one bulk reorder; not rate-limited).
+      if (!dryRun && rows.length > 0) {
+        const primaryIds = (await this.deps.autoChannels.listByGuild(guildId))
+          .filter((p) => groupKeyFor(this.deps.voice.categoryOf?.(p.channelId)) === categoryKey)
+          .map((p) => p.channelId);
+        await this.deps.actions.repositionGroup(
+          guildId,
+          primaryIds,
+          await this.companionBlock(rows.map((r) => r.channelId)),
+          groups[categoryKey]?.above === true,
+        );
       }
     }
 
