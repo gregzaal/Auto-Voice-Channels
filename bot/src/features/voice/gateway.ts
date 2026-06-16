@@ -60,8 +60,9 @@ export function registerVoiceGateway(deps: VoiceGatewayDeps): () => void {
   const scheduler = new RenameScheduler({
     delayMs: deps.renameDelayMs ?? 4000,
     run: (guildId, channelId) =>
-      deps.dispatcher.dispatch(guildId, 'rerenderSecondary', async () => {
-        await deps.feature.rerenderSecondary(guildId, channelId);
+      deps.dispatcher.dispatch(guildId, 'rerenderChannel', async () => {
+        // Routes to the secondary or adopted-managed re-render as appropriate.
+        await deps.feature.rerenderChannelName(guildId, channelId);
       }),
     onError: (err, guildId, channelId) => {
       deps.logger.error({ err, guildId, channelId }, 'secondary re-render failed');
@@ -93,8 +94,8 @@ export function registerVoiceGateway(deps: VoiceGatewayDeps): () => void {
     // 2. Skip the constant status / custom-status churn: only act when a
     //    Playing/Streaming activity actually changed (the fields a name reads).
     if (gameSignature(oldPresence) === gameSignature(newPresence)) return;
-    // The rename is debounced per channel and rerenderSecondary no-ops if the
-    // channel isn't a tracked secondary, so scheduling here is cheap and safe.
+    // The rename is debounced per channel and the re-render no-ops if the channel
+    // isn't a managed secondary/adopted channel, so scheduling here is cheap and safe.
     scheduler.schedule(guildId, channelId);
   };
 

@@ -5,6 +5,7 @@ import {
   GuildRepository,
   JoinChannelRepository,
   loadConfig,
+  ManagedChannelRepository,
   PgNotifier,
   runMigrations,
   RUNTIME_FLAGS,
@@ -120,6 +121,7 @@ async function main(): Promise<void> {
   });
   const autoChannels = new AutoChannelRepository(db);
   const secondaries = new SecondaryChannelRepository(db);
+  const managed = new ManagedChannelRepository(db);
   const joinChannelsRepo = new JoinChannelRepository(db);
   const guildsRepo = new GuildRepository(db);
   const flags = new RuntimeFlagsRepository(db);
@@ -153,6 +155,7 @@ async function main(): Promise<void> {
   const voiceFeature = new VoiceFeature({
     autoChannels,
     secondaries,
+    managed,
     guilds: settingsCache,
     actions,
     voice,
@@ -214,6 +217,7 @@ async function main(): Promise<void> {
     dispatcher,
     secondaries,
     autoChannels,
+    managed,
     flags,
     logger,
   });

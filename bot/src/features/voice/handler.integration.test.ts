@@ -2,6 +2,7 @@ import {
   AutoChannelRepository,
   GuildRepository,
   JoinChannelRepository,
+  ManagedChannelRepository,
   SecondaryChannelRepository,
   db,
 } from '@avc/core';
@@ -23,6 +24,7 @@ describe('VoiceFeature (integration)', () => {
   let guilds: GuildRepository;
   let autoChannels: AutoChannelRepository;
   let secondaries: SecondaryChannelRepository;
+  let managed: ManagedChannelRepository;
   let voice: FakeVoiceView;
   let actions: RecordingVoiceActions;
   let feature: VoiceFeature;
@@ -32,6 +34,7 @@ describe('VoiceFeature (integration)', () => {
     guilds = new GuildRepository(env.handle.db);
     autoChannels = new AutoChannelRepository(env.handle.db);
     secondaries = new SecondaryChannelRepository(env.handle.db);
+    managed = new ManagedChannelRepository(env.handle.db);
   });
 
   afterAll(async () => {
@@ -41,6 +44,7 @@ describe('VoiceFeature (integration)', () => {
   beforeEach(async () => {
     await env.handle.db.delete(db.schema.joinChannels);
     await env.handle.db.delete(db.schema.secondaryChannels);
+    await env.handle.db.delete(db.schema.managedChannels);
     await env.handle.db.delete(db.schema.autoChannels);
     voice = new FakeVoiceView();
     actions = new RecordingVoiceActions();
@@ -671,5 +675,138 @@ describe('VoiceFeature (integration)', () => {
 
     expect(actions.ofType('privacy')).toHaveLength(0);
     expect(actions.ofType('joinChannel')).toHaveLength(0);
+  });
+
+  describe('adopted standalone channels (managed)', () => {
+    const ADOPTED = 'adopted-vc';
+    let f: VoiceFeature;
+
+    beforeEach(() => {
+      f = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        managed,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+      });
+    });
+
+    it('adopts a channel: seeds owner from occupants and renders the occupied name', async () => {
+      const alice = member('alice');
+      voice.put(ADOPTED, alice);
+
+      const res = await f.adoptChannel(GUILD, ADOPTED, 'General');
+      expect(res.ok).toBe(true);
+
+      const row = (await managed.get(ADOPTED))!;
+      expect(row.ownerId).toBe('alice');
+      expect(row.template.name).toBe("__General/@@creator@@'s room__");
+      // Occupied → "Alice's room".
+      expect(actions.ofType('rename').at(-1)).toMatchObject({
+        channelId: ADOPTED,
+        name: "alice's room",
+      });
+    });
+
+    it('refuses to adopt a primary or an already-adopted channel', async () => {
+      expect((await f.adoptChannel(GUILD, PRIMARY, 'x')).ok).toBe(false);
+      voice.put(ADOPTED, member('alice'));
+      await f.adoptChannel(GUILD, ADOPTED, 'General');
+      expect((await f.adoptChannel(GUILD, ADOPTED, 'General')).ok).toBe(false);
+    });
+
+    it('renames to the resting name when emptied — and never deletes the channel', async () => {
+      const alice = member('alice');
+      voice.put(ADOPTED, alice);
+      await f.adoptChannel(GUILD, ADOPTED, 'General');
+
+      // alice leaves → channel empties.
+      voice.drop(ADOPTED, 'alice');
+      const touched = await f.handleVoiceStateUpdate({
+        guildId: GUILD,
+        member: alice,
+        beforeChannelId: ADOPTED,
+      });
+      expect(touched).toContain(ADOPTED);
+      await f.rerenderManaged(GUILD, ADOPTED); // the scheduler does this in production
+
+      expect(actions.ofType('rename').at(-1)).toMatchObject({
+        channelId: ADOPTED,
+        name: 'General',
+      });
+      expect(actions.ofType('delete')).toHaveLength(0);
+      expect(await managed.get(ADOPTED)).toBeDefined();
+      expect((await managed.get(ADOPTED))!.ownerId).toBeNull();
+    });
+
+    it('claims ownership and shows the occupied name when someone joins an empty one', async () => {
+      await managed.create({
+        channelId: ADOPTED,
+        guildId: GUILD,
+        template: { name: "__General/@@creator@@'s room__" },
+        state: { seed: 1, name: 'General' },
+      });
+      const bob = member('bob');
+      voice.put(ADOPTED, bob);
+
+      await f.handleVoiceStateUpdate({ guildId: GUILD, member: bob, afterChannelId: ADOPTED });
+      expect((await managed.get(ADOPTED))!.ownerId).toBe('bob');
+      await f.rerenderManaged(GUILD, ADOPTED);
+      expect(actions.ofType('rename').at(-1)).toMatchObject({
+        channelId: ADOPTED,
+        name: "bob's room",
+      });
+    });
+
+    it('edits templates, stops managing, and exposes editor state', async () => {
+      voice.put(ADOPTED, member('alice'));
+      await f.adoptChannel(GUILD, ADOPTED, 'General');
+
+      const editor = await f.getManagedEditorState(GUILD, ADOPTED);
+      expect(editor.found).toBe(true);
+      expect(editor.name.currentTemplate).toBe("__General/@@creator@@'s room__");
+
+      expect((await f.setManagedName(GUILD, ADOPTED, '__Lobby/@@creator@@ is live__')).ok).toBe(
+        true,
+      );
+      expect((await managed.get(ADOPTED))!.template.name).toBe('__Lobby/@@creator@@ is live__');
+      expect((await f.setManagedName(GUILD, ADOPTED, '   ')).ok).toBe(false); // blank rejected
+
+      const stop = await f.stopManaging(GUILD, ADOPTED);
+      expect(stop.ok).toBe(true);
+      expect(await managed.get(ADOPTED)).toBeUndefined();
+    });
+
+    it('reconcile converges names, never deletes, and drops vanished records', async () => {
+      // A live adopted channel whose stored name has drifted from reality.
+      await managed.create({
+        channelId: ADOPTED,
+        guildId: GUILD,
+        ownerId: 'alice',
+        template: { name: "__General/@@creator@@'s room__" },
+        state: { seed: 1, name: 'STALE', roster: ['alice'] },
+      });
+      voice.put(ADOPTED, member('alice'));
+      // A vanished adopted channel (record exists, channel gone).
+      await managed.create({
+        channelId: 'gone-vc',
+        guildId: GUILD,
+        template: { name: '__X/Y__' },
+        state: {},
+      });
+
+      await f.reconcileGuild(GUILD);
+
+      expect(actions.ofType('rename').at(-1)).toMatchObject({
+        channelId: ADOPTED,
+        name: "alice's room",
+      });
+      expect(actions.ofType('delete')).toHaveLength(0); // adopted channels are never deleted
+      expect(await managed.get(ADOPTED)).toBeDefined();
+      expect(await managed.get('gone-vc')).toBeUndefined(); // stale record dropped
+    });
   });
 });

@@ -35,8 +35,8 @@ function presence(guildId: string, channelId: string | null, game: string | unde
 function harness() {
   const client = new EventEmitter();
   const handleVoiceStateUpdate = vi.fn(async () => ['sec-1']);
-  const rerenderSecondary = vi.fn(async () => ({}));
-  const feature = { handleVoiceStateUpdate, rerenderSecondary } as unknown as VoiceFeature;
+  const rerenderChannelName = vi.fn(async () => ({}));
+  const feature = { handleVoiceStateUpdate, rerenderChannelName } as unknown as VoiceFeature;
   const dispose = registerVoiceGateway({
     client: client as unknown as Client,
     dispatcher: new GuildDispatcher({ logger: fakeLogger() }),
@@ -44,7 +44,7 @@ function harness() {
     logger: fakeLogger(),
     renameDelayMs: 5,
   });
-  return { client, handleVoiceStateUpdate, rerenderSecondary, dispose };
+  return { client, handleVoiceStateUpdate, rerenderChannelName, dispose };
 }
 
 describe('registerVoiceGateway (gateway → dispatcher → feature pipeline)', () => {
@@ -71,7 +71,7 @@ describe('registerVoiceGateway (gateway → dispatcher → feature pipeline)', (
 
     // The returned "touched" channel is scheduled for a debounced rerender.
     await tick(20);
-    expect(h.rerenderSecondary).toHaveBeenCalledWith('g1', 'sec-1');
+    expect(h.rerenderChannelName).toHaveBeenCalledWith('g1', 'sec-1');
   });
 
   it('ignores a mute/unmute (same channel before and after)', async () => {
@@ -95,7 +95,7 @@ describe('registerVoiceGateway (gateway → dispatcher → feature pipeline)', (
       presence('g1', 'sec-1', 'Halo'),
     );
     await tick(20);
-    expect(h.rerenderSecondary).toHaveBeenCalledWith('g1', 'sec-1');
+    expect(h.rerenderChannelName).toHaveBeenCalledWith('g1', 'sec-1');
   });
 
   it('ignores a presence change for a member not in a voice channel', async () => {
@@ -103,7 +103,7 @@ describe('registerVoiceGateway (gateway → dispatcher → feature pipeline)', (
     dispose = h.dispose;
     h.client.emit('presenceUpdate', presence('g1', null, 'Halo'), presence('g1', null, 'Doom'));
     await tick(20);
-    expect(h.rerenderSecondary).not.toHaveBeenCalled();
+    expect(h.rerenderChannelName).not.toHaveBeenCalled();
   });
 
   it('the disposer detaches listeners (no work after dispose)', async () => {

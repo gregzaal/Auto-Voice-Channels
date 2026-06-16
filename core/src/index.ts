@@ -9,6 +9,7 @@ export * from './repositories/opsAudit.js';
 export * from './repositories/shardLeases.js';
 export * from './repositories/autoChannels.js';
 export * from './repositories/secondaryChannels.js';
+export * from './repositories/managedChannels.js';
 export * from './repositories/joinChannels.js';
 export * from './db/client.js';
 export * from './db/migrate.js';

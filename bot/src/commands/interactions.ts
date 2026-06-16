@@ -37,8 +37,11 @@ import {
   settingsId,
 } from './settingsPanel.js';
 import {
+  ADOPT_PREFIX,
+  buildAdoptPrompt,
   buildEditorModal,
   EDITOR_PREFIX,
+  parseAdoptId,
   parseEditorId,
   renderEditorPanel,
 } from './templatePanel.js';
@@ -231,17 +234,25 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     const guildId = interaction.guildId!;
     const channelId = await requireVoiceChannel(interaction);
     if (!channelId) return;
-    const state = await run(guildId, 'cmd:template', () =>
+    // A creator channel's secondary → edit the primary's templates (the usual case).
+    const primaryState = await run(guildId, 'cmd:template', () =>
       deps.feature.getEditorState('primary', guildId, channelId),
     );
-    if (!state.found) {
-      await interaction.reply({
-        content: 'This isn’t a bot-managed voice channel.',
-        ephemeral: true,
-      });
+    if (primaryState.found) {
+      await interaction.reply(renderEditorPanel('primary', channelId, primaryState));
       return;
     }
-    await interaction.reply(renderEditorPanel('primary', channelId, state));
+    // Already an adopted standalone channel → edit its templates.
+    const managedState = await run(guildId, 'cmd:template:managed', () =>
+      deps.feature.getManagedEditorState(guildId, channelId),
+    );
+    if (managedState.found) {
+      await interaction.reply(renderEditorPanel('adopted', channelId, managedState));
+      return;
+    }
+    // An otherwise-unmanaged voice channel → offer to adopt it (explicit confirm).
+    const name = interaction.guild?.channels.cache.get(channelId)?.name ?? 'this channel';
+    await interaction.reply(buildAdoptPrompt(channelId, name));
   }
 
   /** `/position` → a modal to pick above/below for the creator channel you're in. */
@@ -439,7 +450,57 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       // Defer first: the rerender can hit the rate-limit probe and brush the 3s ack.
       await interaction.deferUpdate();
       await refreshEditorPanel(interaction, scope, field, channelId, 'reset');
+      return;
     }
+    if (action === 'stop') {
+      // Adopted channels only: stop managing the name and close the panel.
+      const res = await run(interaction.guildId!, 'editor:stop', () =>
+        deps.feature.stopManaging(interaction.guildId!, channelId),
+      );
+      await interaction.update({ content: formatResult(res), embeds: [], components: [] });
+    }
+  }
+
+  /** The "AVC will manage this channel's name" confirm/cancel buttons (`/template`). */
+  async function handleAdoptButton(interaction: ButtonInteraction): Promise<void> {
+    if (!(await requireManageChannels(interaction))) return;
+    const parsed = parseAdoptId(interaction.customId);
+    if (!parsed) return;
+    const guildId = interaction.guildId!;
+    const { action, channelId } = parsed;
+    if (action === 'cancel') {
+      await interaction.update({
+        content: 'Cancelled — AVC won’t manage this channel.',
+        embeds: [],
+        components: [],
+      });
+      return;
+    }
+    if (!(await deps.guilds.isEntitled(guildId, deps.selfHosted))) {
+      await interaction.update({
+        content: 'This server isn’t currently entitled.',
+        embeds: [],
+        components: [],
+      });
+      return;
+    }
+    const name = interaction.guild?.channels.cache.get(channelId)?.name ?? 'this channel';
+    const res = await run(guildId, 'adopt:confirm', () =>
+      deps.feature.adoptChannel(guildId, channelId, name),
+    );
+    if (!res.ok) {
+      await interaction.update({ content: formatResult(res), embeds: [], components: [] });
+      return;
+    }
+    // Drop straight into the managed-channel editor so they can tweak the template.
+    const state = await run(guildId, 'adopt:state', () =>
+      deps.feature.getManagedEditorState(guildId, channelId),
+    );
+    await interaction.update(
+      toUpdate(
+        renderEditorPanel('adopted', channelId, state, { updated: true, note: res.message }),
+      ),
+    );
   }
 
   async function handleEditorModal(interaction: ModalSubmitInteraction): Promise<void> {
@@ -489,6 +550,13 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         field === 'name'
           ? deps.voiceCommands.setName(guildId, channelId, userId, value, { admin })
           : deps.voiceCommands.setStatus(guildId, channelId, userId, value, { admin }),
+      );
+    } else if (scope === 'adopted') {
+      // Adopted standalone channel: edit + re-render happen inside the feature.
+      result = await run(guildId, `editor:adopted:${field}`, () =>
+        field === 'name'
+          ? deps.feature.setManagedName(guildId, channelId, value)
+          : deps.feature.setManagedStatus(guildId, channelId, value),
       );
     } else {
       result = await run(guildId, `editor:primary:${field}`, () =>
@@ -707,6 +775,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     if (interaction.customId === CREATE_AGAIN_ID) return openCreateModal(interaction);
     if (interaction.customId.startsWith(KICK_PREFIX)) return handleKickVote(interaction);
     if (interaction.customId.startsWith(JOIN_PREFIX)) return handleJoinDecision(interaction);
+    if (interaction.customId.startsWith(ADOPT_PREFIX)) return handleAdoptButton(interaction);
     if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorButton(interaction);
     if (interaction.customId.startsWith(SETTINGS_PREFIX)) return handleSettingsButton(interaction);
   }

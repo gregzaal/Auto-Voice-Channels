@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { EditorState } from '../features/voice/index.js';
-import { buildEditorModal, editorId, parseEditorId, renderEditorPanel } from './templatePanel.js';
+import {
+  buildAdoptPrompt,
+  buildEditorModal,
+  editorId,
+  parseAdoptId,
+  parseEditorId,
+  renderEditorPanel,
+} from './templatePanel.js';
 
 const state: EditorState = {
   found: true,
@@ -62,5 +69,49 @@ describe('templatePanel', () => {
       buildEditorModal('primary', 'status', '123', state).toJSON(),
     );
     expect(primaryStatus).toContain('PLAYING');
+  });
+
+  it('accepts the adopted scope and swaps "Reset name" for "Stop managing"', () => {
+    expect(parseEditorId(editorId('stop', 'adopted', 'name', '42'))).toMatchObject({
+      action: 'stop',
+      scope: 'adopted',
+    });
+    const adoptedState: EditorState = {
+      found: true,
+      scope: 'adopted',
+      name: {
+        currentTemplate: "__General/@@creator@@'s room__",
+        effectiveTemplate: "__General/@@creator@@'s room__",
+        preview: 'General',
+      },
+      status: { effectiveTemplate: '', preview: '' },
+      ownerId: null,
+    };
+    const labels = (
+      renderEditorPanel('adopted', '42', adoptedState).components as {
+        components: { data: { label?: string } }[];
+      }[]
+    ).flatMap((row) => row.components.map((c) => c.data.label));
+    expect(labels).toEqual([
+      'Edit name template',
+      'Edit status template',
+      'Stop managing',
+      'Reset status',
+      'Close',
+    ]);
+  });
+
+  it('round-trips and validates adopt-prompt ids, and renders the confirm prompt', () => {
+    expect(parseAdoptId('avc:adopt:confirm:99')).toEqual({ action: 'confirm', channelId: '99' });
+    expect(parseAdoptId('avc:adopt:cancel:99')).toEqual({ action: 'cancel', channelId: '99' });
+    expect(parseAdoptId('avc:adopt:bogus:99')).toBeNull();
+    expect(parseAdoptId('avc:tpl:edit:channel:name:1')).toBeNull();
+
+    const prompt = buildAdoptPrompt('99', 'Lobby');
+    expect(prompt.ephemeral).toBe(true);
+    const json = JSON.stringify(prompt);
+    expect(json).toContain('Lobby'); // shows the resting (current) name
+    expect(json).toContain('avc:adopt:confirm:99');
+    expect(json).toContain('avc:adopt:cancel:99');
   });
 });

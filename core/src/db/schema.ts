@@ -113,6 +113,34 @@ export const secondaryChannels = pgTable(
 );
 
 /**
+ * Standalone voice channels AVC manages the *name* of, adopted via `/template`
+ * on an otherwise-unmanaged channel. Unlike secondaries these are persistent:
+ * they are never created or deleted by the bot, only renamed between an "empty"
+ * and "occupied" form as members come and go. One row per adopted channel,
+ * removed when the channel vanishes or management is turned off.
+ */
+export const managedChannels = pgTable(
+  'managed_channels',
+  {
+    channelId: text('channel_id').primaryKey(),
+    guildId: text('guild_id').notNull(),
+    /** Current occupant-owner (longest-present), for `@@creator@@`. Null when empty. */
+    ownerId: text('owner_id'),
+    /** Name/status templates configured for this channel (the `/template` editor). */
+    template: jsonb('template')
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    /** Last-rendered name/status, random seed, and arrival roster (change detection). */
+    state: jsonb('state')
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index('managed_channels_guild_idx').on(t.guildId)],
+);
+
+/**
  * "⇩ Join {creator}" companion channels for private secondaries. Joining one
  * raises a join request to the private channel's owner. One row per private
  * secondary; deleted when the channel goes public or is cleaned up.

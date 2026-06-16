@@ -2,6 +2,7 @@ import {
   RUNTIME_FLAGS,
   type AutoChannelRepository,
   type Logger,
+  type ManagedChannelRepository,
   type RuntimeFlagsRepository,
   type SecondaryChannelRepository,
 } from '@avc/core';
@@ -13,6 +14,8 @@ export interface ReconcilerDeps {
   dispatcher: GuildDispatcher;
   secondaries: SecondaryChannelRepository;
   autoChannels: AutoChannelRepository;
+  /** Adopted standalone channels, so the sweep also covers guilds that only have those. */
+  managed?: ManagedChannelRepository;
   flags: RuntimeFlagsRepository;
   logger: Logger;
   /** Periodic safety-net sweep interval (ms). Defaults to 5 minutes. */
@@ -99,13 +102,14 @@ export class Reconciler {
     await this.reconcileGuilds(guildIds, opts);
   }
 
-  /** Distinct guilds with at least one primary or tracked secondary. */
+  /** Distinct guilds with at least one primary, tracked secondary, or adopted channel. */
   private async scopedGuildIds(): Promise<string[]> {
-    const [withSecondaries, withPrimaries] = await Promise.all([
+    const [withSecondaries, withPrimaries, withManaged] = await Promise.all([
       this.deps.secondaries.listGuildIds(),
       this.deps.autoChannels.listGuildIds(),
+      this.deps.managed?.listGuildIds() ?? Promise.resolve([]),
     ]);
-    return [...new Set([...withSecondaries, ...withPrimaries])];
+    return [...new Set([...withSecondaries, ...withPrimaries, ...withManaged])];
   }
 
   private isPaused(): Promise<boolean> {

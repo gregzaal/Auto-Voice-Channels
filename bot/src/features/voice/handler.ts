@@ -2,6 +2,8 @@ import type {
   AutoChannelRepository,
   GuildSettingsReader,
   Logger,
+  ManagedChannelRepository,
+  ManagedChannelRow,
   SecondaryChannelRepository,
   SecondaryChannelRow,
 } from '@avc/core';
@@ -10,6 +12,7 @@ import type { VoiceActions } from './actions.js';
 import type { GuildVoiceView, MemberActivity, VoiceMember, VoiceStateEvent } from './types.js';
 import { getGameName, MAX_STATUS_LENGTH, renderChannelName } from './nameTemplate.js';
 import { displayName, parseVoiceSettings } from './guildSettings.js';
+import type { CommandResult } from './commands.js';
 
 /** A fresh 31-bit random seed for a channel's `[[random]]` picks. */
 function randomSeed(): number {
@@ -42,6 +45,12 @@ export interface CreationGate {
 export interface VoiceFeatureDeps {
   autoChannels: AutoChannelRepository;
   secondaries: SecondaryChannelRepository;
+  /**
+   * Adopted standalone channels whose name the bot manages (`/template` on an
+   * unmanaged channel). Optional so the feature is testable without it; when
+   * absent, no channel is treated as managed.
+   */
+  managed?: ManagedChannelRepository;
   guilds: GuildSettingsReader;
   actions: VoiceActions;
   voice: GuildVoiceView;
@@ -161,7 +170,7 @@ type CreateOutcome =
 type CleanupOutcome = { action: 'deleted' | 'would-delete' | 'skip' };
 
 /** Whose templates an editor panel edits: one channel (`/name`) or a primary (`/template`). */
-export type EditorScope = 'channel' | 'primary';
+export type EditorScope = 'channel' | 'primary' | 'adopted';
 /** Which template within a scope. */
 export type EditorField = 'name' | 'status';
 
@@ -235,6 +244,12 @@ export class VoiceFeature {
         await this.handleSecondaryLeave(guildId, beforeChannelId, event.member.id);
         this.deps.serverLog?.(guildId, 3, `🚪 <@${event.member.id}> left <#${beforeChannelId}>`);
         touched.push(beforeChannelId);
+      } else if (await this.isManaged(guildId, beforeChannelId)) {
+        // An adopted standalone channel: update its roster/owner and re-render
+        // (to the resting "empty" name once the last member leaves).
+        await this.handleManagedLeave(guildId, beforeChannelId, event.member.id);
+        this.deps.serverLog?.(guildId, 3, `🚪 <@${event.member.id}> left <#${beforeChannelId}>`);
+        touched.push(beforeChannelId);
       }
     }
 
@@ -246,10 +261,21 @@ export class VoiceFeature {
         await this.addToRoster(guildId, afterChannelId, event.member.id);
         this.deps.serverLog?.(guildId, 3, `🔊 <@${event.member.id}> joined <#${afterChannelId}>`);
         touched.push(afterChannelId);
+      } else if (await this.isManaged(guildId, afterChannelId)) {
+        // An adopted standalone channel: claim ownership if empty, then re-render
+        // (to the "occupied" name once someone joins).
+        await this.handleManagedJoin(guildId, afterChannelId, event.member.id);
+        this.deps.serverLog?.(guildId, 3, `🔊 <@${event.member.id}> joined <#${afterChannelId}>`);
+        touched.push(afterChannelId);
       }
     }
 
     return touched;
+  }
+
+  /** Whether `channelId` is an adopted managed channel (false when none wired). */
+  private async isManaged(guildId: string, channelId: string): Promise<boolean> {
+    return (await this.deps.managed?.isManaged(guildId, channelId)) ?? false;
   }
 
   /**
@@ -451,6 +477,308 @@ export class VoiceFeature {
       ...secondary.state,
       roster: [...roster, memberId],
     });
+  }
+
+  /**
+   * A member joined an adopted managed channel: append them to the arrival roster
+   * and, if the channel had no current owner (it was empty), make the
+   * longest-present member its owner — so `@@creator@@` resolves once occupied.
+   * Idempotent: a replayed join writes nothing new.
+   */
+  private async handleManagedJoin(
+    guildId: string,
+    channelId: string,
+    memberId: string,
+  ): Promise<void> {
+    const row = await this.deps.managed?.get(channelId);
+    if (!this.deps.managed || !row || row.guildId !== guildId) return;
+
+    const members = this.deps.voice.membersInChannel(channelId).filter((m) => !m.bot);
+    const present = new Set(members.map((m) => m.id));
+    present.add(memberId); // the joiner, even if their state hasn't hit the cache yet
+    const ordered = (row.state.roster ?? []).filter((id) => present.has(id));
+    for (const m of members) if (!ordered.includes(m.id)) ordered.push(m.id);
+    if (!ordered.includes(memberId)) ordered.push(memberId);
+
+    if (!sameOrder(ordered, row.state.roster)) {
+      await this.deps.managed.updateState(channelId, { ...row.state, roster: ordered });
+    }
+    // Owner only set when there isn't a present one (e.g. the channel was empty).
+    const ownerPresent = row.ownerId !== null && present.has(row.ownerId);
+    if (!ownerPresent && ordered[0]) await this.deps.managed.setOwner(channelId, ordered[0]);
+  }
+
+  /**
+   * A member left an adopted managed channel: prune the roster and, when the
+   * owner left, hand ownership to the longest-present remaining member — or clear
+   * it (null) when the channel is now empty, so the re-render shows the resting
+   * "empty" name. Idempotent.
+   */
+  private async handleManagedLeave(
+    guildId: string,
+    channelId: string,
+    leaverId: string,
+  ): Promise<void> {
+    const row = await this.deps.managed?.get(channelId);
+    if (!this.deps.managed || !row || row.guildId !== guildId) return;
+
+    const members = this.deps.voice.membersInChannel(channelId).filter((m) => !m.bot);
+    const present = new Set(members.map((m) => m.id));
+    const ordered = (row.state.roster ?? []).filter((id) => present.has(id));
+    for (const m of members) if (!ordered.includes(m.id)) ordered.push(m.id);
+
+    if (!sameOrder(ordered, row.state.roster)) {
+      await this.deps.managed.updateState(channelId, { ...row.state, roster: ordered });
+    }
+
+    // Reassign ownership only when the owner is the one who left.
+    if (row.ownerId !== leaverId) return;
+    const nextOwner = ordered[0] ?? null; // null → channel emptied
+    await this.deps.managed.setOwner(channelId, nextOwner);
+  }
+
+  /**
+   * Re-renders an adopted managed channel's name (and status) from its template +
+   * current members. Unlike {@link rerenderSecondary} it does NOT bail when the
+   * channel is empty — that's exactly when it must show its resting name — and it
+   * never deletes the channel. Idempotent: a no-op when nothing changed.
+   */
+  async rerenderManaged(
+    guildId: string,
+    channelId: string,
+    opts: ReconcileOptions = {},
+  ): Promise<RerenderResult> {
+    const row = await this.deps.managed?.get(channelId);
+    if (!this.deps.managed || !row || row.guildId !== guildId) return {};
+    if (row.template.name === undefined && row.template.status === undefined) return {};
+
+    const guild = await this.deps.guilds.ensure(guildId);
+    const settings = parseVoiceSettings(guild.settings);
+    const members = this.deps.voice.membersInChannel(channelId);
+    const owner = row.ownerId ? members.find((m) => m.id === row.ownerId) : undefined;
+    const renderCtx = {
+      index: 0,
+      members,
+      aliases: settings.aliases,
+      general: settings.general,
+      ...(row.state.seed !== undefined ? { seed: row.state.seed } : {}),
+      ...(owner ? { creatorName: displayName(settings, owner), creator: owner } : {}),
+    };
+
+    const renderedName =
+      row.template.name !== undefined ? renderChannelName(row.template.name, renderCtx) : undefined;
+    const renderedStatus =
+      row.template.status !== undefined
+        ? renderChannelName(row.template.status, renderCtx, {
+            maxLength: MAX_STATUS_LENGTH,
+            allowEmpty: true,
+          })
+        : undefined;
+
+    const result: RerenderResult = {};
+    if (renderedName !== undefined && renderedName !== row.state.name) result.name = renderedName;
+    if (renderedStatus !== undefined && renderedStatus !== (row.state.status ?? '')) {
+      result.status = renderedStatus;
+    }
+    if (result.name === undefined && result.status === undefined) return {};
+    if (opts.dryRun) return result;
+
+    if (result.name !== undefined) {
+      const { rateLimited } = await this.deps.actions.renameChannel(
+        guildId,
+        channelId,
+        result.name,
+      );
+      if (rateLimited) result.rateLimited = true;
+      this.deps.serverLog?.(guildId, 2, `✏️ <#${channelId}> renamed to **${result.name}**`);
+    }
+    if (result.status !== undefined) {
+      await this.deps.actions.setVoiceStatus(guildId, channelId, result.status);
+    }
+    // Persist the freshly-rendered values (so change detection is stable next time).
+    await this.deps.managed.updateState(channelId, {
+      ...row.state,
+      ...(renderedName !== undefined ? { name: renderedName } : {}),
+      ...(renderedStatus !== undefined ? { status: renderedStatus } : {}),
+    });
+
+    this.deps.logger.info(
+      { guildId, managedId: channelId, name: renderedName, status: renderedStatus },
+      're-rendered managed channel',
+    );
+    return result;
+  }
+
+  /**
+   * Re-renders whichever kind of managed channel `channelId` is — an adopted
+   * standalone channel or a spawned secondary. The gateway's debounced re-render
+   * scheduler routes through this so both kinds pick up join/leave/presence
+   * changes; a no-op when the channel is neither.
+   */
+  async rerenderChannelName(
+    guildId: string,
+    channelId: string,
+    opts: RerenderOptions = {},
+  ): Promise<RerenderResult> {
+    if (await this.isManaged(guildId, channelId)) {
+      return this.rerenderManaged(guildId, channelId, opts);
+    }
+    return this.rerenderSecondary(guildId, channelId, opts);
+  }
+
+  /**
+   * The default name template applied when adopting a channel: its current name
+   * while empty, and "{owner}'s room" once occupied. The original name is
+   * sanitized so it can't break the `__empty/occupied__` token (no `/` to split
+   * early, no `__` to close it early).
+   */
+  private adoptDefaultTemplate(originalName: string): string {
+    const safe = originalName.replace(/\//g, '∕').replace(/_{2,}/g, '_').trim() || 'Voice';
+    return `__${safe}/@@creator@@'s room__`;
+  }
+
+  /**
+   * Adopts an otherwise-unmanaged voice channel so the bot manages its name. Seeds
+   * the roster/owner from who's currently in it (so `@@creator@@` resolves right
+   * away) and renders the default `__empty/occupied__` template once. Refuses a
+   * primary, secondary, or already-adopted channel.
+   */
+  async adoptChannel(
+    guildId: string,
+    channelId: string,
+    originalName: string,
+  ): Promise<CommandResult> {
+    if (!this.deps.managed) return { ok: false, message: 'Managed channels aren’t available.' };
+    if (await this.deps.managed.isManaged(guildId, channelId)) {
+      return { ok: false, message: 'AVC already manages this channel.' };
+    }
+    if (await this.deps.autoChannels.isPrimary(guildId, channelId)) {
+      return {
+        ok: false,
+        message: 'That’s a creator channel — edit it with `/template` directly.',
+      };
+    }
+    if (await this.deps.secondaries.isSecondary(guildId, channelId)) {
+      return { ok: false, message: 'That’s already a bot-created channel.' };
+    }
+    const roster = this.deps.voice
+      .membersInChannel(channelId)
+      .filter((m) => !m.bot)
+      .map((m) => m.id);
+    await this.deps.managed.create({
+      channelId,
+      guildId,
+      ownerId: roster[0] ?? null,
+      template: { name: this.adoptDefaultTemplate(originalName) },
+      state: { seed: randomSeed(), roster },
+    });
+    await this.rerenderManaged(guildId, channelId);
+    this.deps.logger.info({ guildId, channelId }, 'adopted channel for name management');
+    return { ok: true, message: 'AVC now manages this channel’s name.' };
+  }
+
+  /** Sets an adopted channel's name template and re-renders it. Name can't be blank. */
+  async setManagedName(guildId: string, channelId: string, value: string): Promise<CommandResult> {
+    if (!this.deps.managed) return { ok: false, message: 'Managed channels aren’t available.' };
+    const row = await this.deps.managed.get(channelId);
+    if (!row || row.guildId !== guildId) {
+      return { ok: false, message: 'AVC doesn’t manage this channel.' };
+    }
+    const trimmed = value.trim().replace(/[\r\n]+/g, ' ');
+    if (trimmed === '') return { ok: false, message: 'The name template can’t be empty.' };
+    await this.deps.managed.setTemplate(channelId, { ...row.template, name: trimmed });
+    await this.rerenderManaged(guildId, channelId);
+    return { ok: true, message: 'Updated this channel’s name template.' };
+  }
+
+  /**
+   * Sets an adopted channel's status template and re-renders it. A blank value (or
+   * `reset`) clears the status — adopted channels default to no status.
+   */
+  async setManagedStatus(
+    guildId: string,
+    channelId: string,
+    value: string,
+  ): Promise<CommandResult> {
+    if (!this.deps.managed) return { ok: false, message: 'Managed channels aren’t available.' };
+    const row = await this.deps.managed.get(channelId);
+    if (!row || row.guildId !== guildId) {
+      return { ok: false, message: 'AVC doesn’t manage this channel.' };
+    }
+    const trimmed = value.trim();
+    const cleared = trimmed === '' || trimmed.toLowerCase() === 'reset';
+    await this.deps.managed.setTemplate(channelId, {
+      ...row.template,
+      status: cleared ? '' : trimmed,
+    });
+    await this.rerenderManaged(guildId, channelId);
+    return {
+      ok: true,
+      message: cleared
+        ? 'Cleared this channel’s status — it will stay blank.'
+        : 'Updated this channel’s status template.',
+    };
+  }
+
+  /** Stops managing an adopted channel (its current name stays as-is). */
+  async stopManaging(guildId: string, channelId: string): Promise<CommandResult> {
+    if (!this.deps.managed) return { ok: false, message: 'Managed channels aren’t available.' };
+    const row = await this.deps.managed.get(channelId);
+    if (!row || row.guildId !== guildId) {
+      return { ok: false, message: 'AVC doesn’t manage this channel.' };
+    }
+    await this.deps.managed.remove(channelId);
+    this.deps.logger.info({ guildId, channelId }, 'stopped managing channel');
+    return {
+      ok: true,
+      message: 'Stopped managing this channel’s name — its current name stays as-is.',
+    };
+  }
+
+  /**
+   * Resolves the `/template` editor state for an adopted standalone channel: its
+   * current name + status templates and a live preview against current members.
+   */
+  async getManagedEditorState(guildId: string, channelId: string): Promise<EditorState> {
+    const empty: EditorFieldState = { effectiveTemplate: '', preview: '' };
+    const row = await this.deps.managed?.get(channelId);
+    if (!this.deps.managed || !row || row.guildId !== guildId) {
+      return { found: false, scope: 'adopted', name: empty, status: empty };
+    }
+    const guild = await this.deps.guilds.ensure(guildId);
+    const settings = parseVoiceSettings(guild.settings);
+    const members = this.deps.voice.membersInChannel(channelId);
+    const owner = row.ownerId ? members.find((m) => m.id === row.ownerId) : undefined;
+    const renderCtx = {
+      index: 0,
+      members,
+      aliases: settings.aliases,
+      general: settings.general,
+      ...(row.state.seed !== undefined ? { seed: row.state.seed } : {}),
+      ...(owner ? { creatorName: displayName(settings, owner), creator: owner } : {}),
+    };
+    const nameTpl = row.template.name ?? '';
+    const statusTpl = row.template.status ?? '';
+    return {
+      found: true,
+      scope: 'adopted',
+      name: {
+        ...(row.template.name !== undefined ? { currentTemplate: row.template.name } : {}),
+        effectiveTemplate: nameTpl,
+        preview: nameTpl ? renderChannelName(nameTpl, renderCtx) : '',
+      },
+      status: {
+        ...(row.template.status !== undefined ? { currentTemplate: row.template.status } : {}),
+        effectiveTemplate: statusTpl,
+        preview: statusTpl
+          ? renderChannelName(statusTpl, renderCtx, {
+              maxLength: MAX_STATUS_LENGTH,
+              allowEmpty: true,
+            })
+          : '',
+      },
+      ownerId: row.ownerId,
+    };
   }
 
   /**
@@ -701,6 +1029,8 @@ export class VoiceFeature {
     guildId: string,
     channelId: string,
   ): Promise<EditorState> {
+    // Adopted standalone channels live in their own repo, not as secondaries.
+    if (scope === 'adopted') return this.getManagedEditorState(guildId, channelId);
     const guild = await this.deps.guilds.ensure(guildId);
     const settings = parseVoiceSettings(guild.settings);
     const empty: EditorFieldState = { effectiveTemplate: '', preview: '' };
@@ -842,6 +1172,23 @@ export class VoiceFeature {
       }
     }
 
+    // Adopted standalone channels: drop records whose Discord channel vanished;
+    // otherwise converge ownership/roster from who's present and re-render. These
+    // are never deleted — an empty adopted channel just shows its resting name.
+    if (this.deps.managed) {
+      for (const managed of await this.deps.managed.listByGuild(guildId)) {
+        const { channelId } = managed;
+        if (!this.deps.voice.channelExists(channelId)) {
+          if (!dryRun) await this.deps.managed.remove(channelId);
+          drift.orphanedRecords.push(channelId);
+          continue;
+        }
+        if (!dryRun) await this.reconcileManagedOwner(guildId, managed);
+        const { name } = await this.rerenderManaged(guildId, channelId, { dryRun });
+        if (name !== undefined) drift.renamed.push({ channelId, to: name });
+      }
+    }
+
     if (drift.orphanedRecords.length || drift.deletedEmpty.length || drift.created.length) {
       this.deps.logger.info(
         {
@@ -856,5 +1203,20 @@ export class VoiceFeature {
       );
     }
     return drift;
+  }
+
+  /** Recomputes an adopted channel's roster + owner from who's currently present. */
+  private async reconcileManagedOwner(guildId: string, row: ManagedChannelRow): Promise<void> {
+    if (!this.deps.managed || row.guildId !== guildId) return;
+    const members = this.deps.voice.membersInChannel(row.channelId).filter((m) => !m.bot);
+    const present = new Set(members.map((m) => m.id));
+    const ordered = (row.state.roster ?? []).filter((id) => present.has(id));
+    for (const m of members) if (!ordered.includes(m.id)) ordered.push(m.id);
+    if (!sameOrder(ordered, row.state.roster)) {
+      await this.deps.managed.updateState(row.channelId, { ...row.state, roster: ordered });
+    }
+    const ownerPresent = row.ownerId !== null && present.has(row.ownerId);
+    const nextOwner = ownerPresent ? row.ownerId : (ordered[0] ?? null);
+    if (nextOwner !== row.ownerId) await this.deps.managed.setOwner(row.channelId, nextOwner);
   }
 }

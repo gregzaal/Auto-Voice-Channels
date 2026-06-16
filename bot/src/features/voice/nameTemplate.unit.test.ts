@@ -9,6 +9,7 @@ import {
   getGameName,
   RANDOM_EMOJIS,
   renderChannelName,
+  resolveEmptyOccupied,
   toRoman,
 } from './nameTemplate.js';
 
@@ -196,6 +197,21 @@ describe('renderChannelName — rich tokens', () => {
       creator: alice,
     });
     expect(name).toBe('2/1');
+  });
+
+  it('selects the __empty/occupied__ branch by occupancy, substituting its tokens', () => {
+    const tmpl = "__General/@@creator@@'s room__";
+    const empty = renderChannelName(tmpl, { index: 0, members: [] });
+    expect(empty).toBe('General');
+
+    const alice = member({ id: 'a', displayName: 'Alice' });
+    const occupied = renderChannelName(tmpl, {
+      index: 0,
+      members: [alice],
+      creator: alice,
+      creatorName: 'Alice',
+    });
+    expect(occupied).toBe("Alice's room");
   });
 
   it('handles <<singular/plural>> by member count', () => {
@@ -402,5 +418,26 @@ describe('applyStringTransforms (legacy ""mode:text"")', () => {
     });
     expect(out).toBe("ᴏɴᴢᴀ'ꜱ ᴄʀᴇᴡ");
     expect(out).not.toContain('""');
+  });
+});
+
+describe('resolveEmptyOccupied (__empty/occupied__)', () => {
+  it('picks the first branch when empty, the second when occupied', () => {
+    expect(resolveEmptyOccupied('__General/Busy__', true)).toBe('General');
+    expect(resolveEmptyOccupied('__General/Busy__', false)).toBe('Busy');
+  });
+
+  it('splits on the first slash only, so the occupied branch may contain "/"', () => {
+    expect(resolveEmptyOccupied('__Lobby/a/b__', false)).toBe('a/b');
+    expect(resolveEmptyOccupied('__Lobby/a/b__', true)).toBe('Lobby');
+  });
+
+  it('resolves multiple groups and surrounding text left to right', () => {
+    expect(resolveEmptyOccupied('[__A/B__] [__C/D__]', false)).toBe('[B] [D]');
+  });
+
+  it('leaves a group without a slash, and plain "__" runs, untouched', () => {
+    expect(resolveEmptyOccupied('__no slash__', true)).toBe('__no slash__');
+    expect(resolveEmptyOccupied('plain text', false)).toBe('plain text');
   });
 });

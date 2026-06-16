@@ -28,13 +28,59 @@ export function parseEditorId(
   const [, , action, scope, field, channelId] = customId.split(':');
   if (
     !action ||
-    (scope !== 'channel' && scope !== 'primary') ||
+    (scope !== 'channel' && scope !== 'primary' && scope !== 'adopted') ||
     (field !== 'name' && field !== 'status') ||
     !channelId
   ) {
     return null;
   }
   return { action, scope, field, channelId };
+}
+
+/** Custom-id namespace for the "adopt this channel?" confirm prompt. */
+export const ADOPT_PREFIX = 'avc:adopt:';
+export const adoptId = (action: 'confirm' | 'cancel', channelId: string): string =>
+  `${ADOPT_PREFIX}${action}:${channelId}`;
+
+/** Parses `avc:adopt:<confirm|cancel>:<channelId>`. */
+export function parseAdoptId(
+  customId: string,
+): { action: 'confirm' | 'cancel'; channelId: string } | null {
+  if (!customId.startsWith(ADOPT_PREFIX)) return null;
+  const [, , action, channelId] = customId.split(':');
+  if ((action !== 'confirm' && action !== 'cancel') || !channelId) return null;
+  return { action, channelId };
+}
+
+/**
+ * The explicit "AVC will manage this channel's name" confirmation shown when
+ * `/template` is run on an otherwise-unmanaged voice channel, with Manage /
+ * Cancel buttons. `originalName` is the channel's current name (the resting name
+ * the default template will show when empty).
+ */
+export function buildAdoptPrompt(channelId: string, originalName: string): InteractionReplyOptions {
+  const embed: APIEmbed = new EmbedBuilder()
+    .setTitle('🏷️ Let AVC manage this channel’s name?')
+    .setColor(0xfaa61a)
+    .setDescription(
+      `<#${channelId}> isn’t managed by AVC yet. Turn this on and AVC will rename it ` +
+        'automatically — a resting name while empty, and an in-use name while people are in it.\n\n' +
+        `**Default:** empty → **${truncate(originalName, 60) || 'its name'}**, in use → ` +
+        '**“{owner}’s room”**. You can edit both templates next.',
+    )
+    .toJSON();
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(adoptId('confirm', channelId))
+      .setLabel('Manage this channel')
+      .setEmoji('🏷️')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(adoptId('cancel', channelId))
+      .setLabel('Cancel')
+      .setStyle(ButtonStyle.Secondary),
+  );
+  return { embeds: [embed], components: [row], ephemeral: true };
 }
 
 /** Max length of a template in the edit modal (well above any rendered-output cap). */
@@ -58,13 +104,23 @@ export function renderEditorPanel(
   opts: { updated?: boolean; note?: string } = {},
 ): InteractionReplyOptions {
   const isChannel = scope === 'channel';
+  const isAdopted = scope === 'adopted';
   const embed: APIEmbed = new EmbedBuilder()
-    .setTitle(isChannel ? '✏️ Channel name & status' : '🧩 Creator-channel templates')
+    .setTitle(
+      isAdopted
+        ? '🏷️ Managed channel name & status'
+        : isChannel
+          ? '✏️ Channel name & status'
+          : '🧩 Creator-channel templates',
+    )
     .setColor(0x5865f2)
     .setDescription(
-      isChannel
-        ? `Editing <#${channelId}> — just this channel.`
-        : `Editing the templates for **all** channels of <#${channelId}>’s creator channel.`,
+      isAdopted
+        ? `AVC manages <#${channelId}>’s name — a resting name when empty, an in-use name ` +
+            'when occupied (the `__empty/occupied__` token).'
+        : isChannel
+          ? `Editing <#${channelId}> — just this channel.`
+          : `Editing the templates for **all** channels of <#${channelId}>’s creator channel.`,
     )
     .addFields(
       {
@@ -97,11 +153,18 @@ export function renderEditorPanel(
       .setEmoji('💬')
       .setStyle(ButtonStyle.Primary),
   );
+  // Adopted channels have no inherited name default to reset to, so offer "Stop
+  // managing" in place of "Reset name" (status still resets to blank).
   const manageRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder()
-      .setCustomId(editorId('reset', scope, 'name', channelId))
-      .setLabel('Reset name')
-      .setStyle(ButtonStyle.Secondary),
+    isAdopted
+      ? new ButtonBuilder()
+          .setCustomId(editorId('stop', scope, 'name', channelId))
+          .setLabel('Stop managing')
+          .setStyle(ButtonStyle.Danger)
+      : new ButtonBuilder()
+          .setCustomId(editorId('reset', scope, 'name', channelId))
+          .setLabel('Reset name')
+          .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId(editorId('reset', scope, 'status', channelId))
       .setLabel('Reset status')
@@ -122,9 +185,9 @@ export function buildEditorModal(
   state: EditorState,
 ): ModalBuilder {
   const fs = state[field];
-  // Per-channel overrides start blank (people type a literal); a primary template
-  // (and any existing override) starts from the current value so it can be tweaked.
-  const prefill = fs.currentTemplate ?? (scope === 'primary' ? fs.effectiveTemplate : '');
+  // Per-channel overrides start blank (people type a literal); a primary or adopted
+  // template (and any existing override) starts from the current value to tweak.
+  const prefill = fs.currentTemplate ?? (scope === 'channel' ? '' : fs.effectiveTemplate);
   const input = new TextInputBuilder()
     .setCustomId('template')
     .setLabel(field === 'name' ? 'Name template' : 'Status template')

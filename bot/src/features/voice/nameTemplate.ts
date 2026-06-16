@@ -394,6 +394,34 @@ export function resolveSingularPlural(
 }
 
 // ---------------------------------------------------------------------------
+// __empty/occupied__ — resting vs in-use name for adopted standalone channels
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolves `__empty/occupied__` groups: the first branch when the channel has no
+ * non-bot members, the second when it's occupied. Used by adopted standalone
+ * channels (`/template` on any voice channel) so they show a resting name when
+ * idle and an in-use name once someone joins. Mirrors the other block resolvers
+ * (left-to-right, requires a `/`); splits on the FIRST `/` only, so the occupied
+ * branch may itself contain `/`.
+ */
+export function resolveEmptyOccupied(template: string, isEmpty: boolean): string {
+  let name = template;
+  for (let guard = 0; guard < 50; guard++) {
+    const open = name.indexOf('__');
+    if (open === -1) break;
+    const close = name.indexOf('__', open + 2);
+    if (close === -1) break;
+    const inner = name.slice(open + 2, close);
+    const slash = inner.indexOf('/');
+    if (slash === -1) break;
+    const choice = isEmpty ? inner.slice(0, slash) : inner.slice(slash + 1);
+    name = name.slice(0, open) + choice + name.slice(close + 2);
+  }
+  return name;
+}
+
+// ---------------------------------------------------------------------------
 // {{conditional}} expressions
 // ---------------------------------------------------------------------------
 
@@ -583,6 +611,7 @@ export interface RenderContext {
  * - `@@num_playing@@` / `@@party_size@@` / `@@party_state@@` / `@@party_details@@`
  *                                 → rich-presence party info for the channel's game
  * - `[[a/b/c]]`                   → random pick, fixed per channel (via `seed`)
+ * - `__empty/occupied__`          → resting vs in-use name (adopted standalone channels)
  * - `<<one/many>>` / `<<one\\many>>` → singular/plural by member / non-creator count
  * - `{{cond ?? yes // no}}`        → conditional (see {@link evalExpression})
  * - `""mode:text""`                → string transform of the substituted text;
@@ -613,6 +642,10 @@ export function renderChannelName(
   const nonBot = ctx.members.filter((m) => !m.bot);
   const num = nonBot.length;
   const numOthers = ctx.creator ? nonBot.filter((m) => m.id !== ctx.creator!.id).length : num;
+
+  // 0. Empty/occupied selection for adopted standalone channels (__empty/occupied__).
+  //    Resolved first, so the chosen branch's own tokens are still substituted below.
+  if (name.includes('__')) name = resolveEmptyOccupied(name, num === 0);
 
   // 1. Random picks first, fixed per channel by the stored seed.
   if (name.includes('[[')) name = resolveRandom(name, ctx.seed ?? 0);
