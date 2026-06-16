@@ -336,7 +336,7 @@ export class VoiceFeature {
       { guildId, primaryId: channelId, secondaryId: newChannelId, name, creator: member.id },
       'created secondary channel',
     );
-    this.deps.serverLog?.(guildId, 1, `➕ <@${member.id}> created **${name}**`);
+    this.deps.serverLog?.(guildId, 1, `➕ <@${member.id}> created <#${newChannelId}>`);
     return { action: 'created', channelId: newChannelId };
   }
 
@@ -363,7 +363,7 @@ export class VoiceFeature {
     await this.deps.onSecondaryRemoved?.(guildId, channelId);
 
     this.deps.logger.info({ guildId, secondaryId: channelId }, 'deleted empty secondary channel');
-    this.deps.serverLog?.(guildId, 1, `🗑 Deleted **${secondary.state.name ?? channelId}**`);
+    this.deps.serverLog?.(guildId, 1, `🗑 Deleted **${secondary.state.name ?? channelId}** (\`${channelId}\`)`);
     return { action: 'deleted' };
   }
 
@@ -412,7 +412,7 @@ export class VoiceFeature {
     this.deps.serverLog?.(
       guildId,
       2,
-      `👑 <@${newOwner.id}> now owns **${secondary.state.name ?? channelId}**`,
+      `👑 <@${newOwner.id}> now owns <#${channelId}>`,
     );
     // Re-point a private channel's "⇩ Join" companion (no-op if not private).
     await this.deps.onOwnerChanged?.(guildId, channelId, newOwner.id, newOwnerName);
