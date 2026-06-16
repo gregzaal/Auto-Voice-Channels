@@ -7,3 +7,4 @@ coverage/
 *.log
 .DS_Store
 plans/
+migrate/
