@@ -230,21 +230,21 @@ function rowOf(...buttons: ButtonBuilder[]): ActionRowBuilder<ButtonBuilder> {
  * already in a voice channel, we offer this picker instead of dead-ending. The
  * chosen action is encoded in the custom id (`avc:setup:pick:<command>`).
  */
-export function buildChannelPickerMessage(
-  command: string,
-  prompt: string,
-): InteractionUpdateOptions {
+export function channelPickerRow(command: string): ActionRowBuilder<ChannelSelectMenuBuilder> {
   const menu = new ChannelSelectMenuBuilder()
     .setCustomId(setupId(`pick:${command}`))
     .setChannelTypes(ChannelType.GuildVoice)
     .setPlaceholder('Choose a voice channel')
     .setMinValues(1)
     .setMaxValues(1);
-  return {
-    content: prompt,
-    embeds: [],
-    components: [new ActionRowBuilder<ChannelSelectMenuBuilder>().addComponents(menu)],
-  };
+  return new ActionRowBuilder<ChannelSelectMenuBuilder>().addComponents(menu);
+}
+
+export function buildChannelPickerMessage(
+  command: string,
+  prompt: string,
+): InteractionUpdateOptions {
+  return { content: prompt, embeds: [], components: [channelPickerRow(command)] };
 }
 
 /** Parses the command out of a `avc:setup:pick:<command>` channel-select id. */

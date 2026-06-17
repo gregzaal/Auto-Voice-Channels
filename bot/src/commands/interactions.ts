@@ -41,6 +41,7 @@ import {
   ALL_REQUIRED_PERMISSION_LABELS,
   buildChannelPickerMessage,
   buildSetupPanel,
+  channelPickerRow,
   formatPlan,
   missingBotPermissions,
   parseSetupPick,
@@ -260,7 +261,11 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   // -- /name + /template editor panel --------------------------------------
 
   async function openTemplatePanel(interaction: ChatInputCommandInteraction): Promise<void> {
-    const channelId = await requireVoiceChannel(interaction);
+    const channelId = await resolveOrPick(
+      interaction,
+      'manage',
+      '🛠️ Pick a voice channel to manage:',
+    );
     if (!channelId) return;
     await manageChannelCore(interaction, channelId);
   }
@@ -297,11 +302,23 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     return respond(interaction, buildAdoptPrompt(channelId, name));
   }
 
-  /** `/position` → a modal to pick above/below for the creator channel (or group) you're in. */
+  /** `/position` → act on the channel you're in, else pick one. */
   async function openPositionModal(interaction: ChatInputCommandInteraction): Promise<void> {
-    const guildId = interaction.guildId!;
-    const channelId = await requireVoiceChannel(interaction);
+    const channelId = await resolveOrPick(
+      interaction,
+      'position',
+      '↕️ Pick a creator channel to position:',
+    );
     if (!channelId) return;
+    await positionCore(interaction, channelId);
+  }
+
+  /** Opens the above/below modal for a creator channel (or its whole group). */
+  async function positionCore(
+    interaction: ManageableInteraction,
+    channelId: string,
+  ): Promise<void> {
+    const guildId = interaction.guildId!;
     // If this channel's category is grouped, /position sets the whole group's direction.
     const categoryKey = categoryKeyForChannel(interaction, channelId);
     const group = await run(guildId, 'cmd:position:group', () =>
@@ -315,11 +332,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       deps.settings.getPosition(guildId, channelId),
     );
     if (!pos.found) {
-      await interaction.reply({
+      return respond(interaction, {
         content: 'This isn’t a bot-managed voice channel.',
         ephemeral: true,
       });
-      return;
     }
     await interaction.showModal(buildPositionModal(channelId, pos.above));
   }
@@ -376,37 +392,52 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     });
   }
 
-  /** `/alwaysprivate` → toggle default-private for the creator channel you're in. */
+  /** `/alwaysprivate` → toggle default-private for a creator channel (yours, or picked). */
   async function handleAlwaysPrivate(interaction: ChatInputCommandInteraction): Promise<void> {
-    const guildId = interaction.guildId!;
-    const channelId = await requireVoiceChannel(interaction);
+    const channelId = await resolveOrPick(
+      interaction,
+      'alwaysprivate',
+      '🔒 Pick a creator channel to toggle default-private:',
+    );
     if (!channelId) return;
+    await alwaysPrivateCore(interaction, channelId);
+  }
+
+  async function alwaysPrivateCore(
+    interaction: ManageableInteraction,
+    channelId: string,
+  ): Promise<void> {
+    const guildId = interaction.guildId!;
     const res = await run(guildId, 'cmd:alwaysprivate', () =>
       deps.settings.toggleDefaultPrivate(guildId, channelId),
     );
-    await interaction.reply({ content: formatResult(res), ephemeral: true });
+    await respond(interaction, { content: formatResult(res), ephemeral: true });
   }
 
   /** `/group` → explain + confirm grouping (or offer to turn it off) for this category. */
   async function openGroupPanel(interaction: ChatInputCommandInteraction): Promise<void> {
-    const guildId = interaction.guildId!;
-    const channelId = await requireVoiceChannel(
+    const channelId = await resolveOrPick(
       interaction,
-      'Join a voice channel in the category you want to group.',
+      'group',
+      '🧱 Pick a voice channel in the category you want to group:',
     );
     if (!channelId) return;
+    await groupCore(interaction, channelId);
+  }
+
+  async function groupCore(interaction: ManageableInteraction, channelId: string): Promise<void> {
+    const guildId = interaction.guildId!;
     const categoryKey = categoryKeyForChannel(interaction, channelId);
     const primaryIds = await run(guildId, 'cmd:group:info', () =>
       deps.feature.categoryPrimaryIds(guildId, categoryKey),
     );
     if (primaryIds.length === 0) {
-      await interaction.reply({
+      return respond(interaction, {
         content:
-          'This category has no creator channels to group. Join a voice channel in the ' +
-          'category you want to group, then run `/group` again.',
+          'This category has no creator channels to group. Pick (or join) a voice channel in ' +
+          'the category you want to group, then run `/group` again.',
         ephemeral: true,
       });
-      return;
     }
     const categoryName =
       categoryKey === ROOT_GROUP_KEY
@@ -415,7 +446,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     const group = await run(guildId, 'cmd:group:get', () =>
       deps.settings.getGroup(guildId, categoryKey),
     );
-    await interaction.reply(
+    await respond(
+      interaction,
       group
         ? buildGroupDisablePanel(categoryKey, categoryName, group.above)
         : buildGroupEnablePanel(categoryKey, categoryName, primaryIds.length),
@@ -452,20 +484,27 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     await interaction.update({ content: message, embeds: [], components: [] });
   }
 
-  /** `/inheritpermissions` → a modal to choose the permission source. */
+  /** `/inheritpermissions` → choose the permission source for a creator channel. */
   async function openInheritModal(interaction: ChatInputCommandInteraction): Promise<void> {
-    const guildId = interaction.guildId!;
-    const channelId = await requireVoiceChannel(interaction);
+    const channelId = await resolveOrPick(
+      interaction,
+      'inheritpermissions',
+      '🔑 Pick a creator channel to set permission inheritance:',
+    );
     if (!channelId) return;
+    await inheritCore(interaction, channelId);
+  }
+
+  async function inheritCore(interaction: ManageableInteraction, channelId: string): Promise<void> {
+    const guildId = interaction.guildId!;
     const pos = await run(guildId, 'cmd:inherit', () =>
       deps.settings.getPosition(guildId, channelId),
     );
     if (!pos.found) {
-      await interaction.reply({
+      return respond(interaction, {
         content: 'This isn’t a bot-managed voice channel.',
         ephemeral: true,
       });
-      return;
     }
     await interaction.showModal(buildInheritModal(channelId));
   }
@@ -531,32 +570,31 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   }
 
   async function openNamePanel(interaction: ChatInputCommandInteraction): Promise<void> {
+    const target = await resolveOrPick(interaction, 'name', '✏️ Pick a voice channel to rename:');
+    if (!target) return;
+    await nameCore(interaction, target);
+  }
+
+  async function nameCore(interaction: ManageableInteraction, channelId: string): Promise<void> {
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
-    const target = await requireVoiceChannel(
-      interaction,
-      'Join the voice channel you want to rename first.',
-    );
-    if (!target) return;
     const state = await run(guildId, 'cmd:name', () =>
-      deps.feature.getEditorState('channel', guildId, target),
+      deps.feature.getEditorState('channel', guildId, channelId),
     );
     if (!state.found) {
-      await interaction.reply({
+      return respond(interaction, {
         content: 'That isn’t a bot-managed voice channel.',
         ephemeral: true,
       });
-      return;
     }
     // Anyone may edit their own channel; editing another's needs admin.
     if (!hasManageChannels(interaction) && state.ownerId && state.ownerId !== userId) {
-      await interaction.reply({
+      return respond(interaction, {
         content: 'Only the channel’s owner or a server admin can edit it.',
         ephemeral: true,
       });
-      return;
     }
-    await interaction.reply(renderEditorPanel('channel', target, state));
+    await respond(interaction, renderEditorPanel('channel', channelId, state));
   }
 
   async function handleEditorButton(interaction: ButtonInteraction): Promise<void> {
@@ -948,15 +986,36 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     }
   }
 
-  /** A voice-channel was chosen from a `avc:setup:pick:<command>` menu. */
+  // Picker commands that require Manage Channels (the open `name` command self-gates
+  // on channel ownership in nameCore, so it isn't listed here).
+  const ADMIN_PICK_COMMANDS = new Set([
+    'manage',
+    'position',
+    'alwaysprivate',
+    'inheritpermissions',
+    'group',
+  ]);
+
+  /** A voice-channel was chosen from a `avc:setup:pick:<command>` menu → run the command. */
   async function handleChannelSelect(interaction: ChannelSelectMenuInteraction): Promise<void> {
     const command = parseSetupPick(interaction.customId);
     if (!command) return;
     const channelId = interaction.values[0];
     if (!channelId) return;
-    if (command === 'manage') {
-      if (!(await requireManageChannels(interaction))) return;
-      return manageChannelCore(interaction, channelId);
+    if (ADMIN_PICK_COMMANDS.has(command) && !(await requireManageChannels(interaction))) return;
+    switch (command) {
+      case 'manage':
+        return manageChannelCore(interaction, channelId);
+      case 'position':
+        return positionCore(interaction, channelId);
+      case 'alwaysprivate':
+        return alwaysPrivateCore(interaction, channelId);
+      case 'inheritpermissions':
+        return inheritCore(interaction, channelId);
+      case 'group':
+        return groupCore(interaction, channelId);
+      case 'name':
+        return nameCore(interaction, channelId);
     }
   }
 
@@ -1188,21 +1247,36 @@ function currentVoiceChannelId(
 
 /** The grouping `categoryKey` for a channel: its parent category id, or the root sentinel. */
 function categoryKeyForChannel(
-  interaction: ChatInputCommandInteraction | ButtonInteraction | ModalSubmitInteraction,
+  interaction:
+    | ChatInputCommandInteraction
+    | ButtonInteraction
+    | ChannelSelectMenuInteraction
+    | ModalSubmitInteraction,
   channelId: string,
 ): string {
   const channel = interaction.guild?.channels.cache.get(channelId);
   return groupKeyFor(channel && 'parentId' in channel ? channel.parentId : null);
 }
 
-/** The caller's current voice channel, or undefined after replying `joinMessage`. */
-async function requireVoiceChannel(
+/**
+ * House style for channel-targeting commands: act on the channel you're in; if
+ * you're not in one, reply with a voice-channel picker (`command → pick →
+ * execute`) instead of dead-ending. Returns the channel id to act on, or
+ * undefined when it showed the picker (the chosen channel arrives later via the
+ * `avc:setup:pick:<command>` select menu).
+ */
+async function resolveOrPick(
   interaction: ChatInputCommandInteraction,
-  joinMessage = 'Join one of that creator channel’s voice channels first.',
+  command: string,
+  prompt: string,
 ): Promise<string | undefined> {
   const channelId = currentVoiceChannelId(interaction);
   if (channelId) return channelId;
-  await interaction.reply({ content: joinMessage, ephemeral: true });
+  await interaction.reply({
+    content: prompt,
+    components: [channelPickerRow(command)],
+    ephemeral: true,
+  });
   return undefined;
 }
 
@@ -1287,6 +1361,12 @@ async function respond(
   if (interaction.isChatInputCommand()) {
     await interaction.reply(payload);
   } else {
-    await interaction.update(toUpdate(payload));
+    // An in-place edit: carry content too (a `null` clears any prior prompt text,
+    // e.g. the channel-picker question, when swapping in an embed-only panel).
+    await interaction.update({
+      content: payload.content ?? null,
+      embeds: payload.embeds ?? [],
+      components: payload.components ?? [],
+    });
   }
 }

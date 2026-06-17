@@ -16,6 +16,7 @@ interface FakeInteractionOpts {
   commandName?: string;
   customId?: string;
   manageChannels?: boolean;
+  values?: string[];
 }
 
 /** Builds a minimal interaction with the methods/getters the router touches. */
@@ -44,6 +45,9 @@ function fakeInteraction(opts: FakeInteractionOpts) {
     isModalSubmit: () => opts.kind === 'modal',
     reply,
     followUp,
+    update: vi.fn().mockResolvedValue(undefined),
+    showModal: vi.fn().mockResolvedValue(undefined),
+    values: opts.values ?? [],
     fields: { getStringSelectValues: () => [], getSelectedChannels: () => null },
     channelId: 'text1',
   };
@@ -119,6 +123,36 @@ describe('registerInteractionHandler (router)', () => {
     expect(env.reportError).toHaveBeenCalled();
     expect(reply).toHaveBeenCalledWith(
       expect.objectContaining({ content: '⚠️ Something went wrong handling that.' }),
+    );
+  });
+
+  it('offers a channel picker when a config command is used outside a voice channel', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    // /position with no current voice channel → reply with the pick-a-channel menu.
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'position',
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('avc:setup:pick:position');
+  });
+
+  it('gates the manage channel-select on Manage Channels', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'select',
+      customId: 'avc:setup:pick:manage',
+      manageChannels: false,
+      values: ['vc1'],
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'You need the Manage Channels permission.' }),
     );
   });
 
