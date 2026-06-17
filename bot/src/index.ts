@@ -34,6 +34,7 @@ import {
   DiscordVoiceActions,
   DiscordVoiceView,
   GuildSettingsService,
+  PermissionProblemTracker,
   PrivacyService,
   Reconciler,
   registerJoinRequests,
@@ -143,6 +144,8 @@ async function main(): Promise<void> {
   const settingsCache = new SettingsCache(guildsRepo, notifier);
   await settingsCache.start();
   const serverLogger = new ServerLogger({ client, guilds: settingsCache, logger });
+  // Tracks "I lost access to this channel" incidents, surfaced in /setup + /logging.
+  const permissionProblems = new PermissionProblemTracker();
   // Private-channel "⇩ Join" mechanism. Wired into the feature's cleanup hook so
   // a private channel's companion is deleted whenever the channel goes away.
   const privacy = new PrivacyService({
@@ -169,6 +172,7 @@ async function main(): Promise<void> {
     makePrivateOnCreate: (gid, cid, ownerId, ownerName) =>
       privacy.makePrivateForCreation(gid, cid, ownerId, ownerName),
     serverLog: (gid, level, message) => serverLogger.log(gid, level, message),
+    permissionProblems,
     logger,
   });
   const disposeVoiceGateway = registerVoiceGateway({
@@ -205,6 +209,7 @@ async function main(): Promise<void> {
     feature: voiceFeature,
     guilds: guildsRepo,
     managed,
+    permissionProblems,
     selfHosted: config.selfHosted,
     clientId: config.clientId,
     reportError: (message, context) => errorReporter.report(message, context),

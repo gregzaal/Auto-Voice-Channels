@@ -26,6 +26,7 @@ import {
   type EditorScope,
   type EditorState,
   type GuildSettingsService,
+  type PermissionProblemTracker,
   type PrivacyService,
   type VoiceCommands,
   type VoiceFeature,
@@ -90,6 +91,8 @@ export interface InteractionDeps {
   feature: VoiceFeature;
   guilds: GuildRepository;
   managed: ManagedChannelRepository;
+  /** Recent "I lost access to this channel" incidents, surfaced in `/setup`. */
+  permissionProblems?: PermissionProblemTracker;
   selfHosted: boolean;
   /** Discord application id, for building the `/invite` link. */
   clientId: string;
@@ -938,6 +941,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       missingPermissions,
       primaries: config.primaries,
       managed: managedRows,
+      problems: deps.permissionProblems?.recent(guildId) ?? [],
     });
   }
 

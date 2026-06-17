@@ -18,9 +18,17 @@ import type { GuildVoiceView, MemberActivity, VoiceMember, VoiceStateEvent } fro
 const UNKNOWN_CHANNEL = 10003;
 /** Discord API error code for "Unknown Member" (already gone). */
 const UNKNOWN_MEMBER = 10007;
+/** "Missing Access" (50001 — can't see the resource) / "Missing Permissions" (50013). */
+const MISSING_ACCESS = 50001;
+const MISSING_PERMISSIONS = 50013;
 
 function isApiError(err: unknown, code: number): boolean {
   return err instanceof DiscordAPIError && err.code === code;
+}
+
+/** Whether `err` is a Discord permission/visibility failure (the bot lacks access). */
+export function isPermissionError(err: unknown): boolean {
+  return isApiError(err, MISSING_ACCESS) || isApiError(err, MISSING_PERMISSIONS);
 }
 
 export interface ResolvedOverwrite {

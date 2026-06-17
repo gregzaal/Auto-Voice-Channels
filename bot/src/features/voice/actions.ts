@@ -1,3 +1,5 @@
+import { DiscordAPIError } from 'discord.js';
+
 /**
  * The Discord side-effect seam. Feature logic depends only on this interface, so
  * it can be driven by a real discord.js implementation in production and by a
@@ -140,6 +142,8 @@ export class RecordingVoiceActions implements VoiceActions {
   readonly actions: RecordedAction[] = [];
   /** When true, every rename reports as rate-limited (for testing the notice). */
   simulateRenameRateLimit = false;
+  /** When set, `deleteChannel` throws Missing Access for this channel id. */
+  failDeleteForChannel?: string;
   private seq = 0;
   private readonly created = new Set<string>();
 
@@ -159,6 +163,18 @@ export class RecordingVoiceActions implements VoiceActions {
   }
 
   deleteChannel(guildId: string, channelId: string): Promise<void> {
+    if (this.failDeleteForChannel === channelId) {
+      return Promise.reject(
+        new DiscordAPIError(
+          { code: 50001, message: 'Missing Access' } as never,
+          50001,
+          403,
+          'DELETE',
+          'https://discord.test',
+          {} as never,
+        ),
+      );
+    }
     this.created.delete(channelId);
     this.actions.push({ type: 'delete', guildId, channelId });
     return Promise.resolve();

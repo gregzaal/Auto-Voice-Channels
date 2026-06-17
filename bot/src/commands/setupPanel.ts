@@ -115,6 +115,8 @@ export interface SetupPanelInput {
   missingPermissions: string[];
   primaries: { channelId: string }[];
   managed: { channelId: string }[];
+  /** Channels the bot recently lost access to (a permission override hid them). */
+  problems?: { channelId: string }[];
 }
 
 const INTRO =
@@ -159,6 +161,21 @@ export function buildSetupPanel(input: SetupPanelInput): InteractionReplyOptions
       },
     )
     .toJSON();
+
+  // Surface any channels the bot recently lost access to (a permission override),
+  // with the one-line fix, so admins aren't left guessing why automation stalled.
+  if (input.problems && input.problems.length > 0) {
+    embed.fields!.push({
+      name: `⚠️ Needs attention (${input.problems.length})`,
+      value:
+        `I lost access to ${input.problems
+          .slice(0, 5)
+          .map((p) => `<#${p.channelId}>`)
+          .join(', ')} and stopped managing ${input.problems.length === 1 ? 'it' : 'them'}.\n` +
+        'Grant my role **View Channel**, **Connect**, **Manage Channels** and **Move Members** ' +
+        'on the channel (or its category), then it’ll work again.',
+    });
+  }
 
   const components = input.isAdmin ? adminRows(input.enabled) : memberRows();
   return { embeds: [embed], components, ephemeral: true };

@@ -12,6 +12,8 @@ import type { VoiceActions } from './actions.js';
 import type { GuildVoiceView, MemberActivity, VoiceMember, VoiceStateEvent } from './types.js';
 import { getGameName, MAX_STATUS_LENGTH, renderChannelName } from './nameTemplate.js';
 import { displayName, groupKeyFor, parseVoiceSettings, readGroups } from './guildSettings.js';
+import { isPermissionError } from './discordAdapter.js';
+import { permissionProblemMessage, type PermissionProblemTracker } from './permissionProblems.js';
 import type { CommandResult } from './commands.js';
 
 /** A fresh 31-bit random seed for a channel's `[[random]]` picks. */
@@ -110,6 +112,8 @@ export interface VoiceFeatureDeps {
    * joining/leaving. Fire-and-forget.
    */
   serverLog?: (guildId: string, level: 1 | 2 | 3, message: string) => void;
+  /** Records "I lost access to this channel" incidents for `/setup` + `/logging`. */
+  permissionProblems?: PermissionProblemTracker;
 }
 
 /** Common option for state-changing operations: report without acting. */
@@ -441,7 +445,27 @@ export class VoiceFeature {
 
     if (opts.dryRun) return { action: 'would-delete' };
 
-    await this.deps.actions.deleteChannel(guildId, channelId);
+    try {
+      await this.deps.actions.deleteChannel(guildId, channelId);
+    } catch (err) {
+      if (!isPermissionError(err)) throw err;
+      // We've lost access to a channel we manage (a permission override hid it from
+      // us): stop tracking it so we don't retry the impossible delete on every
+      // reconcile, and tell the admin how to restore access.
+      await this.deps.secondaries.remove(channelId);
+      await this.deps.onSecondaryRemoved?.(guildId, channelId);
+      this.deps.permissionProblems?.record(guildId, {
+        channelId,
+        operation: 'delete',
+        at: Date.now(),
+      });
+      this.deps.serverLog?.(guildId, 1, permissionProblemMessage(channelId));
+      this.deps.logger.warn(
+        { guildId, secondaryId: channelId, err },
+        'lost access to managed channel; stopped managing it',
+      );
+      return { action: 'skip' };
+    }
     await this.deps.secondaries.remove(channelId);
     await this.deps.onSecondaryRemoved?.(guildId, channelId);
 
@@ -451,6 +475,8 @@ export class VoiceFeature {
       1,
       `🗑 Deleted **${secondary.state.name ?? channelId}** (\`${channelId}\`)`,
     );
+    // A successful op means access is back — clear any stale incident.
+    this.deps.permissionProblems?.clear(guildId, channelId);
     return { action: 'deleted' };
   }
 

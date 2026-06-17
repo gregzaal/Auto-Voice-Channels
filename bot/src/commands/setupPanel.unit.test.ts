@@ -91,6 +91,19 @@ describe('buildSetupPanel', () => {
     expect(json).toContain('Manage Channels');
   });
 
+  it('surfaces channels the bot lost access to', () => {
+    const json = JSON.stringify(
+      buildSetupPanel({ ...baseInput, isAdmin: true, problems: [{ channelId: 'x9' }] }),
+    );
+    expect(json).toContain('Needs attention');
+    expect(json).toContain('<#x9>');
+  });
+
+  it('omits the needs-attention field when there are no problems', () => {
+    const json = JSON.stringify(buildSetupPanel({ ...baseInput, isAdmin: true, problems: [] }));
+    expect(json).not.toContain('Needs attention');
+  });
+
   it('labels the toggle button by current state', () => {
     expect(
       JSON.stringify(buildSetupPanel({ ...baseInput, isAdmin: true, enabled: true })),

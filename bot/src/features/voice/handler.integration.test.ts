@@ -12,6 +12,7 @@ import { startPostgres } from '../../test/pgContainer.js';
 import { fakeLogger } from '../../runtime/testUtils.js';
 import { RecordingVoiceActions } from './actions.js';
 import { VoiceFeature } from './handler.js';
+import { PermissionProblemTracker } from './permissionProblems.js';
 import { PrivacyService } from './privacy.js';
 import type { VoiceStateEvent } from './types.js';
 import { FakeVoiceView, fakeMember as member } from './voiceTestUtils.js';
@@ -355,6 +356,41 @@ describe('VoiceFeature (integration)', () => {
     voice.drop(sec, 'bob');
     await f.handleVoiceStateUpdate({ guildId: GUILD, member: member('bob'), beforeChannelId: sec });
     expect(logs).toContainEqual({ level: 3, message: expect.stringContaining('left') });
+  });
+
+  it('gives up a channel it can no longer delete (Missing Access), notifying instead of retrying', async () => {
+    const logs: { level: number; message: string }[] = [];
+    const problems = new PermissionProblemTracker();
+    const f = new VoiceFeature({
+      autoChannels,
+      secondaries,
+      guilds,
+      actions,
+      voice,
+      selfHosted: true,
+      logger: fakeLogger(),
+      serverLog: (_g, level, message) => logs.push({ level, message }),
+      permissionProblems: problems,
+    });
+    await secondaries.create({
+      channelId: 'locked',
+      guildId: GUILD,
+      primaryChannelId: PRIMARY,
+      ownerId: 'alice',
+      state: { name: 'Locked', index: 0 },
+    });
+    // The empty channel can't be deleted — a permission override hid it from us.
+    actions.failDeleteForChannel = 'locked';
+    await f.handleVoiceStateUpdate({
+      guildId: GUILD,
+      member: member('alice'),
+      beforeChannelId: 'locked',
+    });
+
+    // Stopped tracking it (so the reconcile won't retry forever), recorded + notified.
+    expect(await secondaries.get('locked')).toBeUndefined();
+    expect(problems.recent(GUILD).map((p) => p.channelId)).toContain('locked');
+    expect(logs.some((l) => l.level === 1 && l.message.includes('lost access'))).toBe(true);
   });
 
   it('logs a rate-limited rename as deferred (level 2), and a normal rename as applied', async () => {
