@@ -1,9 +1,22 @@
 import { EventEmitter } from 'node:events';
-import { PermissionFlagsBits } from 'discord.js';
+import { DiscordAPIError, PermissionFlagsBits } from 'discord.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fakeLogger } from '../runtime/testUtils.js';
 import { registerInteractionHandler, type InteractionDeps } from './interactions.js';
 import { LOGGING_MODAL_ID } from './loggingModal.js';
+import { CREATE_MODAL_ID } from './createModal.js';
+
+/** A Discord "Missing Permissions" (50013) rejection, as thrown by a failed create. */
+function missingPermissions(): DiscordAPIError {
+  return new DiscordAPIError(
+    { code: 50013, message: 'Missing Permissions' } as never,
+    50013,
+    403,
+    'POST',
+    'https://discord.test',
+    {} as never,
+  );
+}
 
 /** A fake discord.js Client: just the event emitter surface the router uses. */
 function fakeClient(): EventEmitter {
@@ -17,17 +30,47 @@ interface FakeInteractionOpts {
   customId?: string;
   manageChannels?: boolean;
   values?: string[];
+  /** The interaction id (the retry token is keyed off it). */
+  id?: string;
+  /** Modal text inputs by custom id (name/nameTemplate/statusTemplate). */
+  textInputs?: Record<string, string>;
+  /** The `privacy` string-select value. */
+  privacy?: 'open' | 'private';
+  /** The category chosen in the modal's channel-select. */
+  selectedChannelId?: string;
+  /** Permission flags the bot member holds guild-wide. */
+  botPerms?: bigint[];
+  /** A category present in the guild cache: name + the flags the bot holds there. */
+  category?: { id: string; name: string; perms: bigint[] };
 }
 
 /** Builds a minimal interaction with the methods/getters the router touches. */
 function fakeInteraction(opts: FakeInteractionOpts) {
   const reply = vi.fn().mockResolvedValue(undefined);
   const followUp = vi.fn().mockResolvedValue(undefined);
+  const holds = (flags: bigint[] | undefined, p: bigint): boolean => (flags ?? []).includes(p);
   const interaction = {
+    id: opts.id ?? 'i1',
     guildId: opts.guildId ?? 'g1',
     user: { id: 'u1' },
     member: null,
-    guild: { members: { cache: { get: () => undefined } } },
+    guild: {
+      members: {
+        cache: { get: () => undefined },
+        me: { permissions: { has: (p: bigint) => holds(opts.botPerms, p) } },
+      },
+      channels: {
+        cache: {
+          get: (id: string) =>
+            opts.category && opts.category.id === id
+              ? {
+                  name: opts.category.name,
+                  permissionsFor: () => ({ has: (p: bigint) => holds(opts.category!.perms, p) }),
+                }
+              : undefined,
+        },
+      },
+    },
     commandName: opts.commandName,
     customId: opts.customId,
     memberPermissions: {
@@ -48,7 +91,12 @@ function fakeInteraction(opts: FakeInteractionOpts) {
     update: vi.fn().mockResolvedValue(undefined),
     showModal: vi.fn().mockResolvedValue(undefined),
     values: opts.values ?? [],
-    fields: { getStringSelectValues: () => [], getSelectedChannels: () => null },
+    fields: {
+      getStringSelectValues: (k: string) => (k === 'privacy' && opts.privacy ? [opts.privacy] : []),
+      getSelectedChannels: () =>
+        opts.selectedChannelId ? { first: () => ({ id: opts.selectedChannelId }) } : null,
+      getTextInputValue: (k: string) => opts.textInputs?.[k] ?? '',
+    },
     channelId: 'text1',
   };
   return { interaction, reply, followUp };
@@ -61,7 +109,10 @@ function setup(overrides: Partial<InteractionDeps> = {}) {
     setLogging: vi.fn().mockResolvedValue({ ok: true, message: 'ok' }),
     getLogging: vi.fn().mockResolvedValue({ enabled: false, level: 1, channelId: null }),
   };
-  const guilds = { get: vi.fn().mockResolvedValue({ authStatus: 'active' }) };
+  const guilds = {
+    get: vi.fn().mockResolvedValue({ authStatus: 'active' }),
+    isEntitled: vi.fn().mockResolvedValue(true),
+  };
   const managed = { listByGuild: vi.fn().mockResolvedValue([]) };
   const reportError = vi.fn();
   const deps = {
@@ -172,5 +223,88 @@ describe('registerInteractionHandler (router)', () => {
       expect.objectContaining({ content: 'You need the Manage Channels permission.' }),
     );
     expect(env.settings.setLogging).not.toHaveBeenCalled();
+  });
+
+  /** A `/create` modal submit that fails on missing category permissions. */
+  function createSettings() {
+    return {
+      getConfig: vi.fn().mockResolvedValue({
+        enabled: true,
+        primaries: [],
+        defaultTemplate: 'T',
+        defaultStatus: 'S',
+      }),
+      createPrimary: vi.fn().mockRejectedValue(missingPermissions()),
+    };
+  }
+
+  function submitFailingCreate(env: ReturnType<typeof setup>) {
+    const { interaction, reply } = fakeInteraction({
+      kind: 'modal',
+      customId: CREATE_MODAL_ID,
+      manageChannels: true,
+      id: 'modal-1',
+      textInputs: { name: 'Lobby', nameTemplate: 'T', statusTemplate: 'S' },
+      privacy: 'private',
+      selectedChannelId: 'cat1',
+      category: {
+        id: 'cat1',
+        name: 'Staff',
+        perms: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect],
+      },
+    });
+    env.client.emit('interactionCreate', interaction);
+    return reply;
+  }
+
+  it('names the missing/held permissions and offers a Retry on a create permission failure', async () => {
+    const settings = createSettings();
+    const env = setup({ settings: settings as never });
+    dispose = env.dispose;
+    const reply = submitFailingCreate(env);
+    await flush();
+
+    expect(settings.createPrimary).toHaveBeenCalled();
+    // Handled gracefully, not via the top-level "something went wrong" path.
+    expect(env.reportError).not.toHaveBeenCalled();
+    const payload = reply.mock.calls[0]?.[0];
+    expect(payload.content).toContain('Staff'); // the chosen category, by name
+    expect(payload.content).toContain('Manage Channels'); // missing there
+    expect(payload.content).toContain('View Channels'); // already held
+    expect(JSON.stringify(payload.components)).toContain('avc:create:retry:modal-1');
+  });
+
+  it('re-opens the modal with the saved selections when Retry is clicked', async () => {
+    const env = setup({ settings: createSettings() as never });
+    dispose = env.dispose;
+    submitFailingCreate(env);
+    await flush();
+
+    const { interaction: btn } = fakeInteraction({
+      kind: 'button',
+      customId: 'avc:create:retry:modal-1',
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', btn);
+    await flush();
+
+    expect(btn.showModal).toHaveBeenCalledTimes(1);
+    const modal = JSON.stringify(btn.showModal.mock.calls[0]?.[0]);
+    expect(modal).toContain('Lobby'); // saved channel name
+    expect(modal).toContain('cat1'); // saved category re-selected
+  });
+
+  it('falls back to a blank modal when the saved create selections have expired', async () => {
+    const env = setup({ settings: createSettings() as never });
+    dispose = env.dispose;
+    // No prior failure stored this token → no prefill, but Retry still opens a modal.
+    const { interaction: btn } = fakeInteraction({
+      kind: 'button',
+      customId: 'avc:create:retry:gone',
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', btn);
+    await flush();
+    expect(btn.showModal).toHaveBeenCalledTimes(1);
   });
 });

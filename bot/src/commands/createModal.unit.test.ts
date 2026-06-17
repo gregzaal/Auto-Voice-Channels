@@ -1,6 +1,11 @@
 import type { ModalSubmitFields } from 'discord.js';
 import { describe, expect, it } from 'vitest';
-import { buildCreateModal, CREATE_MODAL_ID, parseCreateModal } from './createModal.js';
+import {
+  buildCreateModal,
+  CREATE_MODAL_ID,
+  parseCreateModal,
+  readCreateModalRaw,
+} from './createModal.js';
 
 const defaults = { nameTemplate: 'DEFAULT NAME', statusTemplate: 'DEFAULT STATUS' };
 
@@ -68,5 +73,49 @@ describe('createModal', () => {
     expect(parseCreateModal(fields({ privacy: 'private' }), defaults)).toEqual({
       defaultPrivate: true,
     });
+  });
+
+  it('readCreateModalRaw keeps every value verbatim (no default-dropping)', () => {
+    expect(
+      readCreateModalRaw(
+        fields({
+          name: 'Lobby',
+          nameTemplate: 'DEFAULT NAME', // equals default — kept anyway, unlike parse
+          statusTemplate: 'Custom status',
+          privacy: 'private',
+          category: 'cat-123',
+        }),
+      ),
+    ).toEqual({
+      name: 'Lobby',
+      nameTemplate: 'DEFAULT NAME',
+      statusTemplate: 'Custom status',
+      privacy: 'private',
+      parentId: 'cat-123',
+    });
+  });
+
+  it('re-prefills the modal from a saved selection (for the Retry button)', () => {
+    const modal = buildCreateModal(defaults, {
+      name: 'Lobby',
+      nameTemplate: 'My name tpl',
+      statusTemplate: 'My status tpl',
+      privacy: 'private',
+      parentId: 'cat-123',
+    }).toJSON();
+    const json = JSON.stringify(modal);
+    expect(json).toContain('Lobby'); // name input value
+    expect(json).toContain('My name tpl');
+    expect(json).toContain('My status tpl');
+    expect(json).toContain('cat-123'); // category re-selected as a default value
+    // The private option carries the `default: true` flag, not the open one.
+    const privacy = (
+      modal.components as { component: { custom_id?: string; options?: unknown[] } }[]
+    )
+      .map((c) => c.component)
+      .find((c) => c.custom_id === 'privacy');
+    const options = privacy?.options as { value: string; default?: boolean }[];
+    expect(options.find((o) => o.value === 'private')?.default).toBe(true);
+    expect(options.find((o) => o.value === 'open')?.default).toBe(false);
   });
 });

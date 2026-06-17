@@ -17,6 +17,7 @@ import {
 import type { GuildRepository, Logger, ManagedChannelRepository } from '@avc/core';
 import type { GuildDispatcher } from '../runtime/dispatcher.js';
 import {
+  isPermissionError,
   JOIN_PREFIX,
   parseJoinId,
   rateLimitNote,
@@ -58,7 +59,10 @@ import {
   buildCreateModal,
   CREATE_AGAIN_ID,
   CREATE_MODAL_ID,
+  CREATE_RETRY_PREFIX,
   parseCreateModal,
+  readCreateModalRaw,
+  type CreatePrefill,
 } from './createModal.js';
 import {
   buildPositionModal,
@@ -104,6 +108,8 @@ export interface InteractionDeps {
 
 const KICK_PREFIX = 'avc:kick:';
 const VOTE_TIMEOUT_MS = 2 * 60 * 1000;
+/** How long a failed-`/create`'s saved selections stay retry-able (in memory). */
+const CREATE_RETRY_TTL_MS = 15 * 60 * 1000;
 
 /** Interactions that can drive the "manage a channel" flow (command + components). */
 type ManageableInteraction =
@@ -122,6 +128,9 @@ type ManageableInteraction =
  */
 export function registerInteractionHandler(deps: InteractionDeps): () => void {
   const voteTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Saved `/create` selections, keyed by the failing interaction's id, so the
+  // "Retry" button can re-open the modal with the user's choices intact.
+  const createRetries = new Map<string, { prefill: CreatePrefill; expiresAt: number }>();
 
   const onInteraction = (interaction: Interaction): void => {
     void route(interaction).catch((err: unknown) => {
@@ -877,13 +886,24 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     if (!(await requireManageChannels(interaction))) return;
     if (!(await isEntitledOrReject(interaction, guildId))) return;
     const config = await deps.settings.getConfig(guildId);
-    const opts = parseCreateModal(interaction.fields, {
-      nameTemplate: config.defaultTemplate,
-      statusTemplate: config.defaultStatus,
+    const defaults = { nameTemplate: config.defaultTemplate, statusTemplate: config.defaultStatus };
+    const prefill = readCreateModalRaw(interaction.fields);
+    const opts = parseCreateModal(interaction.fields, defaults);
+    // Catch a permissions failure *inside* the task: nothing is persisted before the
+    // create throws, so it's an expected, deterministic config error that shouldn't
+    // trip the guild's circuit breaker — and we want to offer a tailored retry.
+    const outcome = await run(guildId, 'create:submit', async () => {
+      try {
+        return { ok: true as const, result: await deps.settings.createPrimary(guildId, opts) };
+      } catch (err) {
+        if (isPermissionError(err)) return { ok: false as const, err };
+        throw err;
+      }
     });
-    const result = await run(guildId, 'create:submit', () =>
-      deps.settings.createPrimary(guildId, opts),
-    );
+    if (!outcome.ok) {
+      await replyCreatePermissionError(interaction, prefill, outcome.err);
+      return;
+    }
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId(CREATE_AGAIN_ID)
@@ -891,10 +911,97 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         .setStyle(ButtonStyle.Secondary),
     );
     await interaction.reply({
-      content: formatResult(result),
+      content: formatResult(outcome.result),
       components: [row],
       ephemeral: true,
     });
+  }
+
+  /**
+   * The chosen category (or the guild) refused the create for lack of permission.
+   * Reply with exactly which permissions I'm missing there — and which I do hold —
+   * plus a "Retry" button that re-opens the modal with their selections intact.
+   */
+  async function replyCreatePermissionError(
+    interaction: ModalSubmitInteraction,
+    prefill: CreatePrefill,
+    err: unknown,
+  ): Promise<void> {
+    const me = interaction.guild?.members.me ?? null;
+    const category =
+      prefill.parentId != null
+        ? (interaction.guild?.channels.cache.get(prefill.parentId) ?? null)
+        : null;
+    // Resolve permissions where the channel would land: inside the chosen category
+    // (base perms + that category's overrides) or, with no category, guild-wide.
+    const has = (flag: bigint): boolean => {
+      if (!me) return false;
+      if (category && 'permissionsFor' in category) {
+        return category.permissionsFor(me)?.has(flag) ?? false;
+      }
+      return me.permissions.has(flag);
+    };
+    const missing = missingBotPermissions(has);
+    const held = ALL_REQUIRED_PERMISSION_LABELS.filter((l) => !missing.includes(l));
+    const where = category ? ` in **${category.name}**` : '';
+
+    const lines = [`⚠️ I couldn’t create the creator channel${where}.`];
+    if (missing.length) {
+      lines.push(`I’m missing these permissions: **${missing.join('**, **')}**.`);
+      if (held.length) lines.push(`Permissions I already have: ${held.join(', ')}.`);
+      lines.push(
+        category
+          ? 'Grant me those permissions on that category (or server-wide), then hit **Retry**.'
+          : 'Grant me those permissions, then hit **Retry**.',
+      );
+    } else {
+      // Discord refused but my base perms look fine — a role/channel override is the
+      // likely culprit. Surface the raw detail so it's still actionable.
+      lines.push(
+        `Discord refused with: ${describeError(err)}. A role or channel override may be ` +
+          'blocking me — adjust it, then hit **Retry**.',
+      );
+    }
+    lines.push('_Your selections are saved._');
+
+    const token = interaction.id;
+    pruneCreateRetries();
+    createRetries.set(token, { prefill, expiresAt: Date.now() + CREATE_RETRY_TTL_MS });
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`${CREATE_RETRY_PREFIX}${token}`)
+        .setLabel('Retry')
+        .setStyle(ButtonStyle.Primary),
+    );
+    await interaction.reply({ content: lines.join('\n'), components: [row], ephemeral: true });
+  }
+
+  /** "Retry" after a failed `/create`: re-open the modal with the saved selections. */
+  async function handleCreateRetry(interaction: ButtonInteraction): Promise<void> {
+    const guildId = interaction.guildId!;
+    if (!(await deps.guilds.isEntitled(guildId, deps.selfHosted))) {
+      await interaction.reply({
+        content: 'This server isn’t currently entitled.',
+        ephemeral: true,
+      });
+      return;
+    }
+    if (!(await requireManageChannels(interaction))) return;
+    pruneCreateRetries();
+    const saved = createRetries.get(interaction.customId.slice(CREATE_RETRY_PREFIX.length));
+    const config = await deps.settings.getConfig(guildId);
+    const defaults = { nameTemplate: config.defaultTemplate, statusTemplate: config.defaultStatus };
+    // The saved prefill expires (and is lost on restart); fall back to the guild
+    // defaults so Retry still opens a usable modal.
+    await interaction.showModal(buildCreateModal(defaults, saved?.prefill));
+  }
+
+  /** Drops expired saved-create entries so the map stays bounded. */
+  function pruneCreateRetries(): void {
+    const now = Date.now();
+    for (const [token, entry] of createRetries) {
+      if (entry.expiresAt <= now) createRetries.delete(token);
+    }
   }
 
   async function isEntitledOrReject(
@@ -1068,6 +1175,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
 
   async function handleButton(interaction: ButtonInteraction): Promise<void> {
     if (interaction.customId === CREATE_AGAIN_ID) return openCreateModal(interaction);
+    if (interaction.customId.startsWith(CREATE_RETRY_PREFIX)) return handleCreateRetry(interaction);
     if (interaction.customId.startsWith(KICK_PREFIX)) return handleKickVote(interaction);
     if (interaction.customId.startsWith(JOIN_PREFIX)) return handleJoinDecision(interaction);
     if (interaction.customId.startsWith(ADOPT_PREFIX)) return handleAdoptButton(interaction);
@@ -1205,6 +1313,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     deps.client.off('interactionCreate', onInteraction);
     for (const timer of voteTimers.values()) clearTimeout(timer);
     voteTimers.clear();
+    createRetries.clear();
   };
 }
 
