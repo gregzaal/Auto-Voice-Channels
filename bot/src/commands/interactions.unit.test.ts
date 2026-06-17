@@ -11,7 +11,7 @@ function fakeClient(): EventEmitter {
 }
 
 interface FakeInteractionOpts {
-  kind: 'command' | 'button' | 'modal';
+  kind: 'command' | 'button' | 'select' | 'modal';
   guildId?: string | null;
   commandName?: string;
   customId?: string;
@@ -40,6 +40,7 @@ function fakeInteraction(opts: FakeInteractionOpts) {
     isRepliable: () => true,
     isChatInputCommand: () => opts.kind === 'command',
     isButton: () => opts.kind === 'button',
+    isChannelSelectMenu: () => opts.kind === 'select',
     isModalSubmit: () => opts.kind === 'modal',
     reply,
     followUp,

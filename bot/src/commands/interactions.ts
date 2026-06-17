@@ -5,6 +5,7 @@ import {
   GuildMember,
   PermissionFlagsBits,
   type ButtonInteraction,
+  type ChannelSelectMenuInteraction,
   type ChatInputCommandInteraction,
   type Client,
   type Interaction,
@@ -12,7 +13,7 @@ import {
   type InteractionUpdateOptions,
   type ModalSubmitInteraction,
 } from 'discord.js';
-import type { GuildRepository, Logger } from '@avc/core';
+import type { GuildRepository, Logger, ManagedChannelRepository } from '@avc/core';
 import type { GuildDispatcher } from '../runtime/dispatcher.js';
 import {
   JOIN_PREFIX,
@@ -36,6 +37,15 @@ import {
   SETTINGS_PREFIX,
   settingsId,
 } from './settingsPanel.js';
+import {
+  ALL_REQUIRED_PERMISSION_LABELS,
+  buildChannelPickerMessage,
+  buildSetupPanel,
+  formatPlan,
+  missingBotPermissions,
+  parseSetupPick,
+  SETUP_PREFIX,
+} from './setupPanel.js';
 import {
   ADOPT_PREFIX,
   buildAdoptPrompt,
@@ -81,6 +91,7 @@ export interface InteractionDeps {
   privacy: PrivacyService;
   feature: VoiceFeature;
   guilds: GuildRepository;
+  managed: ManagedChannelRepository;
   selfHosted: boolean;
   /** Discord application id, for building the `/invite` link. */
   clientId: string;
@@ -91,6 +102,12 @@ export interface InteractionDeps {
 
 const KICK_PREFIX = 'avc:kick:';
 const VOTE_TIMEOUT_MS = 2 * 60 * 1000;
+
+/** Interactions that can drive the "manage a channel" flow (command + components). */
+type ManageableInteraction =
+  | ChatInputCommandInteraction
+  | ButtonInteraction
+  | ChannelSelectMenuInteraction;
 
 /**
  * The command/interaction surface. Resolves each interaction's guild + caller +
@@ -130,6 +147,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
 
     if (interaction.isChatInputCommand()) return handleCommand(interaction);
     if (interaction.isButton()) return handleButton(interaction);
+    if (interaction.isChannelSelectMenu()) return handleChannelSelect(interaction);
     if (interaction.isModalSubmit()) return handleModal(interaction);
   }
 
@@ -231,6 +249,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return openCreateModal(interaction);
       case 'settings':
         return openSettings(interaction);
+      case 'setup':
+        return openSetup(interaction);
       default:
         await interaction.reply({ content: 'Unknown command.', ephemeral: true });
         return;
@@ -240,28 +260,41 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   // -- /name + /template editor panel --------------------------------------
 
   async function openTemplatePanel(interaction: ChatInputCommandInteraction): Promise<void> {
-    const guildId = interaction.guildId!;
     const channelId = await requireVoiceChannel(interaction);
     if (!channelId) return;
+    await manageChannelCore(interaction, channelId);
+  }
+
+  /**
+   * The "manage a channel" flow, reusable from `/template`, the `/setup`
+   * "Manage a channel" button, and the channel picker. Routes to the right
+   * editor for what the channel *is*: a creator-channel secondary edits the
+   * primary's templates; an adopted standalone edits its own; anything else is
+   * offered for adoption. Responds in place via {@link respond} (a fresh reply
+   * for a command, an in-place update for a component interaction).
+   */
+  async function manageChannelCore(
+    interaction: ManageableInteraction,
+    channelId: string,
+  ): Promise<void> {
+    const guildId = interaction.guildId!;
     // A creator channel's secondary → edit the primary's templates (the usual case).
     const primaryState = await run(guildId, 'cmd:template', () =>
       deps.feature.getEditorState('primary', guildId, channelId),
     );
     if (primaryState.found) {
-      await interaction.reply(renderEditorPanel('primary', channelId, primaryState));
-      return;
+      return respond(interaction, renderEditorPanel('primary', channelId, primaryState));
     }
     // Already an adopted standalone channel → edit its templates.
     const managedState = await run(guildId, 'cmd:template:managed', () =>
       deps.feature.getManagedEditorState(guildId, channelId),
     );
     if (managedState.found) {
-      await interaction.reply(renderEditorPanel('adopted', channelId, managedState));
-      return;
+      return respond(interaction, renderEditorPanel('adopted', channelId, managedState));
     }
     // An otherwise-unmanaged voice channel → offer to adopt it (explicit confirm).
     const name = interaction.guild?.channels.cache.get(channelId)?.name ?? 'this channel';
-    await interaction.reply(buildAdoptPrompt(channelId, name));
+    return respond(interaction, buildAdoptPrompt(channelId, name));
   }
 
   /** `/position` → a modal to pick above/below for the creator channel (or group) you're in. */
@@ -699,7 +732,11 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
 
   /** Gate an admin action: replies with the permission notice and returns false if lacking it. */
   async function requireManageChannels(
-    interaction: ChatInputCommandInteraction | ButtonInteraction | ModalSubmitInteraction,
+    interaction:
+      | ChatInputCommandInteraction
+      | ButtonInteraction
+      | ChannelSelectMenuInteraction
+      | ModalSubmitInteraction,
   ): Promise<boolean> {
     if (hasManageChannels(interaction)) return true;
     await interaction.reply({
@@ -836,6 +873,93 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     await interaction.reply(renderSettingsPanel(config));
   }
 
+  // -- /setup : the primary entry point ------------------------------------
+
+  /** Gathers everything the `/setup` panel shows for this guild + viewer. */
+  async function buildSetupReply(
+    interaction: ChatInputCommandInteraction | ButtonInteraction,
+  ): Promise<InteractionReplyOptions> {
+    const guildId = interaction.guildId!;
+    const [config, managedRows, guildRow] = await Promise.all([
+      run(guildId, 'setup:config', () => deps.settings.getConfig(guildId)),
+      run(guildId, 'setup:managed', () => deps.managed.listByGuild(guildId)),
+      deps.guilds.get(guildId),
+    ]);
+    const me = interaction.guild?.members.me ?? null;
+    const missingPermissions = me
+      ? missingBotPermissions((flag) => me.permissions.has(flag))
+      : ALL_REQUIRED_PERMISSION_LABELS;
+    const plan = formatPlan({
+      memberCount: interaction.guild?.memberCount ?? 0,
+      status: guildRow?.authStatus ?? 'trial',
+      expiresAt: guildRow?.authExpiresAt ?? null,
+      selfHosted: deps.selfHosted,
+      now: new Date(),
+    });
+    return buildSetupPanel({
+      enabled: config.enabled,
+      isAdmin: hasManageChannels(interaction),
+      plan,
+      missingPermissions,
+      primaries: config.primaries,
+      managed: managedRows,
+    });
+  }
+
+  async function openSetup(interaction: ChatInputCommandInteraction): Promise<void> {
+    await interaction.reply(await buildSetupReply(interaction));
+  }
+
+  /** Re-render the (already-open) setup panel in place after a panel action. */
+  async function refreshSetupPanel(interaction: ButtonInteraction): Promise<void> {
+    await interaction.update(toUpdate(await buildSetupReply(interaction)));
+  }
+
+  /** The `/setup` panel buttons. (`lang` is disabled and never fires.) */
+  async function handleSetupButton(interaction: ButtonInteraction): Promise<void> {
+    const action = interaction.customId.slice(SETUP_PREFIX.length);
+    // Create runs its own entitlement + permission gating (and opens a modal).
+    if (action === 'create') return openCreateModal(interaction);
+    if (!(await requireManageChannels(interaction))) return;
+    const guildId = interaction.guildId!;
+    if (action === 'toggle') {
+      await run(guildId, 'setup:toggle', async () => {
+        const config = await deps.settings.getConfig(guildId);
+        return deps.settings.setEnabled(guildId, !config.enabled);
+      });
+      await refreshSetupPanel(interaction);
+      return;
+    }
+    if (action === 'logging') {
+      const current = await run(guildId, 'setup:logging:get', () =>
+        deps.settings.getLogging(guildId),
+      );
+      await interaction.showModal(buildLoggingModal(current));
+      return;
+    }
+    if (action === 'manage') {
+      // House style: act on the channel you're in, else offer a picker.
+      const channelId = currentVoiceChannelId(interaction);
+      if (channelId) return manageChannelCore(interaction, channelId);
+      await interaction.update(
+        buildChannelPickerMessage('manage', '🛠️ Pick a voice channel to manage:'),
+      );
+      return;
+    }
+  }
+
+  /** A voice-channel was chosen from a `avc:setup:pick:<command>` menu. */
+  async function handleChannelSelect(interaction: ChannelSelectMenuInteraction): Promise<void> {
+    const command = parseSetupPick(interaction.customId);
+    if (!command) return;
+    const channelId = interaction.values[0];
+    if (!channelId) return;
+    if (command === 'manage') {
+      if (!(await requireManageChannels(interaction))) return;
+      return manageChannelCore(interaction, channelId);
+    }
+  }
+
   async function handleKickCommand(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
     const channelId = currentVoiceChannelId(interaction);
@@ -881,6 +1005,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     if (interaction.customId.startsWith(ADOPT_PREFIX)) return handleAdoptButton(interaction);
     if (interaction.customId.startsWith(GROUP_PREFIX)) return handleGroupButton(interaction);
     if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorButton(interaction);
+    if (interaction.customId.startsWith(SETUP_PREFIX)) return handleSetupButton(interaction);
     if (interaction.customId.startsWith(SETTINGS_PREFIX)) return handleSettingsButton(interaction);
   }
 
@@ -1050,7 +1175,9 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   };
 }
 
-function currentVoiceChannelId(interaction: ChatInputCommandInteraction): string | undefined {
+function currentVoiceChannelId(
+  interaction: ChatInputCommandInteraction | ButtonInteraction | ChannelSelectMenuInteraction,
+): string | undefined {
   // `interaction.member` may be the raw API shape (no `.voice`) when uncached;
   // use it only when it's a real GuildMember, else resolve from the guild cache.
   if (interaction.member instanceof GuildMember) {
@@ -1146,4 +1273,20 @@ function toUpdate(
   reply: InteractionReplyOptions,
 ): Pick<InteractionUpdateOptions, 'embeds' | 'components'> {
   return { embeds: reply.embeds ?? [], components: reply.components ?? [] };
+}
+
+/**
+ * Responds to a manage-flow interaction in place: a fresh ephemeral reply for a
+ * slash command, or an in-place edit of the existing message for a button /
+ * channel-select (so the panel transforms rather than stacking a new message).
+ */
+async function respond(
+  interaction: ManageableInteraction,
+  payload: InteractionReplyOptions,
+): Promise<void> {
+  if (interaction.isChatInputCommand()) {
+    await interaction.reply(payload);
+  } else {
+    await interaction.update(toUpdate(payload));
+  }
 }

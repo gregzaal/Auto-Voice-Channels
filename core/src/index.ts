@@ -1,6 +1,7 @@
 export * from './config.js';
 export * from './logger.js';
 export * from './domain/auth.js';
+export * from './domain/tiers.js';
 export * from './domain/runtimeFlags.js';
 export * from './domain/settingsCache.js';
 export * from './repositories/guilds.js';

@@ -25,6 +25,7 @@ describe('buildCommandDefinitions', () => {
         'private',
         'public',
         'settings',
+        'setup',
         'template',
         'transfer',
         'unlimit',

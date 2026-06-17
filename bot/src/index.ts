@@ -204,6 +204,7 @@ async function main(): Promise<void> {
     privacy,
     feature: voiceFeature,
     guilds: guildsRepo,
+    managed,
     selfHosted: config.selfHosted,
     clientId: config.clientId,
     reportError: (message, context) => errorReporter.report(message, context),

@@ -111,6 +111,11 @@ export function buildCommandDefinitions(
         .setName('invite')
         .setDescription('Get a link to invite this bot to another server.'),
     ),
+    guildOnly(
+      new SlashCommandBuilder()
+        .setName('setup')
+        .setDescription('Get started with Auto-Voice-Channels: status, setup, and quick actions.'),
+    ),
     adminOnly(
       new SlashCommandBuilder()
         .setName('create')
