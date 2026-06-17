@@ -80,6 +80,7 @@ import {
   parseGroupId,
 } from './groupPanel.js';
 import { groupKeyFor, ROOT_GROUP_KEY } from '../features/voice/guildSettings.js';
+import { describeError } from '../ops/describeError.js';
 
 export interface InteractionDeps {
   client: Client;
@@ -130,7 +131,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         type: interaction.type,
         error: String(err),
       });
-      void safeReply(interaction, '⚠️ Something went wrong handling that.');
+      void safeReply(interaction, `⚠️ Something went wrong handling that: ${describeError(err)}`);
     });
   };
 

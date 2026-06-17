@@ -7,6 +7,7 @@ import type {
 import type { VoiceActions } from './actions.js';
 import type { CommandResult } from './commands.js';
 import type { GuildVoiceView } from './types.js';
+import { describeError } from '../../ops/describeError.js';
 
 const ok = (message: string): CommandResult => ({ ok: true, message });
 const fail = (message: string): CommandResult => ({ ok: false, message });
@@ -158,9 +159,7 @@ export class PrivacyService {
       await this.deps.actions.moveMember(ctx.guildId, requesterId, ctx.secondaryChannelId);
     } catch (err) {
       this.deps.logger.warn({ err, joinChannelId, requesterId }, 'failed to admit join requester');
-      return fail(
-        `Couldn’t admit <@${requesterId}> — they may have left or I’m missing permissions.`,
-      );
+      return fail(`Couldn’t admit <@${requesterId}> — ${describeError(err)}.`);
     }
     return ok(`Admitted <@${requesterId}>.`);
   }
@@ -183,7 +182,9 @@ export class PrivacyService {
         { err, joinChannelId, requesterId, block },
         'failed to deny join requester',
       );
-      return fail(`Couldn’t ${block ? 'block' : 'deny'} <@${requesterId}> — please try again.`);
+      return fail(
+        `Couldn’t ${block ? 'block' : 'deny'} <@${requesterId}> — ${describeError(err)}.`,
+      );
     }
     return ok(block ? `Blocked <@${requesterId}>.` : `Denied <@${requesterId}>.`);
   }

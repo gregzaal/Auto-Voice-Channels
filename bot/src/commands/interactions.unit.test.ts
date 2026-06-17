@@ -124,7 +124,7 @@ describe('registerInteractionHandler (router)', () => {
     await flush();
     expect(env.reportError).toHaveBeenCalled();
     expect(reply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: '⚠️ Something went wrong handling that.' }),
+      expect.objectContaining({ content: '⚠️ Something went wrong handling that: boom' }),
     );
   });
 
