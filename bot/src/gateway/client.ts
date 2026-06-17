@@ -1,4 +1,20 @@
-import { Client, GatewayIntentBits, Options, Partials, type ClientOptions } from 'discord.js';
+import {
+  ActivityType,
+  Client,
+  GatewayIntentBits,
+  Options,
+  Partials,
+  type ClientOptions,
+} from 'discord.js';
+
+/**
+ * The bot's resting presence — a custom status (no "Playing" prefix) pointing
+ * first-time users at the `/setup` entry point and the website. Applied at
+ * identify on every shard via {@link ClientOptions.presence}. For
+ * {@link ActivityType.Custom}, Discord renders the activity's `state`; `name`
+ * is required on the activity object, so we set both to the same text.
+ */
+const SETUP_STATUS = 'dotsbots.com · /setup';
 
 export interface GatewayOptions {
   /** Total shard count; shard ids are derived per Discord's formula. */
@@ -29,6 +45,10 @@ export function buildGatewayClient(options: GatewayOptions): Client {
   const clientOptions: ClientOptions = {
     shards: options.shardIds,
     shardCount: options.totalShards,
+    presence: {
+      status: 'online',
+      activities: [{ type: ActivityType.Custom, name: SETUP_STATUS, state: SETUP_STATUS }],
+    },
     intents: [
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildVoiceStates,

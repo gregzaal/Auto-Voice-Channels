@@ -1,4 +1,4 @@
-import { GatewayIntentBits, Partials } from 'discord.js';
+import { ActivityType, GatewayIntentBits, Partials } from 'discord.js';
 import { describe, expect, it } from 'vitest';
 import { buildGatewayClient } from './client.js';
 
@@ -16,5 +16,13 @@ describe('buildGatewayClient', () => {
     // handler bails unless it can construct the (partial) user — without this
     // partial, presence/game detection freezes at the GUILD_CREATE value.
     expect(client.options.partials).toContain(Partials.User);
+  });
+
+  it('advertises the /setup entry point in its presence', () => {
+    const activity = client.options.presence?.activities?.[0];
+    expect(activity?.type).toBe(ActivityType.Custom);
+    // Custom-status text lives in `state`; assert the website + command are surfaced.
+    expect(activity?.state).toContain('dotsbots.com');
+    expect(activity?.state).toContain('/setup');
   });
 });
