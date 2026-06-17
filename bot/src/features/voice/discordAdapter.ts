@@ -57,6 +57,21 @@ export function everyoneViewDenied(overwrites: ResolvedOverwrite[], guildId: str
 }
 
 /**
+ * Masks each overwrite's allow/deny to the bits the bot actually holds, dropping
+ * any that become empty. Discord rejects a create whose overwrites touch a
+ * permission the bot doesn't have (50013); masking keeps the bits it can set —
+ * crucially View/Connect, which preserve a channel's visibility/hiding.
+ */
+export function maskOverwrites(
+  overwrites: ResolvedOverwrite[],
+  botPerms: bigint,
+): ResolvedOverwrite[] {
+  return overwrites
+    .map((o) => ({ id: o.id, type: o.type, allow: o.allow & botPerms, deny: o.deny & botPerms }))
+    .filter((o) => o.allow !== 0n || o.deny !== 0n);
+}
+
+/**
  * Guards against AVC locking itself out of a channel it creates. Inheriting (or
  * syncing to) a "private" category/source copies its `@everyone` View/Connect
  * *denies* onto the new channel — and the bot, being in `@everyone`, loses access
@@ -190,13 +205,27 @@ export class DiscordVoiceActions implements VoiceActions {
       const category = await this.resolveCategoryOverwrites(parentId);
       if (category && everyoneViewDenied(category, input.guildId)) overwrites = category;
     }
-    // Only when the result hides the channel from @everyone (and so from the bot,
-    // a member of @everyone) do we inject a bot-access overwrite — otherwise the
-    // bot keeps access via its guild role and we avoid noisy per-channel overrides.
+    // Inject a bot-access overwrite when the result hides the channel from
+    // @everyone (and so from the bot, a member of @everyone).
     if (overwrites && botId && everyoneViewDenied(overwrites, input.guildId)) {
       overwrites = withBotAccess(overwrites, botId);
     }
-    const permissionOverwrites = overwrites && overwrites.length > 0 ? overwrites : undefined;
+    // Discord only lets you set overwrite bits you yourself hold, and only with
+    // Manage Roles — otherwise it rejects the whole create with 50013. So mask
+    // every overwrite to the bot's own permissions (View/Connect denies survive,
+    // exotic bits the bot lacks are dropped); without Manage Roles we can't set
+    // overwrites at all, so fall back to letting Discord sync to the category.
+    const me = guild.members.me ?? (await guild.members.fetchMe().catch(() => null));
+    const botPerms = me?.permissions.bitfield ?? 0n;
+    let permissionOverwrites: ResolvedOverwrite[] | undefined;
+    if (
+      overwrites &&
+      overwrites.length > 0 &&
+      (botPerms & PermissionFlagsBits.ManageRoles) !== 0n
+    ) {
+      const masked = maskOverwrites(overwrites, botPerms);
+      if (masked.length > 0) permissionOverwrites = masked;
+    }
 
     const channel = await guild.channels.create({
       name: input.name,

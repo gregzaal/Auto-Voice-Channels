@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DiscordVoiceActions,
   everyoneViewDenied,
+  maskOverwrites,
   normalizeVoiceState,
   withBotAccess,
 } from './discordAdapter.js';
@@ -12,6 +13,11 @@ const UNKNOWN_CHANNEL = 10003;
 const BOT = 'bot-id';
 const VIEW = PermissionFlagsBits.ViewChannel;
 const MANAGE = PermissionFlagsBits.ManageChannels;
+const CONNECT = PermissionFlagsBits.Connect;
+const MOVE = PermissionFlagsBits.MoveMembers;
+const MANAGE_ROLES = PermissionFlagsBits.ManageRoles;
+// A bot with the perms it needs to set overwrites (incl. Manage Roles).
+const FULL_BOT_PERMS = VIEW | CONNECT | MANAGE | MOVE | MANAGE_ROLES;
 
 function apiError(code: number): DiscordAPIError {
   return new DiscordAPIError(
@@ -122,9 +128,16 @@ describe('DiscordVoiceActions.createVoiceChannel', () => {
   });
 
   type Row = { id: string; type: number; allow: bigint; deny: bigint };
-  function makeClient(categoryOverwrites: Row[], primaryOverwrites: Row[] = []) {
+  function makeClient(
+    categoryOverwrites: Row[],
+    primaryOverwrites: Row[] = [],
+    botPerms = FULL_BOT_PERMS,
+  ) {
     const created = { id: 'new', setPosition: vi.fn() };
-    const guild = { channels: { create: vi.fn().mockResolvedValue(created) } };
+    const guild = {
+      channels: { create: vi.fn().mockResolvedValue(created) },
+      members: { me: { permissions: { bitfield: botPerms } } },
+    };
     const primary = {
       isVoiceBased: () => true,
       parent: { id: 'cat' },
@@ -192,6 +205,58 @@ describe('DiscordVoiceActions.createVoiceChannel', () => {
     await actions.createVoiceChannel({ guildId: 'g1', name: 'x', nearChannelId: 'prim' });
 
     expect(createArg(guild).permissionOverwrites).toBeUndefined();
+  });
+
+  it('masks exotic overwrite bits the bot lacks but keeps View/Connect + bot access', async () => {
+    const exotic = 1n << 40n; // a permission the bot does not hold
+    const primaryOverwrites: Row[] = [
+      { id: 'g1', type: 0, allow: 0n, deny: VIEW }, // @everyone hidden
+      { id: 'muted', type: 0, allow: 0n, deny: exotic | CONNECT }, // exotic + Connect deny
+    ];
+    const { client, guild } = makeClient([], primaryOverwrites);
+    const actions = new DiscordVoiceActions(client);
+    await actions.createVoiceChannel({
+      guildId: 'g1',
+      name: 'x',
+      nearChannelId: 'prim',
+      inheritFrom: 'primary',
+    });
+    const ow = createArg(guild).permissionOverwrites!;
+    expect(ow.find((o) => o.id === BOT)!.allow & VIEW).toBe(VIEW); // bot kept
+    expect(ow.find((o) => o.id === 'g1')!.deny & VIEW).toBe(VIEW); // hidden kept
+    const muted = ow.find((o) => o.id === 'muted')!;
+    expect(muted.deny & exotic).toBe(0n); // exotic bit the bot lacks is dropped
+    expect(muted.deny & CONNECT).toBe(CONNECT); // Connect (the bot has) survives
+  });
+
+  it('skips explicit overwrites entirely when the bot lacks Manage Roles', async () => {
+    // Without Manage Roles the create can't carry any overwrites (50013); fall back
+    // to Discord's sync rather than failing the whole creation.
+    const hide: Row[] = [{ id: 'g1', type: 0, allow: 0n, deny: VIEW }];
+    const { client, guild } = makeClient([], hide, VIEW | CONNECT | MANAGE | MOVE); // no Manage Roles
+    const actions = new DiscordVoiceActions(client);
+    await actions.createVoiceChannel({
+      guildId: 'g1',
+      name: 'x',
+      nearChannelId: 'prim',
+      inheritFrom: 'primary',
+    });
+    expect(createArg(guild).permissionOverwrites).toBeUndefined();
+  });
+});
+
+describe('maskOverwrites', () => {
+  it('keeps only bits the bot holds and drops empties', () => {
+    const botPerms = VIEW | CONNECT;
+    const out = maskOverwrites(
+      [
+        { id: 'a', type: 0, allow: VIEW | MANAGE, deny: CONNECT },
+        { id: 'b', type: 0, allow: MANAGE, deny: 0n }, // becomes empty → dropped
+      ],
+      botPerms,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ id: 'a', allow: VIEW, deny: CONNECT });
   });
 });
 

@@ -144,12 +144,26 @@ export class RecordingVoiceActions implements VoiceActions {
   simulateRenameRateLimit = false;
   /** When set, `deleteChannel` throws Missing Access for this channel id. */
   failDeleteForChannel?: string;
+  /** When true, `createVoiceChannel` throws Missing Permissions (tests the create path). */
+  failCreate = false;
   private seq = 0;
   private readonly created = new Set<string>();
 
   constructor(private readonly idPrefix = 'sec') {}
 
   createVoiceChannel(input: CreateVoiceChannelInput): Promise<string> {
+    if (this.failCreate) {
+      return Promise.reject(
+        new DiscordAPIError(
+          { code: 50013, message: 'Missing Permissions' } as never,
+          50013,
+          403,
+          'POST',
+          'https://discord.test',
+          {} as never,
+        ),
+      );
+    }
     const channelId = `${this.idPrefix}-${++this.seq}`;
     this.created.add(channelId);
     this.actions.push({

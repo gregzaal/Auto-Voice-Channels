@@ -370,19 +370,34 @@ export class VoiceFeature {
       userLimit: primary?.template.limit ?? 0,
     });
 
-    const newChannelId = await this.deps.actions.createVoiceChannel({
-      guildId,
-      name,
-      userLimit: primary?.template.limit ?? 0,
-      // Place the secondary in the primary's category, above/below per config.
-      nearChannelId: channelId,
-      // Default is below the primary; only `above: true` positions above it.
-      above: primary?.template.above === true,
-      // Inherit permissions from the primary by default (matching the legacy bot);
-      // `/inheritpermissions` can switch the source to the category or a specific
-      // channel. Unset must NOT fall through to Discord's category-sync.
-      inheritFrom: primary?.template.inheritperms ?? 'primary',
-    });
+    let newChannelId: string;
+    try {
+      newChannelId = await this.deps.actions.createVoiceChannel({
+        guildId,
+        name,
+        userLimit: primary?.template.limit ?? 0,
+        // Place the secondary in the primary's category, above/below per config.
+        nearChannelId: channelId,
+        // Default is below the primary; only `above: true` positions above it.
+        above: primary?.template.above === true,
+        // Inherit permissions from the primary by default (matching the legacy bot);
+        // `/inheritpermissions` can switch the source to the category or a specific
+        // channel. Unset must NOT fall through to Discord's category-sync.
+        inheritFrom: primary?.template.inheritperms ?? 'primary',
+      });
+    } catch (err) {
+      if (!isPermissionError(err)) throw err;
+      // Can't create the channel (missing perms — usually Manage Roles to copy the
+      // creator channel's permissions). Tell the admin instead of failing silently.
+      this.deps.permissionProblems?.record(guildId, {
+        channelId,
+        operation: 'create',
+        at: Date.now(),
+      });
+      this.deps.serverLog?.(guildId, 1, permissionProblemMessage(channelId, 'create'));
+      this.deps.logger.warn({ guildId, primaryId: channelId, err }, 'cannot create secondary');
+      return { action: 'skip' };
+    }
 
     await this.deps.secondaries.create({
       channelId: newChannelId,
@@ -404,7 +419,28 @@ export class VoiceFeature {
       );
     }
 
-    await this.deps.actions.moveMember(guildId, member.id, newChannelId);
+    try {
+      await this.deps.actions.moveMember(guildId, member.id, newChannelId);
+    } catch (err) {
+      if (!isPermissionError(err)) throw err;
+      // Created the channel but can't move the member into it (we've lost access to
+      // it). Stop tracking it, best-effort delete (likely also blocked → left for
+      // manual cleanup), and notify.
+      await this.deps.secondaries.remove(newChannelId);
+      await this.deps.onSecondaryRemoved?.(guildId, newChannelId);
+      await this.deps.actions.deleteChannel(guildId, newChannelId).catch(() => undefined);
+      this.deps.permissionProblems?.record(guildId, {
+        channelId: newChannelId,
+        operation: 'move',
+        at: Date.now(),
+      });
+      this.deps.serverLog?.(guildId, 1, permissionProblemMessage(newChannelId));
+      this.deps.logger.warn(
+        { guildId, secondaryId: newChannelId, err },
+        'created secondary but cannot move member into it',
+      );
+      return { action: 'skip' };
+    }
 
     // Grouped category: slot the new channel into the group block (at the bottom,
     // since it's the newest) with one bulk reorder. Positions aren't rate-limited,

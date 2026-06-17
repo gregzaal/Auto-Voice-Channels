@@ -358,6 +358,30 @@ describe('VoiceFeature (integration)', () => {
     expect(logs).toContainEqual({ level: 3, message: expect.stringContaining('left') });
   });
 
+  it('notifies (without crashing) when it can’t create a secondary (missing permissions)', async () => {
+    const logs: { level: number; message: string }[] = [];
+    const problems = new PermissionProblemTracker();
+    const f = new VoiceFeature({
+      autoChannels,
+      secondaries,
+      guilds,
+      actions,
+      voice,
+      selfHosted: true,
+      logger: fakeLogger(),
+      serverLog: (_g, level, message) => logs.push({ level, message }),
+      permissionProblems: problems,
+    });
+    actions.failCreate = true;
+    const alice = member('alice');
+    voice.put(PRIMARY, alice);
+    await f.handleVoiceStateUpdate({ guildId: GUILD, member: alice, afterChannelId: PRIMARY });
+
+    expect(actions.ofType('create')).toHaveLength(0); // the create threw
+    expect(problems.recent(GUILD).map((p) => p.channelId)).toContain(PRIMARY);
+    expect(logs.some((l) => l.level === 1 && l.message.includes('create a channel'))).toBe(true);
+  });
+
   it('gives up a channel it can no longer delete (Missing Access), notifying instead of retrying', async () => {
     const logs: { level: number; message: string }[] = [];
     const problems = new PermissionProblemTracker();

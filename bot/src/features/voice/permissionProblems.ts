@@ -42,8 +42,18 @@ export class PermissionProblemTracker {
   }
 }
 
-/** The actionable `/logging` message for a lost-access incident. */
-export function permissionProblemMessage(channelId: string): string {
+/** The actionable `/logging` message for an incident, tailored to the operation. */
+export function permissionProblemMessage(
+  channelId: string,
+  operation: PermissionOperation | 'access' = 'access',
+): string {
+  if (operation === 'create') {
+    return (
+      `⚠️ I couldn’t create a channel from <#${channelId}> — I’m missing permissions. To copy ` +
+      'its permissions I need **Manage Roles**, plus **Manage Channels**, **Connect** and ' +
+      '**Move Members** on it (or its category). Grant those and new channels will work.'
+    );
+  }
   return (
     `⚠️ I can’t manage <#${channelId}> — I’ve lost access to it (a permission override is ` +
     'hiding it from me). Grant my role **View Channel**, **Connect**, **Manage Channels** and ' +
