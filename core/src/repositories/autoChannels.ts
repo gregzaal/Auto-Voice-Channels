@@ -25,7 +25,8 @@ export const primaryTemplateSchema = z.object({
   /**
    * Permission inheritance for spawned secondaries: `primary` (copy the primary
    * channel's overwrites), `category` (copy the primary's category), or a
-   * specific channel id to copy. Unset → Discord defaults.
+   * specific channel id to copy. Unset → defaults to `primary` (the legacy
+   * behaviour), NOT Discord's implicit category-sync.
    */
   inheritperms: z.string().optional(),
 });

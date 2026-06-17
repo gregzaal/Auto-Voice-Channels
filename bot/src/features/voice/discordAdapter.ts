@@ -168,23 +168,27 @@ export class DiscordVoiceActions implements VoiceActions {
       if (placeAbove) reorderAboveIndex = near.position; // captured before create
     }
 
-    // Resolve the permission overwrites to create the channel with, and make sure
-    // the bot is never locked out of its own channel:
-    //  - explicit `/inheritpermissions` copies its source's overwrites;
-    //  - otherwise, if the channel will land in a category that hides itself from
-    //    `@everyone`, snapshot that category — Discord would otherwise *sync* the new
-    //    channel to it, inheriting the View deny and locking the bot out (later
-    //    moves/deletes then fail with Missing Access, 50001).
+    // Resolve the permission overwrites to create the channel with:
+    //  - `inheritFrom` copies its source's overwrites (secondaries default to the
+    //    primary channel; `/inheritpermissions` can pick the category or a channel);
+    //  - a channel created directly in a category with no inherit source (e.g. a
+    //    primary) only snapshots that category when it hides itself from @everyone —
+    //    otherwise we leave perms clean and let Discord sync as usual.
+    const botId = this.client.user?.id;
     let overwrites = input.inheritFrom
       ? await this.resolveInheritedOverwrites(input.inheritFrom, near)
       : undefined;
-    if (!overwrites && parentId) {
+    if (!overwrites && !input.inheritFrom && parentId) {
       const category = await this.resolveCategoryOverwrites(parentId);
       if (category && everyoneViewDenied(category, input.guildId)) overwrites = category;
     }
-    const botId = this.client.user?.id;
-    const permissionOverwrites =
-      overwrites && overwrites.length > 0 && botId ? withBotAccess(overwrites, botId) : overwrites;
+    // Only when the result hides the channel from @everyone (and so from the bot,
+    // a member of @everyone) do we inject a bot-access overwrite — otherwise the
+    // bot keeps access via its guild role and we avoid noisy per-channel overrides.
+    if (overwrites && botId && everyoneViewDenied(overwrites, input.guildId)) {
+      overwrites = withBotAccess(overwrites, botId);
+    }
+    const permissionOverwrites = overwrites && overwrites.length > 0 ? overwrites : undefined;
 
     const channel = await guild.channels.create({
       name: input.name,

@@ -374,7 +374,10 @@ export class VoiceFeature {
       nearChannelId: channelId,
       // Default is below the primary; only `above: true` positions above it.
       above: primary?.template.above === true,
-      ...(primary?.template.inheritperms ? { inheritFrom: primary.template.inheritperms } : {}),
+      // Inherit permissions from the primary by default (matching the legacy bot);
+      // `/inheritpermissions` can switch the source to the category or a specific
+      // channel. Unset must NOT fall through to Discord's category-sync.
+      inheritFrom: primary?.template.inheritperms ?? 'primary',
     });
 
     await this.deps.secondaries.create({

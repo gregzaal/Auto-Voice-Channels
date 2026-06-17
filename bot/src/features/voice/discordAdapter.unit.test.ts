@@ -121,9 +121,8 @@ describe('DiscordVoiceActions.createVoiceChannel', () => {
     },
   });
 
-  function makeClient(
-    categoryOverwrites: { id: string; type: number; allow: bigint; deny: bigint }[],
-  ) {
+  type Row = { id: string; type: number; allow: bigint; deny: bigint };
+  function makeClient(categoryOverwrites: Row[], primaryOverwrites: Row[] = []) {
     const created = { id: 'new', setPosition: vi.fn() };
     const guild = { channels: { create: vi.fn().mockResolvedValue(created) } };
     const primary = {
@@ -131,6 +130,7 @@ describe('DiscordVoiceActions.createVoiceChannel', () => {
       parent: { id: 'cat' },
       rawPosition: 0,
       position: 0,
+      permissionOverwrites: overwriteCache(primaryOverwrites),
     };
     const category = { permissionOverwrites: overwriteCache(categoryOverwrites) };
     const client = {
@@ -142,14 +142,46 @@ describe('DiscordVoiceActions.createVoiceChannel', () => {
     } as unknown as Client;
     return { client, guild };
   }
+  const createArg = (guild: { channels: { create: ReturnType<typeof vi.fn> } }) =>
+    guild.channels.create.mock.calls[0][0] as {
+      permissionOverwrites?: { id: string; allow: bigint; deny: bigint }[];
+    };
 
-  it('snapshots a hidden category and injects bot access (no /inheritpermissions)', async () => {
+  it('inherits a hidden primary by default and keeps bot access', async () => {
+    // No inheritFrom passed by the handler historically meant "category sync"; now
+    // the handler defaults to 'primary'. A hidden primary → bot must keep access.
+    const hide: Row[] = [{ id: 'g1', type: 0, allow: 0n, deny: VIEW }];
+    const { client, guild } = makeClient([], hide);
+    const actions = new DiscordVoiceActions(client);
+    await actions.createVoiceChannel({
+      guildId: 'g1',
+      name: 'x',
+      nearChannelId: 'prim',
+      inheritFrom: 'primary',
+    });
+    const ow = createArg(guild).permissionOverwrites!;
+    expect(ow.find((o) => o.id === BOT)!.allow & VIEW).toBe(VIEW);
+    expect(ow.find((o) => o.id === 'g1')!.deny & VIEW).toBe(VIEW);
+  });
+
+  it('inherits a public primary with no extra bot overwrite (clean perms)', async () => {
+    const { client, guild } = makeClient([], []); // primary has no overwrites
+    const actions = new DiscordVoiceActions(client);
+    await actions.createVoiceChannel({
+      guildId: 'g1',
+      name: 'x',
+      nearChannelId: 'prim',
+      inheritFrom: 'primary',
+    });
+    expect(createArg(guild).permissionOverwrites).toBeUndefined();
+  });
+
+  it('snapshots a hidden category for a no-inherit channel (e.g. a primary)', async () => {
     const { client, guild } = makeClient([{ id: 'g1', type: 0, allow: 0n, deny: VIEW }]);
     const actions = new DiscordVoiceActions(client);
     await actions.createVoiceChannel({ guildId: 'g1', name: 'x', nearChannelId: 'prim' });
 
-    const arg = (guild.channels.create as ReturnType<typeof vi.fn>).mock.calls[0][0];
-    const ow = arg.permissionOverwrites as { id: string; allow: bigint; deny: bigint }[];
+    const ow = createArg(guild).permissionOverwrites!;
     expect(ow.find((o) => o.id === BOT)!.allow & VIEW).toBe(VIEW); // bot can see/manage
     expect(ow.find((o) => o.id === 'g1')!.deny & VIEW).toBe(VIEW); // others still hidden
   });
@@ -159,8 +191,7 @@ describe('DiscordVoiceActions.createVoiceChannel', () => {
     const actions = new DiscordVoiceActions(client);
     await actions.createVoiceChannel({ guildId: 'g1', name: 'x', nearChannelId: 'prim' });
 
-    const arg = (guild.channels.create as ReturnType<typeof vi.fn>).mock.calls[0][0];
-    expect(arg.permissionOverwrites).toBeUndefined();
+    expect(createArg(guild).permissionOverwrites).toBeUndefined();
   });
 });
 
