@@ -100,13 +100,6 @@ export class GuildSettingsService {
     return ok(`The “no game” label is now **${value}**.`);
   }
 
-  async setDefaultTemplate(guildId: string, template: string): Promise<CommandResult> {
-    const value = template.trim().replace(/[\r\n]+/g, ' ');
-    if (!value) return fail('The template cannot be empty.');
-    await this.deps.guilds.updateSettings(guildId, { channel_name_template: value });
-    return ok(`Default channel-name template set to:\n\`${value}\``);
-  }
-
   async addAlias(guildId: string, game: string, alias: string): Promise<CommandResult> {
     const g = game.trim();
     const a = alias.trim();

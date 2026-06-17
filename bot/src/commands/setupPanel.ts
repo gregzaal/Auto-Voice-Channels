@@ -5,7 +5,10 @@ import {
   ChannelSelectMenuBuilder,
   ChannelType,
   EmbedBuilder,
+  ModalBuilder,
   PermissionFlagsBits,
+  TextInputBuilder,
+  TextInputStyle,
   type APIEmbed,
   type InteractionReplyOptions,
   type InteractionUpdateOptions,
@@ -201,6 +204,11 @@ function adminRows(enabled: boolean): ReturnType<typeof rowOf>[] {
       .setLabel('Set up logging')
       .setEmoji('🪵')
       .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(setupId('general'))
+      .setLabel('“No game” label')
+      .setEmoji('🎮')
+      .setStyle(ButtonStyle.Primary),
     languageButton(),
   );
   const row3 = rowOf(
@@ -252,4 +260,26 @@ export function parseSetupPick(customId: string): string | null {
   if (!customId.startsWith(SETUP_PREFIX)) return null;
   const [, , kind, command] = customId.split(':');
   return kind === 'pick' && command ? command : null;
+}
+
+/** Custom id for the `/setup` "no game" label modal. */
+export const GENERAL_MODAL_ID = 'avc:setup:label:set';
+
+/**
+ * The modal behind the "no game" label button: the word shown by `@@game_name@@`
+ * when no game is detected (prefilled with the current value).
+ */
+export function buildGeneralModal(current?: string): ModalBuilder {
+  const input = new TextInputBuilder()
+    .setCustomId('label')
+    .setLabel('“No game” label')
+    .setPlaceholder('General')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(80);
+  if (current) input.setValue(current.slice(0, 80));
+  return new ModalBuilder()
+    .setCustomId(GENERAL_MODAL_ID)
+    .setTitle('Set the “no game” label')
+    .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
 }

@@ -51,15 +51,13 @@ describe('GuildSettingsService (integration)', () => {
     expect(config.primaries).toEqual([]);
   });
 
-  it('toggles enabled, general word and default template', async () => {
+  it('toggles enabled and the “no game” word', async () => {
     await settings.setEnabled(GUILD, false);
     await settings.setGeneral(GUILD, 'Hangout');
-    await settings.setDefaultTemplate(GUILD, '@@creator@@’s room');
 
     const config = await settings.getConfig(GUILD);
     expect(config.enabled).toBe(false);
     expect(config.general).toBe('Hangout');
-    expect(config.defaultTemplate).toBe('@@creator@@’s room');
   });
 
   it('adds aliases by game name', async () => {

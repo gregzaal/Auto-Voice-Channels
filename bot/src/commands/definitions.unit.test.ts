@@ -9,6 +9,7 @@ describe('buildCommandDefinitions', () => {
   it('exposes the full hybrid command surface', () => {
     expect([...byName.keys()].sort()).toEqual(
       [
+        'alias',
         'alwaysprivate',
         'claim',
         'create',
@@ -24,7 +25,6 @@ describe('buildCommandDefinitions', () => {
         'position',
         'private',
         'public',
-        'settings',
         'setup',
         'template',
         'transfer',
@@ -36,7 +36,7 @@ describe('buildCommandDefinitions', () => {
   it('gates admin commands behind ManageChannels', () => {
     const manage = PermissionFlagsBits.ManageChannels.toString();
     for (const name of [
-      'settings',
+      'alias',
       'create',
       'template',
       'position',

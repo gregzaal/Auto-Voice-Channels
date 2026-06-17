@@ -123,8 +123,8 @@ export function buildCommandDefinitions(
     ),
     adminOnly(
       new SlashCommandBuilder()
-        .setName('settings')
-        .setDescription('Open the server configuration panel for Auto-Voice-Channels.'),
+        .setName('alias')
+        .setDescription('Add a shorter alias for a game name shown in channel names.'),
     ),
     adminOnly(
       new SlashCommandBuilder()

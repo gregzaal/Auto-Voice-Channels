@@ -62,6 +62,7 @@ function setup(overrides: Partial<InteractionDeps> = {}) {
     getLogging: vi.fn().mockResolvedValue({ enabled: false, level: 1, channelId: null }),
   };
   const guilds = { get: vi.fn().mockResolvedValue({ authStatus: 'active' }) };
+  const managed = { listByGuild: vi.fn().mockResolvedValue([]) };
   const reportError = vi.fn();
   const deps = {
     client,
@@ -72,6 +73,7 @@ function setup(overrides: Partial<InteractionDeps> = {}) {
     privacy: {},
     feature: {},
     guilds,
+    managed,
     selfHosted: true,
     clientId: 'c1',
     logger: fakeLogger(),
@@ -93,7 +95,7 @@ describe('registerInteractionHandler (router)', () => {
       guilds: { get: vi.fn().mockResolvedValue({ authStatus: 'blocked' }) } as never,
     });
     dispose = env.dispose;
-    const { interaction, reply } = fakeInteraction({ kind: 'command', commandName: 'settings' });
+    const { interaction, reply } = fakeInteraction({ kind: 'command', commandName: 'setup' });
     env.client.emit('interactionCreate', interaction);
     await flush();
     expect(reply).toHaveBeenCalledWith(
@@ -117,7 +119,7 @@ describe('registerInteractionHandler (router)', () => {
     };
     const env = setup({ settings: settings as never });
     dispose = env.dispose;
-    const { interaction, reply } = fakeInteraction({ kind: 'command', commandName: 'settings' });
+    const { interaction, reply } = fakeInteraction({ kind: 'command', commandName: 'setup' });
     env.client.emit('interactionCreate', interaction);
     await flush();
     expect(env.reportError).toHaveBeenCalled();

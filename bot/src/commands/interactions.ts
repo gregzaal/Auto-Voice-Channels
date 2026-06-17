@@ -1,5 +1,6 @@
 import {
   ActionRowBuilder,
+  ActivityType,
   ButtonBuilder,
   ButtonStyle,
   GuildMember,
@@ -30,19 +31,15 @@ import {
   type VoiceFeature,
   type VoteKickManager,
 } from '../features/voice/index.js';
-import {
-  modalForButton,
-  renderSettingsPanel,
-  SETTINGS_MODAL_IDS,
-  SETTINGS_PREFIX,
-  settingsId,
-} from './settingsPanel.js';
+import { ALIAS_MODAL_ID, buildAliasModal, parseAliasModal } from './aliasModal.js';
 import {
   ALL_REQUIRED_PERMISSION_LABELS,
   buildChannelPickerMessage,
+  buildGeneralModal,
   buildSetupPanel,
   channelPickerRow,
   formatPlan,
+  GENERAL_MODAL_ID,
   missingBotPermissions,
   parseSetupPick,
   SETUP_PREFIX,
@@ -248,8 +245,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return handleDebug(interaction);
       case 'create':
         return openCreateModal(interaction);
-      case 'settings':
-        return openSettings(interaction);
+      case 'alias':
+        return openAliasModal(interaction);
       case 'setup':
         return openSetup(interaction);
       default:
@@ -905,10 +902,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     return false;
   }
 
-  async function openSettings(interaction: ChatInputCommandInteraction): Promise<void> {
-    const guildId = interaction.guildId!;
-    const config = await run(guildId, 'settings:open', () => deps.settings.getConfig(guildId));
-    await interaction.reply(renderSettingsPanel(config));
+  /** `/alias` → a modal to alias a game name, prefilled with your current game. */
+  async function openAliasModal(interaction: ChatInputCommandInteraction): Promise<void> {
+    // Admin-gated by Discord; the modal submit re-gates. Prefill from presence.
+    await interaction.showModal(buildAliasModal(currentGameName(interaction)));
   }
 
   // -- /setup : the primary entry point ------------------------------------
@@ -973,6 +970,13 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         deps.settings.getLogging(guildId),
       );
       await interaction.showModal(buildLoggingModal(current));
+      return;
+    }
+    if (action === 'general') {
+      const config = await run(guildId, 'setup:general:get', () =>
+        deps.settings.getConfig(guildId),
+      );
+      await interaction.showModal(buildGeneralModal(config.general));
       return;
     }
     if (action === 'manage') {
@@ -1065,7 +1069,6 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     if (interaction.customId.startsWith(GROUP_PREFIX)) return handleGroupButton(interaction);
     if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorButton(interaction);
     if (interaction.customId.startsWith(SETUP_PREFIX)) return handleSetupButton(interaction);
-    if (interaction.customId.startsWith(SETTINGS_PREFIX)) return handleSettingsButton(interaction);
   }
 
   /** Owner approves/denies/blocks a "⇩ Join" request via the message buttons. */
@@ -1130,34 +1133,6 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     await interaction.reply({ content: res.message, ephemeral: true });
   }
 
-  async function handleSettingsButton(interaction: ButtonInteraction): Promise<void> {
-    if (!(await requireManageChannels(interaction))) return;
-    const guildId = interaction.guildId!;
-    const modal = modalForButton(interaction);
-    if (modal) {
-      await interaction.showModal(modal);
-      return;
-    }
-    if (interaction.customId === settingsId('toggle')) {
-      await run(guildId, 'settings:toggle', async () => {
-        const config = await deps.settings.getConfig(guildId);
-        return deps.settings.setEnabled(guildId, !config.enabled);
-      });
-      const config = await deps.settings.getConfig(guildId);
-      await interaction.update(toUpdate(renderSettingsPanel(config)));
-      return;
-    }
-    if (interaction.customId === settingsId('create')) {
-      const result = await run(guildId, 'settings:create', () =>
-        deps.settings.createPrimary(guildId),
-      );
-      const config = await deps.settings.getConfig(guildId);
-      await interaction.update(toUpdate(renderSettingsPanel(config)));
-      await interaction.followUp({ content: result.message, ephemeral: true });
-      return;
-    }
-  }
-
   async function handleModal(interaction: ModalSubmitInteraction): Promise<void> {
     if (interaction.customId === CREATE_MODAL_ID) return handleCreateSubmit(interaction);
     if (interaction.customId.startsWith(POSITION_MODAL_PREFIX)) {
@@ -1170,33 +1145,27 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     }
     if (interaction.customId === LOGGING_MODAL_ID) return handleLoggingSubmit(interaction);
     if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorModal(interaction);
+    if (interaction.customId === GENERAL_MODAL_ID) return handleGeneralSubmit(interaction);
+    if (interaction.customId === ALIAS_MODAL_ID) return handleAliasSubmit(interaction);
+  }
+
+  /** The `/setup` "no game" label modal submit. */
+  async function handleGeneralSubmit(interaction: ModalSubmitInteraction): Promise<void> {
+    if (!(await requireManageChannels(interaction))) return;
     const guildId = interaction.guildId!;
-    // The remaining ids are the admin /settings panel modals — re-gate on submit.
-    const settingsModalIds: string[] = Object.values(SETTINGS_MODAL_IDS);
-    if (
-      settingsModalIds.includes(interaction.customId) &&
-      !(await requireManageChannels(interaction))
-    )
-      return;
-    let result: CommandResult | undefined;
-    if (interaction.customId === SETTINGS_MODAL_IDS.general) {
-      result = await run(guildId, 'settings:general', () =>
-        deps.settings.setGeneral(guildId, interaction.fields.getTextInputValue('label')),
-      );
-    } else if (interaction.customId === SETTINGS_MODAL_IDS.template) {
-      result = await run(guildId, 'settings:template', () =>
-        deps.settings.setDefaultTemplate(guildId, interaction.fields.getTextInputValue('template')),
-      );
-    } else if (interaction.customId === SETTINGS_MODAL_IDS.alias) {
-      result = await run(guildId, 'settings:alias', () =>
-        deps.settings.addAlias(
-          guildId,
-          interaction.fields.getTextInputValue('game'),
-          interaction.fields.getTextInputValue('alias'),
-        ),
-      );
-    }
-    if (result) await interaction.reply({ content: result.message, ephemeral: true });
+    const res = await run(guildId, 'setup:general', () =>
+      deps.settings.setGeneral(guildId, interaction.fields.getTextInputValue('label')),
+    );
+    await interaction.reply({ content: formatResult(res), ephemeral: true });
+  }
+
+  /** The `/alias` modal submit. */
+  async function handleAliasSubmit(interaction: ModalSubmitInteraction): Promise<void> {
+    if (!(await requireManageChannels(interaction))) return;
+    const guildId = interaction.guildId!;
+    const { game, alias } = parseAliasModal(interaction.fields);
+    const res = await run(guildId, 'cmd:alias', () => deps.settings.addAlias(guildId, game, alias));
+    await interaction.reply({ content: formatResult(res), ephemeral: true });
   }
 
   // -- helpers --------------------------------------------------------------
@@ -1243,6 +1212,18 @@ function currentVoiceChannelId(
     return interaction.member.voice.channelId ?? undefined;
   }
   return interaction.guild?.members.cache.get(interaction.user.id)?.voice.channelId ?? undefined;
+}
+
+/** The caller's current game (Playing/Streaming activity name), if any — for `/alias` prefill. */
+function currentGameName(interaction: ChatInputCommandInteraction): string | undefined {
+  const member =
+    interaction.member instanceof GuildMember
+      ? interaction.member
+      : interaction.guild?.members.cache.get(interaction.user.id);
+  const activity = member?.presence?.activities.find(
+    (a) => a.type === ActivityType.Playing || a.type === ActivityType.Streaming,
+  );
+  return activity?.name;
 }
 
 /** The grouping `categoryKey` for a channel: its parent category id, or the root sentinel. */
