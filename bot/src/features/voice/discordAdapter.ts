@@ -38,12 +38,24 @@ const BOT_REQUIRED_PERMS =
   PermissionFlagsBits.MoveMembers;
 
 /**
- * Guards against AVC locking itself out of a channel it creates. Inheriting a
- * "private" category/source copies its `@everyone` View/Connect *denies* onto the
- * new channel — and the bot, being in `@everyone`, loses access to its own
- * channel (later moves/deletes fail with `Missing Access`, 50001). A member-level
- * overwrite for the bot is the highest-precedence rule in Discord's model, so we
- * always merge in a bot allow that overrides any inherited role/`@everyone` deny.
+ * Whether these overwrites hide the channel from `@everyone` (whose role id equals
+ * the guild id). Such a category, if a new channel syncs to it, would leave the
+ * bot — a member of `@everyone` — unable to see/manage the channel.
+ */
+export function everyoneViewDenied(overwrites: ResolvedOverwrite[], guildId: string): boolean {
+  return overwrites.some(
+    (o) => o.id === guildId && (o.deny & PermissionFlagsBits.ViewChannel) !== 0n,
+  );
+}
+
+/**
+ * Guards against AVC locking itself out of a channel it creates. Inheriting (or
+ * syncing to) a "private" category/source copies its `@everyone` View/Connect
+ * *denies* onto the new channel — and the bot, being in `@everyone`, loses access
+ * to its own channel (later moves/deletes fail with `Missing Access`, 50001). A
+ * member-level overwrite for the bot is the highest-precedence rule in Discord's
+ * model, so we merge in a bot allow that overrides any inherited role/`@everyone`
+ * deny.
  */
 export function withBotAccess(overwrites: ResolvedOverwrite[], botId: string): ResolvedOverwrite[] {
   const mine = overwrites.find((o) => o.id === botId && o.type === OverwriteType.Member);
@@ -156,15 +168,23 @@ export class DiscordVoiceActions implements VoiceActions {
       if (placeAbove) reorderAboveIndex = near.position; // captured before create
     }
 
-    // Resolve inherited permission overwrites, if requested. When we apply any,
-    // ensure the bot keeps access to the channel it's about to create — inheriting
-    // a private category/source would otherwise lock us out of our own channel.
-    const inherited = input.inheritFrom
+    // Resolve the permission overwrites to create the channel with, and make sure
+    // the bot is never locked out of its own channel:
+    //  - explicit `/inheritpermissions` copies its source's overwrites;
+    //  - otherwise, if the channel will land in a category that hides itself from
+    //    `@everyone`, snapshot that category — Discord would otherwise *sync* the new
+    //    channel to it, inheriting the View deny and locking the bot out (later
+    //    moves/deletes then fail with Missing Access, 50001).
+    let overwrites = input.inheritFrom
       ? await this.resolveInheritedOverwrites(input.inheritFrom, near)
       : undefined;
+    if (!overwrites && parentId) {
+      const category = await this.resolveCategoryOverwrites(parentId);
+      if (category && everyoneViewDenied(category, input.guildId)) overwrites = category;
+    }
     const botId = this.client.user?.id;
     const permissionOverwrites =
-      inherited && inherited.length > 0 && botId ? withBotAccess(inherited, botId) : inherited;
+      overwrites && overwrites.length > 0 && botId ? withBotAccess(overwrites, botId) : overwrites;
 
     const channel = await guild.channels.create({
       name: input.name,
@@ -199,6 +219,16 @@ export class DiscordVoiceActions implements VoiceActions {
     } catch (err) {
       this.logger?.warn({ err, channelId: channel.id }, 'failed to position new channel');
     }
+  }
+
+  /** A category's overwrites by id (for the implicit-sync lock-out guard). */
+  private async resolveCategoryOverwrites(
+    categoryId: string,
+  ): Promise<ResolvedOverwrite[] | undefined> {
+    const category = await this.client.channels.fetch(categoryId).catch(() => null);
+    return category && 'permissionOverwrites' in category
+      ? mapOverwrites(category.permissionOverwrites.cache)
+      : undefined;
   }
 
   private async resolveInheritedOverwrites(

@@ -1,7 +1,12 @@
 import { DiscordAPIError, OverwriteType, PermissionFlagsBits } from 'discord.js';
 import type { Client, GuildMember, VoiceState } from 'discord.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DiscordVoiceActions, normalizeVoiceState, withBotAccess } from './discordAdapter.js';
+import {
+  DiscordVoiceActions,
+  everyoneViewDenied,
+  normalizeVoiceState,
+  withBotAccess,
+} from './discordAdapter.js';
 
 const UNKNOWN_CHANNEL = 10003;
 const BOT = 'bot-id';
@@ -94,6 +99,68 @@ describe('withBotAccess', () => {
     expect(result.filter((o) => o.id === BOT)).toHaveLength(1);
     expect(result[0]!.allow & VIEW).toBe(VIEW);
     expect(result[0]!.deny & VIEW).toBe(0n); // the View deny is cleared
+  });
+});
+
+describe('everyoneViewDenied', () => {
+  it('detects an @everyone (role id == guild id) View deny', () => {
+    expect(everyoneViewDenied([{ id: 'g1', type: 0, allow: 0n, deny: VIEW }], 'g1')).toBe(true);
+    expect(everyoneViewDenied([{ id: 'g1', type: 0, allow: 0n, deny: MANAGE }], 'g1')).toBe(false);
+    expect(everyoneViewDenied([{ id: 'role', type: 0, allow: 0n, deny: VIEW }], 'g1')).toBe(false);
+    expect(everyoneViewDenied([], 'g1')).toBe(false);
+  });
+});
+
+describe('DiscordVoiceActions.createVoiceChannel', () => {
+  const overwriteCache = (rows: { id: string; type: number; allow: bigint; deny: bigint }[]) => ({
+    cache: {
+      values: () =>
+        rows
+          .map((r) => ({ ...r, allow: { bitfield: r.allow }, deny: { bitfield: r.deny } }))
+          [Symbol.iterator](),
+    },
+  });
+
+  function makeClient(
+    categoryOverwrites: { id: string; type: number; allow: bigint; deny: bigint }[],
+  ) {
+    const created = { id: 'new', setPosition: vi.fn() };
+    const guild = { channels: { create: vi.fn().mockResolvedValue(created) } };
+    const primary = {
+      isVoiceBased: () => true,
+      parent: { id: 'cat' },
+      rawPosition: 0,
+      position: 0,
+    };
+    const category = { permissionOverwrites: overwriteCache(categoryOverwrites) };
+    const client = {
+      user: { id: BOT },
+      guilds: { fetch: vi.fn().mockResolvedValue(guild) },
+      channels: {
+        fetch: vi.fn((id: string) => Promise.resolve(id === 'cat' ? category : primary)),
+      },
+    } as unknown as Client;
+    return { client, guild };
+  }
+
+  it('snapshots a hidden category and injects bot access (no /inheritpermissions)', async () => {
+    const { client, guild } = makeClient([{ id: 'g1', type: 0, allow: 0n, deny: VIEW }]);
+    const actions = new DiscordVoiceActions(client);
+    await actions.createVoiceChannel({ guildId: 'g1', name: 'x', nearChannelId: 'prim' });
+
+    const arg = (guild.channels.create as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const ow = arg.permissionOverwrites as { id: string; allow: bigint; deny: bigint }[];
+    expect(ow.find((o) => o.id === BOT)!.allow & VIEW).toBe(VIEW); // bot can see/manage
+    expect(ow.find((o) => o.id === 'g1')!.deny & VIEW).toBe(VIEW); // others still hidden
+  });
+
+  it('leaves a public category alone (Discord sync, no explicit overwrites)', async () => {
+    const { client, guild } = makeClient([]); // category does not hide itself
+    const actions = new DiscordVoiceActions(client);
+    await actions.createVoiceChannel({ guildId: 'g1', name: 'x', nearChannelId: 'prim' });
+
+    const arg = (guild.channels.create as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(arg.permissionOverwrites).toBeUndefined();
   });
 });
 
