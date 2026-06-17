@@ -3,6 +3,7 @@ import {
   ChannelType,
   DiscordAPIError,
   OverwriteType,
+  PermissionFlagsBits,
   type Activity,
   type Client,
   type GuildMember,
@@ -22,11 +23,39 @@ function isApiError(err: unknown, code: number): boolean {
   return err instanceof DiscordAPIError && err.code === code;
 }
 
-interface ResolvedOverwrite {
+export interface ResolvedOverwrite {
   id: string;
   type: number;
   allow: bigint;
   deny: bigint;
+}
+
+/** The permissions the bot must retain to manage a channel it created. */
+const BOT_REQUIRED_PERMS =
+  PermissionFlagsBits.ViewChannel |
+  PermissionFlagsBits.Connect |
+  PermissionFlagsBits.ManageChannels |
+  PermissionFlagsBits.MoveMembers;
+
+/**
+ * Guards against AVC locking itself out of a channel it creates. Inheriting a
+ * "private" category/source copies its `@everyone` View/Connect *denies* onto the
+ * new channel — and the bot, being in `@everyone`, loses access to its own
+ * channel (later moves/deletes fail with `Missing Access`, 50001). A member-level
+ * overwrite for the bot is the highest-precedence rule in Discord's model, so we
+ * always merge in a bot allow that overrides any inherited role/`@everyone` deny.
+ */
+export function withBotAccess(overwrites: ResolvedOverwrite[], botId: string): ResolvedOverwrite[] {
+  const mine = overwrites.find((o) => o.id === botId && o.type === OverwriteType.Member);
+  if (mine) {
+    mine.allow |= BOT_REQUIRED_PERMS;
+    mine.deny &= ~BOT_REQUIRED_PERMS;
+    return overwrites;
+  }
+  return [
+    ...overwrites,
+    { id: botId, type: OverwriteType.Member, allow: BOT_REQUIRED_PERMS, deny: 0n },
+  ];
 }
 
 /** Maps a channel's permission-overwrite cache to `channels.create` input. */
@@ -127,10 +156,15 @@ export class DiscordVoiceActions implements VoiceActions {
       if (placeAbove) reorderAboveIndex = near.position; // captured before create
     }
 
-    // Resolve inherited permission overwrites, if requested.
-    const permissionOverwrites = input.inheritFrom
+    // Resolve inherited permission overwrites, if requested. When we apply any,
+    // ensure the bot keeps access to the channel it's about to create — inheriting
+    // a private category/source would otherwise lock us out of our own channel.
+    const inherited = input.inheritFrom
       ? await this.resolveInheritedOverwrites(input.inheritFrom, near)
       : undefined;
+    const botId = this.client.user?.id;
+    const permissionOverwrites =
+      inherited && inherited.length > 0 && botId ? withBotAccess(inherited, botId) : inherited;
 
     const channel = await guild.channels.create({
       name: input.name,

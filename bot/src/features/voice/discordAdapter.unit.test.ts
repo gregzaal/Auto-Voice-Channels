@@ -1,9 +1,12 @@
-import { DiscordAPIError } from 'discord.js';
+import { DiscordAPIError, OverwriteType, PermissionFlagsBits } from 'discord.js';
 import type { Client, GuildMember, VoiceState } from 'discord.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DiscordVoiceActions, normalizeVoiceState } from './discordAdapter.js';
+import { DiscordVoiceActions, normalizeVoiceState, withBotAccess } from './discordAdapter.js';
 
 const UNKNOWN_CHANNEL = 10003;
+const BOT = 'bot-id';
+const VIEW = PermissionFlagsBits.ViewChannel;
+const MANAGE = PermissionFlagsBits.ManageChannels;
 
 function apiError(code: number): DiscordAPIError {
   return new DiscordAPIError(
@@ -68,6 +71,29 @@ describe('normalizeVoiceState', () => {
     );
     expect(join).not.toHaveProperty('beforeChannelId');
     expect(join).toMatchObject({ afterChannelId: 'b' });
+  });
+});
+
+describe('withBotAccess', () => {
+  it('adds a bot member overwrite that grants the perms needed to manage the channel', () => {
+    // A "private" category: @everyone denied View — would lock the bot out.
+    const inherited = [{ id: 'everyone', type: OverwriteType.Role, allow: 0n, deny: VIEW }];
+    const result = withBotAccess(inherited, BOT);
+    const botRule = result.find((o) => o.id === BOT && o.type === OverwriteType.Member);
+    expect(botRule).toBeDefined();
+    expect(botRule!.allow & VIEW).toBe(VIEW);
+    expect(botRule!.allow & MANAGE).toBe(MANAGE);
+    expect(botRule!.deny & VIEW).toBe(0n);
+    // The inherited @everyone deny is preserved (channel stays private to others).
+    expect(result.find((o) => o.id === 'everyone')!.deny & VIEW).toBe(VIEW);
+  });
+
+  it('amends an existing bot overwrite rather than duplicating it', () => {
+    const inherited = [{ id: BOT, type: OverwriteType.Member, allow: 0n, deny: VIEW | MANAGE }];
+    const result = withBotAccess(inherited, BOT);
+    expect(result.filter((o) => o.id === BOT)).toHaveLength(1);
+    expect(result[0]!.allow & VIEW).toBe(VIEW);
+    expect(result[0]!.deny & VIEW).toBe(0n); // the View deny is cleared
   });
 });
 
