@@ -20,8 +20,8 @@ export const SETUP_PREFIX = 'avc:setup:';
 export const setupId = (action: string): string => `${SETUP_PREFIX}${action}`;
 
 /** Outbound links surfaced from `/setup`. */
-export const SIGNUP_URL = 'https://avc.dotsbots.com/signup';
-export const DOCS_URL = 'https://wiki.dotsbots.com';
+export const SIGNUP_URL = 'https://auto-voice.io/signup';
+export const DOCS_URL = 'https://auto-voice.io/docs';
 export const SUPPORT_URL = 'https://discord.gg/jVm4tjrczE';
 
 /**

@@ -14,7 +14,7 @@ import {
  * {@link ActivityType.Custom}, Discord renders the activity's `state`; `name`
  * is required on the activity object, so we set both to the same text.
  */
-const SETUP_STATUS = 'dotsbots.com · /setup';
+const SETUP_STATUS = 'auto-voice.io · /setup';
 
 export interface GatewayOptions {
   /** Total shard count; shard ids are derived per Discord's formula. */

@@ -40,7 +40,7 @@ describe('templatePanel', () => {
     const json = JSON.stringify(panel);
     expect(json).toContain('My Room'); // name current + preview
     expect(json).toContain('Playing Halo'); // status preview
-    expect(json).toContain('https://wiki.dotsbots.com/en/commands/template'); // docs link
+    expect(json).toContain('https://auto-voice.io/docs/commands/template'); // docs link
 
     const labels = (panel.components as { components: { data: { label?: string } }[] }[]).flatMap(
       (row) => row.components.map((c) => c.data.label),

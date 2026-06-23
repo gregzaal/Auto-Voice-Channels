@@ -22,7 +22,7 @@ describe('buildGatewayClient', () => {
     const activity = client.options.presence?.activities?.[0];
     expect(activity?.type).toBe(ActivityType.Custom);
     // Custom-status text lives in `state`; assert the website + command are surfaced.
-    expect(activity?.state).toContain('dotsbots.com');
+    expect(activity?.state).toContain('auto-voice.io');
     expect(activity?.state).toContain('/setup');
   });
 });

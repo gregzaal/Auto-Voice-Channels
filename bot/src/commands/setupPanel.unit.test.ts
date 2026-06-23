@@ -30,13 +30,13 @@ describe('formatPlan', () => {
   it('flags an expired server with the signup link', () => {
     const line = formatPlan({ ...base, memberCount: 500, status: 'expired' });
     expect(line).toContain('ended');
-    expect(line).toContain('avc.dotsbots.com/signup');
+    expect(line).toContain('auto-voice.io/signup');
   });
 
   it('routes ≥1M servers to the dedicated-infra signup', () => {
     const line = formatPlan({ ...base, memberCount: 2_000_000 });
     expect(line).toContain('dedicated');
-    expect(line).toContain('avc.dotsbots.com/signup');
+    expect(line).toContain('auto-voice.io/signup');
   });
 
   it('acknowledges an active subscription', () => {
