@@ -1,12 +1,14 @@
-# Fly.io deployment config for the scaled hosted service.
+# Fly.io deployment config for the hosted bot service.
 # The application is deployment-agnostic; everything Fly-specific lives here so
 # the app never hard-depends on Fly. Self-host uses docker-compose instead.
 #
 # Secrets (set via `fly secrets set ...`, never committed):
 #   DISCORD_TOKEN, CLIENT_ID, DATABASE_URL
 #
-# TODO: set `app`, region, and Postgres attachment when provisioning.
-app = "auto-voice-channels"
+# `avc-dev` is the live beta app (running the beta bot 701117810549588038). At
+# the production cutover this becomes the prod app / identity (see
+# plans/migration.md); update `app`, secrets, and CLIENT_ID together then.
+app = "avc-dev"
 primary_region = "iad"
 
 [build]
