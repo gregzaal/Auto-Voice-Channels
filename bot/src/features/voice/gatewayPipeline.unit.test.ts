@@ -32,10 +32,11 @@ function presence(guildId: string, channelId: string | null, game: string | unde
 }
 
 /** Wires the real gateway + real dispatcher to a spy feature, via a fake client. */
-function harness() {
+function harness(opts: { entitled?: (guildId: string) => boolean } = {}) {
   const client = new EventEmitter();
   const handleVoiceStateUpdate = vi.fn(async () => ['sec-1']);
   const rerenderChannelName = vi.fn(async () => ({}));
+  const onGatedJoin = vi.fn();
   const feature = { handleVoiceStateUpdate, rerenderChannelName } as unknown as VoiceFeature;
   const dispose = registerVoiceGateway({
     client: client as unknown as Client,
@@ -43,8 +44,9 @@ function harness() {
     feature,
     logger: fakeLogger(),
     renameDelayMs: 5,
+    ...(opts.entitled ? { entitled: opts.entitled, onGatedJoin } : {}),
   });
-  return { client, handleVoiceStateUpdate, rerenderChannelName, dispose };
+  return { client, handleVoiceStateUpdate, rerenderChannelName, onGatedJoin, dispose };
 }
 
 describe('registerVoiceGateway (gateway → dispatcher → feature pipeline)', () => {
@@ -104,6 +106,52 @@ describe('registerVoiceGateway (gateway → dispatcher → feature pipeline)', (
     h.client.emit('presenceUpdate', presence('g1', null, 'Halo'), presence('g1', null, 'Doom'));
     await tick(20);
     expect(h.rerenderChannelName).not.toHaveBeenCalled();
+  });
+
+  it('short-circuits voice events for non-entitled guilds before the dispatcher', async () => {
+    const h = harness({ entitled: (guildId) => guildId !== 'gated' });
+    dispose = h.dispose;
+
+    h.client.emit(
+      'voiceStateUpdate',
+      voiceState('gated', 'u1', null),
+      voiceState('gated', 'u1', 'creator-1'),
+    );
+    await tick(10);
+    expect(h.handleVoiceStateUpdate).not.toHaveBeenCalled();
+    // The join is handed to the gated-join hook (creator-channel notice path).
+    expect(h.onGatedJoin).toHaveBeenCalledWith('gated', 'creator-1');
+
+    // An entitled guild still flows through untouched.
+    h.client.emit(
+      'voiceStateUpdate',
+      voiceState('ok', 'u1', null),
+      voiceState('ok', 'u1', 'sec-1'),
+    );
+    await tick(10);
+    expect(h.handleVoiceStateUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ guildId: 'ok' }),
+    );
+  });
+
+  it('short-circuits presence churn for non-entitled guilds (no rerender scheduled)', async () => {
+    const h = harness({ entitled: () => false });
+    dispose = h.dispose;
+    h.client.emit(
+      'presenceUpdate',
+      presence('gated', 'sec-1', undefined),
+      presence('gated', 'sec-1', 'Halo'),
+    );
+    await tick(20);
+    expect(h.rerenderChannelName).not.toHaveBeenCalled();
+    // A leave (no after-channel) never triggers the gated-join hook.
+    h.client.emit(
+      'voiceStateUpdate',
+      voiceState('gated', 'u1', 'sec-1'),
+      voiceState('gated', 'u1', null),
+    );
+    await tick(10);
+    expect(h.onGatedJoin).not.toHaveBeenCalled();
   });
 
   it('the disposer detaches listeners (no work after dispose)', async () => {

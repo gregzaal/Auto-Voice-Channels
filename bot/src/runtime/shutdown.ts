@@ -4,6 +4,7 @@ import type { GuildDispatcher } from './dispatcher.js';
 import type { ShardLeaseManager } from './shardLeaseManager.js';
 import type { HealthServer } from '../ops/health.js';
 import type { Reconciler } from '../features/voice/index.js';
+import type { BillingReconciler, EntitlementGate } from '../features/billing/index.js';
 
 export interface ShutdownDeps {
   logger: Logger;
@@ -19,6 +20,10 @@ export interface ShutdownDeps {
   disposeVoiceGateway: () => void;
   disposeJoinRequests: () => void;
   disposeInteractions: () => void;
+  disposeOnboarding: () => void;
+  /** Undefined when SELF_HOSTED (the job never exists there). */
+  billingReconciler: BillingReconciler | undefined;
+  entitlementGate: EntitlementGate;
   closeDb: () => Promise<void>;
 }
 
@@ -34,14 +39,19 @@ export interface ShutdownDeps {
 export async function gracefulDrain(deps: ShutdownDeps): Promise<void> {
   clearInterval(deps.dbPingTimer);
   deps.reconciler.stopSweep();
+  // Awaited: an in-flight billing pass must finish (or bail at its next
+  // per-guild checkpoint) before the DB pool goes away.
+  await deps.billingReconciler?.stop();
   deps.disposeInteractions();
   deps.disposeJoinRequests();
   deps.disposeVoiceGateway();
+  deps.disposeOnboarding();
   deps.client.removeAllListeners();
   await deps.dispatcher.drainAll();
   await deps.leaseManager.releaseAll();
   await deps.client.destroy();
   await deps.settingsCache.stop();
+  deps.entitlementGate.stop();
   await deps.notifier.close();
   await deps.health.stop();
   await deps.closeDb();

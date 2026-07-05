@@ -31,6 +31,8 @@ export interface DiagnosticsReport {
   runtimeFlags: Record<string, unknown>;
   /** Whether the periodic safety-net sweep is currently running. */
   sweepEnabled: boolean;
+  /** Billing/trial reconcile job counters (null when SELF_HOSTED). */
+  billing: Record<string, unknown> | null;
 }
 
 export interface HealthServerOptions {

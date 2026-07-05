@@ -7,6 +7,13 @@ export interface JoinRequestsDeps {
   client: Client;
   privacy: PrivacyService;
   logger: Logger;
+  /**
+   * Sync entitlement gate (monetization hard gate): joins in non-entitled
+   * guilds are dropped before any DB read — a gated guild's leftover private
+   * channels must not keep generating join-request messages the owner can't
+   * act on. Omitted → all guilds pass (tests, self-host).
+   */
+  entitled?: (guildId: string) => boolean;
 }
 
 /**
@@ -25,6 +32,7 @@ export function registerJoinRequests(deps: JoinRequestsDeps): () => void {
     const guildId = newState.guild?.id;
     const requesterId = newState.member?.id;
     if (!guildId || !requesterId) return;
+    if (deps.entitled && !deps.entitled(guildId)) return;
     void post(joinChannelId, requesterId).catch((err: unknown) => {
       deps.logger.error({ err, guildId, joinChannelId }, 'join request failed');
     });

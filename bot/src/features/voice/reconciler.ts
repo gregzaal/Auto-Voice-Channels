@@ -22,6 +22,13 @@ export interface ReconcilerDeps {
   sweepIntervalMs?: number;
   /** Max guilds reconciled concurrently (bounds the DB/CPU burst). Default 10. */
   reconcileConcurrency?: number;
+  /**
+   * Entitlement gate: non-entitled (hard-gated) guilds are skipped — the gate
+   * is non-destructive, so reconcile must never "clean up" (delete) a gated
+   * guild's now-unmanaged channels (monetization.md §4). Omitted → all guilds
+   * reconcile (tests, self-host).
+   */
+  entitled?: (guildId: string) => boolean | Promise<boolean>;
 }
 
 const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
@@ -49,7 +56,19 @@ export class Reconciler {
   }
 
   /** Reconcile one guild through its per-guild queue (ordered + isolated). */
-  reconcileGuild(guildId: string, opts: ReconcileOptions = {}): Promise<GuildDrift> {
+  async reconcileGuild(guildId: string, opts: ReconcileOptions = {}): Promise<GuildDrift> {
+    // A dry run only reports drift (ops tooling), so it's allowed even for a
+    // gated guild; anything that would act is skipped while non-entitled.
+    if (!opts.dryRun && this.deps.entitled && !(await this.deps.entitled(guildId))) {
+      return {
+        guildId,
+        dryRun: false,
+        orphanedRecords: [],
+        deletedEmpty: [],
+        created: [],
+        renamed: [],
+      };
+    }
     return this.deps.dispatcher.dispatch(guildId, 'reconcile', () =>
       this.deps.feature.reconcileGuild(guildId, opts),
     );

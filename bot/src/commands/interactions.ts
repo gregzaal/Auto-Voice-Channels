@@ -14,8 +14,14 @@ import {
   type InteractionUpdateOptions,
   type ModalSubmitInteraction,
 } from 'discord.js';
-import type { GuildRepository, Logger, ManagedChannelRepository } from '@avc/core';
+import {
+  isEntitled,
+  type GuildRepository,
+  type Logger,
+  type ManagedChannelRepository,
+} from '@avc/core';
 import type { GuildDispatcher } from '../runtime/dispatcher.js';
+import { expiredInteractionMessage } from '../features/billing/messages.js';
 import {
   isPermissionError,
   JOIN_PREFIX,
@@ -148,10 +154,26 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     if (!interaction.inGuild()) return;
     const guildId = interaction.guildId;
 
+    const guildRow = await deps.guilds.get(guildId);
+
     // Per-guild kill-switch: a blocked guild gets nothing.
-    if (await isBlocked(deps.guilds, guildId)) {
+    if (guildRow?.authStatus === 'blocked') {
       if (interaction.isRepliable()) {
         await interaction.reply({ content: 'This server is currently blocked.', ephemeral: true });
+      }
+      return;
+    }
+
+    // Hard gate (monetization.md §6): in an expired guild every interaction
+    // gets the friendly reactivation message — except the read-only surfaces
+    // that let an admin see the gated state and fix it (`/setup` & friends).
+    const entitled = isEntitled({
+      status: guildRow?.authStatus ?? 'trial',
+      selfHosted: deps.selfHosted,
+    });
+    if (!entitled && !allowedWhileExpired(interaction)) {
+      if (interaction.isRepliable()) {
+        await interaction.reply({ content: expiredInteractionMessage(), ephemeral: true });
       }
       return;
     }
@@ -160,6 +182,23 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     if (interaction.isButton()) return handleButton(interaction);
     if (interaction.isChannelSelectMenu()) return handleChannelSelect(interaction);
     if (interaction.isModalSubmit()) return handleModal(interaction);
+  }
+
+  /**
+   * Interactions that still work in a hard-gated guild: the informational
+   * commands plus the `/setup` panel (which shows the gated plan state and its
+   * logging/settings modals) — mirroring the dashboard's "show the gated state
+   * with a prominent reactivate path" behavior.
+   */
+  function allowedWhileExpired(interaction: Interaction): boolean {
+    if (interaction.isChatInputCommand()) {
+      return ['setup', 'ping', 'invite', 'debug', 'logging'].includes(interaction.commandName);
+    }
+    if (interaction.isButton()) return interaction.customId.startsWith(SETUP_PREFIX);
+    if (interaction.isModalSubmit()) {
+      return interaction.customId === GENERAL_MODAL_ID || interaction.customId === LOGGING_MODAL_ID;
+    }
+    return false;
   }
 
   async function handleCommand(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -662,7 +701,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     }
     if (!(await deps.guilds.isEntitled(guildId, deps.selfHosted))) {
       await interaction.update({
-        content: 'This server isn’t currently entitled.',
+        content: expiredInteractionMessage(),
         embeds: [],
         components: [],
       });
@@ -863,7 +902,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     const guildId = interaction.guildId!;
     if (!(await deps.guilds.isEntitled(guildId, deps.selfHosted))) {
       await interaction.reply({
-        content: 'This server isn’t currently entitled.',
+        content: expiredInteractionMessage(),
         ephemeral: true,
       });
       return;
@@ -981,7 +1020,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     const guildId = interaction.guildId!;
     if (!(await deps.guilds.isEntitled(guildId, deps.selfHosted))) {
       await interaction.reply({
-        content: 'This server isn’t currently entitled.',
+        content: expiredInteractionMessage(),
         ephemeral: true,
       });
       return;
@@ -1009,7 +1048,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     guildId: string,
   ): Promise<boolean> {
     if (await deps.guilds.isEntitled(guildId, deps.selfHosted)) return true;
-    await interaction.reply({ content: 'This server isn’t currently entitled.', ephemeral: true });
+    await interaction.reply({ content: expiredInteractionMessage(), ephemeral: true });
     return false;
   }
 
@@ -1410,11 +1449,6 @@ function formatDebug(info: ChannelDebug, permissions: Record<string, boolean>): 
     }),
   ].filter((l): l is string => l !== null);
   return lines.join('\n').slice(0, 1900);
-}
-
-async function isBlocked(guilds: GuildRepository, guildId: string): Promise<boolean> {
-  const row = await guilds.get(guildId);
-  return row?.authStatus === 'blocked';
 }
 
 async function replyResult(

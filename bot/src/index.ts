@@ -1,11 +1,14 @@
 import {
   AutoChannelRepository,
+  BillingRunRepository,
   createDatabase,
   createLogger,
   GuildRepository,
+  isEntitled,
   JoinChannelRepository,
   loadConfig,
   ManagedChannelRepository,
+  OpsAuditRepository,
   PgNotifier,
   runMigrations,
   RUNTIME_FLAGS,
@@ -14,6 +17,7 @@ import {
   SettingsCache,
   shardCapFor,
   ShardLeaseRepository,
+  SubscriptionRepository,
   type Logger,
 } from '@avc/core';
 import { REST, Routes } from 'discord.js';
@@ -45,6 +49,13 @@ import {
 } from './features/voice/index.js';
 import { registerCommands } from './commands/definitions.js';
 import { registerInteractionHandler } from './commands/interactions.js';
+import {
+  BillingReconciler,
+  DiscordBillingNotifier,
+  EntitlementGate,
+  ExpiredJoinNotifier,
+  registerGuildOnboarding,
+} from './features/billing/index.js';
 import { COMMIT, VERSION } from './version.js';
 
 /**
@@ -144,6 +155,17 @@ async function main(): Promise<void> {
   const settingsCache = new SettingsCache(guildsRepo, notifier);
   await settingsCache.start();
   const serverLogger = new ServerLogger({ client, guilds: settingsCache, logger });
+  // Sync entitlement answers for the hot paths (presence/voice intake): the
+  // monetization hard gate's short-circuit. Serves cached booleans, refreshes
+  // in the background, and evicts on the same NOTIFY channel as the settings
+  // cache so auth transitions apply promptly cluster-wide.
+  const entitlementGate = new EntitlementGate({
+    guilds: settingsCache,
+    notifier,
+    selfHosted: config.selfHosted,
+    logger,
+  });
+  await entitlementGate.start();
   // Tracks "I lost access to this channel" incidents, surfaced in /setup + /logging.
   const permissionProblems = new PermissionProblemTracker();
   // Private-channel "⇩ Join" mechanism. Wired into the feature's cleanup hook so
@@ -175,13 +197,28 @@ async function main(): Promise<void> {
     permissionProblems,
     logger,
   });
+  // The one carve-out from the hard-gate short-circuit: joining a creator
+  // channel in a gated guild posts a throttled "AVC is paused here" notice.
+  const expiredJoinNotifier = new ExpiredJoinNotifier({
+    autoChannels,
+    guilds: settingsCache,
+    client,
+    logger,
+  });
   const disposeVoiceGateway = registerVoiceGateway({
     client,
     dispatcher,
     feature: voiceFeature,
     logger,
+    entitled: (guildId) => entitlementGate.check(guildId),
+    onGatedJoin: (guildId, channelId) => expiredJoinNotifier.handleGatedJoin(guildId, channelId),
   });
-  const disposeJoinRequests = registerJoinRequests({ client, privacy, logger });
+  const disposeJoinRequests = registerJoinRequests({
+    client,
+    privacy,
+    logger,
+    entitled: (guildId) => entitlementGate.check(guildId),
+  });
 
   // Command / interaction surface (slash commands + /settings panel).
   const voiceCommands = new VoiceCommands({
@@ -226,7 +263,60 @@ async function main(): Promise<void> {
     managed,
     flags,
     logger,
+    // Skip hard-gated guilds: the gate is non-destructive, so reconcile must
+    // never clean up a gated guild's now-unmanaged channels. Authoritative
+    // (cache-backed) read rather than the sync gate — reconcile isn't hot.
+    entitled: async (guildId) => {
+      const row = await settingsCache.ensure(guildId);
+      return isEntitled({ status: row.authStatus, selfHosted: config.selfHosted });
+    },
   });
+
+  // Monetization (dormant when SELF_HOSTED): new-guild onboarding + the
+  // advisory-locked trial/billing reconcile job (samples member counts,
+  // advances the leniency ladder, sends the §6 notifications).
+  const subscriptionsRepo = new SubscriptionRepository(db);
+  const billingNotifier = new DiscordBillingNotifier({ client, logger });
+  const disposeOnboarding = config.selfHosted
+    ? (): void => undefined
+    : registerGuildOnboarding({
+        client,
+        dispatcher,
+        guilds: guildsRepo,
+        store: settingsCache,
+        notifier: billingNotifier,
+        logger,
+      });
+  const billingReconciler = config.selfHosted
+    ? undefined
+    : new BillingReconciler({
+        guilds: guildsRepo,
+        store: settingsCache,
+        subscriptions: subscriptionsRepo,
+        runs: new BillingRunRepository(db),
+        flags,
+        opsAudit: new OpsAuditRepository(db),
+        notifier: billingNotifier,
+        listCachedGuildCounts: () =>
+          [...client.guilds.cache.values()].map((g) => ({
+            guildId: g.id,
+            memberCount: g.memberCount ?? 0,
+          })),
+        // §5 step 3: the authoritative tie-breaker before any billing-affecting
+        // transition. REST works for any guild the bot is in, on any shard.
+        fetchAuthoritativeCount: async (guildId) => {
+          try {
+            const guild = (await client.rest.get(Routes.guild(guildId), {
+              query: new URLSearchParams({ with_counts: 'true' }),
+            })) as { approximate_member_count?: number };
+            return guild.approximate_member_count ?? null;
+          } catch {
+            return null;
+          }
+        },
+        logger,
+        instanceId: config.instanceId,
+      });
 
   let gatewayStatus: SubsystemStatus = 'unknown';
   // After READY, a `guildCreate` means either a brand-new guild join or a guild
@@ -247,6 +337,14 @@ async function main(): Promise<void> {
       .reconcileGuilds(client.guilds.cache.keys())
       .catch((err: unknown) => logger.error({ err }, 'initial reconcile failed'));
     reconciler.startSweep();
+    // Billing job only makes sense once the guild cache is populated (its
+    // sampling phase reads it). Hourly ticks + one immediate pass.
+    if (billingReconciler) {
+      billingReconciler.start();
+      void billingReconciler.runOnce().catch((err: unknown) => {
+        logger.error({ err }, 'initial billing reconcile failed');
+      });
+    }
   });
   client.on('error', (err) => {
     gatewayStatus = 'down';
@@ -289,6 +387,7 @@ async function main(): Promise<void> {
         paused: runtimeFlags[RUNTIME_FLAGS.GLOBAL_PAUSE] === true,
         sweepEnabled: runtimeFlags[RUNTIME_FLAGS.SWEEP_DISABLED] !== true,
         runtimeFlags,
+        billing: billingReconciler ? { ...billingReconciler.stats } : null,
       };
     },
   });
@@ -336,6 +435,9 @@ async function main(): Promise<void> {
     disposeVoiceGateway,
     disposeJoinRequests,
     disposeInteractions,
+    disposeOnboarding,
+    billingReconciler,
+    entitlementGate,
     closeDb,
   });
 

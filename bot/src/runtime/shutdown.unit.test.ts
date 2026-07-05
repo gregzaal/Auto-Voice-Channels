@@ -17,6 +17,13 @@ function depsRecording(order: string[]): ShutdownDeps {
     disposeInteractions: () => order.push('disposeInteractions'),
     disposeJoinRequests: () => order.push('disposeJoinRequests'),
     disposeVoiceGateway: () => order.push('disposeVoiceGateway'),
+    disposeOnboarding: () => order.push('disposeOnboarding'),
+    billingReconciler: {
+      stop: () => order.push('billingReconciler.stop'),
+    } as unknown as ShutdownDeps['billingReconciler'],
+    entitlementGate: {
+      stop: () => order.push('entitlementGate.stop'),
+    } as unknown as ShutdownDeps['entitlementGate'],
     client: {
       removeAllListeners: () => order.push('removeAllListeners'),
       destroy: step('client.destroy'),
@@ -37,14 +44,17 @@ describe('gracefulDrain', () => {
 
     expect(order).toEqual([
       'stopSweep',
+      'billingReconciler.stop',
       'disposeInteractions',
       'disposeJoinRequests',
       'disposeVoiceGateway',
+      'disposeOnboarding',
       'removeAllListeners',
       'drainAll',
       'releaseAll',
       'client.destroy',
       'settingsCache.stop',
+      'entitlementGate.stop',
       'notifier.close',
       'health.stop',
       'closeDb',

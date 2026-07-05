@@ -155,6 +155,42 @@ describe('registerInteractionHandler (router)', () => {
     expect(env.settings.getConfig).not.toHaveBeenCalled();
   });
 
+  it('an expired guild gets the reactivation message for normal commands', async () => {
+    const env = setup({
+      selfHosted: false,
+      guilds: { get: vi.fn().mockResolvedValue({ authStatus: 'expired' }) } as never,
+    });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({ kind: 'command', commandName: 'limit' });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('auto-voice.io');
+  });
+
+  it('an expired guild can still open /setup (shows the gated state)', async () => {
+    const env = setup({
+      selfHosted: false,
+      guilds: { get: vi.fn().mockResolvedValue({ authStatus: 'expired' }) } as never,
+    });
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({ kind: 'command', commandName: 'setup' });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(env.settings.getConfig).toHaveBeenCalled();
+  });
+
+  it('grace guilds are fully entitled (no gating)', async () => {
+    const env = setup({
+      selfHosted: false,
+      guilds: { get: vi.fn().mockResolvedValue({ authStatus: 'grace' }) } as never,
+    });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({ kind: 'command', commandName: 'bogus' });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(reply).toHaveBeenCalledWith(expect.objectContaining({ content: 'Unknown command.' }));
+  });
+
   it('replies "Unknown command." for an unrecognised command', async () => {
     const env = setup();
     dispose = env.dispose;
