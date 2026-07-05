@@ -22,9 +22,7 @@ design and decision log.
 
 Monorepo: [`core/`](./core) (domain logic, DB schema, types, validation) +
 [`bot/`](./bot) (gateway/runtime, shard leases, dispatcher, ops). This repo is
-the self-hostable bot and is fully runnable on its own. The website and
-dashboard for the paid hosted service live in a separate private repo and reuse
-`core`.
+the self-hostable bot and is fully runnable on its own.
 
 ## Self-hosting
 
