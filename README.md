@@ -6,7 +6,7 @@ across multiple instances) and a **private self-hosted instance** (one container
 + Postgres) — differentiated only by configuration.
 
 This is the **TypeScript rewrite**. See [`rewrite.md`](./rewrite.md) for the full
-design and decision log, and [`AGENTS.md`](./AGENTS.md) for the operator runbook.
+design and decision log.
 
 **License:** AGPL-3.0-only.
 
@@ -21,8 +21,10 @@ design and decision log, and [`AGENTS.md`](./AGENTS.md) for the operator runbook
 - All state-changing operations are **idempotent**; reconciliation is convergent.
 
 Monorepo: [`core/`](./core) (domain logic, DB schema, types, validation) +
-[`bot/`](./bot) (gateway/runtime, shard leases, dispatcher, ops). A future
-dashboard reuses `core`.
+[`bot/`](./bot) (gateway/runtime, shard leases, dispatcher, ops). This repo is
+the self-hostable bot and is fully runnable on its own. The website and
+dashboard for the paid hosted service live in a separate private repo and reuse
+`core`.
 
 ## Self-hosting
 
@@ -37,7 +39,8 @@ Requirements: Docker + Docker Compose, and a Discord application/bot.
    cp .env.example .env     # set DISCORD_TOKEN and CLIENT_ID
    ```
 
-   Keep `SELF_HOSTED=true` to disable entitlement gating (no trial/active/expired/billing).
+   That's all you need. Self-hosting runs with entitlement gating off by
+   default (no trial, billing, or paywall), so there's nothing else to set.
 
 3. Run:
 
