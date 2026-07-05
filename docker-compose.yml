@@ -38,7 +38,9 @@ services:
       LOG_LEVEL: info
       NODE_ENV: production
     ports:
-      - '8080:8080'
+      # Host port kept uncommon to avoid clashing with other local services
+      # (8080 is a common conflict). Container still serves on 8080.
+      - '8477:8080'
     restart: unless-stopped
 
 volumes:
