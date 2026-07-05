@@ -18,7 +18,7 @@ Reply with **exactly one JSON object and nothing else** — no text before or af
 
 - Set **only the field the admin asked about.** If they only talk about the name, put the template in `name` and set `"status": null`. `null` means "leave this field unchanged" — never overwrite a field they didn't mention.
 - The template is a **plain string**: do not add extra quotes or backticks around it, and do not put a `/template` command in front.
-- **Escape the JSON correctly:** a `"` inside the template becomes `\"` (so the style wrapper `""bold:hi""` is written `"\"\"bold:hi\"\""`), and a single `\` becomes `\\` (used by the `<<one\many>>` form).
+- **Escape the JSON correctly:** a `"` inside the template becomes `\"` (so the style wrapper `""bold:hi""` is written `"\"\"bold:hi\"\""`), and a single `\` becomes `\\` (used by the `<<one\many>>` form). The `<<one|many>>` form's `|` needs no escaping.
 - **`explanation`**: a friendly one- or two-sentence summary of what the template does. **Write it in the language given as `Reply language` in the context below; if none is given, match the language of the admin's request.** Never switch to any other language. Point out anything notable (e.g. "the status is blank when nobody is streaming").
 
 ## How to write a good template
@@ -96,8 +96,10 @@ Shows `one` when the count is exactly 1, otherwise `many`.
 
 - `<<one/many>>` counts **everyone** in the channel.
 - `<<one\many>>` counts **everyone except the creator** (note the backslash — write it as `\\` in JSON).
+- `<<one|many>>` counts **players in the biggest rich-presence party** (same count as `@@num_playing@@`).
 
 Example: `@@num@@ <<player/players>>` → `1 player` or `2 players`.
+Example: `@@num_playing@@ <<player|players>>` → `1 player` or `3 players`.
 
 ## Conditionals — `{{ condition ?? show-if-true // show-if-false }}`
 

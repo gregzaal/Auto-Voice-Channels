@@ -284,6 +284,47 @@ describe('renderChannelName — rich tokens', () => {
     expect(name).toBe('3/4 Hazard 5 — Salvage');
   });
 
+  it('handles <<singular|plural>> by party size (@@num_playing@@)', () => {
+    const soloParty = [
+      member({
+        id: 'a',
+        activities: [{ kind: 'playing', name: 'Deep Rock', party: { size: [1, 4] } }],
+      }),
+    ];
+    const solo = renderChannelName('@@num_playing@@ <<player|players>>', {
+      index: 0,
+      members: soloParty,
+      general: 'General',
+    });
+    expect(solo).toBe('1 player');
+
+    const fullParty = [
+      member({
+        id: 'a',
+        activities: [{ kind: 'playing', name: 'Deep Rock', party: { size: [3, 4] } }],
+      }),
+      member({
+        id: 'b',
+        activities: [{ kind: 'playing', name: 'Deep Rock', party: { size: [3, 4] } }],
+      }),
+    ];
+    const full = renderChannelName('@@num_playing@@ <<player|players>>', {
+      index: 0,
+      members: fullParty,
+      general: 'General',
+    });
+    expect(full).toBe('3 players');
+
+    // No rich-presence data at all: the party lookup still runs (triggered by the
+    // `<<…|…>>` group alone) and numPlaying defaults to 0, which takes the plural.
+    const noParty = renderChannelName('<<player|players>>', {
+      index: 0,
+      members: [member({ id: 'a' })],
+      general: 'General',
+    });
+    expect(noParty).toBe('players');
+  });
+
   it('evaluates {{conditional}} expressions', () => {
     const streamer = member({ id: 'a', activities: [{ kind: 'streaming', name: 'My Stream' }] });
     const live = renderChannelName('{{LIVE ?? 🔴 @@stream_name@@ // offline}}', {

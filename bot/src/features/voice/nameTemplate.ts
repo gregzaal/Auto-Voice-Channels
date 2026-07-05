@@ -6,8 +6,9 @@ import type { VoiceMember } from './types.js';
  * `get_channel_games` / `get_game_name` / `get_alias` / `get_party_info` /
  * `eval_expression`. Covers the index tokens, game name, member counts, the
  * `[[random]]` picker (resolved once per channel via a stored seed),
- * `@@nato@@`, the rich-presence party/stream tokens, `<<singular/plural>>`, and
- * `{{conditional}}` expressions.
+ * `@@nato@@`, the rich-presence party/stream tokens, `<<singular/plural>>`
+ * (member / non-creator / party-size selectors), and `{{conditional}}`
+ * expressions.
  *
  * Tier gating from the legacy bot is gone (single standard bot), so every token
  * is available to every guild.
@@ -355,9 +356,10 @@ export function getPartyInfo(
 // ---------------------------------------------------------------------------
 
 /**
- * Resolves `<<singular/plural>>` (count = total members) and
- * `<<singular\\plural>>` (count = members excluding the creator): the singular
- * form when the count is exactly 1, else the plural.
+ * Resolves `<<singular/plural>>` (count = total members), `<<singular\\plural>>`
+ * (count = members excluding the creator), and `<<singular|plural>>` (count =
+ * players in the channel's biggest rich-presence party, `@@num_playing@@`): the
+ * singular form when the count is exactly 1, else the plural.
  *
  * Processed INNERMOST-first (first `>>`, then the nearest `<<` before it) so that
  * NESTED groups work — e.g. `<<a/<<b\\c>>>>` gives a 3-way select. The legacy bot
@@ -369,6 +371,7 @@ export function resolveSingularPlural(
   template: string,
   numMembers: number,
   numOthers: number,
+  numPlaying: number,
 ): string {
   let name = template;
   for (let guard = 0; guard < 50; guard++) {
@@ -385,6 +388,9 @@ export function resolveSingularPlural(
     } else if ((inner.match(/\\/g) ?? []).length === 1) {
       parts = inner.split('\\');
       count = numOthers;
+    } else if ((inner.match(/\|/g) ?? []).length === 1) {
+      parts = inner.split('|');
+      count = numPlaying;
     }
     if (!parts || count === undefined) break;
     const choice = count === 1 ? parts[0]! : parts[1]!;
@@ -612,7 +618,8 @@ export interface RenderContext {
  *                                 → rich-presence party info for the channel's game
  * - `[[a/b/c]]`                   → random pick, fixed per channel (via `seed`)
  * - `__empty/occupied__`          → resting vs in-use name (adopted standalone channels)
- * - `<<one/many>>` / `<<one\\many>>` → singular/plural by member / non-creator count
+ * - `<<one/many>>` / `<<one\\many>>` / `<<one|many>>` → singular/plural by member /
+ *                                    non-creator / party-size (`@@num_playing@@`) count
  * - `{{cond ?? yes // no}}`        → conditional (see {@link evalExpression})
  * - `""mode:text""`                → string transform of the substituted text;
  *                                    case (`lower`/`upper`/`caps`/`title`/`swap`),
@@ -678,9 +685,17 @@ export function renderChannelName(
     name = name.split('@@num_others@@').join(String(numOthers));
   }
 
-  // 6. Rich-presence party tokens (computed lazily, only when referenced).
-  if (name.includes('@@party_') || name.includes('@@num_playing@@') || name.includes('{{')) {
+  // 6. Rich-presence party tokens (computed lazily, only when referenced — including
+  //    by a `<<one|many>>` group, which selects on the party's @@num_playing@@ count).
+  let numPlaying = 0;
+  if (
+    name.includes('@@party_') ||
+    name.includes('@@num_playing@@') ||
+    name.includes('{{') ||
+    (name.includes('<<') && name.includes('|'))
+  ) {
     const party = getPartyInfo(ctx.members, gameName, ctx.aliases ?? {}, ctx.userLimit ?? 0);
+    numPlaying = Number.parseInt(party.numPlaying, 10) || 0;
     name = name.split('@@num_playing@@').join(party.numPlaying);
     name = name.split('@@party_size@@').join(party.size);
     name = name.split('@@party_state@@').join(party.state);
@@ -692,7 +707,7 @@ export function renderChannelName(
   }
 
   // 8. Singular/plural selection.
-  if (name.includes('<<')) name = resolveSingularPlural(name, num, numOthers);
+  if (name.includes('<<')) name = resolveSingularPlural(name, num, numOthers, numPlaying);
 
   // 9. Game name, creator, and stream title.
   if (name.includes('@@game_name@@')) name = name.split('@@game_name@@').join(gameName);
