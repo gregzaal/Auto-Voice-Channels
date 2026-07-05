@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { isFreeForever, tierFor, TIERS } from './tiers.js';
+import {
+  compareTiers,
+  isFreeForever,
+  tierById,
+  tierFor,
+  TIERS,
+  trialDurationMs,
+  trialPolicyFor,
+} from './tiers.js';
 
 describe('tierFor', () => {
   it('maps boundary member counts to the right tier', () => {
@@ -40,5 +48,38 @@ describe('tierFor', () => {
     const bounds = TIERS.map((t) => t.maxExclusive);
     expect(bounds).toEqual([...bounds].sort((a, b) => a - b));
     expect(TIERS[TIERS.length - 1]!.maxExclusive).toBe(Number.POSITIVE_INFINITY);
+  });
+});
+
+describe('tier helpers', () => {
+  it('tierById finds each tier', () => {
+    for (const tier of TIERS) expect(tierById(tier.id)).toBe(tier);
+  });
+
+  it('compareTiers orders by size', () => {
+    expect(compareTiers('free', 's')).toBeLessThan(0);
+    expect(compareTiers('m', 'm')).toBe(0);
+    expect(compareTiers('xl', 'm')).toBeGreaterThan(0);
+    expect(compareTiers('xxl', 'xl')).toBeGreaterThan(0);
+  });
+});
+
+describe('trialPolicyFor (monetization.md §3)', () => {
+  it('maps size bands at their boundaries', () => {
+    expect(trialPolicyFor(0)).toBe('dormant');
+    expect(trialPolicyFor(99)).toBe('dormant');
+    expect(trialPolicyFor(100)).toBe('year');
+    expect(trialPolicyFor(9_999)).toBe('year');
+    expect(trialPolicyFor(10_000)).toBe('short');
+    expect(trialPolicyFor(999_999)).toBe('short');
+    expect(trialPolicyFor(1_000_000)).toBe('hard_gate');
+  });
+
+  it('trial durations: a year for small/dormant, 14 days for large, none for the gate', () => {
+    const day = 86_400_000;
+    expect(trialDurationMs('dormant')).toBe(365 * day);
+    expect(trialDurationMs('year')).toBe(365 * day);
+    expect(trialDurationMs('short')).toBe(14 * day);
+    expect(trialDurationMs('hard_gate')).toBeNull();
   });
 });

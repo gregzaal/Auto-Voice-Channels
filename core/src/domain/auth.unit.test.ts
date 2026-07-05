@@ -7,6 +7,11 @@ describe('isEntitled', () => {
     expect(isEntitled({ status: 'active', selfHosted: false })).toBe(true);
   });
 
+  it('grace keeps a guild fully entitled (the leniency buffer)', () => {
+    expect(isEntitled({ status: 'grace', selfHosted: false })).toBe(true);
+    expect(isEntitled({ status: 'grace', selfHosted: true })).toBe(true);
+  });
+
   it('denies expired when not self-hosted', () => {
     expect(isEntitled({ status: 'expired', selfHosted: false })).toBe(false);
   });

@@ -1,18 +1,18 @@
 /**
  * Per-server pricing tiers, derived from member count (see
- * `plans/monetization.md` §2). This is the **display/derivation** half of the
- * model — a pure `tierFor()` over the tier table — used today only to *show*
- * a guild where it sits (e.g. in `/setup`). The billing machinery
- * (subscriptions, Paddle, the leniency ladder) is a separate, later effort;
- * when it lands it extends this table with Paddle price ids rather than
- * replacing it.
+ * `plans/monetization.md` §2), plus the trial policy applied at bot-add (§3).
  *
- * Tier is never an authoritative stored value — it is always re-derived from
- * the current member count.
+ * `tierFor()` derives the **required** tier from the current member count; the
+ * **billed** tier (what a subscription covers) is cached on `guilds.tier` and
+ * synced from Paddle. Tier is never an authoritative stored value — it is
+ * always re-derived from the current member count.
  */
+export const TIER_IDS = ['free', 's', 'm', 'l', 'xl', 'xxl'] as const;
+export type TierId = (typeof TIER_IDS)[number];
+
 export interface Tier {
   /** Stable id (also the future Paddle price-id key). */
-  id: 'free' | 's' | 'm' | 'l' | 'xl' | 'xxl';
+  id: TierId;
   /** Short display label. */
   label: string;
   /** Upper bound (exclusive). A guild is in this tier when `members < maxExclusive`. */
@@ -44,4 +44,66 @@ export function tierFor(memberCount: number): Tier {
 /** Whether a guild of this size is on the free-forever tier (< 100 members). */
 export function isFreeForever(memberCount: number): boolean {
   return tierFor(memberCount).id === 'free';
+}
+
+/** Lookup a tier by its stable id. */
+export function tierById(id: TierId): Tier {
+  // Ids are a closed union, so a match always exists.
+  return TIERS.find((t) => t.id === id) ?? TIERS[0]!;
+}
+
+/**
+ * Orders tiers by size: negative when `a` is a smaller tier than `b`, zero when
+ * equal, positive when larger. Used for the over-limit check (`required > billed`).
+ */
+export function compareTiers(a: TierId, b: TierId): number {
+  return TIERS.findIndex((t) => t.id === a) - TIERS.findIndex((t) => t.id === b);
+}
+
+// ---------------------------------------------------------------------------
+// Trial policy (monetization.md §3) — how the trial applies at bot-add time,
+// by member count. The trial clock starts the moment the bot is FIRST added
+// and runs 1 year; a large guild instead gets a short taste; a huge guild is
+// hard-gated until a subscription is arranged.
+// ---------------------------------------------------------------------------
+
+export const TRIAL_YEAR_DAYS = 365;
+export const TRIAL_SHORT_DAYS = 14;
+
+export type TrialPolicy =
+  /** `< 100` members — free forever; the trial clock runs but is never needed. */
+  | 'dormant'
+  /** `100 – 9,999` members — 1-year free trial, fully entitled. */
+  | 'year'
+  /** `10,000 – 999,999` members — 14-day free trial, then subscribe. */
+  | 'short'
+  /** `≥ 1,000,000` members — no trial; a subscription must be arranged first. */
+  | 'hard_gate';
+
+/** The trial policy for a guild of `memberCount` members at bot-add time. */
+export function trialPolicyFor(memberCount: number): TrialPolicy {
+  const tier = tierFor(memberCount);
+  if (tier.id === 'free') return 'dormant';
+  if (tier.id === 's' || tier.id === 'm') return 'year';
+  if (tier.id === 'xxl') return 'hard_gate';
+  return 'short';
+}
+
+const DAY_MS = 86_400_000;
+
+/**
+ * The trial window length for a policy, in milliseconds. `null` for the hard
+ * gate (there is no trial window). The dormant policy still gets the 1-year
+ * clock — it was always running; it just becomes relevant if the guild grows.
+ */
+export function trialDurationMs(policy: TrialPolicy): number | null {
+  switch (policy) {
+    case 'dormant':
+    case 'year':
+      return TRIAL_YEAR_DAYS * DAY_MS;
+    case 'short':
+      return TRIAL_SHORT_DAYS * DAY_MS;
+    case 'hard_gate':
+      return null;
+  }
 }

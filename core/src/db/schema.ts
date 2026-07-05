@@ -16,7 +16,7 @@ import {
  * imports). MUST stay in sync with `AUTH_STATUSES` in `domain/auth.ts`; a unit
  * test (`schema.unit.test.ts`) asserts they match.
  */
-const AUTH_STATUSES = ['trial', 'active', 'expired', 'blocked'] as const;
+const AUTH_STATUSES = ['trial', 'active', 'grace', 'expired', 'blocked'] as const;
 
 /**
  * Drizzle schema. Postgres is the source of truth.
@@ -45,11 +45,22 @@ export const guilds = pgTable('guilds', {
   authStatus: text('auth_status', { enum: AUTH_STATUSES }).notNull().default('trial'),
   /** When the current trial/subscription window ends (drives time-based transitions). */
   authExpiresAt: timestamp('auth_expires_at', { withTimezone: true }),
+  /** When the current grace window ends (the leniency ladder; null = not in grace). */
+  graceUntil: timestamp('grace_until', { withTimezone: true }),
+  /** Latest member-count sample (a hint, never ground truth — see monetization.md §5). */
+  memberCount: integer('member_count'),
+  memberCountUpdatedAt: timestamp('member_count_updated_at', { withTimezone: true }),
+  /**
+   * Billed tier cache (what the guild's subscription covers), for the dashboard
+   * and the over-limit check. The *required* tier is always re-derived from the
+   * member count via `tierFor()` — never stored.
+   */
+  tier: text('tier'),
   /** Arbitrary per-guild settings, mirroring the old per-guild JSON shape. */
   settings: jsonb('settings')
     .notNull()
     .default(sql`'{}'::jsonb`),
-  /** Free-form metadata (support notes, flags, etc.). */
+  /** Free-form metadata (support notes, billing samples/notifications, flags, etc.). */
   metadata: jsonb('metadata')
     .notNull()
     .default(sql`'{}'::jsonb`),
@@ -174,6 +185,100 @@ export const aliases = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Billing (monetization.md §7). Self-hosted deployments run these migrations
+// too but never populate the tables (SELF_HOSTED bypasses entitlement).
+// ---------------------------------------------------------------------------
+
+/** Billing source of truth per guild, synced from Paddle webhooks. */
+export const subscriptions = pgTable('subscriptions', {
+  guildId: text('guild_id').primaryKey(),
+  paddleSubscriptionId: text('paddle_subscription_id').notNull().unique(),
+  paddleCustomerId: text('paddle_customer_id').notNull(),
+  /** The tier this subscription pays for (`s`/`m`/`l`/`xl`/`xxl`). */
+  tier: text('tier').notNull(),
+  /** Paddle subscription status (e.g. active, past_due, canceled). */
+  status: text('status').notNull(),
+  currentPeriodEnd: timestamp('current_period_end', { withTimezone: true }),
+  /** Unit price as reported by Paddle (minor units string, e.g. '1900'). */
+  price: text('price'),
+  currency: text('currency'),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+});
+
+/** Append-only Paddle webhook log; the unique event id makes processing idempotent. */
+export const billingEvents = pgTable(
+  'billing_events',
+  {
+    id: bigint('id', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
+    /** Paddle's event id — UNIQUE, so a redelivered webhook is a no-op. */
+    paddleEventId: text('paddle_event_id').notNull().unique(),
+    eventType: text('event_type').notNull(),
+    guildId: text('guild_id'),
+    payload: jsonb('payload')
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    processedAt: timestamp('processed_at', { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [index('billing_events_guild_idx').on(t.guildId, t.createdAt)],
+);
+
+// ---------------------------------------------------------------------------
+// Web auth (Auth.js Drizzle-adapter tables for auto-voice.io). Column TS
+// property names must match what @auth/drizzle-adapter expects; SQL names
+// follow the repo's snake_case convention.
+// ---------------------------------------------------------------------------
+
+export const users = pgTable('users', {
+  id: text('id')
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  name: text('name'),
+  email: text('email').unique(),
+  emailVerified: timestamp('email_verified', { withTimezone: true }),
+  image: text('image'),
+});
+
+export const accounts = pgTable(
+  'accounts',
+  {
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    type: text('type').notNull(),
+    provider: text('provider').notNull(),
+    providerAccountId: text('provider_account_id').notNull(),
+    refresh_token: text('refresh_token'),
+    access_token: text('access_token'),
+    expires_at: integer('expires_at'),
+    token_type: text('token_type'),
+    scope: text('scope'),
+    id_token: text('id_token'),
+    session_state: text('session_state'),
+  },
+  (t) => [primaryKey({ columns: [t.provider, t.providerAccountId] })],
+);
+
+export const sessions = pgTable('sessions', {
+  sessionToken: text('session_token').primaryKey(),
+  userId: text('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  expires: timestamp('expires', { withTimezone: true }).notNull(),
+});
+
+export const verificationTokens = pgTable(
+  'verification_tokens',
+  {
+    identifier: text('identifier').notNull(),
+    token: text('token').notNull(),
+    expires: timestamp('expires', { withTimezone: true }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.identifier, t.token] })],
+);
+
+// ---------------------------------------------------------------------------
 // Coordination
 // ---------------------------------------------------------------------------
 
@@ -203,6 +308,21 @@ export const shardLeases = pgTable(
 export const identifyBuckets = pgTable('identify_buckets', {
   bucket: integer('bucket').primaryKey(),
   lastIdentifyAt: timestamp('last_identify_at', { withTimezone: true }),
+  updatedAt: updatedAt(),
+});
+
+/**
+ * Durable last-run bookkeeping for cluster-singleton background jobs (e.g. the
+ * billing/trial reconcile job). Checked/updated under a per-job advisory lock —
+ * the same pattern as `identify_buckets` — so exactly one instance runs a job
+ * per spacing window.
+ */
+export const billingRuns = pgTable('billing_runs', {
+  /** Job key (e.g. 'billing.advance'). */
+  job: text('job').primaryKey(),
+  lastRunAt: timestamp('last_run_at', { withTimezone: true }),
+  /** Instance that ran it last (diagnostics). */
+  lastRunBy: text('last_run_by'),
   updatedAt: updatedAt(),
 });
 
