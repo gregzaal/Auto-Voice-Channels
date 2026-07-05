@@ -59,6 +59,14 @@ describe('applyMode — usd, rand, and misc', () => {
     expect(a.toLowerCase()).toBe('hello world'); // same letters, only case varies
   });
 
+  it('rand actually varies case within a word (not one uniform case)', () => {
+    // Regression: the old two-step hash left the low bit constant across the
+    // character index, so every letter came out the same case. Real mixed case
+    // must appear.
+    const r = applyMode('rand', 'chaos');
+    expect(/[a-z]/.test(r) && /[A-Z]/.test(r)).toBe(true);
+  });
+
   it('<N>w keeps the first N words', () => {
     expect(applyMode('3w', 'a b c d e')).toBe('a b c');
   });

@@ -86,6 +86,12 @@ function firstNWords(s: string, n: number): string {
  * new engine's "render is stable → no rename churn" invariant. We instead derive
  * the per-character case from a hash of the text itself, so the same text always
  * yields the same mixed-case result (no churn) while still looking randomised.
+ *
+ * The per-character hash runs the FULL three-step avalanche finalizer (matching
+ * `mixHash` in nameTemplate.ts). An earlier version stopped after two steps,
+ * which left the low bit degenerate: it came out identical for every index, so
+ * a whole word rendered in one case instead of a mix. The extra rounds diffuse
+ * the index into the low bit, so the case now actually varies per character.
  */
 function randomCase(s: string): string {
   let seed = 0;
@@ -95,6 +101,8 @@ function randomCase(s: string): string {
   for (const c of s) {
     let h = (seed ^ Math.imul(i + 1, 0x9e3779b1)) >>> 0;
     h = Math.imul(h ^ (h >>> 15), 0x85ebca6b) >>> 0;
+    h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35) >>> 0;
+    h = (h ^ (h >>> 16)) >>> 0;
     out += h & 1 ? c.toUpperCase() : c.toLowerCase();
     i++;
   }
