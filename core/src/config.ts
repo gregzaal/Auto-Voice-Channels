@@ -27,8 +27,17 @@ export const configSchema = z.object({
   /** Postgres connection string (source of truth). */
   databaseUrl: z.string().min(1, 'DATABASE_URL is required'),
 
-  /** When true, the entitlement gate always allows (no trial/active/expired/billing). */
-  selfHosted: booleanish.default(false),
+  /**
+   * When true, the entitlement gate always allows (no trial/active/expired/billing).
+   *
+   * Defaults to **true** so a self-hoster never has to set anything to run the
+   * full bot. The hosted paid service is the only deployment that runs with
+   * entitlement enforced, and it sets `SELF_HOSTED=false` explicitly (see
+   * `deploy/fly/fly.toml`). Consequence: the hosted fleet MUST keep that
+   * setting, or it fails open (everyone entitled). That is a deliberate
+   * trade-off in favour of self-hosters, who are the common case.
+   */
+  selfHosted: booleanish.default(true),
 
   /** Total shard count across all instances. A managed config value. */
   totalShards: z.coerce.number().int().positive().default(1),

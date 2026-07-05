@@ -31,7 +31,7 @@ services:
       # Optional: register slash commands to one guild (instant) for local testing.
       DEV_GUILD_ID: ${DEV_GUILD_ID:-}
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/avc
-      SELF_HOSTED: 'true'
+      # SELF_HOSTED defaults to true, so self-hosting needs nothing here.
       TOTAL_SHARDS: '1'
       INSTANCE_ID: selfhost
       HTTP_PORT: '8080'

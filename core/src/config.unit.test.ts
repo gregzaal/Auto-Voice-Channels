@@ -11,7 +11,8 @@ describe('loadConfig', () => {
   it('loads valid config with defaults', () => {
     const config = loadConfig(baseEnv);
     expect(config.discordToken).toBe('token');
-    expect(config.selfHosted).toBe(false);
+    // Self-host is the default; the hosted service opts out explicitly.
+    expect(config.selfHosted).toBe(true);
     expect(config.totalShards).toBe(1);
     expect(config.httpPort).toBe(8080);
     expect(config.logLevel).toBe('info');
