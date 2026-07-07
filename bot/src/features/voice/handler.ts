@@ -521,7 +521,9 @@ export class VoiceFeature {
    * the arrival roster, and — if they owned the channel — hands ownership to the
    * longest-present remaining member. Keeps `@@creator@@` resolvable after the
    * creator leaves and re-points a private channel's "⇩ Join" companion at the
-   * new owner. Idempotent: a replayed leave sees the roster already pruned and
+   * new owner. The new owner is only a caretaker: `setOwner` preserves the
+   * `originalCreator`, so the original creator can `/claim` the channel back on
+   * return. Idempotent: a replayed leave sees the roster already pruned and
    * ownership already moved, so it writes nothing.
    */
   private async handleSecondaryLeave(

@@ -42,6 +42,7 @@ export const secondaryChannelRowSchema = z.object({
   guildId: z.string(),
   primaryChannelId: z.string(),
   ownerId: z.string().nullable(),
+  originalCreator: z.string().nullable(),
   state: secondaryStateSchema,
   createdAt: z.date(),
   updatedAt: z.date(),
@@ -54,6 +55,8 @@ export interface CreateSecondaryInput {
   guildId: string;
   primaryChannelId: string;
   ownerId?: string;
+  /** The channel's original creator; defaults to `ownerId` when omitted. */
+  originalCreator?: string;
   state?: SecondaryState;
 }
 
@@ -78,6 +81,8 @@ export class SecondaryChannelRepository {
         guildId: input.guildId,
         primaryChannelId: input.primaryChannelId,
         ownerId: input.ownerId ?? null,
+        // The creator is the first owner unless a specific one is given.
+        originalCreator: input.originalCreator ?? input.ownerId ?? null,
         state: input.state ?? {},
       })
       .onConflictDoNothing({ target: secondaryChannels.channelId })
@@ -163,11 +168,27 @@ export class SecondaryChannelRepository {
       .where(eq(secondaryChannels.channelId, channelId));
   }
 
-  /** Reassigns the owner (used by `/transfer` and `/claim`). */
+  /**
+   * Reassigns only the current owner, leaving {@link SecondaryChannelRow.originalCreator}
+   * untouched. Used when the owner leaves and the longest-present member takes over
+   * as caretaker — so the original creator keeps their standing to `/claim` it back.
+   */
   async setOwner(channelId: string, ownerId: string): Promise<void> {
     await this.db
       .update(secondaryChannels)
       .set({ ownerId, updatedAt: new Date() })
+      .where(eq(secondaryChannels.channelId, channelId));
+  }
+
+  /**
+   * Hands the channel to `memberId` as both current owner AND original creator — a
+   * deliberate takeover via `/transfer` or `/claim`. Moving `originalCreator` too
+   * means the previous holder can't later `/claim` it back; the handover sticks.
+   */
+  async setOwnerAndCreator(channelId: string, memberId: string): Promise<void> {
+    await this.db
+      .update(secondaryChannels)
+      .set({ ownerId: memberId, originalCreator: memberId, updatedAt: new Date() })
       .where(eq(secondaryChannels.channelId, channelId));
   }
 }

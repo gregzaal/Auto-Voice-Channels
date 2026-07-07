@@ -41,7 +41,8 @@ export interface VoiceCommandsDeps {
  * this layer is exercised with the same fakes as the rest of the feature.
  *
  * Most actions are owner-only (`ownerId` on the secondary). `claim` is the
- * exception: anyone may take over a channel whose owner has left.
+ * exception: anyone may take over a channel whose owner has left, and the original
+ * creator may reclaim it from a caretaker at any time.
  */
 export class VoiceCommands {
   constructor(private readonly deps: VoiceCommandsDeps) {}
@@ -156,14 +157,20 @@ export class VoiceCommands {
     const inChannel = this.deps.voice.membersInChannel(id).some((m) => m.id === targetId);
     if (!inChannel) return fail('That member isn’t in this channel.');
 
-    await this.deps.secondaries.setOwner(id, targetId);
+    // A deliberate handover: the target becomes the original creator too, so the
+    // giver can't `/claim` it back afterwards.
+    await this.deps.secondaries.setOwnerAndCreator(id, targetId);
     await this.deps.feature.rerenderSecondary(guildId, id);
     return ok(`Transferred ownership to <@${targetId}>.`);
   }
 
   /**
-   * Claims ownership of the channel the caller is in, when its owner has left.
-   * Anyone present may claim; no-op refusal if the owner is still here.
+   * Takes over the channel the caller is in, and makes them its owner AND original
+   * creator. Anyone present may claim a channel whose owner has left; additionally
+   * the **original creator** may reclaim it at any time — even from a caretaker
+   * who is still present — because an owner leaving only reassigns the caretaker
+   * owner, never the original creator. Always explicit: rejoining a channel never
+   * reassigns ownership on its own.
    */
   async claim(
     guildId: string,
@@ -178,12 +185,20 @@ export class VoiceCommands {
       return fail('You need to be in the channel to claim it.');
     }
     if (row.ownerId === userId) return fail('You already own this channel.');
-    if (row.ownerId && present.some((m) => m.id === row.ownerId)) {
+    const isOriginalCreator = row.originalCreator === userId;
+    const ownerPresent = row.ownerId !== null && present.some((m) => m.id === row.ownerId);
+    // A present owner blocks a claim — unless the caller is the original creator
+    // reclaiming the channel from a caretaker.
+    if (ownerPresent && !isOriginalCreator) {
       return fail('The current owner is still here — they can `/transfer` it to you.');
     }
-    await this.deps.secondaries.setOwner(row.channelId, userId);
+    await this.deps.secondaries.setOwnerAndCreator(row.channelId, userId);
     await this.deps.feature.rerenderSecondary(guildId, row.channelId);
-    return ok('You are now the owner of this channel.');
+    return ok(
+      isOriginalCreator
+        ? 'You’ve reclaimed your channel.'
+        : 'You are now the owner of this channel.',
+    );
   }
 
   // -- helpers --------------------------------------------------------------

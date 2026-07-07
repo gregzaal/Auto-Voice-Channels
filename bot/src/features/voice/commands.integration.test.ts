@@ -159,7 +159,10 @@ describe('VoiceCommands (integration)', () => {
     voice.put(SEC, member('bob'));
     const res = await commands.transfer(GUILD, SEC, 'alice', 'bob');
     expect(res.ok).toBe(true);
-    expect((await secondaries.get(SEC))!.ownerId).toBe('bob');
+    const row = await secondaries.get(SEC);
+    expect(row!.ownerId).toBe('bob');
+    // A transfer is a durable handover: bob also becomes the original creator.
+    expect(row!.originalCreator).toBe('bob');
   });
 
   it('refuses transfer to someone not in the channel', async () => {
@@ -173,7 +176,10 @@ describe('VoiceCommands (integration)', () => {
     voice.put(SEC, member('bob'));
     const res = await commands.claim(GUILD, SEC, 'bob');
     expect(res.ok).toBe(true);
-    expect((await secondaries.get(SEC))!.ownerId).toBe('bob');
+    const row = await secondaries.get(SEC);
+    expect(row!.ownerId).toBe('bob');
+    // A non-creator claim is durable: bob becomes the new original creator.
+    expect(row!.originalCreator).toBe('bob');
   });
 
   it('refuses claiming when the owner is still present', async () => {
@@ -181,5 +187,35 @@ describe('VoiceCommands (integration)', () => {
     const res = await commands.claim(GUILD, SEC, 'bob');
     expect(res.ok).toBe(false);
     expect((await secondaries.get(SEC))!.ownerId).toBe('alice');
+  });
+
+  it('reassigns the original creator on transfer, so the giver cannot reclaim it', async () => {
+    voice.put(SEC, member('bob'));
+    await commands.transfer(GUILD, SEC, 'alice', 'bob');
+    expect((await secondaries.get(SEC))!.originalCreator).toBe('bob');
+
+    // Alice is still present but no longer the original creator, and bob (the
+    // owner) is here — so she can't wrestle it back with /claim.
+    const reclaim = await commands.claim(GUILD, SEC, 'alice');
+    expect(reclaim.ok).toBe(false);
+    expect(reclaim.message).toMatch(/still here/i);
+    expect((await secondaries.get(SEC))!.ownerId).toBe('bob');
+  });
+
+  it('lets the original creator reclaim the channel from a caretaker owner', async () => {
+    // Alice leaves; the caretaker handoff (setOwner, as handleSecondaryLeave does)
+    // makes bob the owner but keeps alice as the original creator.
+    await secondaries.setOwner(SEC, 'bob');
+    expect((await secondaries.get(SEC))!.originalCreator).toBe('alice');
+
+    // Alice returns — both she and caretaker bob are present. She reclaims it even
+    // though bob is still here, because she is the original creator.
+    voice.put(SEC, member('bob'));
+    const res = await commands.claim(GUILD, SEC, 'alice');
+    expect(res.ok).toBe(true);
+    expect(res.message).toMatch(/reclaim/i);
+    const row = await secondaries.get(SEC);
+    expect(row!.ownerId).toBe('alice');
+    expect(row!.originalCreator).toBe('alice');
   });
 });
