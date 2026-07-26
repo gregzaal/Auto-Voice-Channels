@@ -339,6 +339,7 @@ export class BillingReconciler {
       authExpiresAt: row.authExpiresAt,
       graceUntil: row.graceUntil,
       billedTier: row.tier,
+      hasSubscription: subscription !== undefined,
       subscriptionOk: subscription ? SUBSCRIPTION_OK_STATUSES.has(subscription.status) : false,
       memberCount: row.memberCount,
       samples: meta.samples,

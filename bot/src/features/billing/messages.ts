@@ -88,6 +88,15 @@ export function notificationMessage(n: LeniencyNotification, memberCount: number
           `${SITE_URL}. Congrats on the growth!`
         );
       }
+      if (n.reason === 'subscription_lapsed') {
+        // Deliberately covers both a failed payment and a cancellation — from
+        // here the two look identical, and guessing wrong reads badly either way.
+        return (
+          `🕊️ **Your AVC subscription has ended.** Nothing has stopped — you're in a ${days}-day ` +
+          `grace period with everything still working. Resubscribe or update your payment ` +
+          `details at ${SITE_URL} whenever you're ready.`
+        );
+      }
       return (
         `🕊️ **Your AVC trial has ended — and nothing broke.** You're in a ${days}-day grace ` +
         `period with everything still working. Whenever you're ready, keep AVC going ` +

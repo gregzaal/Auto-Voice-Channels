@@ -29,6 +29,7 @@ function state(overrides: Partial<LeniencyState>): LeniencyState {
     authExpiresAt: new Date(NOW.getTime() + days(200)),
     graceUntil: null,
     billedTier: null,
+    hasSubscription: false,
     subscriptionOk: false,
     memberCount: 500,
     samples: samplesAt(500, 10),
@@ -195,6 +196,70 @@ describe('evaluateLeniency — active (over-limit)', () => {
     );
     expect(decision.transition).toBeUndefined();
     expect(decision.notifications).toEqual([]);
+  });
+});
+
+describe('evaluateLeniency — active (dunning backstop)', () => {
+  const paying = {
+    authStatus: 'active' as const,
+    billedTier: 'm' as const,
+    hasSubscription: true,
+    subscriptionOk: true,
+  };
+
+  it('converges to grace when a subscription stopped paying and the webhook was missed', () => {
+    const decision = evaluateLeniency(state({ ...paying, subscriptionOk: false }), NOW);
+    expect(decision.transition).toMatchObject({
+      toStatus: 'grace',
+      reason: 'subscription_lapsed',
+      graceUntil: new Date(NOW.getTime() + days(60)),
+    });
+    expect(decision.notifications[0]).toMatchObject({
+      kind: 'grace_started',
+      reason: 'subscription_lapsed',
+      daysLeft: 60,
+    });
+  });
+
+  it('leaves a healthy subscription alone', () => {
+    expect(evaluateLeniency(state(paying), NOW).transition).toBeUndefined();
+  });
+
+  it('never mistakes a manually arranged guild (no Paddle row) for a failed payment', () => {
+    // An XXL guild on a bespoke deal is entitled by agreement: a billed tier
+    // with no subscription behind it must not trip the backstop.
+    const decision = evaluateLeniency(
+      state({
+        authStatus: 'active',
+        billedTier: 'xxl',
+        hasSubscription: false,
+        subscriptionOk: false,
+        memberCount: 2_000_000,
+        samples: samplesAt(2_000_000, 40),
+      }),
+      NOW,
+    );
+    expect(decision.transition).toBeUndefined();
+    expect(decision.notifications).toEqual([]);
+  });
+
+  it('re-emits the dunning grace notice until it lands', () => {
+    const decision = evaluateLeniency(
+      state({
+        ...paying,
+        subscriptionOk: false,
+        authStatus: 'grace',
+        graceUntil: new Date(NOW.getTime() + days(30)),
+        authExpiresAt: new Date(NOW.getTime() + days(200)),
+      }),
+      NOW,
+    );
+    expect(decision.transition).toBeUndefined();
+    expect(decision.notifications[0]).toMatchObject({
+      kind: 'grace_started',
+      key: 'grace_started:subscription_lapsed',
+      reason: 'subscription_lapsed',
+    });
   });
 });
 

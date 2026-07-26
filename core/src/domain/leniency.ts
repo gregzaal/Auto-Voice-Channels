@@ -57,6 +57,12 @@ export interface LeniencyState {
   graceUntil: Date | null;
   /** Billed tier (what the subscription covers); null = no subscription. */
   billedTier: TierId | null;
+  /**
+   * Whether a Paddle subscription row exists for the guild at all. Distinct
+   * from {@link subscriptionOk}: a bespoke XXL arrangement is entitled with no
+   * subscription row, and must not be mistaken for a failed payment.
+   */
+  hasSubscription: boolean;
   /** Whether the Paddle subscription is in good standing (false during dunning). */
   subscriptionOk: boolean;
   /** Latest member-count sample (a hint — transitions re-validate via REST). */
@@ -177,6 +183,33 @@ function alreadySent(state: LeniencyState, key: string): boolean {
 
 function evaluateActive(state: LeniencyState, now: Date, config: LeniencyConfig): LeniencyDecision {
   const required = requiredTierOf(state);
+
+  // Dunning backstop. The Paddle webhook normally moves a failing subscription
+  // into grace the moment it hears about it; this converges the same way when
+  // that delivery was missed or arrived while we were down, so a guild can
+  // never sit `active` forever behind a subscription that stopped paying.
+  // Guarded on a subscription actually existing — a manually arranged guild
+  // (no Paddle row) is entitled by agreement, not by a payment we can see.
+  if (state.hasSubscription && !state.subscriptionOk) {
+    return {
+      transition: {
+        toStatus: 'grace',
+        reason: 'subscription_lapsed',
+        graceUntil: addDays(now, config.graceDays),
+        requiresCountValidation: false,
+      },
+      notifications: [
+        {
+          key: 'grace_started:subscription_lapsed',
+          kind: 'grace_started',
+          reason: 'subscription_lapsed',
+          requiredTier: required.id,
+          daysLeft: config.graceDays,
+        },
+      ],
+    };
+  }
+
   // Over-limit: the guild outgrew what it pays for, sustained across the
   // breach window → start the grace clock. (Never the other way: a guild may
   // hold any tier at or above its required tier — voluntary over-provisioning
@@ -320,13 +353,19 @@ function expectedGraceStarted(
   if (state.billedTier && compareTiers(required.id, state.billedTier) > 0) {
     return { key: `grace_started:over_limit:${required.id}`, reason: 'over_limit' };
   }
+  // Dunning, whether the Paddle webhook put the guild here or the backstop in
+  // `evaluateActive` did. The webhook only moves the row; the admin-facing
+  // notice is always this machine's job, so it belongs here rather than being
+  // lost between the two paths.
+  if (state.hasSubscription && !state.subscriptionOk) {
+    return { key: 'grace_started:subscription_lapsed', reason: 'subscription_lapsed' };
+  }
   if (state.authExpiresAt && state.authExpiresAt.getTime() <= now.getTime()) {
     return {
       key: `grace_started:trial_expired:${state.authExpiresAt.toISOString()}`,
       reason: 'trial_expired',
     };
   }
-  // Other grace entries (e.g. webhook-driven dunning) carry their own notice.
   return undefined;
 }
 
