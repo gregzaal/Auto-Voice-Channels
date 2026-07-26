@@ -1,4 +1,5 @@
 import {
+  AiUsageRepository,
   AutoChannelRepository,
   BillingRunRepository,
   createDatabase,
@@ -49,6 +50,7 @@ import {
 } from './features/voice/index.js';
 import { registerCommands } from './commands/definitions.js';
 import { registerInteractionHandler } from './commands/interactions.js';
+import { OpenAiCompatClient, TemplateAssistant } from './features/templateAssistant/index.js';
 import {
   BillingReconciler,
   DiscordBillingNotifier,
@@ -236,6 +238,30 @@ async function main(): Promise<void> {
     logger,
   });
   const votekick = new VoteKickManager({ secondaries, voice, actions, logger });
+  // The natural-language template assistant. One OpenAI-compatible endpoint,
+  // enabled iff a key is configured — the self-host default is off, and in that
+  // case `/templateassistant` is never even registered (see registerCommands).
+  // Deliberately NOT entitlement-gated: free on every tier, including
+  // free-forever guilds (plans/assisted_templates.md §5).
+  const assistant = config.aiApiKey
+    ? new TemplateAssistant({
+        client: new OpenAiCompatClient({
+          baseUrl: config.aiBaseUrl,
+          apiKey: config.aiApiKey,
+          model: config.aiModel,
+          timeoutMs: config.aiTimeoutMs,
+        }),
+        usage: new AiUsageRepository(db),
+        flags,
+        selfHosted: config.selfHosted,
+        prices: {
+          inputPerMTok: config.aiPriceInputPerMTok,
+          outputPerMTok: config.aiPriceOutputPerMTok,
+        },
+        reportAlert: (message, context) => errorReporter.report(message, context),
+        logger,
+      })
+    : undefined;
   const disposeInteractions = registerInteractionHandler({
     client,
     dispatcher,
@@ -247,6 +273,7 @@ async function main(): Promise<void> {
     guilds: guildsRepo,
     managed,
     permissionProblems,
+    ...(assistant ? { assistant } : {}),
     selfHosted: config.selfHosted,
     clientId: config.clientId,
     reportError: (message, context) => errorReporter.report(message, context),
@@ -388,6 +415,7 @@ async function main(): Promise<void> {
         sweepEnabled: runtimeFlags[RUNTIME_FLAGS.SWEEP_DISABLED] !== true,
         runtimeFlags,
         billing: billingReconciler ? { ...billingReconciler.stats } : null,
+        ai: assistant ? { ...assistant.stats } : null,
       };
     },
   });
@@ -412,7 +440,9 @@ async function main(): Promise<void> {
   // Self-register the global slash commands (idempotent upsert). A failure here
   // shouldn't take the bot down — log and continue; the next boot retries.
   try {
-    await registerCommands(config.discordToken, config.clientId, logger, config.devGuildId);
+    await registerCommands(config.discordToken, config.clientId, logger, config.devGuildId, {
+      includeAssistant: Boolean(assistant),
+    });
   } catch (err) {
     logger.error({ err }, 'slash-command registration failed');
   }

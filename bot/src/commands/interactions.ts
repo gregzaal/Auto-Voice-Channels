@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   ActionRowBuilder,
   ActivityType,
@@ -84,6 +85,18 @@ import {
 } from './inheritModal.js';
 import { buildLoggingModal, LOGGING_MODAL_ID, parseLoggingModal } from './loggingModal.js';
 import {
+  ASSISTANT_PREFIX,
+  buildAssistantModal,
+  buildProposalPanel,
+  parseAssistantId,
+} from './assistantPanel.js';
+import type {
+  AssistantTurn,
+  Proposal,
+  TemplateAssistant,
+} from '../features/templateAssistant/index.js';
+import { assistantUnavailableMessage } from '../features/templateAssistant/index.js';
+import {
   buildGroupDisablePanel,
   buildGroupEnablePanel,
   GROUP_PREFIX,
@@ -104,6 +117,12 @@ export interface InteractionDeps {
   managed: ManagedChannelRepository;
   /** Recent "I lost access to this channel" incidents, surfaced in `/setup`. */
   permissionProblems?: PermissionProblemTracker;
+  /**
+   * The natural-language template assistant. Absent when no model endpoint is
+   * configured, which is the self-host default — the command isn't registered
+   * in that case, so this only has to cover the "flag flipped after boot" path.
+   */
+  assistant?: TemplateAssistant;
   selfHosted: boolean;
   /** Discord application id, for building the `/invite` link. */
   clientId: string;
@@ -116,6 +135,19 @@ const KICK_PREFIX = 'avc:kick:';
 const VOTE_TIMEOUT_MS = 2 * 60 * 1000;
 /** How long a failed-`/create`'s saved selections stay retry-able (in memory). */
 const CREATE_RETRY_TTL_MS = 15 * 60 * 1000;
+/** How long a pending assistant proposal stays applicable (in memory). */
+const ASSISTANT_SESSION_TTL_MS = 15 * 60 * 1000;
+
+/** One admin's in-flight `/templateassistant` conversation. */
+interface AssistantSession {
+  scope: Exclude<EditorScope, 'channel'>;
+  channelId: string;
+  userId: string;
+  /** Earlier turns, so "Refine" is a correction rather than a fresh ask. */
+  history: AssistantTurn[];
+  proposal?: Proposal;
+  expiresAt: number;
+}
 
 /** Interactions that can drive the "manage a channel" flow (command + components). */
 type ManageableInteraction =
@@ -137,6 +169,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   // Saved `/create` selections, keyed by the failing interaction's id, so the
   // "Retry" button can re-open the modal with the user's choices intact.
   const createRetries = new Map<string, { prefill: CreatePrefill; expiresAt: number }>();
+  // Pending assistant proposals. A proposal can be a thousand characters, so it
+  // cannot ride in a custom id; the id carries a session key instead. Losing
+  // these on restart just means the admin re-asks, which is the safe direction.
+  const assistantSessions = new Map<string, AssistantSession>();
 
   const onInteraction = (interaction: Interaction): void => {
     void route(interaction).catch((err: unknown) => {
@@ -194,7 +230,14 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     if (interaction.isChatInputCommand()) {
       return ['setup', 'ping', 'invite', 'debug', 'logging'].includes(interaction.commandName);
     }
-    if (interaction.isButton()) return interaction.customId.startsWith(SETUP_PREFIX);
+    if (interaction.isButton()) {
+      // The assistant writes a template, so it is a write path like `/create`
+      // and must not slip through on the `/setup` panel's blanket exemption.
+      // (It is free on every tier — see the assistant's own docs — but an
+      // expired guild has no automation for a template to drive.)
+      if (interaction.customId === `${SETUP_PREFIX}assistant`) return false;
+      return interaction.customId.startsWith(SETUP_PREFIX);
+    }
     if (interaction.isModalSubmit()) {
       return interaction.customId === GENERAL_MODAL_ID || interaction.customId === LOGGING_MODAL_ID;
     }
@@ -279,6 +322,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       }
       case 'template':
         return openTemplatePanel(interaction);
+      case 'templateassistant':
+        return openAssistant(interaction);
       case 'position':
         return openPositionModal(interaction);
       case 'alwaysprivate':
@@ -349,6 +394,239 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     // An otherwise-unmanaged voice channel → offer to adopt it (explicit confirm).
     const name = interaction.guild?.channels.cache.get(channelId)?.name ?? 'this channel';
     return respond(interaction, buildAdoptPrompt(channelId, name));
+  }
+
+  // -- /templateassistant ----------------------------------------------------
+
+  /** `/templateassistant` → act on the channel you're in, else pick one. */
+  async function openAssistant(interaction: ChatInputCommandInteraction): Promise<void> {
+    const channelId = await resolveOrPick(
+      interaction,
+      'templateassistant',
+      '✨ Pick a voice channel to name:',
+    );
+    if (!channelId) return;
+    await assistantCore(interaction, channelId);
+  }
+
+  /**
+   * Opens the "describe it" modal for a channel, resolving which templates the
+   * assistant would be writing. Mirrors `manageChannelCore`: a creator
+   * channel's secondary writes the primary's templates, an adopted standalone
+   * writes its own, and anything else is offered for adoption first (the
+   * assistant has nothing to write to until AVC manages the channel).
+   */
+  async function assistantCore(
+    interaction: ManageableInteraction,
+    channelId: string,
+  ): Promise<void> {
+    const guildId = interaction.guildId!;
+    if (!deps.assistant) {
+      return respond(interaction, {
+        content: assistantUnavailableMessage(deps.selfHosted),
+        ephemeral: true,
+      });
+    }
+    if (!(await requireManageChannels(interaction))) return;
+
+    const primaryState = await run(guildId, 'cmd:assistant', () =>
+      deps.feature.getEditorState('primary', guildId, channelId),
+    );
+    let scope: Exclude<EditorScope, 'channel'> | undefined;
+    if (primaryState.found) scope = 'primary';
+    else {
+      const managedState = await run(guildId, 'cmd:assistant:managed', () =>
+        deps.feature.getManagedEditorState(guildId, channelId),
+      );
+      if (managedState.found) scope = 'adopted';
+    }
+    if (!scope) {
+      const name = interaction.guild?.channels.cache.get(channelId)?.name ?? 'this channel';
+      return respond(interaction, buildAdoptPrompt(channelId, name));
+    }
+
+    const sessionId = newAssistantSession({
+      scope,
+      channelId,
+      userId: interaction.user.id,
+      history: [],
+      expiresAt: Date.now() + ASSISTANT_SESSION_TTL_MS,
+    });
+    await interaction.showModal(buildAssistantModal(sessionId, false));
+  }
+
+  function newAssistantSession(session: AssistantSession): string {
+    pruneAssistantSessions();
+    const sessionId = randomUUID().replace(/-/g, '').slice(0, 12);
+    assistantSessions.set(sessionId, session);
+    return sessionId;
+  }
+
+  function pruneAssistantSessions(): void {
+    const now = Date.now();
+    for (const [id, session] of assistantSessions) {
+      if (session.expiresAt <= now) assistantSessions.delete(id);
+    }
+  }
+
+  /**
+   * Resolves the session behind a component id, enforcing that it belongs to
+   * the person clicking. Ephemeral messages are already private, so this is
+   * belt and braces against a stale or shared id.
+   */
+  function assistantSessionFor(
+    interaction: ButtonInteraction | ModalSubmitInteraction,
+  ): { sessionId: string; session: AssistantSession } | null {
+    const parsed = parseAssistantId(interaction.customId);
+    if (!parsed) return null;
+    const session = assistantSessions.get(parsed.sessionId);
+    if (!session || session.expiresAt <= Date.now()) return null;
+    if (session.userId !== interaction.user.id) return null;
+    return { sessionId: parsed.sessionId, session };
+  }
+
+  /** The "describe it" / "what should change" modal submit → build a proposal. */
+  async function handleAssistantModal(interaction: ModalSubmitInteraction): Promise<void> {
+    const found = assistantSessionFor(interaction);
+    if (!found) {
+      await interaction.reply({
+        content: '⚠️ That assistant session has expired. Run `/templateassistant` again.',
+        ephemeral: true,
+      });
+      return;
+    }
+    if (!deps.assistant) {
+      await interaction.reply({
+        content: assistantUnavailableMessage(deps.selfHosted),
+        ephemeral: true,
+      });
+      return;
+    }
+    const { sessionId, session } = found;
+    const request = interaction.fields.getTextInputValue('request');
+    // A model round-trip is far past the 3s ack window.
+    await interaction.deferReply({ ephemeral: true });
+
+    const guildId = interaction.guildId!;
+    const state = await run(guildId, 'assistant:state', () =>
+      deps.feature.getEditorState(session.scope, guildId, session.channelId),
+    );
+    if (!state.found) {
+      await interaction.editReply({ content: '⚠️ That channel is no longer bot-managed.' });
+      return;
+    }
+    const config = await run(guildId, 'assistant:config', () => deps.settings.getConfig(guildId));
+
+    const result = await deps.assistant.propose(
+      {
+        guildId,
+        standalone: session.scope === 'adopted',
+        general: config.general,
+        aliases: config.aliases,
+        creatorName: interaction.user.displayName || interaction.user.username,
+        ...(state.name.currentTemplate !== undefined
+          ? { currentName: state.name.currentTemplate }
+          : {}),
+        ...(state.status.currentTemplate !== undefined
+          ? { currentStatus: state.status.currentTemplate }
+          : {}),
+        ...(interaction.locale ? { locale: interaction.locale } : {}),
+      },
+      request,
+      session.history,
+    );
+
+    if (!result.ok) {
+      await interaction.editReply({ content: `⚠️ ${result.message}` });
+      return;
+    }
+    session.proposal = result.proposal;
+    session.history = [
+      ...session.history,
+      { request, name: result.proposal.name, status: result.proposal.status },
+    ].slice(-3);
+    session.expiresAt = Date.now() + ASSISTANT_SESSION_TTL_MS;
+    await interaction.editReply(
+      toUpdate(
+        buildProposalPanel(sessionId, result.proposal, {
+          ...(result.capNotice ? { capNotice: result.capNotice } : {}),
+        }),
+      ),
+    );
+  }
+
+  /** Apply / Refine / Cancel on a proposal. */
+  async function handleAssistantButton(interaction: ButtonInteraction): Promise<void> {
+    const parsed = parseAssistantId(interaction.customId);
+    if (!parsed) return;
+    const found = assistantSessionFor(interaction);
+    if (!found) {
+      await interaction.update({
+        content: '⚠️ That assistant session has expired. Run `/templateassistant` again.',
+        embeds: [],
+        components: [],
+      });
+      return;
+    }
+    const { sessionId, session } = found;
+
+    if (parsed.action === 'cancel') {
+      assistantSessions.delete(sessionId);
+      await interaction.update({ content: 'Cancelled.', embeds: [], components: [] });
+      return;
+    }
+    if (parsed.action === 'refine') {
+      await interaction.showModal(buildAssistantModal(sessionId, true));
+      return;
+    }
+    if (parsed.action !== 'apply') return;
+    if (!(await requireManageChannels(interaction))) return;
+
+    const proposal = session.proposal;
+    if (!proposal || proposal.fields.length === 0) {
+      await interaction.update({
+        content: '⚠️ There is nothing to apply.',
+        embeds: [],
+        components: [],
+      });
+      return;
+    }
+
+    // Applying can rename every sibling channel, which brushes the 3s ack.
+    await interaction.deferUpdate();
+    const notes: string[] = [];
+    for (const field of proposal.fields) {
+      // The assistant only *produces* a template. Landing it goes through the
+      // exact same path `/template`'s editor uses, so there is one apply route
+      // to reason about and the assistant can never take a shortcut past it.
+      const applied = await applyEditor(
+        interaction,
+        session.scope,
+        field.field,
+        session.channelId,
+        field.template,
+      );
+      if (!applied.ok) {
+        await interaction.followUp({ content: `⚠️ ${applied.message}`, ephemeral: true });
+        return;
+      }
+      if (applied.opts.note) notes.push(applied.opts.note);
+    }
+    assistantSessions.delete(sessionId);
+
+    // Drop the admin into the familiar editor panel, already saved, so the next
+    // tweak is a normal edit rather than another round-trip to a model.
+    const state = await run(interaction.guildId!, 'assistant:refresh', () =>
+      deps.feature.getEditorState(session.scope, interaction.guildId!, session.channelId),
+    );
+    await interaction.editReply(
+      toUpdate(
+        renderEditorPanel(session.scope, session.channelId, state, {
+          updated: true,
+          ...(notes.length > 0 ? { note: notes.join('\n') } : {}),
+        }),
+      ),
+    );
   }
 
   /** `/position` → act on the channel you're in, else pick one. */
@@ -1089,6 +1367,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       primaries: config.primaries,
       managed: managedRows,
       problems: deps.permissionProblems?.recent(guildId) ?? [],
+      assistant: Boolean(deps.assistant),
     });
   }
 
@@ -1139,6 +1418,14 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       );
       return;
     }
+    if (action === 'assistant') {
+      const channelId = currentVoiceChannelId(interaction);
+      if (channelId) return assistantCore(interaction, channelId);
+      await interaction.update(
+        buildChannelPickerMessage('templateassistant', '✨ Pick a voice channel to name:'),
+      );
+      return;
+    }
   }
 
   // Picker commands that require Manage Channels (the open `name` command self-gates
@@ -1149,6 +1436,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     'alwaysprivate',
     'inheritpermissions',
     'group',
+    'templateassistant',
   ]);
 
   /** A voice-channel was chosen from a `avc:setup:pick:<command>` menu → run the command. */
@@ -1171,6 +1459,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return groupCore(interaction, channelId);
       case 'name':
         return nameCore(interaction, channelId);
+      case 'templateassistant':
+        return assistantCore(interaction, channelId);
     }
   }
 
@@ -1220,6 +1510,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     if (interaction.customId.startsWith(ADOPT_PREFIX)) return handleAdoptButton(interaction);
     if (interaction.customId.startsWith(GROUP_PREFIX)) return handleGroupButton(interaction);
     if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorButton(interaction);
+    if (interaction.customId.startsWith(ASSISTANT_PREFIX))
+      return handleAssistantButton(interaction);
     if (interaction.customId.startsWith(SETUP_PREFIX)) return handleSetupButton(interaction);
   }
 
@@ -1297,6 +1589,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     }
     if (interaction.customId === LOGGING_MODAL_ID) return handleLoggingSubmit(interaction);
     if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorModal(interaction);
+    if (interaction.customId.startsWith(ASSISTANT_PREFIX)) return handleAssistantModal(interaction);
     if (interaction.customId === GENERAL_MODAL_ID) return handleGeneralSubmit(interaction);
     if (interaction.customId === ALIAS_MODAL_ID) return handleAliasSubmit(interaction);
   }
@@ -1353,6 +1646,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     for (const timer of voteTimers.values()) clearTimeout(timer);
     voteTimers.clear();
     createRetries.clear();
+    assistantSessions.clear();
   };
 }
 

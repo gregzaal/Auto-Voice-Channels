@@ -33,6 +33,12 @@ export interface DiagnosticsReport {
   sweepEnabled: boolean;
   /** Billing/trial reconcile job counters (null when SELF_HOSTED). */
   billing: Record<string, unknown> | null;
+  /**
+   * `/templateassistant` counters, including the fleet-wide estimated spend for
+   * the current month against its ceiling. Null when no model endpoint is
+   * configured (the self-host default).
+   */
+  ai: Record<string, unknown> | null;
 }
 
 export interface HealthServerOptions {

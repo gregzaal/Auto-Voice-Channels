@@ -445,6 +445,53 @@ export interface ExpressionVars {
   RICH: boolean;
 }
 
+/**
+ * The `{{…}}` variable names, as a value. Exhaustiveness is enforced by the
+ * type, not by a test: adding a field to {@link ExpressionVars} without listing
+ * it here (or listing one that doesn't exist) fails to compile. The template
+ * assistant's validator reads this to reject an invented variable, which would
+ * otherwise render as a silently-false condition (`plans/assisted_templates.md` §9).
+ */
+const CONDITION_VARIABLE_SET: Record<keyof ExpressionVars, true> = {
+  ROLE: true,
+  LIVE: true,
+  LIVE_DISCORD: true,
+  LIVE_EXTERNAL: true,
+  GAME: true,
+  PLAYING: true,
+  PLAYERS: true,
+  MAX: true,
+  RICH: true,
+};
+
+export const CONDITION_VARIABLES = Object.keys(CONDITION_VARIABLE_SET) as (keyof ExpressionVars)[];
+
+/** Every `@@…@@` token the renderer substitutes. */
+export const AT_TOKENS: readonly string[] = [
+  '@@nato@@',
+  '@@game_name@@',
+  '@@num@@',
+  '@@num_others@@',
+  '@@num_playing@@',
+  '@@party_size@@',
+  '@@party_state@@',
+  '@@party_details@@',
+  '@@creator@@',
+  '@@stream_name@@',
+  '@@random_emoji@@',
+];
+
+/** The channel-number tokens (all meaningless on a standalone channel, where they render `?`). */
+export const NUMBER_TOKENS: readonly string[] = [
+  '##',
+  '$#',
+  '$0#',
+  '$00#',
+  '$000#',
+  '$0000#',
+  '+#',
+];
+
 function splitFirst(text: string, sep: string): [string, string] {
   const i = text.indexOf(sep);
   if (i === -1) return [text, ''];

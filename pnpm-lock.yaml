@@ -29,6 +29,9 @@ importers:
       prettier:
         specifier: ^3.4.2
         version: 3.8.4
+      tsx:
+        specifier: ^4.19.2
+        version: 4.22.4
       typescript:
         specifier: ^5.7.2
         version: 5.9.3

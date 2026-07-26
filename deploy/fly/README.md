@@ -13,6 +13,18 @@ the **same image**.
   fly secrets set DISCORD_TOKEN=... CLIENT_ID=... DATABASE_URL=...
   ```
 
+- Optional, to enable `/templateassistant`:
+
+  ```bash
+  fly secrets set AVC_AI_API_KEY=...
+  ```
+
+  Without it the command is never registered, so nothing else has to change.
+  The endpoint and model are plain `[env]` values in `fly.toml`, not secrets.
+  Setting the key makes the command appear on the **next boot's** command
+  registration, which is a global upsert and can take up to an hour to
+  propagate to clients.
+
 ## Deploy
 
 ```bash

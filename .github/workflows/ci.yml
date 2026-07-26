@@ -38,6 +38,12 @@ jobs:
       - name: Build
         run: pnpm run build
 
+      # `tsc` emits only JS, and the Docker runtime stage copies `bot/dist`
+      # alone, so a runtime asset that misses the copy step ships a container
+      # that dies on boot. Cheap to assert, expensive to find in production.
+      - name: Runtime assets present in dist
+        run: test -f bot/dist/features/templateAssistant/systemPrompt.md
+
       - name: Unit tests
         run: pnpm run test:unit
 

@@ -42,6 +42,10 @@ interface FakeInteractionOpts {
   botPerms?: bigint[];
   /** A category present in the guild cache: name + the flags the bot holds there. */
   category?: { id: string; name: string; perms: bigint[] };
+  /** The voice channel the caller is sitting in (drives the "act on it" path). */
+  voiceChannelId?: string;
+  /** Discord interaction locale, passed to the assistant as the reply language. */
+  locale?: string;
 }
 
 /** Builds a minimal interaction with the methods/getters the router touches. */
@@ -49,14 +53,19 @@ function fakeInteraction(opts: FakeInteractionOpts) {
   const reply = vi.fn().mockResolvedValue(undefined);
   const followUp = vi.fn().mockResolvedValue(undefined);
   const holds = (flags: bigint[] | undefined, p: bigint): boolean => (flags ?? []).includes(p);
+  const editReply = vi.fn().mockResolvedValue(undefined);
   const interaction = {
     id: opts.id ?? 'i1',
     guildId: opts.guildId ?? 'g1',
-    user: { id: 'u1' },
+    user: { id: 'u1', username: 'kay', displayName: 'Kay' },
     member: null,
+    locale: opts.locale,
     guild: {
       members: {
-        cache: { get: () => undefined },
+        cache: {
+          get: () =>
+            opts.voiceChannelId ? { voice: { channelId: opts.voiceChannelId } } : undefined,
+        },
         me: { permissions: { has: (p: bigint) => holds(opts.botPerms, p) } },
       },
       channels: {
@@ -88,6 +97,9 @@ function fakeInteraction(opts: FakeInteractionOpts) {
     isModalSubmit: () => opts.kind === 'modal',
     reply,
     followUp,
+    editReply,
+    deferReply: vi.fn().mockResolvedValue(undefined),
+    deferUpdate: vi.fn().mockResolvedValue(undefined),
     update: vi.fn().mockResolvedValue(undefined),
     showModal: vi.fn().mockResolvedValue(undefined),
     values: opts.values ?? [],
@@ -99,7 +111,7 @@ function fakeInteraction(opts: FakeInteractionOpts) {
     },
     channelId: 'text1',
   };
-  return { interaction, reply, followUp };
+  return { interaction, reply, followUp, editReply };
 }
 
 function setup(overrides: Partial<InteractionDeps> = {}) {
@@ -342,5 +354,263 @@ describe('registerInteractionHandler (router)', () => {
     env.client.emit('interactionCreate', btn);
     await flush();
     expect(btn.showModal).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * `/templateassistant` routing (`plans/assisted_templates.md` §2 and §5).
+ *
+ * The behaviours worth pinning here are the ones that are easy to get subtly
+ * wrong: the command is admin-gated and nothing else gates it, an expired guild
+ * still cannot reach it (it is a write path), and the `/setup` panel's blanket
+ * exemption must not smuggle it past that.
+ */
+describe('registerInteractionHandler (/templateassistant)', () => {
+  let dispose: (() => void) | undefined;
+  afterEach(() => dispose?.());
+
+  const editorState = {
+    found: true,
+    scope: 'primary',
+    name: { currentTemplate: '## room', effectiveTemplate: '## room', preview: '#1 room' },
+    status: { effectiveTemplate: '', preview: '' },
+  };
+
+  function assistantEnv(overrides: Partial<InteractionDeps> = {}) {
+    return setup({
+      feature: {
+        getEditorState: vi.fn().mockResolvedValue(editorState),
+        getManagedEditorState: vi.fn().mockResolvedValue({ found: false }),
+      } as never,
+      assistant: { propose: vi.fn() } as never,
+      ...overrides,
+    });
+  }
+
+  it('opens the describe-it modal for an admin in a managed channel', async () => {
+    const env = assistantEnv();
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'command',
+      commandName: 'templateassistant',
+      manageChannels: true,
+      voiceChannelId: 'vc1',
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+
+    expect(interaction.showModal).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(interaction.showModal.mock.calls[0]?.[0])).toContain('avc:ai:ask:');
+  });
+
+  it('offers a channel picker when the caller is not in a voice channel', async () => {
+    const env = assistantEnv();
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'templateassistant',
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+
+    expect(interaction.showModal).not.toHaveBeenCalled();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('avc:setup:pick:templateassistant');
+  });
+
+  // Admin-gated exactly like /template, and that is the *only* gate (§5).
+  it('refuses a caller without Manage Channels', async () => {
+    const env = assistantEnv();
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'templateassistant',
+      voiceChannelId: 'vc1',
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+
+    expect(reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'You need the Manage Channels permission.' }),
+    );
+    expect(interaction.showModal).not.toHaveBeenCalled();
+  });
+
+  it('explains itself when no model endpoint is configured', async () => {
+    const env = setup({
+      feature: { getEditorState: vi.fn().mockResolvedValue(editorState) } as never,
+    });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'templateassistant',
+      manageChannels: true,
+      voiceChannelId: 'vc1',
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('AVC_AI_API_KEY');
+    expect(interaction.showModal).not.toHaveBeenCalled();
+  });
+
+  it('offers adoption when the channel is not managed yet', async () => {
+    const env = assistantEnv({
+      feature: {
+        getEditorState: vi.fn().mockResolvedValue({ found: false }),
+        getManagedEditorState: vi.fn().mockResolvedValue({ found: false }),
+      } as never,
+    });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'templateassistant',
+      manageChannels: true,
+      voiceChannelId: 'vc1',
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('avc:adopt:confirm:vc1');
+  });
+
+  it('is not reachable in an expired guild', async () => {
+    const env = assistantEnv({
+      selfHosted: false,
+      guilds: { get: vi.fn().mockResolvedValue({ authStatus: 'expired' }) } as never,
+    });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'templateassistant',
+      manageChannels: true,
+      voiceChannelId: 'vc1',
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('auto-voice.io');
+    expect(interaction.showModal).not.toHaveBeenCalled();
+  });
+
+  // The `/setup` panel is exempt from the hard gate so an admin can see the
+  // gated state. The assistant button on it must not inherit that.
+  it('the /setup assistant button is not exempt from the hard gate', async () => {
+    const env = assistantEnv({
+      selfHosted: false,
+      guilds: { get: vi.fn().mockResolvedValue({ authStatus: 'expired' }) } as never,
+    });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'button',
+      customId: 'avc:setup:assistant',
+      manageChannels: true,
+      voiceChannelId: 'vc1',
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('auto-voice.io');
+  });
+
+  it('proposes on modal submit, passing the locale through as the reply language', async () => {
+    const propose = vi.fn().mockResolvedValue({
+      ok: true,
+      proposal: {
+        name: '## - @@game_name@@',
+        status: null,
+        explanation: 'Numbered plus the game.',
+        fields: [
+          {
+            field: 'name',
+            template: '## - @@game_name@@',
+            previews: [{ label: 'one person, nothing playing', rendered: '#1 - General' }],
+          },
+        ],
+        notes: [],
+      },
+    });
+    const env = assistantEnv({ assistant: { propose } as never });
+    dispose = env.dispose;
+
+    // Open a session so the modal id resolves to one.
+    const { interaction: cmd } = fakeInteraction({
+      kind: 'command',
+      commandName: 'templateassistant',
+      manageChannels: true,
+      voiceChannelId: 'vc1',
+    });
+    env.client.emit('interactionCreate', cmd);
+    await flush();
+    const modalId = (cmd.showModal.mock.calls[0]?.[0] as { data: { custom_id: string } }).data
+      .custom_id;
+
+    const { interaction: submit, editReply } = fakeInteraction({
+      kind: 'modal',
+      customId: modalId,
+      manageChannels: true,
+      locale: 'es-ES',
+      textInputs: { request: 'numera las salas y muestra el juego' },
+    });
+    env.client.emit('interactionCreate', submit);
+    await flush();
+
+    expect(propose).toHaveBeenCalledTimes(1);
+    expect(propose.mock.calls[0]?.[0]).toMatchObject({
+      guildId: 'g1',
+      standalone: false,
+      locale: 'es-ES',
+      currentName: '## room',
+    });
+    expect(propose.mock.calls[0]?.[1]).toBe('numera las salas y muestra el juego');
+    const panel = JSON.stringify(editReply.mock.calls[0]?.[0]);
+    expect(panel).toContain('#1 - General');
+    expect(panel).toContain('avc:ai:apply:');
+  });
+
+  it('surfaces a refusal instead of a proposal, and offers no Apply', async () => {
+    const propose = vi
+      .fn()
+      .mockResolvedValue({ ok: false, reason: 'capped', message: 'all 200 AI builds' });
+    const env = assistantEnv({ assistant: { propose } as never });
+    dispose = env.dispose;
+
+    const { interaction: cmd } = fakeInteraction({
+      kind: 'command',
+      commandName: 'templateassistant',
+      manageChannels: true,
+      voiceChannelId: 'vc1',
+    });
+    env.client.emit('interactionCreate', cmd);
+    await flush();
+    const modalId = (cmd.showModal.mock.calls[0]?.[0] as { data: { custom_id: string } }).data
+      .custom_id;
+
+    const { interaction: submit, editReply } = fakeInteraction({
+      kind: 'modal',
+      customId: modalId,
+      manageChannels: true,
+      textInputs: { request: 'anything' },
+    });
+    env.client.emit('interactionCreate', submit);
+    await flush();
+
+    const shown = JSON.stringify(editReply.mock.calls[0]?.[0]);
+    expect(shown).toContain('all 200 AI builds');
+    expect(shown).not.toContain('avc:ai:apply:');
+  });
+
+  it('tells the admin to start over when the session has expired', async () => {
+    const env = assistantEnv();
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'modal',
+      customId: 'avc:ai:ask:gone',
+      manageChannels: true,
+      textInputs: { request: 'anything' },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('session has expired');
   });
 });

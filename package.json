@@ -16,6 +16,7 @@
     "test": "vitest run --workspace ./vitest.workspace.ts",
     "test:unit": "vitest run --workspace ./vitest.workspace.ts --project unit",
     "test:integration": "vitest run --workspace ./vitest.workspace.ts --project integration",
+    "eval": "tsx ./eval/run.ts",
     "build": "pnpm -r --filter ./core --filter ./bot run build",
     "db:generate": "pnpm --filter @avc/core run db:generate",
     "db:migrate": "pnpm --filter @avc/core run db:migrate",
@@ -30,6 +31,7 @@
     "eslint": "^9.17.0",
     "eslint-config-prettier": "^9.1.0",
     "prettier": "^3.4.2",
+    "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.18.1",
     "vitest": "^2.1.8"

@@ -61,6 +61,20 @@ describe('buildCommandDefinitions', () => {
     expect(debug!.default_member_permissions).toBe(PermissionFlagsBits.ManageChannels.toString());
   });
 
+  // A self-hoster with no model endpoint should never be shown a command that
+  // could only apologise, so it is registered conditionally.
+  it('includes /templateassistant only when a model endpoint is configured', () => {
+    expect(byName.has('templateassistant')).toBe(false);
+    const withAssistant = buildCommandDefinitions({ includeAssistant: true });
+    const assistant = withAssistant.find((d) => d.name === 'templateassistant');
+    expect(assistant).toBeDefined();
+    // Admin-gated exactly like /template, and nothing else gates it (§5).
+    expect(assistant!.default_member_permissions).toBe(
+      PermissionFlagsBits.ManageChannels.toString(),
+    );
+    expect(assistant!.options ?? []).toHaveLength(0);
+  });
+
   it('marks commands as guild-only', () => {
     for (const def of defs) {
       expect(def.dm_permission).toBe(false);

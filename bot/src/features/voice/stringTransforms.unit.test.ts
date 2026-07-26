@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyMode } from './stringTransforms.js';
+import { applyMode, isKnownStyleMode, STYLE_MODES } from './stringTransforms.js';
 import { FONT_MAPS } from './unicodeFonts.generated.js';
 
 describe('applyMode — math font styles', () => {
@@ -73,5 +73,33 @@ describe('applyMode — usd, rand, and misc', () => {
 
   it('unknown modes pass the text through unchanged', () => {
     expect(applyMode('definitely-not-a-mode', 'Keep Me')).toBe('Keep Me');
+  });
+});
+
+// An unknown mode is a silent no-op, which is fine for the engine and terrible
+// for the template assistant: a model inventing `""sparkle:…""` would render
+// perfectly and do nothing. `isKnownStyleMode` is what lets the validator tell
+// the two apart, so it has to agree with the switch above.
+describe('isKnownStyleMode', () => {
+  it('recognises every mode applyMode actually acts on', () => {
+    // The probe has to give every mode something to bite on: stray spaces for
+    // `spaces`, a short word for `remshort`, mixed case, and uwu-able letters.
+    const probe = '  the Lovely Random thing  ';
+    for (const mode of STYLE_MODES) {
+      expect(isKnownStyleMode(mode), mode).toBe(true);
+      expect(applyMode(mode, probe), mode).not.toBe(probe);
+    }
+  });
+
+  it('covers the whole font table and the <N>w form', () => {
+    for (const font of Object.keys(FONT_MAPS)) expect(STYLE_MODES).toContain(font);
+    expect(isKnownStyleMode('2w')).toBe(true);
+    expect(isKnownStyleMode('10w')).toBe(true);
+  });
+
+  it('rejects anything the engine would ignore', () => {
+    for (const mode of ['sparkle', 'glitch', '', 'ww', 'w', 'bold ']) {
+      expect(isKnownStyleMode(mode), mode).toBe(false);
+    }
   });
 });

@@ -25,6 +25,28 @@ export const RUNTIME_FLAGS = {
    * `expired` — run the messaging ladder before checkout exists (§0 Phase 2).
    */
   BILLING_HARD_GATE_DISABLED: 'billing.hard_gate_disabled',
+
+  // -- AI-assisted templates (plans/assisted_templates.md §5) ----------------
+  // NOT plan features. The per-guild cap is uniform on every tier and is never
+  // raised by paying; it exists so a stuck client loop cannot run up a bill.
+  /** Per-guild monthly `/templateassistant` build cap (number; default 200, <=0 = unlimited). */
+  AI_BUILDS_PER_MONTH: 'ai.builds_per_month',
+  /** Builds used before the remaining count is surfaced at all (number; default 100). */
+  AI_BUILDS_NOTICE_THRESHOLD: 'ai.builds_notice_threshold',
+  /** Fleet-wide monthly provider spend ceiling in USD (number; default 0 = unlimited). */
+  AI_MONTHLY_BUDGET_USD: 'ai.monthly_budget_usd',
+  /** Fraction of the budget that trips the alert (number; default 0.8). */
+  AI_BUDGET_ALERT_FRACTION: 'ai.budget_alert_fraction',
+  /** Kill-switch for the assistant, independent of whether a key is configured. */
+  AI_DISABLED: 'ai.disabled',
+} as const;
+
+/** Defaults for the AI levers, kept next to the keys so bot + tooling agree. */
+export const AI_FLAG_DEFAULTS = {
+  buildsPerMonth: 200,
+  noticeThreshold: 100,
+  monthlyBudgetUsd: 0,
+  budgetAlertFraction: 0.8,
 } as const;
 
 export type RuntimeFlagKey = (typeof RUNTIME_FLAGS)[keyof typeof RUNTIME_FLAGS];

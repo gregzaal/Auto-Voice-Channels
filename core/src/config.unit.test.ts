@@ -26,6 +26,29 @@ describe('loadConfig', () => {
     expect(loadConfig({ ...baseEnv, SELF_HOSTED: 'off' }).selfHosted).toBe(false);
   });
 
+  // One OpenAI-compatible endpoint, three knobs, no per-provider adapters:
+  // pointing at OpenRouter, Groq, or a local Ollama is a config change only.
+  it('defaults the AI knobs and enables the assistant only when a key is set', () => {
+    const off = loadConfig(baseEnv);
+    expect(off.aiApiKey).toBeUndefined();
+    expect(off.aiBaseUrl).toBe('https://api.openai.com/v1');
+    expect(off.aiModel).toBe('gpt-5.4-mini');
+    expect(off.aiTimeoutMs).toBe(30_000);
+
+    const local = loadConfig({
+      ...baseEnv,
+      AVC_AI_API_KEY: 'sk-x',
+      AVC_AI_BASE_URL: 'http://localhost:11434/v1',
+      AVC_AI_MODEL: 'llama3.2',
+      AVC_AI_PRICE_INPUT_PER_MTOK: '0',
+      AVC_AI_PRICE_OUTPUT_PER_MTOK: '0',
+    });
+    expect(local.aiApiKey).toBe('sk-x');
+    expect(local.aiBaseUrl).toBe('http://localhost:11434/v1');
+    expect(local.aiModel).toBe('llama3.2');
+    expect(local.aiPriceInputPerMTok).toBe(0);
+  });
+
   it('coerces numeric env vars', () => {
     const config = loadConfig({ ...baseEnv, TOTAL_SHARDS: '4', HTTP_PORT: '9000' });
     expect(config.totalShards).toBe(4);

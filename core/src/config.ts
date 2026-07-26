@@ -64,6 +64,31 @@ export const configSchema = z.object({
   /** Optional Discord channel id to report significant errors to. */
   adminChannelId: z.string().optional(),
 
+  /**
+   * AI-assisted templates (`/templateassistant`) — a single **OpenAI-compatible**
+   * `/v1/chat/completions` endpoint, chosen over per-provider adapters so a
+   * self-hoster only has to set env vars (`plans/assisted_templates.md` §3).
+   *
+   * The same three knobs cover OpenAI, OpenRouter, Groq/Together/Fireworks, and
+   * a local Ollama / LM Studio / vLLM with no code change. The feature is
+   * enabled **iff `aiApiKey` is set** — everything else has a working default,
+   * and the whole command simply doesn't appear otherwise.
+   */
+  aiBaseUrl: z.string().min(1).default('https://api.openai.com/v1'),
+  aiApiKey: z.string().min(1).optional(),
+  aiModel: z.string().min(1).default('gpt-5.4-mini'),
+  /** Per-request timeout for the model call (ms). */
+  aiTimeoutMs: z.coerce.number().int().positive().default(30_000),
+
+  /**
+   * Provider prices per 1M tokens, used only to turn the tracked token counts
+   * into the estimated spend the fleet-wide ceiling is enforced on
+   * (`plans/assisted_templates.md` §5.2). Defaults are the §6 `gpt-5.4-mini`
+   * list rates; a self-hoster on a local model sets both to `0`.
+   */
+  aiPriceInputPerMTok: z.coerce.number().nonnegative().default(0.75),
+  aiPriceOutputPerMTok: z.coerce.number().nonnegative().default(4.5),
+
   /** Log level for pino. */
   logLevel: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent']).default('info'),
 
@@ -97,6 +122,12 @@ function envToInput(env: NodeJS.ProcessEnv): Record<string, unknown> {
     instanceId: env.INSTANCE_ID ?? env.FLY_MACHINE_ID,
     httpPort: env.HTTP_PORT,
     adminChannelId: env.ADMIN_CHANNEL_ID,
+    aiBaseUrl: env.AVC_AI_BASE_URL,
+    aiApiKey: env.AVC_AI_API_KEY,
+    aiModel: env.AVC_AI_MODEL,
+    aiTimeoutMs: env.AVC_AI_TIMEOUT_MS,
+    aiPriceInputPerMTok: env.AVC_AI_PRICE_INPUT_PER_MTOK,
+    aiPriceOutputPerMTok: env.AVC_AI_PRICE_OUTPUT_PER_MTOK,
     logLevel: env.LOG_LEVEL,
     nodeEnv: env.NODE_ENV,
   };

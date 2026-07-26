@@ -76,6 +76,25 @@ describe('buildSetupPanel', () => {
     expect(json).toContain('<#p1>'); // creator channel listed
   });
 
+  // Hidden rather than shown-and-broken: with no model endpoint configured
+  // (the self-host default) the command is not even registered.
+  it('shows the assistant button only when the assistant is available', () => {
+    expect(JSON.stringify(buildSetupPanel({ ...baseInput, isAdmin: true }))).not.toContain(
+      setupId('assistant'),
+    );
+    const withAssistant = JSON.stringify(
+      buildSetupPanel({ ...baseInput, isAdmin: true, assistant: true }),
+    );
+    expect(withAssistant).toContain(setupId('assistant'));
+    expect(withAssistant).toContain('Name it for me');
+  });
+
+  it('never offers the assistant to a non-admin', () => {
+    expect(
+      JSON.stringify(buildSetupPanel({ ...baseInput, isAdmin: false, assistant: true })),
+    ).not.toContain(setupId('assistant'));
+  });
+
   it('hides admin actions from non-admins but keeps the support links', () => {
     const json = JSON.stringify(buildSetupPanel({ ...baseInput, isAdmin: false }));
     expect(json).not.toContain(setupId('toggle'));

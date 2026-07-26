@@ -18,6 +18,12 @@ import { MAX_USER_LIMIT } from '../features/voice/index.js';
 export interface CommandBuildOptions {
   /** Include the dev-only `/debug` command (registered only when DEV_GUILD_ID is set). */
   includeDebug?: boolean;
+  /**
+   * Include `/templateassistant`. Registered only when a model endpoint is
+   * configured (`AVC_AI_API_KEY`), so a self-hoster who hasn't set one never
+   * sees a command that could only apologise (`plans/assisted_templates.md` §3).
+   */
+  includeAssistant?: boolean;
 }
 
 export function buildCommandDefinitions(
@@ -158,6 +164,18 @@ export function buildCommandDefinitions(
     ),
   ];
 
+  if (options.includeAssistant) {
+    commands.push(
+      adminOnly(
+        new SlashCommandBuilder()
+          .setName('templateassistant')
+          .setDescription(
+            'Describe the channel names you want and AVC writes the template for you.',
+          ),
+      ),
+    );
+  }
+
   if (options.includeDebug) {
     commands.push(
       adminOnly(
@@ -189,10 +207,11 @@ export async function registerCommands(
   clientId: string,
   logger: Logger,
   guildId?: string,
+  options: CommandBuildOptions = {},
 ): Promise<void> {
   const rest = new REST({ version: '10' }).setToken(token);
   // The dev-only `/debug` command exists only when registering to a dev guild.
-  const body = buildCommandDefinitions({ includeDebug: Boolean(guildId) });
+  const body = buildCommandDefinitions({ ...options, includeDebug: Boolean(guildId) });
   if (guildId) {
     await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body });
     // Clear global commands so dev guild + global don't duplicate in the UI.

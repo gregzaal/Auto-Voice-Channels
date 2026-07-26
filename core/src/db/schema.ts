@@ -232,6 +232,36 @@ export const billingEvents = pgTable(
   (t) => [index('billing_events_guild_idx').on(t.guildId, t.createdAt)],
 );
 
+/**
+ * `/templateassistant` usage, one row per guild per calendar month
+ * (`plans/assisted_templates.md` §5).
+ *
+ * **Not a billing table.** The per-guild cap it backs is identical on every
+ * tier and is never raised by paying — it is a runaway-cost backstop, and the
+ * token columns exist only to enforce the fleet-wide spend ceiling (§5.2).
+ *
+ * The calendar-month key IS the reset mechanism: a new month simply gets a new
+ * row, so "the cap resets on the 1st" holds with no job to run and no clock to
+ * race. Old rows are harmless history and are never read outside their month.
+ */
+export const aiUsage = pgTable(
+  'ai_usage',
+  {
+    guildId: text('guild_id').notNull(),
+    /** UTC calendar month, `YYYY-MM`. */
+    month: text('month').notNull(),
+    /** Builds consumed this month (a reservation, taken before the model call). */
+    builds: integer('builds').notNull().default(0),
+    /** Builds refunded because the provider call itself failed (diagnostics). */
+    refunds: integer('refunds').notNull().default(0),
+    promptTokens: bigint('prompt_tokens', { mode: 'number' }).notNull().default(0),
+    completionTokens: bigint('completion_tokens', { mode: 'number' }).notNull().default(0),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [primaryKey({ columns: [t.guildId, t.month] }), index('ai_usage_month_idx').on(t.month)],
+);
+
 // ---------------------------------------------------------------------------
 // Web auth (Auth.js Drizzle-adapter tables for auto-voice.io). Column TS
 // property names must match what @auth/drizzle-adapter expects; SQL names

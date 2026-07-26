@@ -299,6 +299,38 @@ function uwu(s: string): string {
  * `remshort`, `uwu`, `usd`, `rand`, the 13 math-font styles in
  * {@link FONT_MAPS}, and `<N>w` (first N words).
  */
+/**
+ * The named modes {@link applyMode} acts on. Kept beside the switch so the two
+ * can't drift (a unit test asserts every entry actually transforms), and read by
+ * the template assistant's validator — an unknown mode is silently a no-op, so
+ * a bare render check would never notice the model inventing one
+ * (`plans/assisted_templates.md` §9).
+ */
+export const STYLE_MODES: readonly string[] = [
+  'caps',
+  'upper',
+  'lower',
+  'title',
+  'swap',
+  'scaps',
+  'spaces',
+  'acro',
+  'remshort',
+  'uwu',
+  'usd',
+  'rand',
+  ...Object.keys(FONT_MAPS),
+];
+
+/** Whether `applyMode` recognises `mode` (including the `<N>w` first-N-words form). */
+export function isKnownStyleMode(mode: string): boolean {
+  if (STYLE_MODES.includes(mode)) return true;
+  if (mode.length <= 3 && mode.endsWith('w')) {
+    return Number.isFinite(Number.parseInt(mode.slice(0, -1), 10));
+  }
+  return false;
+}
+
 export function applyMode(mode: string, s: string): string {
   switch (mode) {
     case 'caps':

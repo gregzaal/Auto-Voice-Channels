@@ -117,6 +117,12 @@ export interface SetupPanelInput {
   managed: { channelId: string }[];
   /** Channels the bot recently lost access to (a permission override hid them). */
   problems?: { channelId: string }[];
+  /**
+   * Whether `/templateassistant` is available on this instance. Off is the
+   * self-host default (no model endpoint configured), and the button is hidden
+   * rather than shown-and-broken.
+   */
+  assistant?: boolean;
 }
 
 const INTRO =
@@ -177,7 +183,9 @@ export function buildSetupPanel(input: SetupPanelInput): InteractionReplyOptions
     });
   }
 
-  const components = input.isAdmin ? adminRows(input.enabled) : memberRows();
+  const components = input.isAdmin
+    ? adminRows(input.enabled, input.assistant === true)
+    : memberRows();
   return { embeds: [embed], components, ephemeral: true };
 }
 
@@ -198,7 +206,7 @@ function languageButton(): ButtonBuilder {
     .setDisabled(true);
 }
 
-function adminRows(enabled: boolean): ReturnType<typeof rowOf>[] {
+function adminRows(enabled: boolean, assistant: boolean): ReturnType<typeof rowOf>[] {
   const row1 = rowOf(
     new ButtonBuilder()
       .setCustomId(setupId('toggle'))
@@ -214,6 +222,15 @@ function adminRows(enabled: boolean): ReturnType<typeof rowOf>[] {
       .setLabel('Manage a channel')
       .setEmoji('🛠️')
       .setStyle(ButtonStyle.Primary),
+    ...(assistant
+      ? [
+          new ButtonBuilder()
+            .setCustomId(setupId('assistant'))
+            .setLabel('Name it for me')
+            .setEmoji('✨')
+            .setStyle(ButtonStyle.Primary),
+        ]
+      : []),
   );
   const row2 = rowOf(
     new ButtonBuilder()

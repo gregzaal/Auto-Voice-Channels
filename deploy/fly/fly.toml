@@ -4,6 +4,8 @@
 #
 # Secrets (set via `fly secrets set ...`, never committed):
 #   DISCORD_TOKEN, CLIENT_ID, DATABASE_URL
+#   AVC_AI_API_KEY  (optional: enables /templateassistant; without it the
+#                    command is not registered at all)
 #
 # `avc-dev` is the live beta app (running the beta bot 701117810549588038). At
 # the production cutover this becomes the prod app / identity (see
@@ -25,6 +27,16 @@ primary_region = "iad"
   # shards. Keep this in sync with the running machine count so shards spread
   # evenly (and a replacement machine reliably re-claims a dead peer's share).
   EXPECTED_INSTANCES = "1"
+  # AI-assisted templates. The endpoint and model are plain config; only the key
+  # is a secret. Free on every tier and never entitlement-gated — the only limit
+  # is the uniform per-guild monthly cap, tunable live via `runtime_flags`
+  # (`ai.builds_per_month`, `ai.builds_notice_threshold`, `ai.monthly_budget_usd`).
+  AVC_AI_BASE_URL = "https://api.openai.com/v1"
+  AVC_AI_MODEL = "gpt-5.4-mini"
+  # Used only to estimate spend against the fleet-wide ceiling. Keep in step with
+  # the model's list prices if the model changes.
+  AVC_AI_PRICE_INPUT_PER_MTOK = "0.75"
+  AVC_AI_PRICE_OUTPUT_PER_MTOK = "4.50"
 
 # Rolling deploys with a health gate. Identifies are serialized cluster-wide by
 # the Postgres-backed throttler, so concurrent re-identifies on deploy are safe.

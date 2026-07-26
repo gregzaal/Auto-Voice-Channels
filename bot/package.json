@@ -6,7 +6,7 @@
   "license": "AGPL-3.0-only",
   "main": "./dist/index.js",
   "scripts": {
-    "build": "tsc --build",
+    "build": "tsc --build && node ./scripts/copy-assets.mjs",
     "dev": "tsx watch ./src/index.ts",
     "start": "node ./dist/index.js"
   },
