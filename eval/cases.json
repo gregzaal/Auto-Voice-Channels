@@ -117,6 +117,27 @@
       "expect": { "field": "name", "language": "en" }
     },
     {
+      "$comment": "The escape hatch, and the reason it exists. `Reply language` comes from the admin's DISCORD CLIENT language, not the language they typed in, so anyone whose client language differs from the language they think in will eventually want to override it. Before the prompt gained rule 1 of the explanation bullet, this case came back in English saying \"I kept the reply in English because that's the configured reply language\" — refusing the one fix a confused user would reach for. That is the behaviour this case exists to prevent regressing.",
+      "group": "language",
+      "locale": "en-GB",
+      "request": "Number each room and show the game. Responde en español, por favor.",
+      "expect": { "field": "name", "language": "es" }
+    },
+    {
+      "$comment": "The default when nothing is asked for: the Discord client language wins, even though this request is written in English. This is the reliable, documented behaviour (docs/template-assistant).",
+      "group": "language",
+      "locale": "es-ES",
+      "request": "Number each room and show the game.",
+      "expect": { "field": "name", "language": "es" }
+    },
+    {
+      "$comment": "Best-effort, deliberately NOT asserted on language: a Spanish speaker running Discord in English. The model usually matches what they wrote, but that is the same inference mechanism §10 measured drifting, so it is documented as a nicety rather than promised. What IS asserted is that the template is still correct.",
+      "group": "language",
+      "locale": "en-GB",
+      "request": "Numera cada sala y muestra el juego que se está jugando.",
+      "expect": { "field": "name", "contains": ["@@game_name@@"] }
+    },
+    {
       "$comment": "§9 'not yet probed': very long literal text near the 100-char clamp. FINDING: the model cannot reliably count characters. Told to keep names under 100 it still emitted 122, and when pushed harder it asserted the text was 'already within the limit'. No prompt wording fixes this, which is precisely why the length check is in the validator: production feeds `renders-truncated` back with the actual count and the loop shortens it. Pinned here so the weakness stays visible rather than looking solved.",
       "group": "long",
       "request": "Name it exactly: The Extremely Long And Very Detailed Lounge For People Who Enjoy Playing Cooperative Games Together In The Evenings",
