@@ -21,6 +21,9 @@ export const subscriptionRowSchema = z.object({
   tier: z.enum(TIER_IDS),
   status: z.string(),
   currentPeriodEnd: z.date().nullable(),
+  /** Pending Paddle change: 'cancel' | 'pause' | 'resume'. Null = renewing normally. */
+  scheduledChangeAction: z.string().nullish(),
+  scheduledChangeAt: z.date().nullish(),
   price: z.string().nullable(),
   currency: z.string().nullable(),
   createdAt: z.date(),
@@ -39,6 +42,8 @@ export interface UpsertSubscriptionInput {
   tier: SubscriptionRow['tier'];
   status: string;
   currentPeriodEnd?: Date | null;
+  scheduledChangeAction?: string | null;
+  scheduledChangeAt?: Date | null;
   price?: string | null;
   currency?: string | null;
 }
@@ -68,6 +73,11 @@ export class SubscriptionRepository {
       tier: input.tier,
       status: input.status,
       currentPeriodEnd: input.currentPeriodEnd ?? null,
+      // Straight overwrite, NOT coalesced like purchaser/guildName: revoking a
+      // scheduled cancellation is reported as `scheduled_change: null`, and
+      // keeping the old value would leave the UI claiming it still ends.
+      scheduledChangeAction: input.scheduledChangeAction ?? null,
+      scheduledChangeAt: input.scheduledChangeAt ?? null,
       price: input.price ?? null,
       currency: input.currency ?? null,
     };

@@ -236,6 +236,18 @@ export const subscriptions = pgTable('subscriptions', {
   /** Paddle subscription status (e.g. active, past_due, canceled). */
   status: text('status').notNull(),
   currentPeriodEnd: timestamp('current_period_end', { withTimezone: true }),
+  /**
+   * Paddle's pending `scheduled_change`, if any: `cancel`, `pause` or `resume`.
+   *
+   * Load-bearing, and easy to miss. A subscription the customer has cancelled
+   * keeps `status: 'active'` right up to the end of the paid period, and the
+   * cancellation lives ONLY here. Reading status alone reports a cancelled
+   * subscription as renewing, which is both wrong and alarming to whoever just
+   * cancelled it.
+   */
+  scheduledChangeAction: text('scheduled_change_action'),
+  /** When that scheduled change takes effect. */
+  scheduledChangeAt: timestamp('scheduled_change_at', { withTimezone: true }),
   /** Unit price as reported by Paddle (minor units string, e.g. '1900'). */
   price: text('price'),
   currency: text('currency'),
