@@ -1,0 +1,1 @@
+ALTER TABLE "subscriptions" ADD COLUMN "guild_name" text;

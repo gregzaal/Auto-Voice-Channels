@@ -47,6 +47,16 @@ export const guilds = pgTable('guilds', {
   authExpiresAt: timestamp('auth_expires_at', { withTimezone: true }),
   /** When the current grace window ends (the leniency ladder; null = not in grace). */
   graceUntil: timestamp('grace_until', { withTimezone: true }),
+  /**
+   * When the bot was last removed from this guild (null = it is in the guild).
+   * Set by the `guildDelete` handler and cleared on re-add.
+   *
+   * Rows are never deleted on removal: a guild can still have a live paid
+   * subscription, and the dashboard must keep showing it so the owner can
+   * cancel. Without this marker the dashboard cannot tell "subscribed and
+   * working" from "subscribed and paying for nothing".
+   */
+  botRemovedAt: timestamp('bot_removed_at', { withTimezone: true }),
   /** Latest member-count sample (a hint, never ground truth — see monetization.md §5). */
   memberCount: integer('member_count'),
   memberCountUpdatedAt: timestamp('member_count_updated_at', { withTimezone: true }),
@@ -202,6 +212,25 @@ export const subscriptions = pgTable('subscriptions', {
   guildId: text('guild_id').primaryKey(),
   paddleSubscriptionId: text('paddle_subscription_id').notNull().unique(),
   paddleCustomerId: text('paddle_customer_id').notNull(),
+  /**
+   * The Auth.js user id (our `users.id`, a UUID) of whoever completed
+   * checkout, captured from the transaction's custom data. NOT a Discord
+   * snowflake: it is `session.user.id`, which is what the dashboard compares
+   * against, so matching it to a Discord id will silently never match.
+   *
+   * Without it, a subscription is only reachable through the guild, so someone
+   * who leaves the server (or loses Manage Server) can no longer see or cancel
+   * a subscription they are still being charged for. Nullable because
+   * subscriptions created before this column existed have no purchaser.
+   */
+  purchaserUserId: text('purchaser_user_id'),
+  /**
+   * Server name at checkout time, denormalized from the transaction's custom
+   * data. Only used to render a subscription for a guild the viewer can no
+   * longer see (they left it), where there is no Discord guild object and no
+   * name anywhere else in our schema. A stale name beats a bare snowflake id.
+   */
+  guildName: text('guild_name'),
   /** The tier this subscription pays for (`s`/`m`/`l`/`xl`/`xxl`). */
   tier: text('tier').notNull(),
   /** Paddle subscription status (e.g. active, past_due, canceled). */

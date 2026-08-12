@@ -352,9 +352,33 @@ async function main(): Promise<void> {
   // handler below, so we skip those here to avoid double work.
   client.on('guildCreate', (guild) => {
     if (!client.isReady()) return;
+    // Clear any removal marker: the bot is demonstrably back in this guild.
+    void guildsRepo.setBotPresence(guild.id, null).catch((err: unknown) => {
+      logger.warn({ err, guildId: guild.id }, 'failed to clear bot-removed marker');
+    });
     void reconciler.reconcileGuild(guild.id).catch((err: unknown) => {
       logger.error({ err, guildId: guild.id }, 'reconcile-on-guildCreate failed');
     });
+  });
+  /**
+   * The bot was removed from a guild (kicked, banned, or the guild was deleted).
+   *
+   * We record it and delete NOTHING. A removed guild can still have a live paid
+   * subscription, and the row is what the dashboard resolves a plan from, so
+   * dropping it would hide the cancel button from someone who is still being
+   * charged. Marking instead lets the dashboard say "AVC is not in this server,
+   * and you are still paying for it".
+   *
+   * `guildDelete` also fires on an outage-driven unavailability, so ignore
+   * those: `guild.available === false` means Discord lost the guild, not that
+   * we were removed.
+   */
+  client.on('guildDelete', (guild) => {
+    if (guild.available === false) return;
+    void guildsRepo.setBotPresence(guild.id, new Date()).catch((err: unknown) => {
+      logger.warn({ err, guildId: guild.id }, 'failed to record bot removal');
+    });
+    logger.info({ guildId: guild.id }, 'removed from guild');
   });
   client.once('clientReady', () => {
     gatewayStatus = 'up';

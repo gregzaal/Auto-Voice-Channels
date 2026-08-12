@@ -18,6 +18,15 @@ export const guildRowSchema = z.object({
   authStatus: z.enum(AUTH_STATUSES),
   authExpiresAt: z.date().nullable(),
   graceUntil: z.date().nullable(),
+  /**
+   * Null = the bot is in the guild. Set when it is removed, cleared on re-add.
+   *
+   * `.nullish()` rather than `.nullable()` on purpose: web and bot deploy
+   * independently, so a build carrying this field can read rows before the
+   * migration that adds the column has run. A missing key must degrade to
+   * "unknown", not throw and blank the caller's entire guild list.
+   */
+  botRemovedAt: z.date().nullish(),
   memberCount: z.number().int().nullable(),
   memberCountUpdatedAt: z.date().nullable(),
   tier: z.enum(TIER_IDS).nullable(),
@@ -74,6 +83,24 @@ export class GuildRepository {
   async get(guildId: string): Promise<GuildRow | undefined> {
     const [row] = await this.db.select().from(guilds).where(eq(guilds.guildId, guildId)).limit(1);
     return row ? guildRowSchema.parse(row) : undefined;
+  }
+
+  /**
+   * Records that the bot was removed from (or re-added to) a guild.
+   *
+   * The row itself is deliberately NOT deleted on removal. A removed guild can
+   * still carry a live paid subscription, and the dashboard resolves a guild's
+   * plan from this row: delete it and the card falls back to "AVC isn't in this
+   * server yet", which hides the cancel button from someone still being billed.
+   * Marking is also what lets the dashboard say so explicitly.
+   *
+   * Idempotent, and a no-op for a guild we have never seen (nothing to mark).
+   */
+  async setBotPresence(guildId: string, removedAt: Date | null): Promise<void> {
+    await this.db
+      .update(guilds)
+      .set({ botRemovedAt: removedAt, updatedAt: new Date() })
+      .where(eq(guilds.guildId, guildId));
   }
 
   async getOrThrow(guildId: string): Promise<GuildRow> {
