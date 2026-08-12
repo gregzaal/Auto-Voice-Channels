@@ -64,6 +64,27 @@ export interface UpsertSubscriptionInput {
 export const SUBSCRIPTION_OK_STATUSES: ReadonlySet<string> = new Set(['active', 'trialing']);
 
 /**
+ * Whether a subscription is paying its way *right now*.
+ *
+ * Status alone is not enough: **an approved refund revokes standing even while
+ * Paddle still reports `active`.** A refund does not cancel a subscription, so
+ * without this the reconcile job would see a healthy `active` row and
+ * reactivate a guild we had just gated for being refunded, on the next hourly
+ * tick. Policy (owner, 2026-08-12): a granted refund stops access immediately,
+ * and a customer who should keep part of the term gets a pro-rata refund
+ * instead of partial access.
+ *
+ * Shared so the bot's ladder and the webhook planner cannot drift apart.
+ */
+export function subscriptionInGoodStanding(sub: {
+  status: string;
+  refundStatus?: string | null | undefined;
+}): boolean {
+  if (sub.refundStatus === 'approved') return false;
+  return SUBSCRIPTION_OK_STATUSES.has(sub.status);
+}
+
+/**
  * Billing source of truth per guild, synced from Paddle webhooks (one
  * subscription per guild). Same boundary-validation style as GuildRepository.
  */
