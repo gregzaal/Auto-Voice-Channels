@@ -59,6 +59,13 @@ export interface VoiceGatewayDeps {
    * a creator channel can surface a throttled "AVC is paused here" notice.
    */
   onGatedJoin?: (guildId: string, channelId: string) => void;
+  /**
+   * Called when a member LEAVES a channel in a non-entitled guild, so a temp
+   * channel that just emptied is still tidied away. Gating stops AVC creating
+   * channels; it should not leave dead empty ones behind for an admin to clear
+   * up by hand.
+   */
+  onGatedLeave?: (guildId: string, channelId: string) => void;
 }
 
 /**
@@ -108,6 +115,7 @@ export function registerVoiceGateway(deps: VoiceGatewayDeps): () => void {
     // the gated-join hook so creator channels can post the reactivation notice.
     if (deps.entitled && !deps.entitled(event.guildId)) {
       if (event.afterChannelId) deps.onGatedJoin?.(event.guildId, event.afterChannelId);
+      if (event.beforeChannelId) deps.onGatedLeave?.(event.guildId, event.beforeChannelId);
       return;
     }
 

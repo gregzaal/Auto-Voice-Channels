@@ -82,4 +82,68 @@ describe('EntitlementGate', () => {
     await tick();
     expect(gate.check('g-1')).toBe(true);
   });
+  /**
+   * Regression, found live. `check()` is sync and answered `hit?.entitled ??
+   * true`, and the invalidation listener DELETED the entry, so the next voice
+   * event after every invalidation failed open and was processed as entitled.
+   * One event per guild per invalidation is enough to create a channel for a
+   * guild we just gated.
+   *
+   * Invalidation must mark the entry stale, not remove it: the answer may be
+   * one refresh out of date, but it is never a guess.
+   */
+  it('serves the last known answer while revalidating, instead of failing open', async () => {
+    let status: GuildRow['authStatus'] = 'expired';
+    const guilds: GuildSettingsReader = { ensure: vi.fn(async () => rowWith(status)) };
+    let invalidate: ((guildId: string) => void) | undefined;
+    const notifier = {
+      listen: vi.fn(async (_channel: string, cb: (payload: string) => void) => {
+        invalidate = cb;
+        return () => undefined;
+      }),
+      onReconnect: vi.fn(),
+    };
+    const clock = 0;
+    const gate = new EntitlementGate({
+      guilds,
+      selfHosted: false,
+      logger: fakeLogger(),
+      ttlMs: 60_000,
+      now: () => clock,
+      notifier: notifier as never,
+    });
+    await gate.start();
+
+    // Warm the cache with a known-gated guild.
+    gate.check('g-1');
+    await tick();
+    expect(gate.check('g-1')).toBe(false);
+
+    // An invalidation arrives (auth transition, or any settings write).
+    invalidate?.('g-1');
+    // BEFORE the refresh resolves, the gate must still say "not entitled".
+    expect(gate.check('g-1')).toBe(false);
+    await tick();
+    expect(gate.check('g-1')).toBe(false);
+
+    // And it does pick up a real change once the refresh lands.
+    status = 'active';
+    invalidate?.('g-1');
+    await tick();
+    expect(gate.check('g-1')).toBe(true);
+  });
+
+  it('still fails open for a guild it has never seen', async () => {
+    const guilds: GuildSettingsReader = { ensure: vi.fn(async () => rowWith('expired')) };
+    const gate = new EntitlementGate({
+      guilds,
+      selfHosted: false,
+      logger: fakeLogger(),
+      ttlMs: 60_000,
+      now: () => 0,
+    });
+    // Never blocking on a cold cache is deliberate: an unknown guild is a cache
+    // miss, not a gated one.
+    expect(gate.check('never-seen')).toBe(true);
+  });
 });

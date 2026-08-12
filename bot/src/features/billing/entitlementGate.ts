@@ -43,7 +43,25 @@ export class EntitlementGate {
   async start(): Promise<void> {
     if (!this.opts.notifier) return;
     this.unsubscribe = await this.opts.notifier.listen(SETTINGS_INVALIDATE_CHANNEL, (guildId) => {
-      this.cache.delete(guildId);
+      /**
+       * Mark STALE, do not delete.
+       *
+       * `check()` is sync and answers `hit?.entitled ?? true`, so deleting the
+       * entry made the next voice event fail open and be processed as entitled.
+       * Exactly one event per guild slipped through after every invalidation,
+       * which is enough to create a channel for a guild we just gated. Observed
+       * live: a gated guild's empty-channel cleanup ran anyway.
+       *
+       * Keeping the last known value makes this genuinely
+       * stale-while-revalidate: the answer may be one refresh out of date, but
+       * it is never a guess. Fail-open then applies only to guilds we have
+       * never seen, which is the case it was designed for.
+       */
+      const hit = this.cache.get(guildId);
+      if (hit) this.cache.set(guildId, { ...hit, fetchedAt: 0 });
+      // Refresh now rather than waiting for the next event, so the stale window
+      // is microseconds in the common case instead of until the next join.
+      this.refresh(guildId);
     });
     this.opts.notifier.onReconnect(() => this.cache.clear());
   }

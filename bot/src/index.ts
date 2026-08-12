@@ -214,6 +214,19 @@ async function main(): Promise<void> {
     logger,
     entitled: (guildId) => entitlementGate.check(guildId),
     onGatedJoin: (guildId, channelId) => expiredJoinNotifier.handleGatedJoin(guildId, channelId),
+    // Gated guilds still get their emptied temp channels tidied away, through
+    // the per-guild dispatcher so it stays ordered and fault-isolated like
+    // every other write. Failures are contained: a gated guild must never be
+    // able to make noise in the logs on every leave.
+    onGatedLeave: (guildId, channelId) => {
+      void dispatcher
+        .dispatch(guildId, 'gatedCleanup', () =>
+          voiceFeature.cleanupEmptySecondary(guildId, channelId),
+        )
+        .catch((err: unknown) => {
+          logger.debug({ err, guildId, channelId }, 'gated cleanup failed');
+        });
+    },
   });
   const disposeJoinRequests = registerJoinRequests({
     client,

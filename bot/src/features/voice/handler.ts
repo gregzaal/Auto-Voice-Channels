@@ -482,6 +482,19 @@ export class VoiceFeature {
   }
 
   /**
+   * Cleanup-only entry point, for a guild that is hard-gated.
+   *
+   * Gated guilds have their voice events dropped before the dispatcher, but a
+   * temp channel that empties still has to go: leaving them behind litters the
+   * server with dead empty channels an admin then has to delete by hand, which
+   * is a worse outcome than tidying up. Deliberately narrow, so nothing else
+   * about a gated guild is processed.
+   */
+  async cleanupEmptySecondary(guildId: string, channelId: string): Promise<void> {
+    await this.maybeCleanup(guildId, channelId);
+  }
+
+  /**
    * Deletes a tracked secondary that has emptied. Returns `deleted` when removed,
    * `would-delete` under dry-run, else `skip` (not a secondary, or still has
    * members).
