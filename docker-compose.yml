@@ -30,6 +30,11 @@ services:
       CLIENT_ID: ${CLIENT_ID}
       # Optional: register slash commands to one guild (instant) for local testing.
       DEV_GUILD_ID: ${DEV_GUILD_ID:-}
+      # Optional: setting AVC_AI_API_KEY is the whole switch for /templateassistant.
+      # Unset (the default) and the command is never registered. See .env.example.
+      AVC_AI_BASE_URL: ${AVC_AI_BASE_URL:-}
+      AVC_AI_API_KEY: ${AVC_AI_API_KEY:-}
+      AVC_AI_MODEL: ${AVC_AI_MODEL:-}
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/avc
       # SELF_HOSTED defaults to true, so self-hosting needs nothing here.
       TOTAL_SHARDS: '1'
