@@ -38,9 +38,25 @@ export function decideOnboarding(
 ): OnboardingDecision {
   const policy = trialPolicyFor(memberCount);
   const meta = parseBillingMeta(row.metadata);
-  // Welcome once — and never for rows that predate onboarding (e.g. guilds that
-  // joined while the bot was offline long ago, redelivered in a boot flood).
-  const welcome = !meta.onboardedAt && now.getTime() - row.createdAt.getTime() < STALE_WELCOME_MS;
+  /**
+   * Welcome once, and only when the guild is actually starting out.
+   *
+   * The `authStatus === 'trial'` guard is the load-bearing one. Every welcome
+   * message announces a trial ("your 1-year free trial just started"), but the
+   * message was previously chosen from member count alone, so re-adding the bot
+   * to a PAYING server told the subscriber their trial had just begun. The
+   * other two guards did not catch it: the one-shot flag is only written once a
+   * welcome has actually been delivered, and the staleness window keys off the
+   * ROW's age, which is recent for any guild first seen recently regardless of
+   * how long it has been a customer.
+   *
+   * Anything that is not `trial` (active, grace, expired, blocked) is a
+   * returning guild whose story we would get wrong, so we say nothing.
+   */
+  const welcome =
+    !meta.onboardedAt &&
+    row.authStatus === 'trial' &&
+    now.getTime() - row.createdAt.getTime() < STALE_WELCOME_MS;
 
   const decision: OnboardingDecision = { policy, hardGate: false, welcome };
   if (row.authStatus === 'trial' && row.authExpiresAt === null) {

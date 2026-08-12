@@ -1,4 +1,5 @@
 import { PermissionFlagsBits } from 'discord.js';
+import type { AuthStatus } from '@avc/core';
 import { describe, expect, it } from 'vitest';
 import {
   buildChannelPickerMessage,
@@ -171,5 +172,91 @@ describe('channel picker', () => {
     expect(parseSetupPick(setupId('pick:manage'))).toBe('manage');
     expect(parseSetupPick(setupId('toggle'))).toBeNull();
     expect(parseSetupPick('avc:tpl:edit:primary:name:1')).toBeNull();
+  });
+});
+
+/**
+ * Every plan line, checked against every auth status.
+ *
+ * Both bugs this pins down were the same shape: a message chosen from ONE
+ * dimension (member count, or the presence of a trial window) while ignoring
+ * the guild's actual auth status. A paying subscriber was told their free
+ * trial had just started, and a lapsed subscriber was told their free trial
+ * had lapsed. A matrix is the only thing that keeps catching that.
+ */
+describe('formatPlan across every auth status', () => {
+  const G = '462606582367125509';
+  const DAY = 86_400_000;
+  const STATUSES: AuthStatus[] = ['trial', 'active', 'grace', 'expired', 'blocked'];
+  const SIZES = [50, 500, 50_000, 2_000_000];
+
+  const build = (status: AuthStatus, memberCount: number) =>
+    formatPlan({
+      guildId: G,
+      memberCount,
+      status,
+      expiresAt: new Date(NOW.getTime() + 30 * DAY),
+      graceUntil: new Date(NOW.getTime() + 30 * DAY),
+      selfHosted: false,
+      now: NOW,
+    });
+
+  it('never calls a paid, grace, expired or blocked server a free trial', () => {
+    for (const status of ['active', 'grace', 'expired', 'blocked'] as AuthStatus[]) {
+      for (const size of SIZES) {
+        expect(build(status, size), `${status} @ ${size}`).not.toMatch(/free trial/i);
+      }
+    }
+  });
+
+  it('never tells a blocked server it is free forever or subscribed', () => {
+    for (const size of SIZES) {
+      const line = build('blocked', size);
+      expect(line, `blocked @ ${size}`).toContain('blocked');
+      expect(line, `blocked @ ${size}`).not.toMatch(/free forever|subscribed/i);
+    }
+  });
+
+  it('says "free forever" only for a small server actually on trial', () => {
+    expect(build('trial', 50)).toContain('Free forever');
+    for (const status of ['active', 'grace', 'expired', 'blocked'] as AuthStatus[]) {
+      expect(build(status, 50), status).not.toContain('Free forever');
+    }
+  });
+
+  it('names the grace period instead of borrowing trial wording', () => {
+    for (const size of [500, 50_000]) {
+      const line = build('grace', size);
+      expect(line).toContain('Grace period');
+      expect(line).toContain('30 days left');
+    }
+  });
+
+  it('renders one clean line per state, with no placeholder leakage', () => {
+    for (const status of STATUSES) {
+      for (const size of SIZES) {
+        const line = build(status, size);
+        expect(line.length).toBeGreaterThan(20);
+        expect(line).not.toContain('undefined');
+        expect(line).not.toContain('NaN');
+        expect(line).not.toMatch(/[—–]/);
+      }
+    }
+  });
+
+  it('self-host short-circuits every status', () => {
+    for (const status of STATUSES) {
+      expect(
+        formatPlan({
+          guildId: G,
+          memberCount: 5_000,
+          status,
+          expiresAt: null,
+          graceUntil: null,
+          selfHosted: true,
+          now: NOW,
+        }),
+      ).toContain('Self-hosted');
+    }
   });
 });

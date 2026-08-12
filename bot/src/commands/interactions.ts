@@ -1400,6 +1400,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       memberCount: interaction.guild?.memberCount ?? 0,
       status: guildRow?.authStatus ?? 'trial',
       expiresAt: guildRow?.authExpiresAt ?? null,
+      graceUntil: guildRow?.graceUntil ?? null,
       selfHosted: deps.selfHosted,
       now: new Date(),
     });

@@ -80,4 +80,29 @@ describe('decideOnboarding (§3/§6)', () => {
     );
     expect(stale.welcome).toBe(false);
   });
+  /**
+   * Regression: re-adding the bot to a PAYING server DM'd the owner "your
+   * 1-year free trial just started".
+   *
+   * Every welcome announces a trial, but the message was chosen from member
+   * count alone. The one-shot flag did not help (it is only written once a
+   * welcome has actually been delivered, and this guild had never been
+   * welcomed) and neither did the staleness window (it keys off the ROW's age,
+   * which is recent for any guild first seen recently, however long it has
+   * been a customer). Only the auth status distinguishes them.
+   */
+  it('never welcomes a guild that is not on a trial', () => {
+    for (const authStatus of ['active', 'grace', 'expired', 'blocked'] as const) {
+      const d = decideOnboarding(row({ authStatus }), 6_605, NOW);
+      expect(d.welcome, authStatus).toBe(false);
+    }
+  });
+
+  it('still welcomes a genuine fresh add', () => {
+    expect(decideOnboarding(row({ authStatus: 'trial' }), 6_605, NOW).welcome).toBe(true);
+  });
+
+  it('welcomes a small free-forever server, which is still a trial row', () => {
+    expect(decideOnboarding(row({ authStatus: 'trial' }), 50, NOW).welcome).toBe(true);
+  });
 });

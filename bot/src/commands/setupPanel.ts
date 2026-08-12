@@ -80,6 +80,8 @@ export interface PlanInput {
   memberCount: number;
   status: AuthStatus;
   expiresAt: Date | null;
+  /** End of the grace window, so the grace line can name the days left. */
+  graceUntil?: Date | null;
   selfHosted: boolean;
   now: Date;
 }
@@ -90,7 +92,7 @@ export interface PlanInput {
  * `isEntitled` machinery remains the source of truth for access.
  */
 export function formatPlan(opts: PlanInput): string {
-  const { guildId, memberCount, status, expiresAt, selfHosted, now } = opts;
+  const { guildId, memberCount, status, expiresAt, graceUntil, selfHosted, now } = opts;
   const link = subscribeUrl(guildId);
   if (selfHosted) return '🏠 **Self-hosted**, every feature unlocked, no subscription needed.';
 
@@ -102,14 +104,37 @@ export function formatPlan(opts: PlanInput): string {
         ? 'contact us'
         : `$${tier.pricePerYear}/yr`;
 
-  if (tier.id === 'free') {
-    return '🆓 **Free forever**, under 100 members, so AVC is free on this server. Enjoy!';
+  /**
+   * Order matters, and it is status-first for a reason.
+   *
+   * This previously checked the free tier before any status, and had no branch
+   * at all for `grace` or `blocked`, so both fell through to the trial wording
+   * below. A subscriber whose payment lapsed was told "your free trial has
+   * lapsed" (they never had one), and a blocked server under 100 members was
+   * told "Free forever, enjoy!". The dashboard's `planView` has always ordered
+   * these correctly; this is the surface that drifted.
+   */
+  if (status === 'blocked') {
+    return '🚫 AVC is **blocked** on this server. Contact support if you think that is a mistake.';
   }
   if (status === 'active') {
     return `✅ **Subscribed** · ${tier.label} tier (${priceLabel}). Thanks for supporting AVC!`;
   }
+  if (status === 'grace') {
+    const graceDays = graceUntil ? daysUntil(now, graceUntil) : null;
+    return graceDays !== null && graceDays > 0
+      ? `🕊️ **Grace period**, ${graceDays} day${graceDays === 1 ? '' : 's'} left. Everything still ` +
+          `works. Keep AVC on the ${tier.label} tier (${priceLabel}) at ${link}`
+      : `🕊️ **Grace period.** Everything still works. Keep AVC on the ${tier.label} tier ` +
+          `(${priceLabel}) at ${link}`;
+  }
   if (status === 'expired') {
     return `⏳ Your AVC trial or subscription has **ended**. Reactivate at ${link} to switch automation back on.`;
+  }
+  // Only reachable on `trial` now, which is what "free forever" actually means:
+  // a server too small to ever be billed.
+  if (tier.id === 'free') {
+    return '🆓 **Free forever**, under 100 members, so AVC is free on this server. Enjoy!';
   }
   if (tier.id === 'xxl') {
     return (
