@@ -312,3 +312,52 @@ describe('DiscordVoiceActions.renameChannel (rate-limit probe)', () => {
     await expect(actions.renameChannel('g1', 'c1', 'x')).resolves.toEqual({ rateLimited: false });
   });
 });
+
+describe('DiscordVoiceActions.renameChannel (deleted vs merely hidden)', () => {
+  /**
+   * A client that serves the cached fetch from `channel` (as discord.js does) but
+   * routes the forced, cache-bypassing re-fetch to `onForce`.
+   */
+  function clientWithForce(channel: unknown, onForce: () => Promise<unknown>): Client {
+    return {
+      channels: {
+        fetch: vi.fn((_id: string, opts?: { force?: boolean }) =>
+          opts?.force ? onForce() : Promise.resolve(channel),
+        ),
+      },
+    } as unknown as Client;
+  }
+
+  // Discord answers 50001 for a channel it won't confirm exists, so the edit alone
+  // cannot tell "deleted" from "hidden" — only the forced re-fetch can.
+  const missingAccess = () => Promise.reject(apiError(50001));
+
+  it('reports channelGone when a forced re-fetch proves the channel is deleted', async () => {
+    const channel = { isVoiceBased: () => true, setName: vi.fn(missingAccess) };
+    const actions = new DiscordVoiceActions(
+      clientWithForce(channel, () => Promise.reject(apiError(UNKNOWN_CHANNEL))),
+    );
+    await expect(actions.renameChannel('g1', 'c1', 'x')).resolves.toEqual({
+      rateLimited: false,
+      channelGone: true,
+    });
+  });
+
+  it('rethrows when the channel is still there — hidden, not deleted', async () => {
+    const channel = { isVoiceBased: () => true, setName: vi.fn(missingAccess) };
+    const actions = new DiscordVoiceActions(
+      clientWithForce(channel, () => Promise.resolve(channel)),
+    );
+    await expect(actions.renameChannel('g1', 'c1', 'x')).rejects.toBeInstanceOf(DiscordAPIError);
+  });
+
+  it('does NOT claim the channel is gone when the re-fetch itself fails', async () => {
+    // A timeout or 5xx during an outage is not evidence of deletion. Claiming it
+    // would drop a live channel's row, which is much worse than one more retry.
+    const channel = { isVoiceBased: () => true, setName: vi.fn(missingAccess) };
+    const actions = new DiscordVoiceActions(
+      clientWithForce(channel, () => Promise.reject(new Error('ETIMEDOUT'))),
+    );
+    await expect(actions.renameChannel('g1', 'c1', 'x')).rejects.toBeInstanceOf(DiscordAPIError);
+  });
+});

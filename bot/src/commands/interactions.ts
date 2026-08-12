@@ -50,6 +50,7 @@ import {
   formatPlan,
   GENERAL_MODAL_ID,
   missingBotPermissions,
+  missingRenamePermissions,
   parseSetupPick,
   SETUP_PREFIX,
 } from './setupPanel.js';
@@ -365,6 +366,40 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   }
 
   /**
+   * Refuses an adopted-channel template flow when AVC cannot actually rename the
+   * channel, *before* the admin is asked to write anything. Composing a template
+   * only to have the rename fail afterwards wastes their effort, and the failure
+   * arrives too late to hand their input back.
+   *
+   * Resolved on the channel itself, because a category or channel override can
+   * remove what the role grants guild-wide. An unknown (channel or bot member not
+   * cached) is not treated as a denial: better to try and report than to refuse a
+   * setup that would have worked.
+   *
+   * @returns true when it replied and the caller should stop.
+   */
+  async function blockedByRenamePermissions(
+    interaction: ManageableInteraction,
+    channelId: string,
+  ): Promise<boolean> {
+    const me = interaction.guild?.members.me ?? null;
+    const channel = interaction.guild?.channels.cache.get(channelId) ?? null;
+    if (!me || !channel || !('permissionsFor' in channel)) return false;
+    const perms = channel.permissionsFor(me);
+    if (!perms) return false;
+    const missing = missingRenamePermissions((flag) => perms.has(flag));
+    if (missing.length === 0) return false;
+    await respond(interaction, {
+      content:
+        `⚠️ I can’t manage <#${channelId}>’s name — I’m missing ` +
+        `**${missing.join('**, **')}** on it. Grant those on the channel or its ` +
+        'category, then run this again.',
+      ephemeral: true,
+    });
+    return true;
+  }
+
+  /**
    * The "manage a channel" flow, reusable from `/template`, the `/setup`
    * "Manage a channel" button, and the channel picker. Routes to the right
    * editor for what the channel *is*: a creator-channel secondary edits the
@@ -384,6 +419,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     if (primaryState.found) {
       return respond(interaction, renderEditorPanel('primary', channelId, primaryState));
     }
+    // Past here the template names THIS channel, which AVC renames directly — so
+    // check it can before asking for any input (a primary's template, above,
+    // applies to the secondaries it spawns, not to the channel in hand).
+    if (await blockedByRenamePermissions(interaction, channelId)) return;
     // Already an adopted standalone channel → edit its templates.
     const managedState = await run(guildId, 'cmd:template:managed', () =>
       deps.feature.getManagedEditorState(guildId, channelId),
@@ -435,6 +474,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     let scope: Exclude<EditorScope, 'channel'> | undefined;
     if (primaryState.found) scope = 'primary';
     else {
+      // Past here the assistant writes THIS channel's own template, so check AVC
+      // can rename it before the admin describes anything — and before a model
+      // call is spent producing a template that could never be applied.
+      if (await blockedByRenamePermissions(interaction, channelId)) return;
       const managedState = await run(guildId, 'cmd:assistant:managed', () =>
         deps.feature.getManagedEditorState(guildId, channelId),
       );

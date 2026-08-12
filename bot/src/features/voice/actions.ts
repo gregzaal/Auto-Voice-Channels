@@ -29,7 +29,7 @@ export interface CreateVoiceChannelInput {
   inheritFrom?: 'primary' | 'category' | string;
 }
 
-/** Outcome of a rename: whether Discord deferred it under a rate limit. */
+/** Outcome of a rename: whether Discord deferred it, or the channel is gone. */
 export interface RenameResult {
   /**
    * True when the rename did not apply within the probe window because Discord
@@ -37,6 +37,14 @@ export interface RenameResult {
    * queued and will apply once the limit clears — callers should tell the user.
    */
   rateLimited: boolean;
+  /**
+   * True when the channel is confirmed to no longer exist on Discord. Callers
+   * must stop tracking it rather than retry — nothing will ever make the rename
+   * succeed. Never set for a channel that merely became invisible to the bot:
+   * that stays a permission error (thrown), because the two are different
+   * problems with different fixes.
+   */
+  channelGone?: boolean;
 }
 
 export interface VoiceActions {
@@ -44,7 +52,10 @@ export interface VoiceActions {
   createVoiceChannel(input: CreateVoiceChannelInput): Promise<string>;
   /** Deletes a channel. Must tolerate an already-deleted channel (idempotent). */
   deleteChannel(guildId: string, channelId: string): Promise<void>;
-  /** Renames a channel; reports whether a rate limit deferred it. */
+  /**
+   * Renames a channel; reports whether a rate limit deferred it, or whether the
+   * channel turned out to be gone (see {@link RenameResult}).
+   */
   renameChannel(guildId: string, channelId: string, name: string): Promise<RenameResult>;
   /** Moves a member to a channel (or disconnects them when channelId is null). */
   moveMember(guildId: string, memberId: string, channelId: string | null): Promise<void>;
@@ -144,6 +155,10 @@ export class RecordingVoiceActions implements VoiceActions {
   simulateRenameRateLimit = false;
   /** When set, `deleteChannel` throws Missing Access for this channel id. */
   failDeleteForChannel?: string;
+  /** When set, `renameChannel` throws Missing Access for this channel id. */
+  failRenameForChannel?: string;
+  /** When set, `renameChannel` reports this channel id as deleted on Discord. */
+  renameGoneForChannel?: string;
   /** When true, `createVoiceChannel` throws Missing Permissions (tests the create path). */
   failCreate = false;
   private seq = 0;
@@ -195,7 +210,22 @@ export class RecordingVoiceActions implements VoiceActions {
   }
 
   renameChannel(guildId: string, channelId: string, name: string): Promise<RenameResult> {
+    if (this.failRenameForChannel === channelId) {
+      return Promise.reject(
+        new DiscordAPIError(
+          { code: 50001, message: 'Missing Access' } as never,
+          50001,
+          403,
+          'PATCH',
+          'https://discord.test',
+          {} as never,
+        ),
+      );
+    }
     this.actions.push({ type: 'rename', guildId, channelId, name });
+    if (this.renameGoneForChannel === channelId) {
+      return Promise.resolve({ rateLimited: false, channelGone: true });
+    }
     return Promise.resolve({ rateLimited: this.simulateRenameRateLimit });
   }
 

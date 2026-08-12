@@ -13,7 +13,11 @@ import type { GuildVoiceView, MemberActivity, VoiceMember, VoiceStateEvent } fro
 import { getGameName, MAX_STATUS_LENGTH, renderChannelName } from './nameTemplate.js';
 import { displayName, groupKeyFor, parseVoiceSettings, readGroups } from './guildSettings.js';
 import { isPermissionError } from './discordAdapter.js';
-import { permissionProblemMessage, type PermissionProblemTracker } from './permissionProblems.js';
+import {
+  permissionProblemMessage,
+  type PermissionOperation,
+  type PermissionProblemTracker,
+} from './permissionProblems.js';
 import type { CommandResult } from './commands.js';
 
 /** A fresh 31-bit random seed for a channel's `[[random]]` picks. */
@@ -119,6 +123,20 @@ export interface VoiceFeatureDeps {
 /** Common option for state-changing operations: report without acting. */
 export interface ReconcileOptions {
   dryRun?: boolean;
+  /**
+   * What to do when the bot turns out to have *lost access* to the channel.
+   *
+   * Background callers (the re-render scheduler, reconcile) pass `abandon`: the
+   * row has to go, or every sweep retries the same impossible edit forever.
+   *
+   * Interactive callers keep the default `report`, which rethrows and leaves the
+   * row alone — an admin who just wrote a template must never have it binned
+   * underneath them for a problem they can fix by granting a permission.
+   *
+   * A channel confirmed *deleted* is dropped either way: that is objective and
+   * unrecoverable, and no template can outlive the channel it names.
+   */
+  onUnmanageable?: 'abandon' | 'report';
 }
 
 /** Options for a re-render: dry-run plus an optional sibling-position override. */
@@ -682,13 +700,40 @@ export class VoiceFeature {
     if (opts.dryRun) return result;
 
     if (result.name !== undefined) {
-      const { rateLimited } = await this.deps.actions.renameChannel(
+      let rename;
+      try {
+        rename = await this.deps.actions.renameChannel(guildId, channelId, result.name);
+      } catch (err) {
+        // Recoverable (grant the permission back), so an interactive caller keeps
+        // the row — and the template the admin just wrote — and reports instead.
+        if (!isPermissionError(err) || opts.onUnmanageable !== 'abandon') throw err;
+        // Background caller: the channel still exists but an override hid it.
+        // Stop managing it, or reconcile retries the impossible rename forever.
+        await this.abandonManaged(guildId, channelId, 'rename', err);
+        return {};
+      }
+      if (rename.channelGone) {
+        // Confirmed deleted on Discord — objective and unrecoverable, so the row
+        // goes whoever asked. Nothing to notify about on the background path: the
+        // admin deleted it, which is not a problem to report back to them.
+        await this.deps.managed.remove(channelId);
+        this.deps.logger.info(
+          { guildId, managedId: channelId },
+          'managed channel no longer exists; stopped managing it',
+        );
+        if (opts.onUnmanageable !== 'abandon') {
+          // Interactive: say so rather than report a success for a channel that
+          // no longer exists (a narrow race — it was deleted mid-command).
+          throw new Error('That channel no longer exists.');
+        }
+        return {};
+      }
+      if (rename.rateLimited) result.rateLimited = true;
+      this.deps.serverLog?.(
         guildId,
-        channelId,
-        result.name,
+        2,
+        renameLogMessage(channelId, result.name, rename.rateLimited),
       );
-      if (rateLimited) result.rateLimited = true;
-      this.deps.serverLog?.(guildId, 2, renameLogMessage(channelId, result.name, rateLimited));
     }
     if (result.status !== undefined) {
       await this.deps.actions.setVoiceStatus(guildId, channelId, result.status);
@@ -705,6 +750,63 @@ export class VoiceFeature {
       're-rendered managed channel',
     );
     return result;
+  }
+
+  /**
+   * Gives up on an adopted channel the bot can no longer act on, and tells the
+   * admin how to restore access. Mirrors the secondary-side give-up in
+   * {@link maybeCleanup}: the row has to go, or every reconcile retries the same
+   * impossible edit forever.
+   *
+   * Distinct from {@link stopManaging}, which is the admin *choosing* to un-adopt
+   * a channel — that is a success with a friendly reply, this is a failure the
+   * admin needs told about.
+   */
+  private async abandonManaged(
+    guildId: string,
+    channelId: string,
+    operation: PermissionOperation,
+    err: unknown,
+  ): Promise<void> {
+    await this.deps.managed?.remove(channelId);
+    this.deps.permissionProblems?.record(guildId, { channelId, operation, at: Date.now() });
+    this.deps.serverLog?.(guildId, 1, permissionProblemMessage(channelId));
+    this.deps.logger.warn(
+      { guildId, managedId: channelId, err },
+      'lost access to adopted channel; stopped managing it',
+    );
+  }
+
+  /**
+   * Drops tracking for a channel Discord reports as deleted.
+   *
+   * This is the cheap, immediate path — it stops a stale row ever existing. The
+   * confirm-on-rename fallback in {@link rerenderManaged} covers the deletions
+   * this never sees: those that happen while the shard is disconnected, where the
+   * event is simply never delivered.
+   */
+  async handleChannelDeleted(guildId: string, channelId: string): Promise<void> {
+    const secondary = await this.deps.secondaries.get(channelId);
+    if (secondary && secondary.guildId === guildId) {
+      await this.deps.secondaries.remove(channelId);
+      await this.deps.onSecondaryRemoved?.(guildId, channelId);
+      this.deps.permissionProblems?.clear(guildId, channelId);
+      this.deps.logger.info(
+        { guildId, secondaryId: channelId },
+        'secondary deleted on Discord; stopped tracking it',
+      );
+      return;
+    }
+
+    const managed = await this.deps.managed?.get(channelId);
+    if (managed && managed.guildId === guildId) {
+      await this.deps.managed?.remove(channelId);
+      this.deps.permissionProblems?.clear(guildId, channelId);
+      this.deps.logger.info(
+        { guildId, managedId: channelId },
+        'managed channel deleted on Discord; stopped managing it',
+      );
+    }
   }
 
   /**
@@ -1406,7 +1508,10 @@ export class VoiceFeature {
           continue;
         }
         if (!dryRun) await this.reconcileManagedOwner(guildId, managed);
-        const { name } = await this.rerenderManaged(guildId, channelId, { dryRun });
+        const { name } = await this.rerenderManaged(guildId, channelId, {
+          dryRun,
+          onUnmanageable: 'abandon',
+        });
         if (name !== undefined) drift.renamed.push({ channelId, to: name });
       }
     }

@@ -1,5 +1,12 @@
 import type { Logger } from '@avc/core';
-import { ActivityType, type Client, type Presence, type VoiceState } from 'discord.js';
+import {
+  ActivityType,
+  type Client,
+  type DMChannel,
+  type NonThreadGuildBasedChannel,
+  type Presence,
+  type VoiceState,
+} from 'discord.js';
 import type { GuildDispatcher } from '../../runtime/dispatcher.js';
 import { normalizeVoiceState } from './discordAdapter.js';
 import type { VoiceFeature } from './handler.js';
@@ -79,7 +86,11 @@ export function registerVoiceGateway(deps: VoiceGatewayDeps): () => void {
       if (deps.entitled && !deps.entitled(guildId)) return Promise.resolve();
       return deps.dispatcher.dispatch(guildId, 'rerenderChannel', async () => {
         // Routes to the secondary or adopted-managed re-render as appropriate.
-        await deps.feature.rerenderChannelName(guildId, channelId);
+        // `abandon`: nobody is waiting on this, so a channel we can no longer act
+        // on must stop being tracked rather than be retried on every event.
+        await deps.feature.rerenderChannelName(guildId, channelId, {
+          onUnmanageable: 'abandon',
+        });
       });
     },
     onError: (err, guildId, channelId) => {
@@ -128,12 +139,30 @@ export function registerVoiceGateway(deps: VoiceGatewayDeps): () => void {
     scheduler.schedule(guildId, channelId);
   };
 
+  const onChannelDelete = (channel: DMChannel | NonThreadGuildBasedChannel): void => {
+    if (channel.isDMBased()) return;
+    const guildId = channel.guild.id;
+    // Deliberately NOT gated on `entitled`: this is bookkeeping for a channel that
+    // no longer exists, it is a rare O(1) event rather than presence-style churn,
+    // and a gated guild that later reactivates must not inherit rows pointing at
+    // channels Discord deleted while it was paused.
+    void deps.dispatcher
+      .dispatch(guildId, 'channelDelete', () =>
+        deps.feature.handleChannelDeleted(guildId, channel.id),
+      )
+      .catch((err: unknown) => {
+        deps.logger.error({ err, guildId, channelId: channel.id }, 'channelDelete handling failed');
+      });
+  };
+
   deps.client.on('voiceStateUpdate', onVoice);
   deps.client.on('presenceUpdate', onPresence);
+  deps.client.on('channelDelete', onChannelDelete);
 
   return () => {
     deps.client.off('voiceStateUpdate', onVoice);
     deps.client.off('presenceUpdate', onPresence);
+    deps.client.off('channelDelete', onChannelDelete);
     scheduler.clear();
   };
 }

@@ -45,6 +45,23 @@ export function missingBotPermissions(has: (flag: bigint) => boolean): string[] 
   return REQUIRED_PERMISSIONS.filter((p) => !has(p.flag)).map((p) => p.label);
 }
 
+/**
+ * What AVC needs to manage one channel's *name*: see it, and edit it.
+ *
+ * Deliberately narrower than {@link REQUIRED_PERMISSIONS} — renaming a standalone
+ * adopted channel needs neither Move Members nor Manage Roles, and demanding the
+ * full set here would refuse setups that work perfectly well.
+ */
+const RENAME_PERMISSIONS: { flag: bigint; label: string }[] = [
+  { flag: PermissionFlagsBits.ViewChannel, label: 'View Channel' },
+  { flag: PermissionFlagsBits.ManageChannels, label: 'Manage Channels' },
+];
+
+/** Which name-management permissions are missing, given a `has(flag)` predicate. */
+export function missingRenamePermissions(has: (flag: bigint) => boolean): string[] {
+  return RENAME_PERMISSIONS.filter((p) => !has(p.flag)).map((p) => p.label);
+}
+
 const DAY_MS = 86_400_000;
 function daysUntil(now: Date, then: Date): number {
   return Math.ceil((then.getTime() - now.getTime()) / DAY_MS);

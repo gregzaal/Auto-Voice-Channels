@@ -72,8 +72,12 @@ describe('registerVoiceGateway (gateway → dispatcher → feature pipeline)', (
     );
 
     // The returned "touched" channel is scheduled for a debounced rerender.
+    // `abandon`: nobody is waiting on a background re-render, so an unmanageable
+    // channel must stop being tracked rather than be retried forever.
     await tick(20);
-    expect(h.rerenderChannelName).toHaveBeenCalledWith('g1', 'sec-1');
+    expect(h.rerenderChannelName).toHaveBeenCalledWith('g1', 'sec-1', {
+      onUnmanageable: 'abandon',
+    });
   });
 
   it('ignores a mute/unmute (same channel before and after)', async () => {
@@ -97,7 +101,9 @@ describe('registerVoiceGateway (gateway → dispatcher → feature pipeline)', (
       presence('g1', 'sec-1', 'Halo'),
     );
     await tick(20);
-    expect(h.rerenderChannelName).toHaveBeenCalledWith('g1', 'sec-1');
+    expect(h.rerenderChannelName).toHaveBeenCalledWith('g1', 'sec-1', {
+      onUnmanageable: 'abandon',
+    });
   });
 
   it('ignores a presence change for a member not in a voice channel', async () => {

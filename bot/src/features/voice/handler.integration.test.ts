@@ -816,6 +816,103 @@ describe('VoiceFeature (integration)', () => {
       expect((await f.adoptChannel(GUILD, ADOPTED, 'General')).ok).toBe(false);
     });
 
+    it('drops a managed channel confirmed deleted on Discord, without pestering the admin', async () => {
+      const logs: { level: number; message: string }[] = [];
+      const problems = new PermissionProblemTracker();
+      const feature = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        managed,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+        serverLog: (_g, level, message) => logs.push({ level, message }),
+        permissionProblems: problems,
+      });
+      const alice = member('alice');
+      voice.put(ADOPTED, alice);
+      await feature.adoptChannel(GUILD, ADOPTED, 'General');
+
+      // The channel is deleted on Discord; the next rename confirms it is gone.
+      actions.renameGoneForChannel = ADOPTED;
+      voice.drop(ADOPTED, 'alice');
+      await feature.rerenderManaged(GUILD, ADOPTED, { onUnmanageable: 'abandon' });
+
+      // The row is gone, so reconcile can never retry the impossible rename.
+      expect(await managed.get(ADOPTED)).toBeUndefined();
+      // Deleting your own channel is not a permission problem: say nothing.
+      expect(problems.recent(GUILD)).toHaveLength(0);
+      expect(logs.filter((l) => l.level === 1)).toHaveLength(0);
+    });
+
+    it('gives up an adopted channel it can no longer rename (Missing Access), notifying instead of retrying', async () => {
+      const logs: { level: number; message: string }[] = [];
+      const problems = new PermissionProblemTracker();
+      const feature = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        managed,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+        serverLog: (_g, level, message) => logs.push({ level, message }),
+        permissionProblems: problems,
+      });
+      const alice = member('alice');
+      voice.put(ADOPTED, alice);
+      await feature.adoptChannel(GUILD, ADOPTED, 'General');
+
+      // The channel still exists but an override hid it from us.
+      actions.failRenameForChannel = ADOPTED;
+      voice.drop(ADOPTED, 'alice');
+      await feature.rerenderManaged(GUILD, ADOPTED, { onUnmanageable: 'abandon' });
+
+      expect(await managed.get(ADOPTED)).toBeUndefined();
+      expect(problems.recent(GUILD).map((p) => p.operation)).toContain('rename');
+      expect(logs.some((l) => l.level === 1 && l.message.includes('lost access'))).toBe(true);
+    });
+
+    it('keeps the admin’s template when an interactive rename hits a permission error', async () => {
+      const alice = member('alice');
+      voice.put(ADOPTED, alice);
+      await f.adoptChannel(GUILD, ADOPTED, 'General');
+      const before = (await managed.get(ADOPTED))!.template;
+
+      // An interactive caller (the `/template` editor) must never have the
+      // template it just saved binned under it for a recoverable problem.
+      actions.failRenameForChannel = ADOPTED;
+      voice.drop(ADOPTED, 'alice');
+      await expect(f.rerenderManaged(GUILD, ADOPTED)).rejects.toThrow();
+
+      const after = await managed.get(ADOPTED);
+      expect(after).toBeDefined();
+      expect(after!.template).toEqual(before);
+    });
+
+    it('stops tracking managed and secondary channels deleted on Discord', async () => {
+      voice.put(ADOPTED, member('alice'));
+      await f.adoptChannel(GUILD, ADOPTED, 'General');
+      await secondaries.create({
+        channelId: 'sec-gone',
+        guildId: GUILD,
+        primaryChannelId: PRIMARY,
+        ownerId: 'alice',
+        state: { name: 'Gone', index: 0 },
+      });
+
+      await f.handleChannelDeleted(GUILD, ADOPTED);
+      await f.handleChannelDeleted(GUILD, 'sec-gone');
+
+      expect(await managed.get(ADOPTED)).toBeUndefined();
+      expect(await secondaries.get('sec-gone')).toBeUndefined();
+      // Idempotent: a redelivered event must not throw.
+      await expect(f.handleChannelDeleted(GUILD, ADOPTED)).resolves.toBeUndefined();
+    });
+
     it('renames to the resting name when emptied — and never deletes the channel', async () => {
       const alice = member('alice');
       voice.put(ADOPTED, alice);

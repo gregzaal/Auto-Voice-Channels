@@ -304,12 +304,38 @@ export class DiscordVoiceActions implements VoiceActions {
     }
   }
 
+  /**
+   * Whether `channelId` is *definitively* gone from Discord.
+   *
+   * Discord answers `Missing Access` (50001) rather than `Unknown Channel` for a
+   * resource it will not confirm exists, so by error code alone a deleted channel
+   * is indistinguishable from one merely hidden from the bot. Worse, discord.js
+   * serves `channels.fetch` from its cache, so a stale entry can make the edit the
+   * first call to touch the API at all. A forced re-fetch bypasses the cache and
+   * asks Discord directly.
+   *
+   * Only an explicit 10003 counts as proof. Anything else — a hidden channel, a
+   * timeout, a 5xx during an outage — returns false, because dropping a live
+   * channel's row on ambiguous evidence is far worse than retrying a dead one.
+   */
+  private async confirmChannelGone(channelId: string): Promise<boolean> {
+    try {
+      await this.client.channels.fetch(channelId, { force: true });
+      return false;
+    } catch (err) {
+      return isApiError(err, UNKNOWN_CHANNEL);
+    }
+  }
+
   async renameChannel(_guildId: string, channelId: string, name: string): Promise<RenameResult> {
     let channel;
     try {
       channel = await this.client.channels.fetch(channelId);
     } catch (err) {
-      if (isApiError(err, UNKNOWN_CHANNEL)) return { rateLimited: false };
+      if (isApiError(err, UNKNOWN_CHANNEL)) return { rateLimited: false, channelGone: true };
+      if (isPermissionError(err) && (await this.confirmChannelGone(channelId))) {
+        return { rateLimited: false, channelGone: true };
+      }
       throw err;
     }
     if (!channel?.isVoiceBased()) return { rateLimited: false };
@@ -322,13 +348,20 @@ export class DiscordVoiceActions implements VoiceActions {
     const outcome = await Promise.race([
       apply.then(
         () => 'done' as const,
-        (err: unknown) => {
-          if (isApiError(err, UNKNOWN_CHANNEL)) return 'done' as const;
+        async (err: unknown) => {
+          if (isApiError(err, UNKNOWN_CHANNEL)) return 'gone' as const;
+          // The channel came from the cache, so this edit is the first call that
+          // actually reached Discord — and a 50001 here may mean "deleted" just as
+          // easily as "hidden". Ask again, uncached, before believing either.
+          if (isPermissionError(err) && (await this.confirmChannelGone(channelId))) {
+            return 'gone' as const;
+          }
           throw err;
         },
       ),
       delay(RENAME_PROBE_MS).then(() => 'pending' as const),
     ]);
+    if (outcome === 'gone') return { rateLimited: false, channelGone: true };
     if (outcome === 'done') return { rateLimited: false };
 
     void apply.catch((err: unknown) => {
