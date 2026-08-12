@@ -159,7 +159,7 @@ export class PrivacyService {
       await this.deps.actions.moveMember(ctx.guildId, requesterId, ctx.secondaryChannelId);
     } catch (err) {
       this.deps.logger.warn({ err, joinChannelId, requesterId }, 'failed to admit join requester');
-      return fail(`Couldn’t admit <@${requesterId}> — ${describeError(err)}.`);
+      return fail(`Could not admit <@${requesterId}>: ${describeError(err)}.`);
     }
     return ok(`Admitted <@${requesterId}>.`);
   }
@@ -183,7 +183,7 @@ export class PrivacyService {
         'failed to deny join requester',
       );
       return fail(
-        `Couldn’t ${block ? 'block' : 'deny'} <@${requesterId}> — ${describeError(err)}.`,
+        `Could not ${block ? 'block' : 'deny'} <@${requesterId}>: ${describeError(err)}.`,
       );
     }
     return ok(block ? `Blocked <@${requesterId}>.` : `Denied <@${requesterId}>.`);

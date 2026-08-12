@@ -39,7 +39,7 @@ function sameOrder(a: readonly string[], b: readonly string[] | undefined): bool
  */
 function renameLogMessage(channelId: string, name: string, rateLimited: boolean): string {
   return rateLimited
-    ? `⏳ Rename of <#${channelId}> to **${name}** deferred — Discord is rate-limiting renames on this channel; the new name will apply within a few minutes.`
+    ? `⏳ Rename of <#${channelId}> to **${name}** deferred. Discord is rate-limiting renames on this channel, so the new name will apply within a few minutes.`
     : `✏️ <#${channelId}> renamed to **${name}**`;
 }
 
@@ -855,7 +855,7 @@ export class VoiceFeature {
     if (await this.deps.autoChannels.isPrimary(guildId, channelId)) {
       return {
         ok: false,
-        message: 'That’s a creator channel — edit it with `/template` directly.',
+        message: "That's a creator channel, edit it with `/template` directly.",
       };
     }
     if (await this.deps.secondaries.isSecondary(guildId, channelId)) {
@@ -915,7 +915,7 @@ export class VoiceFeature {
     return {
       ok: true,
       message: cleared
-        ? 'Cleared this channel’s status — it will stay blank.'
+        ? "Cleared this channel's status, it will stay blank."
         : 'Updated this channel’s status template.',
     };
   }
@@ -931,7 +931,7 @@ export class VoiceFeature {
     this.deps.logger.info({ guildId, channelId }, 'stopped managing channel');
     return {
       ok: true,
-      message: 'Stopped managing this channel’s name — its current name stays as-is.',
+      message: "Stopped managing this channel's name, its current name stays as-is.",
     };
   }
 

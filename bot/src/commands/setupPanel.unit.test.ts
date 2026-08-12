@@ -12,7 +12,15 @@ import {
 const NOW = new Date('2026-06-17T00:00:00.000Z');
 
 describe('formatPlan', () => {
-  const base = { status: 'trial' as const, expiresAt: null, selfHosted: false, now: NOW };
+  const GUILD = '462606582367125509';
+  const LINK = `https://auto-voice.io/dashboard?guild=${GUILD}`;
+  const base = {
+    guildId: GUILD,
+    status: 'trial' as const,
+    expiresAt: null,
+    selfHosted: false,
+    now: NOW,
+  };
 
   it('shows free-forever under 100 members', () => {
     expect(formatPlan({ ...base, memberCount: 50 })).toContain('Free forever');
@@ -25,18 +33,19 @@ describe('formatPlan', () => {
     expect(line).toContain('10 days');
     expect(line).toContain('S tier');
     expect(line).toContain('$19/yr');
+    expect(line).toContain(LINK);
   });
 
-  it('flags an expired server with the signup link', () => {
+  it('flags an expired server and deep-links to its dashboard card', () => {
     const line = formatPlan({ ...base, memberCount: 500, status: 'expired' });
     expect(line).toContain('ended');
-    expect(line).toContain('auto-voice.io/signup');
+    expect(line).toContain(LINK);
   });
 
-  it('routes ≥1M servers to the dedicated-infra signup', () => {
+  it('routes ≥1M servers to the dedicated-infra conversation', () => {
     const line = formatPlan({ ...base, memberCount: 2_000_000 });
     expect(line).toContain('dedicated');
-    expect(line).toContain('auto-voice.io/signup');
+    expect(line).toContain('auto-voice.io');
   });
 
   it('acknowledges an active subscription', () => {
@@ -45,6 +54,27 @@ describe('formatPlan', () => {
 
   it('self-host bypasses the plan entirely', () => {
     expect(formatPlan({ ...base, memberCount: 5_000, selfHosted: true })).toContain('Self-hosted');
+  });
+
+  /**
+   * `/signup` has never existed on the site and returns 404. These assertions
+   * previously REQUIRED that URL, so the tests were pinning a dead link into
+   * the most-used admin surface in the bot.
+   */
+  it('never points at the non-existent /signup page', () => {
+    const lines = [
+      formatPlan({ ...base, memberCount: 50 }),
+      formatPlan({ ...base, memberCount: 500 }),
+      formatPlan({ ...base, memberCount: 500, status: 'expired' }),
+      formatPlan({ ...base, memberCount: 500, expiresAt: new Date('2026-06-27T00:00:00.000Z') }),
+      formatPlan({ ...base, memberCount: 5_000, status: 'active' }),
+      formatPlan({ ...base, memberCount: 2_000_000 }),
+      formatPlan({ ...base, memberCount: 5_000, selfHosted: true }),
+    ];
+    for (const line of lines) {
+      expect(line).not.toContain('/signup');
+      expect(line).not.toMatch(/[—–]/);
+    }
   });
 });
 

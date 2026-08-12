@@ -44,7 +44,7 @@ export function buildCommandDefinitions(
         .addIntegerOption((o) =>
           o
             .setName('count')
-            .setDescription(`Maximum members (0–${MAX_USER_LIMIT}).`)
+            .setDescription(`Maximum members (0 to ${MAX_USER_LIMIT}).`)
             .setMinValue(0)
             .setMaxValue(MAX_USER_LIMIT)
             .setRequired(true),

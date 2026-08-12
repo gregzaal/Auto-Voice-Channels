@@ -3,6 +3,9 @@ node_modules/
 **/*.tsbuildinfo
 .env
 .env.local
+# Local compose overrides (e.g. SELF_HOSTED=false to rehearse the hosted
+# entitlement ladder). The published default must stay self-host-friendly.
+docker-compose.override.yml
 coverage/
 *.log
 .DS_Store

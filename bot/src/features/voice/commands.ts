@@ -138,7 +138,7 @@ export class VoiceCommands {
       isReset
         ? `Reset this channel’s ${field} to the inherited template.${note}`
         : clearedStatus
-          ? `Cleared this channel’s status — it will stay blank.${note}`
+          ? `Cleared this channel's status, it will stay blank.${note}`
           : `Updated this channel’s ${field}.${note}`,
     );
   }
@@ -190,7 +190,7 @@ export class VoiceCommands {
     // A present owner blocks a claim — unless the caller is the original creator
     // reclaiming the channel from a caretaker.
     if (ownerPresent && !isOriginalCreator) {
-      return fail('The current owner is still here — they can `/transfer` it to you.');
+      return fail('The current owner is still here, they can `/transfer` it to you.');
     }
     await this.deps.secondaries.setOwnerAndCreator(row.channelId, userId);
     await this.deps.feature.rerenderSecondary(guildId, row.channelId);

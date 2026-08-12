@@ -61,7 +61,7 @@ export class ExpiredJoinNotifier {
     this.lastNotice.set(guildId, this.now());
     const channel = await this.opts.client.channels.fetch(channelId).catch(() => null);
     if (channel?.isTextBased() && 'send' in channel) {
-      await channel.send(gatedCreatorChannelNotice()).catch(() => undefined);
+      await channel.send(gatedCreatorChannelNotice(guildId)).catch(() => undefined);
     }
   }
 }

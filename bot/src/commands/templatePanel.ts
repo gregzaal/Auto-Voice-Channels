@@ -64,7 +64,7 @@ export function buildAdoptPrompt(channelId: string, originalName: string): Inter
     .setColor(0xfaa61a)
     .setDescription(
       `<#${channelId}> isn’t managed by AVC yet. Turn this on and AVC will rename it ` +
-        'automatically — a resting name while empty, and an in-use name while people are in it.\n\n' +
+        'automatically: a resting name while empty, and an in-use name while people are in it.\n\n' +
         `**Default:** empty → **${truncate(originalName, 60) || 'its name'}**, in use → ` +
         '**“{owner}’s room”**. You can edit both templates next.',
     )
@@ -93,7 +93,7 @@ const VARIABLES_HELP =
 
 function fieldValue(template: string | undefined, fallbackHint: string): string {
   if (template === undefined) return fallbackHint;
-  return template === '' ? '_(empty — no status)_' : `\`${truncate(template)}\``;
+  return template === '' ? '_(empty, no status)_' : `\`${truncate(template)}\``;
 }
 
 /** Builds the ephemeral editor panel showing both the name and status templates. */
@@ -116,10 +116,10 @@ export function renderEditorPanel(
     .setColor(0x5865f2)
     .setDescription(
       isAdopted
-        ? `AVC manages <#${channelId}>’s name — a resting name when empty, an in-use name ` +
+        ? `AVC manages <#${channelId}>'s name: a resting name when empty, an in-use name ` +
             'when occupied (the `__empty/occupied__` token).'
         : isChannel
-          ? `Editing <#${channelId}> — just this channel.`
+          ? `Editing <#${channelId}>, just this channel.`
           : `Editing the templates for **all** channels of <#${channelId}>’s creator channel.`,
     )
     .addFields(

@@ -36,11 +36,11 @@ export class DiscordBillingNotifier implements BillingNotifier {
     notification: LeniencyNotification,
     memberCount: number,
   ): Promise<boolean> {
-    return this.deliver(guildId, notificationMessage(notification, memberCount));
+    return this.deliver(guildId, notificationMessage(notification, memberCount, guildId));
   }
 
   async welcomeGuild(guildId: string, policy: TrialPolicy, memberCount: number): Promise<boolean> {
-    return this.deliver(guildId, onboardingMessage(policy, memberCount));
+    return this.deliver(guildId, onboardingMessage(policy, memberCount, guildId));
   }
 
   private async deliver(guildId: string, content: string): Promise<boolean> {
@@ -54,13 +54,23 @@ export class DiscordBillingNotifier implements BillingNotifier {
           try {
             await channel.send({ content });
             return true;
-          } catch {
-            // fall through to the owner DM
+          } catch (err) {
+            // Falling back to the owner DM is fine, but it must never be
+            // SILENT: the usual cause is the bot lacking Send Messages in the
+            // system channel, which is a one-click fix an admin will never make
+            // if nobody reports it. Swallowing this made every notification
+            // look like it was DM-by-design.
+            this.opts.logger.warn(
+              { err, guildId, channelId: guild.systemChannelId },
+              'cannot post billing notification in the system channel, DMing the owner instead',
+            );
           }
         }
       }
       const owner = await guild.fetchOwner();
-      await owner.send({ content });
+      // A DM has no surrounding server, so the message's "this server" wording
+      // would have no antecedent. Name the guild up front instead.
+      await owner.send({ content: `**${guild.name}**\n\n${content}` });
       return true;
     } catch (err) {
       this.opts.logger.debug({ err, guildId }, 'billing notification delivery failed');

@@ -49,13 +49,13 @@ export function permissionProblemMessage(
 ): string {
   if (operation === 'create') {
     return (
-      `⚠️ I couldn’t create a channel from <#${channelId}> — I’m missing permissions. To copy ` +
+      `⚠️ I could not create a channel from <#${channelId}>, I am missing permissions. To copy ` +
       'its permissions I need **Manage Roles**, plus **Manage Channels**, **Connect** and ' +
       '**Move Members** on it (or its category). Grant those and new channels will work.'
     );
   }
   return (
-    `⚠️ I can’t manage <#${channelId}> — I’ve lost access to it (a permission override is ` +
+    `⚠️ I cannot manage <#${channelId}>, I have lost access to it (a permission override is ` +
     'hiding it from me). Grant my role **View Channel**, **Connect**, **Manage Channels** and ' +
     '**Move Members** on that channel or its category, then it’ll work again. ' +
     '(I’ve stopped managing it for now.)'

@@ -210,7 +210,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     });
     if (!entitled && !allowedWhileExpired(interaction)) {
       if (interaction.isRepliable()) {
-        await interaction.reply({ content: expiredInteractionMessage(), ephemeral: true });
+        await interaction.reply({ content: expiredInteractionMessage(guildId), ephemeral: true });
       }
       return;
     }
@@ -391,7 +391,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     if (missing.length === 0) return false;
     await respond(interaction, {
       content:
-        `⚠️ I can’t manage <#${channelId}>’s name — I’m missing ` +
+        `⚠️ I cannot manage <#${channelId}>'s name, I am missing ` +
         `**${missing.join('**, **')}** on it. Grant those on the channel or its ` +
         'category, then run this again.',
       ephemeral: true,
@@ -833,7 +833,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     const { action, categoryKey } = parsed;
     if (action === 'cancel') {
       await interaction.update({
-        content: 'Cancelled — nothing changed.',
+        content: 'Cancelled, nothing changed.',
         embeds: [],
         components: [],
       });
@@ -849,7 +849,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     const message = enabling
       ? `✅ Grouped this category’s channels **${above ? 'above' : 'below'}** the creator ` +
         `channels${summary.considered ? ` (${summary.considered} channel${summary.considered === 1 ? '' : 's'})` : ''}.${note}`
-      : `✅ Turned grouping off — each creator channel goes back to its own numbering and ` +
+      : `✅ Turned grouping off. Each creator channel goes back to its own numbering and ` +
         `placement.${note}`;
     await interaction.update({ content: message, embeds: [], components: [] });
   }
@@ -912,7 +912,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     // Validate the bot can actually post to the chosen/fallback channel before saving.
     if (target !== null && !canPostTo(interaction, target)) {
       await interaction.reply({
-        content: 'I can’t post there — pick a text channel I can send messages in.',
+        content: 'I cannot post there, pick a text channel I can send messages in.',
         ephemeral: true,
       });
       return;
@@ -1014,7 +1014,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     const { action, channelId } = parsed;
     if (action === 'cancel') {
       await interaction.update({
-        content: 'Cancelled — AVC won’t manage this channel.',
+        content: 'Cancelled, AVC will not manage this channel.',
         embeds: [],
         components: [],
       });
@@ -1022,7 +1022,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     }
     if (!(await deps.guilds.isEntitled(guildId, deps.selfHosted))) {
       await interaction.update({
-        content: expiredInteractionMessage(),
+        content: expiredInteractionMessage(guildId),
         embeds: [],
         components: [],
       });
@@ -1223,7 +1223,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     const guildId = interaction.guildId!;
     if (!(await deps.guilds.isEntitled(guildId, deps.selfHosted))) {
       await interaction.reply({
-        content: expiredInteractionMessage(),
+        content: expiredInteractionMessage(guildId),
         ephemeral: true,
       });
       return;
@@ -1319,7 +1319,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       // likely culprit. Surface the raw detail so it's still actionable.
       lines.push(
         `Discord refused with: ${describeError(err)}. A role or channel override may be ` +
-          'blocking me — adjust it, then hit **Retry**.',
+          'blocking me. Adjust it, then hit **Retry**.',
       );
     }
     lines.push('_Your selections are saved._');
@@ -1341,7 +1341,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     const guildId = interaction.guildId!;
     if (!(await deps.guilds.isEntitled(guildId, deps.selfHosted))) {
       await interaction.reply({
-        content: expiredInteractionMessage(),
+        content: expiredInteractionMessage(guildId),
         ephemeral: true,
       });
       return;
@@ -1369,7 +1369,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     guildId: string,
   ): Promise<boolean> {
     if (await deps.guilds.isEntitled(guildId, deps.selfHosted)) return true;
-    await interaction.reply({ content: expiredInteractionMessage(), ephemeral: true });
+    await interaction.reply({ content: expiredInteractionMessage(guildId), ephemeral: true });
     return false;
   }
 
@@ -1396,6 +1396,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       ? missingBotPermissions((flag) => me.permissions.has(flag))
       : ALL_REQUIRED_PERMISSION_LABELS;
     const plan = formatPlan({
+      guildId,
       memberCount: interaction.guild?.memberCount ?? 0,
       status: guildRow?.authStatus ?? 'trial',
       expiresAt: guildRow?.authExpiresAt ?? null,
@@ -1539,7 +1540,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     await interaction.reply({
       content:
         `🗳️ <@${interaction.user.id}> started a vote to kick <@${target.id}>` +
-        `${reason ? ` — _${reason}_` : ''}.\n` +
+        `${reason ? `, _${reason}_` : ''}.\n` +
         `Need **${result.required}** votes. (1 so far)`,
       components: [row],
     });
@@ -1782,7 +1783,7 @@ function formatDebug(info: ChannelDebug, permissions: Record<string, boolean>): 
             `${a.kind === 'streaming' ? '🔴' : ''}${a.name}${a.party?.size ? ` [${a.party.size.join('/')}]` : ''}`,
         )
         .join(', ');
-      return `• ${m.bot ? '🤖 ' : ''}${m.displayName}${acts ? ` — ${acts}` : ''}`;
+      return `• ${m.bot ? '🤖 ' : ''}${m.displayName}${acts ? `: ${acts}` : ''}`;
     }),
   ].filter((l): l is string => l !== null);
   return lines.join('\n').slice(0, 1900);

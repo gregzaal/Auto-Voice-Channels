@@ -155,7 +155,7 @@ describe('PrivacyService (integration)', () => {
     });
     const res = await p2.approveJoin(joinId, 'bob');
     expect(res.ok).toBe(false);
-    expect(res.message).toContain('Couldn’t admit');
+    expect(res.message).toContain('Could not admit');
   });
 
   it('handleOwnerChanged renames the join channel and re-points its creator', async () => {

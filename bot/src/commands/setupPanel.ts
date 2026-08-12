@@ -14,12 +14,19 @@ import {
   type InteractionUpdateOptions,
 } from 'discord.js';
 import { tierFor, type AuthStatus } from '@avc/core';
+import { SITE_URL, subscribeUrl } from '../features/billing/messages.js';
 
 /** Custom-id namespace for the `/setup` panel components. */
 export const SETUP_PREFIX = 'avc:setup:';
 export const setupId = (action: string): string => `${SETUP_PREFIX}${action}`;
 
 /** Outbound links surfaced from `/setup`. */
+/**
+ * @deprecated `https://auto-voice.io/signup` does not exist and returns 404.
+ * Every payment prompt must use `subscribeUrl(guildId)` from
+ * `features/billing/messages.ts`, which deep-links to the guild's own dashboard
+ * card. Kept only so an external import fails loudly rather than silently.
+ */
 export const SIGNUP_URL = 'https://auto-voice.io/signup';
 export const DOCS_URL = 'https://auto-voice.io/docs';
 export const SUPPORT_URL = 'https://discord.gg/jVm4tjrczE';
@@ -68,6 +75,8 @@ function daysUntil(now: Date, then: Date): number {
 }
 
 export interface PlanInput {
+  /** Needed so payment prompts deep-link to THIS server's dashboard card. */
+  guildId: string;
   memberCount: number;
   status: AuthStatus;
   expiresAt: Date | null;
@@ -81,8 +90,9 @@ export interface PlanInput {
  * `isEntitled` machinery remains the source of truth for access.
  */
 export function formatPlan(opts: PlanInput): string {
-  const { memberCount, status, expiresAt, selfHosted, now } = opts;
-  if (selfHosted) return '🏠 **Self-hosted** — every feature unlocked, no subscription needed.';
+  const { guildId, memberCount, status, expiresAt, selfHosted, now } = opts;
+  const link = subscribeUrl(guildId);
+  if (selfHosted) return '🏠 **Self-hosted**, every feature unlocked, no subscription needed.';
 
   const tier = tierFor(memberCount);
   const priceLabel =
@@ -93,33 +103,33 @@ export function formatPlan(opts: PlanInput): string {
         : `$${tier.pricePerYear}/yr`;
 
   if (tier.id === 'free') {
-    return '🆓 **Free forever** — under 100 members, so AVC is free on this server. Enjoy!';
+    return '🆓 **Free forever**, under 100 members, so AVC is free on this server. Enjoy!';
   }
   if (status === 'active') {
     return `✅ **Subscribed** · ${tier.label} tier (${priceLabel}). Thanks for supporting AVC!`;
   }
   if (status === 'expired') {
-    return `⏳ Your AVC trial/subscription has **ended** — reactivate at ${SIGNUP_URL} to switch automation back on.`;
+    return `⏳ Your AVC trial or subscription has **ended**. Reactivate at ${link} to switch automation back on.`;
   }
   if (tier.id === 'xxl') {
     return (
-      '🏛️ This server is **very large** — we run servers this size on dedicated ' +
-      `infrastructure. Let's set you up: ${SIGNUP_URL}`
+      '🏛️ This server is **very large**, and we run servers this size on dedicated ' +
+      `infrastructure. Let's set you up: ${SITE_URL}`
     );
   }
 
-  // Trial — the common 100 – 1M case.
+  // Trial: the common 100 to 1M case.
   const days = expiresAt ? daysUntil(now, expiresAt) : null;
   if (days !== null && days > 0) {
     return (
-      `🎟️ **Free trial** — ${days} day${days === 1 ? '' : 's'} left, then the ${tier.label} ` +
-      `tier (${priceLabel}). Manage anytime at ${SIGNUP_URL}.`
+      `🎟️ **Free trial**, ${days} day${days === 1 ? '' : 's'} left, then the ${tier.label} ` +
+      `tier (${priceLabel}). Manage anytime at ${link}`
     );
   }
   if (days !== null) {
-    return `🎟️ Your free trial has lapsed — keep AVC on the ${tier.label} tier (${priceLabel}) at ${SIGNUP_URL}.`;
+    return `🎟️ Your free trial has lapsed. Keep AVC on the ${tier.label} tier (${priceLabel}) at ${link}`;
   }
-  return `🎟️ **Free trial active** — the ${tier.label} tier (${priceLabel}) when it ends. Manage at ${SIGNUP_URL}.`;
+  return `🎟️ **Free trial active**, the ${tier.label} tier (${priceLabel}) when it ends. Manage at ${link}`;
 }
 
 export interface SetupPanelInput {
@@ -143,9 +153,9 @@ export interface SetupPanelInput {
 }
 
 const INTRO =
-  '**The original auto–voice-channel bot** — open-source & self-hostable.\n' +
+  '**The original auto-voice-channel bot**, open-source and self-hostable.\n' +
   'Members join a **creator channel** and AVC spins up a personal voice channel for ' +
-  'them — auto-named, and cleaned up when empty.';
+  'them, auto-named, and cleaned up when empty.';
 
 function channelList(ids: { channelId: string }[], empty: string): string {
   if (ids.length === 0) return empty;
@@ -159,7 +169,7 @@ export function buildSetupPanel(input: SetupPanelInput): InteractionReplyOptions
   const permsValue =
     input.missingPermissions.length === 0
       ? '✅ Permissions look good.'
-      : `⚠️ Missing **${input.missingPermissions.join('**, **')}** — re-invite me with the correct ` +
+      : `⚠️ Missing **${input.missingPermissions.join('**, **')}** . Re-invite me with the correct ` +
         'permissions, or grant them on my role.';
 
   const embed: APIEmbed = new EmbedBuilder()
@@ -176,11 +186,14 @@ export function buildSetupPanel(input: SetupPanelInput): InteractionReplyOptions
       },
       {
         name: `Creator channels (${input.primaries.length})`,
-        value: channelList(input.primaries, '_None yet — use “➕ New creator channel”._'),
+        value: channelList(input.primaries, '_None yet, use the "New creator channel" button._'),
       },
       {
         name: `Managed channels (${input.managed.length})`,
-        value: channelList(input.managed, '_None — “🛠️ Manage a channel” adopts an existing one._'),
+        value: channelList(
+          input.managed,
+          '_None. The "Manage a channel" button adopts an existing one._',
+        ),
       },
     )
     .toJSON();

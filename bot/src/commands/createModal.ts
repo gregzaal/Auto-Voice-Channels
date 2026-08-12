@@ -120,11 +120,11 @@ export function buildCreateModal(defaults: CreateDefaults, prefill?: CreatePrefi
             .setMaxValues(1)
             .addOptions(
               new StringSelectMenuOptionBuilder()
-                .setLabel('Open — anyone can join')
+                .setLabel('Open, anyone can join')
                 .setValue('open')
                 .setDefault(!privatePicked),
               new StringSelectMenuOptionBuilder()
-                .setLabel('Private — locked; others request to join')
+                .setLabel('Private, others request to join')
                 .setValue('private')
                 .setDefault(privatePicked),
             ),

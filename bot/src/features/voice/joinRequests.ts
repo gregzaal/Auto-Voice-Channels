@@ -60,7 +60,7 @@ export function registerJoinRequests(deps: JoinRequestsDeps): () => void {
     const lobby = await deps.client.channels.fetch(joinChannelId).catch(() => null);
     if (lobby?.isTextBased() && 'send' in lobby) {
       await lobby.send(
-        `🔔 <@${requesterId}>, your request to join was sent — please wait for the owner to respond.`,
+        `🔔 <@${requesterId}>, your request to join was sent. Please wait for the owner to respond.`,
       );
     }
   }
