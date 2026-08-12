@@ -1,4 +1,5 @@
-import { createServer, type Server, type ServerResponse } from 'node:http';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import type { Logger } from '@avc/core';
 
 export type SubsystemStatus = 'up' | 'down' | 'unknown';
@@ -48,6 +49,32 @@ export interface HealthServerOptions {
   health: () => HealthReport;
   /** Returns the current read-only diagnostics snapshot (may be async). */
   diagnostics: () => DiagnosticsReport | Promise<DiagnosticsReport>;
+  /**
+   * Bearer token required on `/diagnostics`. Undefined leaves it open, which
+   * is only reachable on a self-host: the config schema refuses to start a
+   * hosted instance (`SELF_HOSTED=false`) without one.
+   */
+  diagnosticsToken?: string | undefined;
+}
+
+/**
+ * Constant-time token comparison.
+ *
+ * Hashed first so both sides are always 32 bytes: `timingSafeEqual` throws on
+ * a length mismatch, and that throw would itself leak the token's length.
+ */
+function tokenMatches(expected: string, provided: string): boolean {
+  const a = createHash('sha256').update(expected).digest();
+  const b = createHash('sha256').update(provided).digest();
+  return timingSafeEqual(a, b);
+}
+
+/** The bearer token on a request, if it carries one. */
+function bearerFrom(req: IncomingMessage): string | null {
+  const header = req.headers.authorization;
+  if (typeof header !== 'string') return null;
+  const match = /^Bearer (.+)$/i.exec(header.trim());
+  return match?.[1] ?? null;
 }
 
 /**
@@ -79,6 +106,17 @@ export class HealthServer {
           return;
         }
         if (url === '/diagnostics') {
+          const expected = this.options.diagnosticsToken;
+          if (expected) {
+            const provided = bearerFrom(req);
+            if (!provided || !tokenMatches(expected, provided)) {
+              // 404, not 401: a 401 confirms the endpoint exists and invites
+              // guessing. An unauthorized caller should not be able to tell
+              // this route apart from any other path on the server.
+              this.json(res, 404, { error: 'not found' });
+              return;
+            }
+          }
           void Promise.resolve(this.options.diagnostics())
             .then((report) => this.json(res, 200, report))
             .catch((err: unknown) => {

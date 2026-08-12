@@ -13,88 +13,117 @@ const booleanish = z
     typeof v === 'boolean' ? v : ['1', 'true', 'yes', 'on'].includes(v.toLowerCase()),
   );
 
-export const configSchema = z.object({
-  /** Discord bot token. Never commit this; supply via env / secrets. */
-  discordToken: z.string().min(1, 'DISCORD_TOKEN is required'),
-  /** Discord application (client) id, used for slash-command registration. */
-  clientId: z.string().min(1, 'CLIENT_ID is required'),
-  /**
-   * Optional dev/test guild id. When set, slash commands are registered to this
-   * guild only (they appear instantly, vs. up to ~1h for global). Leave unset in
-   * production for global registration.
-   */
-  devGuildId: z.string().optional(),
-  /** Postgres connection string (source of truth). */
-  databaseUrl: z.string().min(1, 'DATABASE_URL is required'),
+export const configSchema = z
+  .object({
+    /** Discord bot token. Never commit this; supply via env / secrets. */
+    discordToken: z.string().min(1, 'DISCORD_TOKEN is required'),
+    /** Discord application (client) id, used for slash-command registration. */
+    clientId: z.string().min(1, 'CLIENT_ID is required'),
+    /**
+     * Optional dev/test guild id. When set, slash commands are registered to this
+     * guild only (they appear instantly, vs. up to ~1h for global). Leave unset in
+     * production for global registration.
+     */
+    devGuildId: z.string().optional(),
+    /** Postgres connection string (source of truth). */
+    databaseUrl: z.string().min(1, 'DATABASE_URL is required'),
 
-  /**
-   * When true, the entitlement gate always allows (no trial/active/expired/billing).
-   *
-   * Defaults to **true** so a self-hoster never has to set anything to run the
-   * full bot. The hosted paid service is the only deployment that runs with
-   * entitlement enforced, and it sets `SELF_HOSTED=false` explicitly (see
-   * `deploy/fly/fly.toml`). Consequence: the hosted fleet MUST keep that
-   * setting, or it fails open (everyone entitled). That is a deliberate
-   * trade-off in favour of self-hosters, who are the common case.
-   */
-  selfHosted: booleanish.default(true),
+    /**
+     * When true, the entitlement gate always allows (no trial/active/expired/billing).
+     *
+     * Defaults to **true** so a self-hoster never has to set anything to run the
+     * full bot. The hosted paid service is the only deployment that runs with
+     * entitlement enforced, and it sets `SELF_HOSTED=false` explicitly (see
+     * `deploy/fly/fly.toml`). Consequence: the hosted fleet MUST keep that
+     * setting, or it fails open (everyone entitled). That is a deliberate
+     * trade-off in favour of self-hosters, who are the common case.
+     */
+    selfHosted: booleanish.default(true),
 
-  /** Total shard count across all instances. A managed config value. */
-  totalShards: z.coerce.number().int().positive().default(1),
+    /** Total shard count across all instances. A managed config value. */
+    totalShards: z.coerce.number().int().positive().default(1),
 
-  /**
-   * Expected number of instances in the fleet. Each instance claims free shards
-   * up to `ceil(totalShards / expectedInstances)` (see {@link shardCapFor}), so the
-   * shards spread across the fleet instead of the first instance grabbing them all.
-   * Self-host leaves this at 1 → one instance claims every shard (unchanged).
-   */
-  expectedInstances: z.coerce.number().int().positive().default(1),
+    /**
+     * Expected number of instances in the fleet. Each instance claims free shards
+     * up to `ceil(totalShards / expectedInstances)` (see {@link shardCapFor}), so the
+     * shards spread across the fleet instead of the first instance grabbing them all.
+     * Self-host leaves this at 1 → one instance claims every shard (unchanged).
+     */
+    expectedInstances: z.coerce.number().int().positive().default(1),
 
-  /**
-   * Stable identifier for this running instance (used for shard leases). MUST be
-   * unique per running process — two instances sharing an id corrupt the shard
-   * leases (each thinks it owns the other's shards). On Fly this is sourced from
-   * the per-machine `FLY_MACHINE_ID`; self-host sets it explicitly; else `local`.
-   */
-  instanceId: z.string().min(1).default('local'),
+    /**
+     * Stable identifier for this running instance (used for shard leases). MUST be
+     * unique per running process — two instances sharing an id corrupt the shard
+     * leases (each thinks it owns the other's shards). On Fly this is sourced from
+     * the per-machine `FLY_MACHINE_ID`; self-host sets it explicitly; else `local`.
+     */
+    instanceId: z.string().min(1).default('local'),
 
-  /** HTTP port for the health / diagnostics endpoint. */
-  httpPort: z.coerce.number().int().min(0).max(65535).default(8080),
+    /** HTTP port for the health / diagnostics endpoint. */
+    httpPort: z.coerce.number().int().min(0).max(65535).default(8080),
 
-  /** Optional Discord channel id to report significant errors to. */
-  adminChannelId: z.string().optional(),
+    /** Optional Discord channel id to report significant errors to. */
+    adminChannelId: z.string().optional(),
 
-  /**
-   * AI-assisted templates (`/templateassistant`) — a single **OpenAI-compatible**
-   * `/v1/chat/completions` endpoint, chosen over per-provider adapters so a
-   * self-hoster only has to set env vars (`plans/assisted_templates.md` §3).
-   *
-   * The same three knobs cover OpenAI, OpenRouter, Groq/Together/Fireworks, and
-   * a local Ollama / LM Studio / vLLM with no code change. The feature is
-   * enabled **iff `aiApiKey` is set** — everything else has a working default,
-   * and the whole command simply doesn't appear otherwise.
-   */
-  aiBaseUrl: z.string().min(1).default('https://api.openai.com/v1'),
-  aiApiKey: z.string().min(1).optional(),
-  aiModel: z.string().min(1).default('gpt-5.4-mini'),
-  /** Per-request timeout for the model call (ms). */
-  aiTimeoutMs: z.coerce.number().int().positive().default(30_000),
+    /**
+     * Bearer token guarding `GET /diagnostics`.
+     *
+     * The endpoint discloses shard and instance topology, every runtime flag,
+     * billing job counters, and the AI model plus month-to-date estimated spend.
+     * That is fine on a self-host (one operator, usually not even exposed) and
+     * not fine on the hosted fleet, so it is **required when `SELF_HOSTED=false`**
+     * and optional otherwise. Enforced below, so a hosted instance cannot boot
+     * without one rather than failing open.
+     */
+    diagnosticsToken: z.string().min(16).optional(),
 
-  /**
-   * Provider prices per 1M tokens, used only to turn the tracked token counts
-   * into the estimated spend the fleet-wide ceiling is enforced on
-   * (`plans/assisted_templates.md` §5.2). Defaults are the §6 `gpt-5.4-mini`
-   * list rates; a self-hoster on a local model sets both to `0`.
-   */
-  aiPriceInputPerMTok: z.coerce.number().nonnegative().default(0.75),
-  aiPriceOutputPerMTok: z.coerce.number().nonnegative().default(4.5),
+    /**
+     * AI-assisted templates (`/templateassistant`) — a single **OpenAI-compatible**
+     * `/v1/chat/completions` endpoint, chosen over per-provider adapters so a
+     * self-hoster only has to set env vars (`plans/assisted_templates.md` §3).
+     *
+     * The same three knobs cover OpenAI, OpenRouter, Groq/Together/Fireworks, and
+     * a local Ollama / LM Studio / vLLM with no code change. The feature is
+     * enabled **iff `aiApiKey` is set** — everything else has a working default,
+     * and the whole command simply doesn't appear otherwise.
+     */
+    aiBaseUrl: z.string().min(1).default('https://api.openai.com/v1'),
+    aiApiKey: z.string().min(1).optional(),
+    aiModel: z.string().min(1).default('gpt-5.4-mini'),
+    /** Per-request timeout for the model call (ms). */
+    aiTimeoutMs: z.coerce.number().int().positive().default(30_000),
 
-  /** Log level for pino. */
-  logLevel: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent']).default('info'),
+    /**
+     * Provider prices per 1M tokens, used only to turn the tracked token counts
+     * into the estimated spend the fleet-wide ceiling is enforced on
+     * (`plans/assisted_templates.md` §5.2). Defaults are the §6 `gpt-5.4-mini`
+     * list rates; a self-hoster on a local model sets both to `0`.
+     */
+    aiPriceInputPerMTok: z.coerce.number().nonnegative().default(0.75),
+    aiPriceOutputPerMTok: z.coerce.number().nonnegative().default(4.5),
 
-  /** Runtime environment label. */
-  nodeEnv: z.enum(['development', 'test', 'production']).default('development'),
-});
+    /** Log level for pino. */
+    logLevel: z
+      .enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'])
+      .default('info'),
+
+    /** Runtime environment label. */
+    nodeEnv: z.enum(['development', 'test', 'production']).default('development'),
+  })
+  .superRefine((cfg, ctx) => {
+    // Fail fast rather than fail open: the hosted fleet must never serve an
+    // unauthenticated /diagnostics, and the only safe place to catch that is
+    // startup. Self-host is exempt, so nothing changes for self-hosters.
+    if (!cfg.selfHosted && !cfg.diagnosticsToken) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['diagnosticsToken'],
+        message:
+          'DIAGNOSTICS_TOKEN is required when SELF_HOSTED=false (>=16 chars). ' +
+          'Generate one with `openssl rand -hex 32` and set it as a Fly secret.',
+      });
+    }
+  });
 
 export type Config = z.infer<typeof configSchema>;
 
@@ -122,6 +151,7 @@ function envToInput(env: NodeJS.ProcessEnv): Record<string, unknown> {
     instanceId: env.INSTANCE_ID ?? env.FLY_MACHINE_ID,
     httpPort: env.HTTP_PORT,
     adminChannelId: env.ADMIN_CHANNEL_ID,
+    diagnosticsToken: env.DIAGNOSTICS_TOKEN,
     aiBaseUrl: env.AVC_AI_BASE_URL,
     aiApiKey: env.AVC_AI_API_KEY,
     aiModel: env.AVC_AI_MODEL,

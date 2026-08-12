@@ -409,6 +409,9 @@ async function main(): Promise<void> {
   const health = new HealthServer({
     port: config.httpPort,
     logger,
+    // Undefined only on a self-host: the config schema refuses to boot a
+    // hosted instance without one, so the fleet cannot fail open.
+    diagnosticsToken: config.diagnosticsToken,
     health: (): HealthReport => ({
       status:
         dbStatus === 'up' && leaseManager.ownedShards.length > 0 && gatewayStatus !== 'down'

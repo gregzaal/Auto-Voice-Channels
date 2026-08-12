@@ -19,11 +19,44 @@ describe('loadConfig', () => {
   });
 
   it('parses booleanish SELF_HOSTED values', () => {
+    // Hosted (SELF_HOSTED=false) additionally requires a diagnostics token.
+    const hosted = { ...baseEnv, DIAGNOSTICS_TOKEN: 'x'.repeat(32) };
     expect(loadConfig({ ...baseEnv, SELF_HOSTED: 'true' }).selfHosted).toBe(true);
     expect(loadConfig({ ...baseEnv, SELF_HOSTED: '1' }).selfHosted).toBe(true);
     expect(loadConfig({ ...baseEnv, SELF_HOSTED: 'yes' }).selfHosted).toBe(true);
-    expect(loadConfig({ ...baseEnv, SELF_HOSTED: 'false' }).selfHosted).toBe(false);
-    expect(loadConfig({ ...baseEnv, SELF_HOSTED: 'off' }).selfHosted).toBe(false);
+    expect(loadConfig({ ...hosted, SELF_HOSTED: 'false' }).selfHosted).toBe(false);
+    expect(loadConfig({ ...hosted, SELF_HOSTED: 'off' }).selfHosted).toBe(false);
+  });
+
+  /**
+   * `/diagnostics` shipped unauthenticated and publicly reachable on the beta
+   * fleet. Fail fast rather than fail open: a hosted instance must not be able
+   * to boot without a token, and self-host must stay zero-config.
+   */
+  describe('diagnostics token', () => {
+    it('is required when SELF_HOSTED=false', () => {
+      expect(() => loadConfig({ ...baseEnv, SELF_HOSTED: 'false' })).toThrow(/DIAGNOSTICS_TOKEN/);
+    });
+
+    it('is optional on a self-host', () => {
+      expect(loadConfig({ ...baseEnv, SELF_HOSTED: 'true' }).diagnosticsToken).toBeUndefined();
+    });
+
+    it('rejects a token short enough to guess', () => {
+      expect(() =>
+        loadConfig({ ...baseEnv, SELF_HOSTED: 'false', DIAGNOSTICS_TOKEN: 'short' }),
+      ).toThrow();
+    });
+
+    it('accepts a long token on either deployment', () => {
+      const token = 'y'.repeat(40);
+      expect(
+        loadConfig({ ...baseEnv, SELF_HOSTED: 'false', DIAGNOSTICS_TOKEN: token }).diagnosticsToken,
+      ).toBe(token);
+      expect(
+        loadConfig({ ...baseEnv, SELF_HOSTED: 'true', DIAGNOSTICS_TOKEN: token }).diagnosticsToken,
+      ).toBe(token);
+    });
   });
 
   // One OpenAI-compatible endpoint, three knobs, no per-provider adapters:
