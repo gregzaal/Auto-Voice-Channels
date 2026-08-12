@@ -270,6 +270,20 @@ export const subscriptions = pgTable('subscriptions', {
   /** Tax included within `chargedTotal` (prices are tax-inclusive). */
   chargedTax: text('charged_tax'),
   chargedCurrency: text('charged_currency'),
+  /**
+   * Latest refund/credit adjustment on this subscription, from `adjustment.*`
+   * webhooks: `pending_approval`, `approved` or `rejected`.
+   *
+   * Deliberately does NOT affect entitlement. A refund is a money decision, not
+   * an access decision, and partial refunds are normal, so revoking service the
+   * moment one is requested would cut off customers we are in the middle of
+   * making whole. The ladder and the Paddle subscription status remain the only
+   * inputs to access.
+   */
+  refundStatus: text('refund_status'),
+  /** Refunded amount (minor units) for that adjustment. */
+  refundTotal: text('refund_total'),
+  refundAt: timestamp('refund_at', { withTimezone: true }),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });

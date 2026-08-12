@@ -99,6 +99,13 @@
       "when": 1786548542858,
       "tag": "0013_mixed_gauntlet",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1786549668816,
+      "tag": "0014_far_microchip",
+      "breakpoints": true
     }
   ]
 }

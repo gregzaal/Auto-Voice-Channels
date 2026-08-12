@@ -25,6 +25,10 @@ export const subscriptionRowSchema = z.object({
   chargedTotal: z.string().nullish(),
   chargedTax: z.string().nullish(),
   chargedCurrency: z.string().nullish(),
+  /** Latest refund adjustment state. Never affects entitlement. See schema.ts. */
+  refundStatus: z.string().nullish(),
+  refundTotal: z.string().nullish(),
+  refundAt: z.date().nullish(),
   /** Pending Paddle change: 'cancel' | 'pause' | 'resume'. Null = renewing normally. */
   scheduledChangeAction: z.string().nullish(),
   scheduledChangeAt: z.date().nullish(),
@@ -140,6 +144,28 @@ export class SubscriptionRepository {
         chargedTotal: totals.total,
         chargedTax: totals.tax ?? null,
         chargedCurrency: totals.currency ?? null,
+        updatedAt: new Date(),
+      })
+      .where(eq(subscriptions.paddleSubscriptionId, paddleSubscriptionId));
+  }
+
+  /**
+   * Records the latest refund adjustment. Keyed on the Paddle subscription id,
+   * and a no-op for an adjustment on a subscription we do not know.
+   *
+   * Last write wins: `adjustment.updated` carries the approval outcome for the
+   * same adjustment, so overwriting is the point.
+   */
+  async recordRefund(
+    paddleSubscriptionId: string,
+    refund: { status: string; total?: string | null; at?: Date | null },
+  ): Promise<void> {
+    await this.db
+      .update(subscriptions)
+      .set({
+        refundStatus: refund.status,
+        refundTotal: refund.total ?? null,
+        refundAt: refund.at ?? new Date(),
         updatedAt: new Date(),
       })
       .where(eq(subscriptions.paddleSubscriptionId, paddleSubscriptionId));
