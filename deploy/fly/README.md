@@ -28,8 +28,15 @@ the **same image**.
 ## Deploy
 
 ```bash
-fly deploy --config deploy/fly/fly.toml
+fly deploy --config deploy/fly/fly.toml --build-arg GIT_COMMIT="$(git rev-parse HEAD)"
 ```
+
+**Pass `GIT_COMMIT`.** It is what `/health` and `/diagnostics` report as `commit`,
+and it is how you tie an incident to a build. The Dockerfile defaults it to `dev`
+so a self-host `docker compose up` needs no flags — which means a deploy without
+the flag silently leaves the running fleet unable to say which build it is.
+`fly.toml` cannot supply it (build args there are static, and this one has to be
+evaluated at deploy time), so it lives on the command line.
 
 Rolling deploy + graceful drain: on `SIGTERM` the bot stops new work, finishes
 in-flight per-guild queues, releases its shard leases, and exits (see
