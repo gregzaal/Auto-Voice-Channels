@@ -21,6 +21,10 @@ export const subscriptionRowSchema = z.object({
   tier: z.enum(TIER_IDS),
   status: z.string(),
   currentPeriodEnd: z.date().nullable(),
+  /** Actually-charged total (minor units, tax-inclusive). See schema.ts. */
+  chargedTotal: z.string().nullish(),
+  chargedTax: z.string().nullish(),
+  chargedCurrency: z.string().nullish(),
   /** Pending Paddle change: 'cancel' | 'pause' | 'resume'. Null = renewing normally. */
   scheduledChangeAction: z.string().nullish(),
   scheduledChangeAt: z.date().nullish(),
@@ -116,6 +120,29 @@ export class SubscriptionRepository {
       .from(subscriptions)
       .where(eq(subscriptions.purchaserUserId, purchaserUserId));
     return rows.map((row) => subscriptionRowSchema.parse(row));
+  }
+
+  /**
+   * Records what a customer was actually charged, from `transaction.completed`.
+   *
+   * Separate from `upsert` because the subscription events cannot carry it: the
+   * item only ever reports the baseline `unit_price`, so the regional discount
+   * is invisible until a transaction settles. Keyed on the Paddle subscription
+   * id, and a no-op for a transaction we have no subscription for.
+   */
+  async recordChargedTotals(
+    paddleSubscriptionId: string,
+    totals: { total: string; tax?: string | null; currency?: string | null },
+  ): Promise<void> {
+    await this.db
+      .update(subscriptions)
+      .set({
+        chargedTotal: totals.total,
+        chargedTax: totals.tax ?? null,
+        chargedCurrency: totals.currency ?? null,
+        updatedAt: new Date(),
+      })
+      .where(eq(subscriptions.paddleSubscriptionId, paddleSubscriptionId));
   }
 
   async getByGuild(guildId: string): Promise<SubscriptionRow | undefined> {

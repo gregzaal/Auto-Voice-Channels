@@ -92,6 +92,13 @@
       "when": 1786543440651,
       "tag": "0012_marvelous_terrax",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1786548542858,
+      "tag": "0013_mixed_gauntlet",
+      "breakpoints": true
     }
   ]
 }

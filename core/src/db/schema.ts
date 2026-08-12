@@ -248,9 +248,28 @@ export const subscriptions = pgTable('subscriptions', {
   scheduledChangeAction: text('scheduled_change_action'),
   /** When that scheduled change takes effect. */
   scheduledChangeAt: timestamp('scheduled_change_at', { withTimezone: true }),
-  /** Unit price as reported by Paddle (minor units string, e.g. '1900'). */
+  /**
+   * The **list** unit price from the subscription item (minor units, e.g.
+   * '5900'). NOT what the customer pays: regional bands are applied per
+   * country via `unit_price_overrides`, and the subscription event only ever
+   * carries the baseline. A band-B customer on the M tier has `price = 5900`
+   * here and is charged 3900.
+   */
   price: text('price'),
   currency: text('currency'),
+  /**
+   * What the customer was actually charged, from `transaction.completed`
+   * (minor units, tax-inclusive). Null until the first transaction lands, and
+   * for subscriptions created before this column existed.
+   *
+   * The subscription event genuinely cannot supply this, so it has to come
+   * from the transaction. Without it, every report and support answer for a
+   * discounted region is wrong by the size of the discount.
+   */
+  chargedTotal: text('charged_total'),
+  /** Tax included within `chargedTotal` (prices are tax-inclusive). */
+  chargedTax: text('charged_tax'),
+  chargedCurrency: text('charged_currency'),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });
