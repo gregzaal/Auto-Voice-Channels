@@ -134,10 +134,10 @@ async function main(): Promise<void> {
     shardIds: leaseManager.ownedShards,
     buildIdentifyThrottler: () => identifyThrottler,
   });
-  const autoChannels = new AutoChannelRepository(db);
-  const secondaries = new SecondaryChannelRepository(db);
-  const managed = new ManagedChannelRepository(db);
-  const joinChannelsRepo = new JoinChannelRepository(db);
+  const autoChannels = new AutoChannelRepository(db, config.fleet);
+  const secondaries = new SecondaryChannelRepository(db, config.fleet);
+  const managed = new ManagedChannelRepository(db, config.fleet);
+  const joinChannelsRepo = new JoinChannelRepository(db, config.fleet);
   const guildsRepo = new GuildRepository(db);
   const flags = new RuntimeFlagsRepository(db, config.fleet);
   const actions = new DiscordVoiceActions(client, logger);

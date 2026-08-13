@@ -1,6 +1,8 @@
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
+import type { SQL } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
+import { DEFAULT_FLEET, type Fleet } from '../domain/fleets.js';
 import { managedChannels } from '../db/schema.js';
 
 /**
@@ -58,7 +60,23 @@ export interface CreateManagedInput {
  * only removed when un-adopted or when the Discord channel vanishes.
  */
 export class ManagedChannelRepository {
-  constructor(private readonly db: Database) {}
+  constructor(
+    private readonly db: Database,
+    private readonly fleet: Fleet = DEFAULT_FLEET,
+  ) {}
+
+  /**
+   * ANDs this repository's fleet onto a predicate.
+   *
+   * Every read goes through it, including lookups by channel id, which look
+   * safe because a snowflake is globally unique and are not: two fleets can
+   * share a guild, and an unscoped `get(channelId)` would hand one fleet the
+   * other's row, after which it would happily rename or delete a channel it
+   * does not own (`plans/fleets.md` §2).
+   */
+  private scoped(...conditions: (SQL | undefined)[]) {
+    return and(eq(managedChannels.fleet, this.fleet), ...conditions);
+  }
 
   /** Adopts a channel (or no-ops if already adopted, leaving its config intact). */
   async create(input: CreateManagedInput): Promise<ManagedChannelRow> {
@@ -67,6 +85,7 @@ export class ManagedChannelRepository {
       .values({
         channelId: input.channelId,
         guildId: input.guildId,
+        fleet: this.fleet,
         ownerId: input.ownerId ?? null,
         template: input.template ?? {},
         state: input.state ?? {},
@@ -83,7 +102,7 @@ export class ManagedChannelRepository {
     const [row] = await this.db
       .select()
       .from(managedChannels)
-      .where(eq(managedChannels.channelId, channelId))
+      .where(this.scoped(eq(managedChannels.channelId, channelId)))
       .limit(1);
     return row ? managedChannelRowSchema.parse(row) : undefined;
   }
@@ -93,7 +112,11 @@ export class ManagedChannelRepository {
     const [row] = await this.db
       .select({ channelId: managedChannels.channelId })
       .from(managedChannels)
-      .where(and(eq(managedChannels.guildId, guildId), eq(managedChannels.channelId, channelId)))
+      .where(
+        this.scoped(
+          and(eq(managedChannels.guildId, guildId), eq(managedChannels.channelId, channelId)),
+        ),
+      )
       .limit(1);
     return row !== undefined;
   }
@@ -102,7 +125,7 @@ export class ManagedChannelRepository {
     const rows = await this.db
       .select()
       .from(managedChannels)
-      .where(eq(managedChannels.guildId, guildId));
+      .where(this.scoped(eq(managedChannels.guildId, guildId)));
     return rows.map((r) => managedChannelRowSchema.parse(r));
   }
 
@@ -110,7 +133,8 @@ export class ManagedChannelRepository {
   async listGuildIds(): Promise<string[]> {
     const rows = await this.db
       .selectDistinct({ guildId: managedChannels.guildId })
-      .from(managedChannels);
+      .from(managedChannels)
+      .where(this.scoped());
     return rows.map((r) => r.guildId);
   }
 
@@ -118,14 +142,14 @@ export class ManagedChannelRepository {
     await this.db
       .update(managedChannels)
       .set({ template, updatedAt: new Date() })
-      .where(eq(managedChannels.channelId, channelId));
+      .where(this.scoped(eq(managedChannels.channelId, channelId)));
   }
 
   async updateState(channelId: string, state: ManagedState): Promise<void> {
     await this.db
       .update(managedChannels)
       .set({ state, updatedAt: new Date() })
-      .where(eq(managedChannels.channelId, channelId));
+      .where(this.scoped(eq(managedChannels.channelId, channelId)));
   }
 
   /** Reassigns the occupant-owner (or clears it with `null` when the channel empties). */
@@ -133,11 +157,13 @@ export class ManagedChannelRepository {
     await this.db
       .update(managedChannels)
       .set({ ownerId, updatedAt: new Date() })
-      .where(eq(managedChannels.channelId, channelId));
+      .where(this.scoped(eq(managedChannels.channelId, channelId)));
   }
 
   /** Stops managing a channel (un-adopt). Idempotent. */
   async remove(channelId: string): Promise<void> {
-    await this.db.delete(managedChannels).where(eq(managedChannels.channelId, channelId));
+    await this.db
+      .delete(managedChannels)
+      .where(this.scoped(eq(managedChannels.channelId, channelId)));
   }
 }

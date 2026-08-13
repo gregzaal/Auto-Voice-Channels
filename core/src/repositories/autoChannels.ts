@@ -1,6 +1,8 @@
 import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
+import type { SQL } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
+import { DEFAULT_FLEET, type Fleet } from '../domain/fleets.js';
 import { autoChannels } from '../db/schema.js';
 
 /**
@@ -45,7 +47,23 @@ export type AutoChannelRow = z.infer<typeof autoChannelRowSchema>;
 
 /** Repository for primary / creator ("auto") channels. */
 export class AutoChannelRepository {
-  constructor(private readonly db: Database) {}
+  constructor(
+    private readonly db: Database,
+    private readonly fleet: Fleet = DEFAULT_FLEET,
+  ) {}
+
+  /**
+   * ANDs this repository's fleet onto a predicate.
+   *
+   * Every read goes through it, including lookups by channel id, which look
+   * safe because a snowflake is globally unique and are not: two fleets can
+   * share a guild, and an unscoped `get(channelId)` would hand one fleet the
+   * other's row, after which it would happily rename or delete a channel it
+   * does not own (`plans/fleets.md` §2).
+   */
+  private scoped(...conditions: (SQL | undefined)[]) {
+    return and(eq(autoChannels.fleet, this.fleet), ...conditions);
+  }
 
   /** Registers (or updates) a primary channel for a guild. Idempotent. */
   async upsert(
@@ -55,12 +73,27 @@ export class AutoChannelRepository {
   ): Promise<AutoChannelRow> {
     const [row] = await this.db
       .insert(autoChannels)
-      .values({ channelId, guildId, template })
+      .values({ channelId, guildId, fleet: this.fleet, template })
       .onConflictDoUpdate({
         target: autoChannels.channelId,
         set: { template, updatedAt: new Date() },
+        /**
+         * A channel id is globally unique, so the conflict target stays the
+         * primary key. But the row it conflicts with may belong to the OTHER
+         * fleet, and without this guard the update would silently rewrite that
+         * fleet's template. Gating makes this practically unreachable, which is
+         * exactly why it should fail loudly rather than corrupt quietly if the
+         * gate ever fails: no row comes back, and the caller below throws.
+         */
+        setWhere: eq(autoChannels.fleet, this.fleet),
       })
       .returning();
+    // Only reachable when the guard above declined: the channel is already a
+    // creator channel of the other fleet. Say so, rather than letting a zod
+    // parse failure on `undefined` describe it as a schema problem.
+    if (!row) {
+      throw new Error(`auto channel ${channelId} belongs to another fleet`);
+    }
     return autoChannelRowSchema.parse(row);
   }
 
@@ -68,7 +101,7 @@ export class AutoChannelRepository {
     const [row] = await this.db
       .select()
       .from(autoChannels)
-      .where(eq(autoChannels.channelId, channelId))
+      .where(this.scoped(eq(autoChannels.channelId, channelId)))
       .limit(1);
     return row ? autoChannelRowSchema.parse(row) : undefined;
   }
@@ -78,23 +111,31 @@ export class AutoChannelRepository {
     const [row] = await this.db
       .select({ channelId: autoChannels.channelId })
       .from(autoChannels)
-      .where(and(eq(autoChannels.guildId, guildId), eq(autoChannels.channelId, channelId)))
+      .where(
+        this.scoped(and(eq(autoChannels.guildId, guildId), eq(autoChannels.channelId, channelId))),
+      )
       .limit(1);
     return row !== undefined;
   }
 
   async listByGuild(guildId: string): Promise<AutoChannelRow[]> {
-    const rows = await this.db.select().from(autoChannels).where(eq(autoChannels.guildId, guildId));
+    const rows = await this.db
+      .select()
+      .from(autoChannels)
+      .where(this.scoped(eq(autoChannels.guildId, guildId)));
     return rows.map((r) => autoChannelRowSchema.parse(r));
   }
 
   async remove(channelId: string): Promise<void> {
-    await this.db.delete(autoChannels).where(eq(autoChannels.channelId, channelId));
+    await this.db.delete(autoChannels).where(this.scoped(eq(autoChannels.channelId, channelId)));
   }
 
   /** Distinct guild ids that have at least one registered primary. */
   async listGuildIds(): Promise<string[]> {
-    const rows = await this.db.selectDistinct({ guildId: autoChannels.guildId }).from(autoChannels);
+    const rows = await this.db
+      .selectDistinct({ guildId: autoChannels.guildId })
+      .from(autoChannels)
+      .where(this.scoped());
     return rows.map((r) => r.guildId);
   }
 
@@ -103,7 +144,7 @@ export class AutoChannelRepository {
     const [row] = await this.db
       .select({ n: sql<number>`count(*)::int` })
       .from(autoChannels)
-      .where(eq(autoChannels.guildId, guildId));
+      .where(this.scoped(eq(autoChannels.guildId, guildId)));
     return row?.n ?? 0;
   }
 }

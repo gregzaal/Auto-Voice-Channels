@@ -1,6 +1,8 @@
 import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
+import type { SQL } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
+import { DEFAULT_FLEET, type Fleet } from '../domain/fleets.js';
 import { secondaryChannels } from '../db/schema.js';
 
 export const secondaryStateSchema = z.object({
@@ -65,7 +67,23 @@ export interface CreateSecondaryInput {
  * reconciliation. All operations are idempotent so events can be safely replayed.
  */
 export class SecondaryChannelRepository {
-  constructor(private readonly db: Database) {}
+  constructor(
+    private readonly db: Database,
+    private readonly fleet: Fleet = DEFAULT_FLEET,
+  ) {}
+
+  /**
+   * ANDs this repository's fleet onto a predicate.
+   *
+   * Every read goes through it, including lookups by channel id, which look
+   * safe because a snowflake is globally unique and are not: two fleets can
+   * share a guild, and an unscoped `get(channelId)` would hand one fleet the
+   * other's row, after which it would happily rename or delete a channel it
+   * does not own (`plans/fleets.md` §2).
+   */
+  private scoped(...conditions: (SQL | undefined)[]) {
+    return and(eq(secondaryChannels.fleet, this.fleet), ...conditions);
+  }
 
   /**
    * Records a new secondary. Create-once: idempotent on the channel id, and on
@@ -79,6 +97,7 @@ export class SecondaryChannelRepository {
       .values({
         channelId: input.channelId,
         guildId: input.guildId,
+        fleet: this.fleet,
         primaryChannelId: input.primaryChannelId,
         ownerId: input.ownerId ?? null,
         // The creator is the first owner unless a specific one is given.
@@ -98,7 +117,7 @@ export class SecondaryChannelRepository {
     const [row] = await this.db
       .select()
       .from(secondaryChannels)
-      .where(eq(secondaryChannels.channelId, channelId))
+      .where(this.scoped(eq(secondaryChannels.channelId, channelId)))
       .limit(1);
     return row ? secondaryChannelRowSchema.parse(row) : undefined;
   }
@@ -108,7 +127,9 @@ export class SecondaryChannelRepository {
       .select({ channelId: secondaryChannels.channelId })
       .from(secondaryChannels)
       .where(
-        and(eq(secondaryChannels.guildId, guildId), eq(secondaryChannels.channelId, channelId)),
+        this.scoped(
+          and(eq(secondaryChannels.guildId, guildId), eq(secondaryChannels.channelId, channelId)),
+        ),
       )
       .limit(1);
     return row !== undefined;
@@ -118,7 +139,7 @@ export class SecondaryChannelRepository {
     const rows = await this.db
       .select()
       .from(secondaryChannels)
-      .where(eq(secondaryChannels.guildId, guildId));
+      .where(this.scoped(eq(secondaryChannels.guildId, guildId)));
     return rows.map((r) => secondaryChannelRowSchema.parse(r));
   }
 
@@ -126,7 +147,7 @@ export class SecondaryChannelRepository {
     const rows = await this.db
       .select()
       .from(secondaryChannels)
-      .where(eq(secondaryChannels.primaryChannelId, primaryChannelId));
+      .where(this.scoped(eq(secondaryChannels.primaryChannelId, primaryChannelId)));
     return rows.map((r) => secondaryChannelRowSchema.parse(r));
   }
 
@@ -135,7 +156,11 @@ export class SecondaryChannelRepository {
     const rows = await this.db
       .select()
       .from(secondaryChannels)
-      .where(and(eq(secondaryChannels.guildId, guildId), eq(secondaryChannels.ownerId, ownerId)));
+      .where(
+        this.scoped(
+          and(eq(secondaryChannels.guildId, guildId), eq(secondaryChannels.ownerId, ownerId)),
+        ),
+      );
     return rows.map((r) => secondaryChannelRowSchema.parse(r));
   }
 
@@ -143,7 +168,8 @@ export class SecondaryChannelRepository {
   async listGuildIds(): Promise<string[]> {
     const rows = await this.db
       .selectDistinct({ guildId: secondaryChannels.guildId })
-      .from(secondaryChannels);
+      .from(secondaryChannels)
+      .where(this.scoped());
     return rows.map((r) => r.guildId);
   }
 
@@ -152,20 +178,22 @@ export class SecondaryChannelRepository {
     const [row] = await this.db
       .select({ n: sql<number>`count(*)::int` })
       .from(secondaryChannels)
-      .where(eq(secondaryChannels.primaryChannelId, primaryChannelId));
+      .where(this.scoped(eq(secondaryChannels.primaryChannelId, primaryChannelId)));
     return row?.n ?? 0;
   }
 
   /** Removes a secondary record. Idempotent (no error if already gone). */
   async remove(channelId: string): Promise<void> {
-    await this.db.delete(secondaryChannels).where(eq(secondaryChannels.channelId, channelId));
+    await this.db
+      .delete(secondaryChannels)
+      .where(this.scoped(eq(secondaryChannels.channelId, channelId)));
   }
 
   async updateState(channelId: string, state: SecondaryState): Promise<void> {
     await this.db
       .update(secondaryChannels)
       .set({ state, updatedAt: new Date() })
-      .where(eq(secondaryChannels.channelId, channelId));
+      .where(this.scoped(eq(secondaryChannels.channelId, channelId)));
   }
 
   /**
@@ -177,7 +205,7 @@ export class SecondaryChannelRepository {
     await this.db
       .update(secondaryChannels)
       .set({ ownerId, updatedAt: new Date() })
-      .where(eq(secondaryChannels.channelId, channelId));
+      .where(this.scoped(eq(secondaryChannels.channelId, channelId)));
   }
 
   /**
@@ -189,6 +217,6 @@ export class SecondaryChannelRepository {
     await this.db
       .update(secondaryChannels)
       .set({ ownerId: memberId, originalCreator: memberId, updatedAt: new Date() })
-      .where(eq(secondaryChannels.channelId, channelId));
+      .where(this.scoped(eq(secondaryChannels.channelId, channelId)));
   }
 }
