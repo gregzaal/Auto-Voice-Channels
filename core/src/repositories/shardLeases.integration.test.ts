@@ -42,6 +42,54 @@ describe('ShardLeaseRepository (integration)', () => {
     expect(stolen).toEqual([]); // A's leases are fresh
   });
 
+  /**
+   * `plans/fleets.md` §2: two live bots shard independently against one
+   * database, so shard 0 exists once per fleet. Before the fleet column this was
+   * impossible by construction, and getting it wrong in either direction is
+   * severe: shared, and beta starves prod of shards; unscoped reads, and an
+   * instance drops shards it still owns because a peer's rows are invisible.
+   */
+  describe('fleet isolation', () => {
+    it('lets each fleet hold the same shard id at once', async () => {
+      const beta = new ShardLeaseRepository(env.handle.db, 'beta');
+      expect(await repo.claimAvailable('prod-A', 2, 30_000)).toEqual([0, 1]);
+      // The same shard ids, from a fleet that cannot see prod's leases at all.
+      expect(await beta.claimAvailable('beta-A', 2, 30_000)).toEqual([0, 1]);
+    });
+
+    it('never returns another fleet’s leases', async () => {
+      const beta = new ShardLeaseRepository(env.handle.db, 'beta');
+      await repo.claimAvailable('prod-A', 2, 30_000);
+      await beta.claimAvailable('beta-A', 2, 30_000);
+
+      expect((await repo.list()).every((l) => l.fleet === 'prod')).toBe(true);
+      expect((await beta.list()).every((l) => l.fleet === 'beta')).toBe(true);
+      expect(await repo.heartbeat('beta-A')).toEqual([]);
+      expect(await beta.heartbeat('prod-A')).toEqual([]);
+    });
+
+    it('releases only within its own fleet', async () => {
+      const beta = new ShardLeaseRepository(env.handle.db, 'beta');
+      await repo.claimAvailable('shared-name', 2, 30_000);
+      await beta.claimAvailable('shared-name', 2, 30_000);
+
+      // Same instance id in both fleets: a cross-fleet release would strand the
+      // other fleet's shards with no running owner and no lease-loss signal.
+      expect(await beta.releaseAll('shared-name')).toBe(2);
+      expect(await repo.heartbeat('shared-name')).toEqual([0, 1]);
+    });
+
+    it('throttles identifies per fleet, since max_concurrency is per application', async () => {
+      const beta = new ShardLeaseRepository(env.handle.db, 'beta');
+      expect((await repo.reserveIdentify(0, 5_000)).ok).toBe(true);
+      // Prod just identified on bucket 0; beta is a different application and
+      // must not be made to wait for it.
+      expect((await beta.reserveIdentify(0, 5_000)).ok).toBe(true);
+      // ...but prod is still spaced against its own previous identify.
+      expect((await repo.reserveIdentify(0, 5_000)).ok).toBe(false);
+    });
+  });
+
   it('an expired lease is re-claimable by another instance', async () => {
     // A claims shard 0 normally.
     const a = await repo.claim(0, 'inst-A', 1, 30_000);

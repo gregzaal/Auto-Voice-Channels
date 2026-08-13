@@ -4,6 +4,7 @@ export * from './domain/auth.js';
 export * from './domain/tiers.js';
 export * from './domain/billing.js';
 export * from './domain/leniency.js';
+export * from './domain/fleets.js';
 export * from './domain/runtimeFlags.js';
 export * from './domain/settingsCache.js';
 export * from './repositories/guilds.js';

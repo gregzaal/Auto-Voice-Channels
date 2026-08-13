@@ -19,8 +19,9 @@ describe('loadConfig', () => {
   });
 
   it('parses booleanish SELF_HOSTED values', () => {
-    // Hosted (SELF_HOSTED=false) additionally requires a diagnostics token.
-    const hosted = { ...baseEnv, DIAGNOSTICS_TOKEN: 'x'.repeat(32) };
+    // Hosted (SELF_HOSTED=false) additionally requires a diagnostics token
+    // and an explicit fleet.
+    const hosted = { ...baseEnv, DIAGNOSTICS_TOKEN: 'x'.repeat(32), FLEET: 'prod' };
     expect(loadConfig({ ...baseEnv, SELF_HOSTED: 'true' }).selfHosted).toBe(true);
     expect(loadConfig({ ...baseEnv, SELF_HOSTED: '1' }).selfHosted).toBe(true);
     expect(loadConfig({ ...baseEnv, SELF_HOSTED: 'yes' }).selfHosted).toBe(true);
@@ -44,14 +45,15 @@ describe('loadConfig', () => {
 
     it('rejects a token short enough to guess', () => {
       expect(() =>
-        loadConfig({ ...baseEnv, SELF_HOSTED: 'false', DIAGNOSTICS_TOKEN: 'short' }),
+        loadConfig({ ...baseEnv, SELF_HOSTED: 'false', FLEET: 'prod', DIAGNOSTICS_TOKEN: 'short' }),
       ).toThrow();
     });
 
     it('accepts a long token on either deployment', () => {
       const token = 'y'.repeat(40);
       expect(
-        loadConfig({ ...baseEnv, SELF_HOSTED: 'false', DIAGNOSTICS_TOKEN: token }).diagnosticsToken,
+        loadConfig({ ...baseEnv, SELF_HOSTED: 'false', FLEET: 'prod', DIAGNOSTICS_TOKEN: token })
+          .diagnosticsToken,
       ).toBe(token);
       expect(
         loadConfig({ ...baseEnv, SELF_HOSTED: 'true', DIAGNOSTICS_TOKEN: token }).diagnosticsToken,
@@ -116,5 +118,39 @@ describe('loadConfig', () => {
 
   it('rejects non-positive shard counts', () => {
     expect(() => loadConfig({ ...baseEnv, TOTAL_SHARDS: '0' })).toThrow(ConfigError);
+  });
+});
+
+/**
+ * Same fail-fast reasoning as the diagnostics token, different blast radius: a
+ * hosted instance that silently defaulted to `prod` would let the beta bot claim
+ * production's shard leases and read production's runtime flags. Wrong rows,
+ * written plausibly, which is far harder to notice than a refused boot.
+ */
+describe('fleet', () => {
+  const hostedBase = {
+    DISCORD_TOKEN: 'token',
+    CLIENT_ID: 'client',
+    DATABASE_URL: 'postgres://localhost/avc',
+    SELF_HOSTED: 'false',
+    DIAGNOSTICS_TOKEN: 'z'.repeat(32),
+  };
+
+  it('is required when SELF_HOSTED=false', () => {
+    expect(() => loadConfig(hostedBase)).toThrow(/FLEET is required/);
+  });
+
+  it('accepts each known fleet when hosted', () => {
+    expect(loadConfig({ ...hostedBase, FLEET: 'prod' }).fleet).toBe('prod');
+    expect(loadConfig({ ...hostedBase, FLEET: 'beta' }).fleet).toBe('beta');
+  });
+
+  it('rejects an unknown fleet', () => {
+    expect(() => loadConfig({ ...hostedBase, FLEET: 'staging' })).toThrow(ConfigError);
+  });
+
+  /** Self-host is the only fleet in its own database, so it never configures one. */
+  it('defaults to prod on a self-host, with no configuration', () => {
+    expect(loadConfig({ ...hostedBase, SELF_HOSTED: 'true', FLEET: undefined }).fleet).toBe('prod');
   });
 });

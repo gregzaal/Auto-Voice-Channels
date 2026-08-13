@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { DEFAULT_FLEET, FLEETS } from './domain/fleets.js';
 
 /**
  * Application configuration, validated with zod at startup. The process should
@@ -39,6 +40,24 @@ export const configSchema = z
      * trade-off in favour of self-hosters, who are the common case.
      */
     selfHosted: booleanish.default(true),
+
+    /**
+     * Which hosted fleet this process belongs to (`plans/fleets.md`).
+     *
+     * Two live bots share one database: `prod` and `beta`. Everything about the
+     * customer is shared between them (entitlement, subscriptions, settings);
+     * everything about a bot's own operation is scoped by this value — shard
+     * leases, identify buckets, runtime flags, the channels it manages, and the
+     * advisory-lock keys it coordinates on.
+     *
+     * Self-host is always `prod` and never notices any of this: it is the only
+     * fleet in its own database, so the scoping is a no-op there.
+     *
+     * Optional here rather than `.default()` so the refinement below can tell an
+     * unset FLEET from an explicit `FLEET=prod`. The default is applied after
+     * validation, so callers still see a concrete {@link Fleet}.
+     */
+    fleet: z.enum(FLEETS).optional(),
 
     /** Total shard count across all instances. A managed config value. */
     totalShards: z.coerce.number().int().positive().default(1),
@@ -123,7 +142,28 @@ export const configSchema = z
           'Generate one with `openssl rand -hex 32` and set it as a Fly secret.',
       });
     }
-  });
+
+    /**
+     * Same fail-fast reasoning, different blast radius. `fleet` defaults to
+     * `prod` so self-host needs no config, but on the hosted side an unset FLEET
+     * means the beta bot would quietly claim prod's shard leases and read prod's
+     * runtime flags — writing plausible rows into the wrong fleet, which is far
+     * harder to notice and to unpick than a boot failure.
+     */
+    if (!cfg.selfHosted && cfg.fleet === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['fleet'],
+        message:
+          `FLEET is required when SELF_HOSTED=false (one of: ${FLEETS.join(', ')}). ` +
+          'Defaulting a hosted instance to prod would let the beta fleet claim ' +
+          "production's shard leases and runtime flags.",
+      });
+    }
+  })
+  // Applied after validation so the refinement above could distinguish an unset
+  // FLEET from an explicit one. Self-host gets `prod` and never thinks about it.
+  .transform((cfg) => ({ ...cfg, fleet: cfg.fleet ?? DEFAULT_FLEET }));
 
 export type Config = z.infer<typeof configSchema>;
 
@@ -144,6 +184,7 @@ function envToInput(env: NodeJS.ProcessEnv): Record<string, unknown> {
     devGuildId: env.DEV_GUILD_ID,
     databaseUrl: env.DATABASE_URL,
     selfHosted: env.SELF_HOSTED,
+    fleet: env.FLEET,
     totalShards: env.TOTAL_SHARDS,
     expectedInstances: env.EXPECTED_INSTANCES,
     // Prefer an explicit INSTANCE_ID; on Fly fall back to the per-machine

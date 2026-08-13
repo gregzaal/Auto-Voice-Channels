@@ -92,7 +92,7 @@ async function main(): Promise<void> {
     throw err;
   }
 
-  const leaseRepo = new ShardLeaseRepository(db);
+  const leaseRepo = new ShardLeaseRepository(db, config.fleet);
   // Populated once the shutdown handler is installed; lets the lease-loss reaction
   // reuse the graceful-drain path. Until then a lease-loss falls back to exit(1).
   const shutdown: { request?: (reason: string, exitCode: number) => void } = {};
@@ -139,7 +139,7 @@ async function main(): Promise<void> {
   const managed = new ManagedChannelRepository(db);
   const joinChannelsRepo = new JoinChannelRepository(db);
   const guildsRepo = new GuildRepository(db);
-  const flags = new RuntimeFlagsRepository(db);
+  const flags = new RuntimeFlagsRepository(db, config.fleet);
   const actions = new DiscordVoiceActions(client, logger);
   const voice = new DiscordVoiceView(client);
   // Significant errors are reported to the admin channel when configured; a seam

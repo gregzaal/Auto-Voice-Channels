@@ -19,6 +19,19 @@ import {
 const AUTH_STATUSES = ['trial', 'active', 'grace', 'expired', 'blocked'] as const;
 
 /**
+ * Hosted fleets, inlined for the same reason as {@link AUTH_STATUSES}. MUST stay
+ * in sync with `FLEETS` in `domain/fleets.ts`; `schema.unit.test.ts` asserts it.
+ *
+ * Every fleet-scoped column below defaults to `'prod'`, which is what makes this
+ * migration additive: rows written before fleets existed, and every row a
+ * self-host will ever write, are production rows.
+ */
+const FLEETS = ['prod', 'beta'] as const;
+
+/** A fleet-scoping column. See `plans/fleets.md` §2 for what gets one and why. */
+const fleet = () => text('fleet', { enum: FLEETS }).notNull().default('prod');
+
+/**
  * Drizzle schema. Postgres is the source of truth.
  *
  * Conventions:
@@ -99,6 +112,37 @@ export const guilds = pgTable('guilds', {
   updatedAt: updatedAt(),
 });
 
+/**
+ * Which fleets are present in a guild, and since when (`plans/fleets.md` §6.1).
+ *
+ * `guilds.bot_removed_at` is a per-fleet fact wearing a shared column: with two
+ * live bots, "the bot was removed" has to name which one. This table answers it,
+ * and answers a question the column never could — a guild can be running beta
+ * with prod absent, which is a healthy state, not a missing bot.
+ *
+ * **Read presence across ALL fleets before telling a customer anything.** The
+ * dashboard's question is "is any fleet here"; only the badge cares which. Asking
+ * per fleet is how you tell a subscribed customer happily using beta that they
+ * are paying for a server AVC is not in.
+ */
+export const guildFleetPresence = pgTable(
+  'guild_fleet_presence',
+  {
+    guildId: text('guild_id').notNull(),
+    fleet: fleet(),
+    /** First time this fleet saw the guild. Never updated after insert. */
+    firstSeenAt: createdAt(),
+    /** When this fleet was removed (null = present). Cleared on re-add. */
+    removedAt: timestamp('removed_at', { withTimezone: true }),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.guildId, t.fleet] }),
+    // "which guilds is this fleet in", for reconcile and the operator console.
+    index('guild_fleet_presence_fleet_idx').on(t.fleet, t.removedAt),
+  ],
+);
+
 /** Append-only audit log of guild auth-state transitions. */
 export const guildAuthEvents = pgTable(
   'guild_auth_events',
@@ -121,6 +165,7 @@ export const autoChannels = pgTable(
   {
     channelId: text('channel_id').primaryKey(),
     guildId: text('guild_id').notNull(),
+    fleet: fleet(),
     /** Template config for spawned secondaries (name template, limits, etc.). */
     template: jsonb('template')
       .notNull()
@@ -128,7 +173,7 @@ export const autoChannels = pgTable(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [index('auto_channels_guild_idx').on(t.guildId)],
+  (t) => [index('auto_channels_guild_idx').on(t.fleet, t.guildId)],
 );
 
 /** Bot-managed temporary voice channels, tracked for reconciliation. */
@@ -137,6 +182,7 @@ export const secondaryChannels = pgTable(
   {
     channelId: text('channel_id').primaryKey(),
     guildId: text('guild_id').notNull(),
+    fleet: fleet(),
     /** The primary/auto channel that spawned this secondary. */
     primaryChannelId: text('primary_channel_id').notNull(),
     /** Current owner (the member who controls this channel). */
@@ -157,7 +203,7 @@ export const secondaryChannels = pgTable(
     updatedAt: updatedAt(),
   },
   (t) => [
-    index('secondary_channels_guild_idx').on(t.guildId),
+    index('secondary_channels_guild_idx').on(t.fleet, t.guildId),
     index('secondary_channels_primary_idx').on(t.primaryChannelId),
   ],
 );
@@ -174,6 +220,7 @@ export const managedChannels = pgTable(
   {
     channelId: text('channel_id').primaryKey(),
     guildId: text('guild_id').notNull(),
+    fleet: fleet(),
     /** Current occupant-owner (longest-present), for `@@creator@@`. Null when empty. */
     ownerId: text('owner_id'),
     /** Name/status templates configured for this channel (the `/template` editor). */
@@ -187,7 +234,7 @@ export const managedChannels = pgTable(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [index('managed_channels_guild_idx').on(t.guildId)],
+  (t) => [index('managed_channels_guild_idx').on(t.fleet, t.guildId)],
 );
 
 /**
@@ -200,6 +247,7 @@ export const joinChannels = pgTable(
   {
     channelId: text('channel_id').primaryKey(),
     guildId: text('guild_id').notNull(),
+    fleet: fleet(),
     /** The private secondary this join channel fronts (and where requests are posted). */
     secondaryChannelId: text('secondary_channel_id').notNull(),
     /** The private channel's owner, who approves/denies requests. */
@@ -482,7 +530,12 @@ export const verificationTokens = pgTable(
 export const shardLeases = pgTable(
   'shard_leases',
   {
-    shardId: integer('shard_id').primaryKey(),
+    /**
+     * Fleet-scoped: two fleets shard independently and would otherwise fight
+     * over shard 0. Part of the primary key, not just a column.
+     */
+    fleet: fleet(),
+    shardId: integer('shard_id').notNull(),
     /** Total shard count this lease was claimed under. */
     totalShards: integer('total_shards').notNull(),
     /** The instance currently holding the lease (null = unclaimed). */
@@ -492,7 +545,10 @@ export const shardLeases = pgTable(
     claimedAt: timestamp('claimed_at', { withTimezone: true }),
     updatedAt: updatedAt(),
   },
-  (t) => [index('shard_leases_instance_idx').on(t.instanceId)],
+  (t) => [
+    primaryKey({ columns: [t.fleet, t.shardId] }),
+    index('shard_leases_instance_idx').on(t.instanceId),
+  ],
 );
 
 /**
@@ -501,11 +557,21 @@ export const shardLeases = pgTable(
  * row records the last identify time per bucket so the identify throttler can
  * serialize them cluster-wide (checked under the identify advisory lock).
  */
-export const identifyBuckets = pgTable('identify_buckets', {
-  bucket: integer('bucket').primaryKey(),
-  lastIdentifyAt: timestamp('last_identify_at', { withTimezone: true }),
-  updatedAt: updatedAt(),
-});
+export const identifyBuckets = pgTable(
+  'identify_buckets',
+  {
+    /**
+     * Fleet-scoped because Discord's `max_concurrency` is per APPLICATION. A
+     * shared bucket would make one fleet delay the other's identifies and
+     * compute the wrong spacing for both.
+     */
+    fleet: fleet(),
+    bucket: integer('bucket').notNull(),
+    lastIdentifyAt: timestamp('last_identify_at', { withTimezone: true }),
+    updatedAt: updatedAt(),
+  },
+  (t) => [primaryKey({ columns: [t.fleet, t.bucket] })],
+);
 
 /**
  * Durable last-run bookkeeping for cluster-singleton background jobs (e.g. the
@@ -523,13 +589,19 @@ export const billingRuns = pgTable('billing_runs', {
 });
 
 /** DB-backed feature flags / kill-switches togglable without a deploy. */
-export const runtimeFlags = pgTable('runtime_flags', {
-  key: text('key').primaryKey(),
-  value: jsonb('value').notNull(),
-  description: text('description'),
-  updatedBy: text('updated_by'),
-  updatedAt: updatedAt(),
-});
+export const runtimeFlags = pgTable(
+  'runtime_flags',
+  {
+    /** Fleet-scoped: pausing beta must not pause production. */
+    fleet: fleet(),
+    key: text('key').notNull(),
+    value: jsonb('value').notNull(),
+    description: text('description'),
+    updatedBy: text('updated_by'),
+    updatedAt: updatedAt(),
+  },
+  (t) => [primaryKey({ columns: [t.fleet, t.key] })],
+);
 
 /** Append-only log of operational actions (flag changes, forced reconciles, blocks). */
 export const opsAudit = pgTable(
@@ -542,6 +614,12 @@ export const opsAudit = pgTable(
     action: text('action').notNull(),
     /** Optional target (e.g. a guild id or flag key). */
     target: text('target'),
+    /**
+     * Which fleet acted. NULLABLE on purpose: actions taken from the web
+     * console originate outside any fleet, and recording a fleet for them
+     * would be a lie rather than a default.
+     */
+    fleet: text('fleet', { enum: FLEETS }),
     /** Why, and any structured details. */
     details: jsonb('details')
       .notNull()

@@ -18,6 +18,13 @@ primary_region = "iad"
 
 [env]
   SELF_HOSTED = "false"
+  # Which hosted fleet this app is (plans/fleets.md). REQUIRED whenever
+  # SELF_HOSTED=false: the process refuses to boot without it, deliberately,
+  # because a hosted instance that silently defaulted to "prod" would let the
+  # beta bot claim production's shard leases and read production's runtime
+  # flags. The beta fleet's own app sets FLEET = "beta" and nothing else here
+  # changes.
+  FLEET = "prod"
   HTTP_PORT = "8080"
   LOG_LEVEL = "info"
   NODE_ENV = "production"

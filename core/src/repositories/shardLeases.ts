@@ -1,5 +1,6 @@
 import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
+import { DEFAULT_FLEET, fleetAdvisoryKey, type Fleet } from '../domain/fleets.js';
 import { identifyBuckets, shardLeases } from '../db/schema.js';
 
 export type ShardLease = typeof shardLeases.$inferSelect;
@@ -14,20 +15,38 @@ export const IDENTIFY_ADVISORY_LOCK = 0x5a7c_0001;
  * Coordination uses native Postgres primitives — advisory locks (to serialize
  * identifies and respect Discord `max_concurrency`) and atomic conditional
  * UPDATEs (so two instances never both claim the same shard).
+ *
+ * **Everything here is fleet-scoped** (`plans/fleets.md` §2). Two live bots
+ * shard independently, so shard 0 exists once per fleet and the two must never
+ * contend for it. The identify throttle is scoped for a sharper reason:
+ * Discord's `max_concurrency` is per APPLICATION, so a shared throttle would
+ * make one fleet delay the other's identifies while computing the wrong spacing
+ * for both.
+ *
+ * `fleet` defaults to `prod`, so self-host and every existing caller are
+ * unchanged — a self-host is the only fleet in its own database.
  */
 export class ShardLeaseRepository {
-  constructor(private readonly db: Database) {}
+  constructor(
+    private readonly db: Database,
+    private readonly fleet: Fleet = DEFAULT_FLEET,
+  ) {}
 
   /** Ensures lease rows exist for shards `0..totalShards-1` (idempotent). */
   async ensureRows(totalShards: number): Promise<void> {
     if (totalShards <= 0) return;
     const values = Array.from({ length: totalShards }, (_, shardId) => ({
+      fleet: this.fleet,
       shardId,
       totalShards,
     }));
-    await this.db.insert(shardLeases).values(values).onConflictDoNothing({
-      target: shardLeases.shardId,
-    });
+    await this.db
+      .insert(shardLeases)
+      .values(values)
+      .onConflictDoNothing({
+        // Composite: shard 0 is a different row per fleet.
+        target: [shardLeases.fleet, shardLeases.shardId],
+      });
   }
 
   /**
@@ -43,7 +62,14 @@ export class ShardLeaseRepository {
   ): Promise<ShardLease | undefined> {
     const cutoff = new Date(Date.now() - leaseTtlMs);
     const now = new Date();
-    // Take over only if unowned, owned by us, or the lease has expired.
+    /**
+     * Take over only if unowned, owned by us, or the lease has expired.
+     *
+     * Deliberately NOT scoped by fleet: the conflict target is
+     * `(fleet, shard_id)`, so the row this condition guards is already this
+     * fleet's row. Adding a fleet predicate here would make the disjunction
+     * always true and let any instance steal a live lease from a healthy peer.
+     */
     const takeover = or(
       isNull(shardLeases.instanceId),
       eq(shardLeases.instanceId, instanceId),
@@ -53,6 +79,7 @@ export class ShardLeaseRepository {
     const [row] = await this.db
       .insert(shardLeases)
       .values({
+        fleet: this.fleet,
         shardId,
         totalShards,
         instanceId,
@@ -60,7 +87,7 @@ export class ShardLeaseRepository {
         claimedAt: now,
       })
       .onConflictDoUpdate({
-        target: shardLeases.shardId,
+        target: [shardLeases.fleet, shardLeases.shardId],
         set: {
           instanceId,
           totalShards,
@@ -108,7 +135,7 @@ export class ShardLeaseRepository {
     const updated = await this.db
       .update(shardLeases)
       .set({ heartbeatAt: now, updatedAt: now })
-      .where(eq(shardLeases.instanceId, instanceId))
+      .where(and(eq(shardLeases.fleet, this.fleet), eq(shardLeases.instanceId, instanceId)))
       .returning({ shardId: shardLeases.shardId });
     return updated.map((r) => r.shardId).sort((a, b) => a - b);
   }
@@ -119,7 +146,13 @@ export class ShardLeaseRepository {
     const released = await this.db
       .update(shardLeases)
       .set({ instanceId: null, heartbeatAt: null, claimedAt: null, updatedAt: now })
-      .where(and(eq(shardLeases.shardId, shardId), eq(shardLeases.instanceId, instanceId)))
+      .where(
+        and(
+          eq(shardLeases.fleet, this.fleet),
+          eq(shardLeases.shardId, shardId),
+          eq(shardLeases.instanceId, instanceId),
+        ),
+      )
       .returning({ shardId: shardLeases.shardId });
     return released.length > 0;
   }
@@ -130,13 +163,17 @@ export class ShardLeaseRepository {
     const released = await this.db
       .update(shardLeases)
       .set({ instanceId: null, heartbeatAt: null, claimedAt: null, updatedAt: now })
-      .where(eq(shardLeases.instanceId, instanceId))
+      .where(and(eq(shardLeases.fleet, this.fleet), eq(shardLeases.instanceId, instanceId)))
       .returning({ shardId: shardLeases.shardId });
     return released.length;
   }
 
   async list(): Promise<ShardLease[]> {
-    return this.db.select().from(shardLeases).orderBy(shardLeases.shardId);
+    return this.db
+      .select()
+      .from(shardLeases)
+      .where(eq(shardLeases.fleet, this.fleet))
+      .orderBy(shardLeases.shardId);
   }
 
   /**
@@ -154,11 +191,20 @@ export class ShardLeaseRepository {
     spacingMs: number,
   ): Promise<{ ok: boolean; waitMs: number }> {
     return this.db.transaction(async (tx) => {
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(${IDENTIFY_ADVISORY_LOCK}, ${bucket})`);
+      /**
+       * Fleet-namespaced. An advisory lock key is a bare integer scoped only by
+       * database, so without this the two fleets would serialize each other's
+       * identifies — which is not merely wasteful, it is wrong: `max_concurrency`
+       * is per application, so the spacing computed under a shared lock is
+       * incorrect for both. The single 64-bit form is used because the two-int
+       * form's second slot is already spent on the bucket.
+       */
+      const lockKey = fleetAdvisoryKey(IDENTIFY_ADVISORY_LOCK, this.fleet, bucket);
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${lockKey})`);
       const [row] = await tx
         .select({ lastIdentifyAt: identifyBuckets.lastIdentifyAt })
         .from(identifyBuckets)
-        .where(eq(identifyBuckets.bucket, bucket));
+        .where(and(eq(identifyBuckets.fleet, this.fleet), eq(identifyBuckets.bucket, bucket)));
       const last = row?.lastIdentifyAt?.getTime() ?? 0;
       const elapsed = Date.now() - last;
       if (last !== 0 && elapsed < spacingMs) {
@@ -167,9 +213,9 @@ export class ShardLeaseRepository {
       const at = new Date();
       await tx
         .insert(identifyBuckets)
-        .values({ bucket, lastIdentifyAt: at, updatedAt: at })
+        .values({ fleet: this.fleet, bucket, lastIdentifyAt: at, updatedAt: at })
         .onConflictDoUpdate({
-          target: identifyBuckets.bucket,
+          target: [identifyBuckets.fleet, identifyBuckets.bucket],
           set: { lastIdentifyAt: at, updatedAt: at },
         });
       return { ok: true, waitMs: 0 };

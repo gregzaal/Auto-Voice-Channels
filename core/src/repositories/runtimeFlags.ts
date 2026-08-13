@@ -1,5 +1,6 @@
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
+import { DEFAULT_FLEET, type Fleet } from '../domain/fleets.js';
 import { opsAudit, runtimeFlags } from '../db/schema.js';
 
 /**
@@ -8,13 +9,21 @@ import { opsAudit, runtimeFlags } from '../db/schema.js';
  * agent actions.
  */
 export class RuntimeFlagsRepository {
-  constructor(private readonly db: Database) {}
+  /**
+   * Flags are per fleet (`plans/fleets.md` §2): pausing beta must not pause
+   * production, and that independence is the whole reason for having a beta.
+   * Defaults to `prod`, so self-host and existing callers are unchanged.
+   */
+  constructor(
+    private readonly db: Database,
+    private readonly fleet: Fleet = DEFAULT_FLEET,
+  ) {}
 
   async get<T = unknown>(key: string): Promise<T | undefined> {
     const [row] = await this.db
       .select()
       .from(runtimeFlags)
-      .where(eq(runtimeFlags.key, key))
+      .where(and(eq(runtimeFlags.fleet, this.fleet), eq(runtimeFlags.key, key)))
       .limit(1);
     return row ? (row.value as T) : undefined;
   }
@@ -25,7 +34,10 @@ export class RuntimeFlagsRepository {
   }
 
   async getAll(): Promise<Record<string, unknown>> {
-    const rows = await this.db.select().from(runtimeFlags);
+    const rows = await this.db
+      .select()
+      .from(runtimeFlags)
+      .where(eq(runtimeFlags.fleet, this.fleet));
     return Object.fromEntries(rows.map((r) => [r.key, r.value]));
   }
 
@@ -39,13 +51,15 @@ export class RuntimeFlagsRepository {
       await tx
         .insert(runtimeFlags)
         .values({
+          fleet: this.fleet,
           key,
           value: value as never,
           description: options.description ?? null,
           updatedBy: options.actor,
         })
         .onConflictDoUpdate({
-          target: runtimeFlags.key,
+          // Composite: the same flag key is a different row per fleet.
+          target: [runtimeFlags.fleet, runtimeFlags.key],
           set: {
             value: value as never,
             ...(options.description !== undefined ? { description: options.description } : {}),
@@ -58,6 +72,7 @@ export class RuntimeFlagsRepository {
         actor: options.actor,
         action: 'flag.set',
         target: key,
+        fleet: this.fleet,
         details: { value, reason: options.reason ?? null } as never,
       });
     });
