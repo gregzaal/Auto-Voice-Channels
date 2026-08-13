@@ -58,6 +58,7 @@ import {
   ExpiredJoinNotifier,
   registerGuildOnboarding,
 } from './features/billing/index.js';
+import { backfillGuildIdentities, registerGuildIdentity } from './features/guildIdentity.js';
 import { COMMIT, VERSION } from './version.js';
 
 /**
@@ -327,6 +328,12 @@ async function main(): Promise<void> {
         notifier: billingNotifier,
         logger,
       });
+  /**
+   * Denormalize guild name/icon/owner so the service can be operated. Runs on
+   * self-host too: it costs one conditional UPDATE per guild edit and it is what
+   * makes a self-hoster's own `/diagnostics` output readable.
+   */
+  const disposeGuildIdentity = registerGuildIdentity({ client, guilds: guildsRepo, logger });
   const billingReconciler = config.selfHosted
     ? undefined
     : new BillingReconciler({
@@ -401,6 +408,13 @@ async function main(): Promise<void> {
       .reconcileGuilds(client.guilds.cache.keys())
       .catch((err: unknown) => logger.error({ err }, 'initial reconcile failed'));
     reconciler.startSweep();
+    // The identity listeners only see *changes*; the guilds already in cache at
+    // READY have never fired one. Catch them up once.
+    void backfillGuildIdentities({ client, guilds: guildsRepo, logger })
+      .then((recorded) => {
+        if (recorded > 0) logger.info({ recorded }, 'guild identities backfilled');
+      })
+      .catch((err: unknown) => logger.error({ err }, 'guild identity backfill failed'));
     // Billing job only makes sense once the guild cache is populated (its
     // sampling phase reads it). Hourly ticks + one immediate pass.
     if (billingReconciler) {
@@ -506,6 +520,7 @@ async function main(): Promise<void> {
     disposeJoinRequests,
     disposeInteractions,
     disposeOnboarding,
+    disposeGuildIdentity,
     billingReconciler,
     entitlementGate,
     closeDb,

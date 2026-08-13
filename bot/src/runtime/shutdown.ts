@@ -21,6 +21,7 @@ export interface ShutdownDeps {
   disposeJoinRequests: () => void;
   disposeInteractions: () => void;
   disposeOnboarding: () => void;
+  disposeGuildIdentity: () => void;
   /** Undefined when SELF_HOSTED (the job never exists there). */
   billingReconciler: BillingReconciler | undefined;
   entitlementGate: EntitlementGate;
@@ -46,6 +47,7 @@ export async function gracefulDrain(deps: ShutdownDeps): Promise<void> {
   deps.disposeJoinRequests();
   deps.disposeVoiceGateway();
   deps.disposeOnboarding();
+  deps.disposeGuildIdentity();
   deps.client.removeAllListeners();
   await deps.dispatcher.drainAll();
   await deps.leaseManager.releaseAll();

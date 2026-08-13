@@ -57,6 +57,27 @@ export const guilds = pgTable('guilds', {
    * working" from "subscribed and paying for nothing".
    */
   botRemovedAt: timestamp('bot_removed_at', { withTimezone: true }),
+  /**
+   * Guild display name, icon hash and owner, denormalized from the gateway's
+   * `GUILD_CREATE`/`GUILD_UPDATE` payloads.
+   *
+   * Denormalizing public Discord metadata looks redundant until you try to
+   * operate the service: nothing else in this schema can name a guild. The
+   * customer dashboard resolves names from the *signed-in user's* OAuth token,
+   * which only ever covers guilds that user is in, so any operator-side or
+   * cross-guild view built the same way is a list of bare snowflakes. The one
+   * other name we hold, `subscriptions.guild_name`, is captured at checkout and
+   * therefore exists only for guilds that have paid.
+   *
+   * A hint, not ground truth — same standing as `member_count`. It is refreshed
+   * on gateway events, so it goes stale for a guild the bot has been removed
+   * from, and a stale name is exactly what we want there (it is the only name
+   * that will ever exist for it again).
+   */
+  name: text('name'),
+  /** Icon hash only; the CDN URL is derived, so a CDN move is not a migration. */
+  iconHash: text('icon_hash'),
+  ownerId: text('owner_id'),
   /** Latest member-count sample (a hint, never ground truth — see monetization.md §5). */
   memberCount: integer('member_count'),
   memberCountUpdatedAt: timestamp('member_count_updated_at', { withTimezone: true }),

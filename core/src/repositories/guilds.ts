@@ -27,6 +27,15 @@ export const guildRowSchema = z.object({
    * "unknown", not throw and blank the caller's entire guild list.
    */
   botRemovedAt: z.date().nullish(),
+  /**
+   * Denormalized guild identity. `.nullish()` for the same reason as
+   * `botRemovedAt`: a build carrying these fields can read rows written before
+   * the migration that adds the columns has run, and a missing key must degrade
+   * to "unknown" rather than throw and blank the caller's whole list.
+   */
+  name: z.string().nullish(),
+  iconHash: z.string().nullish(),
+  ownerId: z.string().nullish(),
   memberCount: z.number().int().nullable(),
   memberCountUpdatedAt: z.date().nullable(),
   tier: z.enum(TIER_IDS).nullable(),
@@ -101,6 +110,47 @@ export class GuildRepository {
       .update(guilds)
       .set({ botRemovedAt: removedAt, updatedAt: new Date() })
       .where(eq(guilds.guildId, guildId));
+  }
+
+  /**
+   * Upserts the denormalized guild identity (name / icon / owner) from a
+   * gateway payload.
+   *
+   * Writes only when something actually changed. `GUILD_UPDATE` fires for every
+   * kind of guild edit, most of which touch none of these three fields, and an
+   * unconditional UPDATE would bump `updated_at` fleet-wide on every one of them
+   * for no information gain.
+   *
+   * Creates the row if it is missing, so a guild the bot was already in when
+   * this shipped gets its identity on the next gateway event rather than waiting
+   * for a backfill.
+   */
+  async recordIdentity(
+    guildId: string,
+    identity: { name: string; iconHash: string | null; ownerId: string | null },
+  ): Promise<void> {
+    const [current] = await this.db
+      .select({ name: guilds.name, iconHash: guilds.iconHash, ownerId: guilds.ownerId })
+      .from(guilds)
+      .where(eq(guilds.guildId, guildId))
+      .limit(1);
+
+    if (
+      current &&
+      current.name === identity.name &&
+      current.iconHash === identity.iconHash &&
+      current.ownerId === identity.ownerId
+    ) {
+      return;
+    }
+
+    await this.db
+      .insert(guilds)
+      .values({ guildId, ...identity })
+      .onConflictDoUpdate({
+        target: guilds.guildId,
+        set: { ...identity, updatedAt: new Date() },
+      });
   }
 
   async getOrThrow(guildId: string): Promise<GuildRow> {

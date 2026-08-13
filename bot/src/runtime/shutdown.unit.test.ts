@@ -18,6 +18,7 @@ function depsRecording(order: string[]): ShutdownDeps {
     disposeJoinRequests: () => order.push('disposeJoinRequests'),
     disposeVoiceGateway: () => order.push('disposeVoiceGateway'),
     disposeOnboarding: () => order.push('disposeOnboarding'),
+    disposeGuildIdentity: () => order.push('disposeGuildIdentity'),
     billingReconciler: {
       stop: () => order.push('billingReconciler.stop'),
     } as unknown as ShutdownDeps['billingReconciler'],
@@ -49,6 +50,7 @@ describe('gracefulDrain', () => {
       'disposeJoinRequests',
       'disposeVoiceGateway',
       'disposeOnboarding',
+      'disposeGuildIdentity',
       'removeAllListeners',
       'drainAll',
       'releaseAll',
