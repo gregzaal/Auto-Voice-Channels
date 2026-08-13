@@ -11,6 +11,7 @@ export * from './repositories/subscriptions.js';
 export * from './repositories/billingEvents.js';
 export * from './repositories/billingRuns.js';
 export * from './repositories/aiUsage.js';
+export * from './repositories/legacyCustomers.js';
 export * from './repositories/runtimeFlags.js';
 export * from './repositories/opsAudit.js';
 export * from './repositories/shardLeases.js';

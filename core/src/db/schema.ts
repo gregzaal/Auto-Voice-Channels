@@ -336,6 +336,69 @@ export const aiUsage = pgTable(
   (t) => [primaryKey({ columns: [t.guildId, t.month] }), index('ai_usage_month_idx').on(t.month)],
 );
 
+/**
+ * People who paid for the old gold/sapphire/diamond model, and are therefore
+ * owed a **permanent 30% loyalty discount** on the new service
+ * (`plans/monetization.md` §2, §0 Phase 7).
+ *
+ * **Keyed by the person, not the server.** The discount is loyalty to whoever
+ * paid, so it follows them to any guild they subscribe for, and does NOT
+ * transfer to whoever inherits a server they used to run. `guild_ids` is
+ * reference data for support, never the eligibility test.
+ *
+ * The id here is a **Discord snowflake**, not our Auth.js `users.id`. Checkout
+ * has to resolve it via `accounts.provider_account_id` for the signed-in user;
+ * comparing it to `users.id` will silently never match (the same trap
+ * documented on `subscriptions.purchaser_user_id`, from the other direction).
+ *
+ * Rows are permanent. A legacy customer who lapses, resubscribes, cancels and
+ * returns is still a legacy customer, so nothing in the billing machinery ever
+ * deletes or expires one. Eligibility is never recomputed from Patreon: that
+ * campaign is being retired, and the evidence columns below are a snapshot of
+ * why each row exists rather than a live source.
+ *
+ * Self-host runs this migration and never populates it, like the other billing
+ * tables.
+ */
+export const legacyCustomers = pgTable(
+  'legacy_customers',
+  {
+    /** Discord user id of the person who paid. */
+    discordUserId: text('discord_user_id').primaryKey(),
+    /**
+     * Best-known tier on the old model: `gold`, `sapphire`, `diamond`, or
+     * `unknown` where they demonstrably paid but no surviving record says at
+     * what level. Metadata only. The discount is a flat 30% on every tier, so
+     * nothing reads this to decide money.
+     */
+    priorTier: text('prior_tier'),
+    /** How `prior_tier` was established, e.g. `sapphire_slot_29`, `owner_roster`. */
+    tierSource: text('tier_source'),
+    /** Total ever paid, in cents, across every Patreon account we tied to them. */
+    lifetimeCents: integer('lifetime_cents').notNull().default(0),
+    /** Patreon account id, where one is known. Null for dedicated-instance
+     * customers recovered from the old bot's own config rather than Patreon. */
+    patreonUserId: text('patreon_user_id'),
+    /** Name on the Patreon account, kept so a support claim can be checked. */
+    patreonName: text('patreon_name'),
+    /** Discord username at seed time, for the same reason. Not kept current. */
+    discordUsername: text('discord_username'),
+    /** Which sources agreed this person paid, joined by `+`. Audit trail for a
+     * row that grants a permanent discount. */
+    evidence: text('evidence'),
+    /** Guilds they ran the old bot in. Support reference, not an entitlement. */
+    guildIds: jsonb('guild_ids')
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    /** Set when the discount is first actually used, so uptake is measurable
+     * without inferring it from Paddle price ids. */
+    redeemedAt: timestamp('redeemed_at', { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index('legacy_customers_patreon_idx').on(t.patreonUserId)],
+);
+
 // ---------------------------------------------------------------------------
 // Web auth (Auth.js Drizzle-adapter tables for auto-voice.io). Column TS
 // property names must match what @auth/drizzle-adapter expects; SQL names
