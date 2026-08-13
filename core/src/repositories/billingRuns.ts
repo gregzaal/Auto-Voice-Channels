@@ -16,6 +16,19 @@ export const BILLING_ADVISORY_LOCK = 0x5a7c_0002;
  * durable last-run timestamp (`billing_runs`) enforces the spacing — the lock
  * alone can't (advisory locks are re-entrant within a session, and release at
  * commit). Exactly one instance wins each spacing window; everyone else skips.
+ *
+ * **Deliberately NOT fleet-scoped**, unlike the identify lock it was copied
+ * from, and the difference is the point. Identifies are per-application work, so
+ * two fleets sharing that lock would compute the wrong spacing for both. The
+ * leniency ladder is the opposite: fleet-wide work on *shared* rows — one guild,
+ * one entitlement, one set of transitions — so it must run once across the whole
+ * cluster no matter how many fleets are up. Sharing this key is what guarantees
+ * that, and it is a second line of defence behind the config that is supposed to
+ * enable the job on exactly one fleet (`plans/fleets.md` §4).
+ *
+ * Note the consequence, which is real: the fleet that *advances* the ladder may
+ * not be in the guild it just transitioned, so notification delivery cannot ride
+ * along with it. Delivery is per fleet, for its own guilds only.
  */
 export class BillingRunRepository {
   constructor(private readonly db: Database) {}

@@ -342,7 +342,7 @@ async function main(): Promise<void> {
         subscriptions: subscriptionsRepo,
         runs: new BillingRunRepository(db),
         flags,
-        opsAudit: new OpsAuditRepository(db),
+        opsAudit: new OpsAuditRepository(db, config.fleet),
         notifier: billingNotifier,
         listCachedGuildCounts: () =>
           [...client.guilds.cache.values()].map((g) => ({
