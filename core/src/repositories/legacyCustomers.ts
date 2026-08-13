@@ -123,9 +123,7 @@ export class LegacyCustomerRepository {
   }
 
   async count(): Promise<number> {
-    const rows = await this.db
-      .select({ n: sql<number>`count(*)::int` })
-      .from(legacyCustomers);
+    const rows = await this.db.select({ n: sql<number>`count(*)::int` }).from(legacyCustomers);
     return rows[0]?.n ?? 0;
   }
 }
