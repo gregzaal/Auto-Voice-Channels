@@ -125,6 +125,45 @@ export const configSchema = z
     aiPriceInputPerMTok: z.coerce.number().nonnegative().default(0.75),
     aiPriceOutputPerMTok: z.coerce.number().nonnegative().default(4.5),
 
+    /**
+     * Data backups (`plans/backups.md`), optional and **all-or-nothing**.
+     *
+     * Absent unless every required S3 field is present; partial config fails
+     * fast in the superRefine below rather than silently running unprotected,
+     * which is the failure mode that matters here (you find out at restore
+     * time). `config.backup !== undefined` is the enabled flag the rest of the
+     * code reads.
+     *
+     * Provider-agnostic on purpose: one S3 API covers Backblaze B2, Cloudflare
+     * R2, AWS S3 and MinIO, so a self-hoster picks a provider rather than
+     * waiting for an adapter.
+     */
+    backup: z
+      .object({
+        endpoint: z.string().url(),
+        region: z.string().min(1),
+        bucket: z.string().min(1),
+        accessKeyId: z.string().min(1),
+        secretAccessKey: z.string().min(1),
+        /**
+         * 32 bytes, base64 or hex. Optional, and strongly recommended: without
+         * it the storage provider can read every guild setting and billing row
+         * in the dump. **Losing it loses the backups** — there is no recovery
+         * path and the loss only surfaces during a restore.
+         */
+        encryptionKey: z.string().min(1).optional(),
+        intervalHours: z.coerce.number().int().positive().default(24),
+        preferredHourUtc: z.coerce.number().int().min(0).max(23).default(3),
+        retention: z.object({
+          daily: z.coerce.number().int().nonnegative().default(7),
+          weekly: z.coerce.number().int().nonnegative().default(4),
+          monthly: z.coerce.number().int().nonnegative().default(6),
+        }),
+        /** Object-key namespace, so one bucket can hold unrelated backup sets. */
+        prefix: z.string().optional(),
+      })
+      .optional(),
+
     /** Log level for pino. */
     logLevel: z
       .enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'])
@@ -231,6 +270,53 @@ function envToInput(env: NodeJS.ProcessEnv): Record<string, unknown> {
     aiPriceOutputPerMTok: e.AVC_AI_PRICE_OUTPUT_PER_MTOK,
     logLevel: e.LOG_LEVEL,
     nodeEnv: e.NODE_ENV,
+    backup: backupInput(e),
+  };
+}
+
+/**
+ * The backup group, or `undefined` when the operator has not configured one.
+ *
+ * All-or-nothing is enforced by *shape*, not by a hand-written check: if any
+ * `BACKUP_*` var is set we hand zod a partial object and let its own required
+ * fields produce the error, naming exactly which key is missing. If none are
+ * set we hand it `undefined` and backups are simply off.
+ *
+ * The alternative -- returning undefined unless all five are present -- would
+ * make a typo'd endpoint silently disable backups, and nobody discovers that
+ * until a restore.
+ */
+function backupInput(e: NodeJS.ProcessEnv): Record<string, unknown> | undefined {
+  const keys = [
+    'BACKUP_S3_ENDPOINT',
+    'BACKUP_S3_REGION',
+    'BACKUP_S3_BUCKET',
+    'BACKUP_S3_ACCESS_KEY_ID',
+    'BACKUP_S3_SECRET_ACCESS_KEY',
+    'BACKUP_ENCRYPTION_KEY',
+    'BACKUP_INTERVAL_HOURS',
+    'BACKUP_PREFERRED_HOUR_UTC',
+    'BACKUP_RETENTION_DAILY',
+    'BACKUP_RETENTION_WEEKLY',
+    'BACKUP_RETENTION_MONTHLY',
+    'BACKUP_PREFIX',
+  ] as const;
+  if (!keys.some((k) => e[k] !== undefined)) return undefined;
+  return {
+    endpoint: e.BACKUP_S3_ENDPOINT,
+    region: e.BACKUP_S3_REGION,
+    bucket: e.BACKUP_S3_BUCKET,
+    accessKeyId: e.BACKUP_S3_ACCESS_KEY_ID,
+    secretAccessKey: e.BACKUP_S3_SECRET_ACCESS_KEY,
+    encryptionKey: e.BACKUP_ENCRYPTION_KEY,
+    intervalHours: e.BACKUP_INTERVAL_HOURS,
+    preferredHourUtc: e.BACKUP_PREFERRED_HOUR_UTC,
+    retention: {
+      daily: e.BACKUP_RETENTION_DAILY,
+      weekly: e.BACKUP_RETENTION_WEEKLY,
+      monthly: e.BACKUP_RETENTION_MONTHLY,
+    },
+    prefix: e.BACKUP_PREFIX,
   };
 }
 
