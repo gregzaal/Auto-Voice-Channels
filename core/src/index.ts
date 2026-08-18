@@ -20,6 +20,8 @@ export * from './repositories/autoChannels.js';
 export * from './repositories/secondaryChannels.js';
 export * from './repositories/managedChannels.js';
 export * from './repositories/joinChannels.js';
+export * from './migrate/legacy.js';
+export * from './migrate/parseLegacyJson.js';
 export * from './backup/storage.js';
 export * from './backup/manifest.js';
 export * from './backup/encryption.js';
