@@ -343,11 +343,20 @@ export const subscriptions = pgTable('subscriptions', {
    * Latest refund/credit adjustment on this subscription, from `adjustment.*`
    * webhooks: `pending_approval`, `approved` or `rejected`.
    *
-   * Deliberately does NOT affect entitlement. A refund is a money decision, not
-   * an access decision, and partial refunds are normal, so revoking service the
-   * moment one is requested would cut off customers we are in the middle of
-   * making whole. The ladder and the Paddle subscription status remain the only
-   * inputs to access.
+   * An **approved** refund revokes entitlement immediately, via
+   * `subscriptionInGoodStanding`. A refund does not cancel the Paddle
+   * subscription, so without reading this field the reconcile job would see a
+   * healthy `active` row an hour later and reactivate the guild.
+   *
+   * A refund that is only *requested* (`pending_approval`) changes nothing.
+   * Paddle reviews these, and cutting someone off while their request is still
+   * being judged would punish them for asking.
+   *
+   * This docblock said the exact opposite until 2026-08-18 ("deliberately does
+   * NOT affect entitlement... the only inputs to access"). It was written for a
+   * display-only design and falsified hours later the same day by the commit
+   * that made an approved refund revoke standing. Left uncorrected it went
+   * public, contradicting both the code below it and the live refund policy.
    */
   refundStatus: text('refund_status'),
   /** Refunded amount (minor units) for that adjustment. */

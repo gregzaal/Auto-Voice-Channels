@@ -25,7 +25,7 @@ export const subscriptionRowSchema = z.object({
   chargedTotal: z.string().nullish(),
   chargedTax: z.string().nullish(),
   chargedCurrency: z.string().nullish(),
-  /** Latest refund adjustment state. Never affects entitlement. See schema.ts. */
+  /** Latest refund adjustment state. Consumed by `subscriptionInGoodStanding`. */
   refundStatus: z.string().nullish(),
   refundTotal: z.string().nullish(),
   refundAt: z.date().nullish(),
@@ -70,9 +70,10 @@ export const SUBSCRIPTION_OK_STATUSES: ReadonlySet<string> = new Set(['active', 
  * Paddle still reports `active`.** A refund does not cancel a subscription, so
  * without this the reconcile job would see a healthy `active` row and
  * reactivate a guild we had just gated for being refunded, on the next hourly
- * tick. Policy (owner, 2026-08-12): a granted refund stops access immediately,
- * and a customer who should keep part of the term gets a pro-rata refund
- * instead of partial access.
+ * tick. Policy (owner, 2026-08-12): a granted refund stops access immediately.
+ * A merely requested one does not, which is what the `approved` check below is
+ * for. The amount refunded is a human decision taken in Paddle and is not
+ * modelled here.
  *
  * Shared so the bot's ladder and the webhook planner cannot drift apart.
  */
