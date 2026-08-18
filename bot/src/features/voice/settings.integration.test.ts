@@ -226,6 +226,64 @@ describe('GuildSettingsService (integration)', () => {
     expect((await settings.toggleDefaultPrivate(GUILD, 'not-a-channel')).ok).toBe(false);
   });
 
+  /**
+   * `/defaultlimit`. The field was readable by the creation path long before
+   * anything could write it (`handler.ts` passes `template.limit` into
+   * createVoiceChannel), so these assert the writer, not the plumbing.
+   */
+  it('sets and clears the default user limit for the primary (/defaultlimit)', async () => {
+    await settings.createPrimary(GUILD);
+    const primaryId = actions.ofType('create')[0]!.channelId;
+    await secondaries.create({
+      channelId: 'sec-dl',
+      guildId: GUILD,
+      primaryChannelId: primaryId,
+      state: {},
+    });
+
+    // Unset by default, which is what makes every spawned channel unlimited.
+    expect((await autoChannels.get(primaryId))!.template.limit).toBeUndefined();
+
+    const set = await settings.setDefaultLimit(GUILD, 'sec-dl', 5);
+    expect(set.ok).toBe(true);
+    expect(set.message).toContain('5');
+    expect((await autoChannels.get(primaryId))!.template.limit).toBe(5);
+
+    // 0 clears the field rather than storing a zero, matching Discord's own
+    // meaning for a user limit and keeping imported configs tidy.
+    const cleared = await settings.setDefaultLimit(GUILD, 'sec-dl', 0);
+    expect(cleared.ok).toBe(true);
+    expect(cleared.message).toContain('no user limit');
+    expect((await autoChannels.get(primaryId))!.template.limit).toBeUndefined();
+
+    // Setting it must not disturb the rest of the template.
+    await settings.toggleDefaultPrivate(GUILD, 'sec-dl');
+    await settings.setDefaultLimit(GUILD, 'sec-dl', 9);
+    const template = (await autoChannels.get(primaryId))!.template;
+    expect(template.limit).toBe(9);
+    expect(template.defaultPrivate).toBe(true);
+  });
+
+  it('refuses a default limit Discord would not accept (/defaultlimit)', async () => {
+    await settings.createPrimary(GUILD);
+    const primaryId = actions.ofType('create')[0]!.channelId;
+    await secondaries.create({
+      channelId: 'sec-dl2',
+      guildId: GUILD,
+      primaryChannelId: primaryId,
+      state: {},
+    });
+
+    for (const bad of [-1, 100, 1.5]) {
+      const res = await settings.setDefaultLimit(GUILD, 'sec-dl2', bad);
+      expect(res.ok).toBe(false);
+    }
+    expect((await autoChannels.get(primaryId))!.template.limit).toBeUndefined();
+
+    // And it still needs a managed channel to act on.
+    expect((await settings.setDefaultLimit(GUILD, 'not-a-channel', 5)).ok).toBe(false);
+  });
+
   it('reads and writes per-category grouping config (/group)', async () => {
     expect(await settings.getGroup(GUILD, 'cat-1')).toBeUndefined();
 

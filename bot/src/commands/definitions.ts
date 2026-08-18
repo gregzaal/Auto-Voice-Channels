@@ -149,6 +149,21 @@ export function buildCommandDefinitions(
     ),
     adminOnly(
       new SlashCommandBuilder()
+        .setName('defaultlimit')
+        .setDescription('Set the user limit new channels from this creator start with.')
+        .addIntegerOption((o) =>
+          o
+            .setName('limit')
+            .setDescription(
+              `Maximum members in new channels (0 to ${MAX_USER_LIMIT}, 0 = no limit).`,
+            )
+            .setMinValue(0)
+            .setMaxValue(MAX_USER_LIMIT)
+            .setRequired(true),
+        ) as SlashCommandBuilder,
+    ),
+    adminOnly(
+      new SlashCommandBuilder()
         .setName('group')
         .setDescription('Group this category’s channels into one numbered block (or turn it off).'),
     ),

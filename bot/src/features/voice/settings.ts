@@ -8,6 +8,7 @@ import type {
 } from '@avc/core';
 import type { VoiceActions } from './actions.js';
 import { DEFAULT_CHANNEL_NAME_TEMPLATE } from './nameTemplate.js';
+import { MAX_USER_LIMIT } from './commands.js';
 import { isStringMap, parseVoiceSettings, readGroups, readLogging } from './guildSettings.js';
 import type { GroupConfig } from './guildSettings.js';
 import { type CommandResult } from './commands.js';
@@ -272,6 +273,46 @@ export class GuildSettingsService {
       enabled
         ? '🔒 New channels from this creator will be created **private** automatically.'
         : '🔓 New channels from this creator will be created **public** (the default).',
+    );
+  }
+
+  /**
+   * Sets the default user limit applied to channels this creator spawns.
+   * `/defaultlimit`.
+   *
+   * The plumbing already existed and had no writer: `handler.ts` passes
+   * `primary.template.limit` straight into `createVoiceChannel`, but nothing
+   * ever set it, so every spawned channel came out unlimited. The legacy Python
+   * bot had `defaultlimit` and 446 primaries across 180 live guilds still use
+   * it (`plans/migration.md` §2.1), so the importer writes the field and this is
+   * how an admin changes it afterwards. Without this command those guilds would
+   * carry a limit they could not edit or remove.
+   *
+   * `0` clears it, matching Discord's own meaning for a user limit of zero and
+   * `/unlimit` on an individual channel.
+   */
+  async setDefaultLimit(
+    guildId: string,
+    secondaryChannelId: string,
+    limit: number,
+  ): Promise<CommandResult> {
+    const primary = await this.primaryFor(guildId, secondaryChannelId);
+    if (!primary) return fail('You need to be in a bot-managed voice channel.');
+    if (!Number.isInteger(limit) || limit < 0 || limit > MAX_USER_LIMIT) {
+      return fail(
+        `Pick a limit between 0 and ${MAX_USER_LIMIT}. Discord does not allow more, and 0 means no limit.`,
+      );
+    }
+
+    const next = { ...primary.template };
+    if (limit > 0) next.limit = limit;
+    else delete next.limit;
+    await this.deps.autoChannels.upsert(guildId, primary.channelId, next);
+
+    return ok(
+      limit > 0
+        ? `👥 New channels from this creator will hold **${limit}** ${limit === 1 ? 'person' : 'people'}. Existing channels keep their current limit.`
+        : '👥 New channels from this creator will have **no user limit**. Existing channels keep their current limit.',
     );
   }
 

@@ -351,6 +351,20 @@ export function parseSetupPick(customId: string): string | null {
   return kind === 'pick' && command ? command : null;
 }
 
+/**
+ * The extra segment a picker may carry, as in `pick:defaultlimit:5`.
+ *
+ * A select-menu interaction has no access to the options of the slash command
+ * that opened it, so a command with a required option would otherwise lose it
+ * the moment the user was shown a channel picker. Carrying it in the custom id
+ * is the only place it survives the round trip.
+ */
+export function parseSetupPickArg(customId: string): string | null {
+  if (!customId.startsWith(SETUP_PREFIX)) return null;
+  const parts = customId.split(':');
+  return parts[2] === 'pick' && parts[4] ? parts[4] : null;
+}
+
 /** Custom id for the `/setup` "no game" label modal. */
 export const GENERAL_MODAL_ID = 'avc:setup:label:set';
 

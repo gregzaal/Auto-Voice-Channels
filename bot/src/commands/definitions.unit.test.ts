@@ -13,6 +13,7 @@ describe('buildCommandDefinitions', () => {
         'alwaysprivate',
         'claim',
         'create',
+        'defaultlimit',
         'group',
         'inheritpermissions',
         'invite',

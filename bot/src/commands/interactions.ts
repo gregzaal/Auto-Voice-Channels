@@ -52,6 +52,7 @@ import {
   missingBotPermissions,
   missingRenamePermissions,
   parseSetupPick,
+  parseSetupPickArg,
   SETUP_PREFIX,
 } from './setupPanel.js';
 import {
@@ -329,6 +330,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return openPositionModal(interaction);
       case 'alwaysprivate':
         return handleAlwaysPrivate(interaction);
+      case 'defaultlimit':
+        return handleDefaultLimit(interaction);
       case 'group':
         return openGroupPanel(interaction);
       case 'inheritpermissions':
@@ -780,6 +783,32 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     const guildId = interaction.guildId!;
     const res = await run(guildId, 'cmd:alwaysprivate', () =>
       deps.settings.toggleDefaultPrivate(guildId, channelId),
+    );
+    await respond(interaction, { content: formatResult(res), ephemeral: true });
+  }
+
+  /** `/defaultlimit` → the user limit new channels from this creator start with. */
+  async function handleDefaultLimit(interaction: ChatInputCommandInteraction): Promise<void> {
+    // Read the option before the picker, so it can be carried in the custom id.
+    const limit = interaction.options.getInteger('limit', true);
+    const channelId = await resolveOrPick(
+      interaction,
+      'defaultlimit',
+      '👥 Pick a creator channel to set the default limit for:',
+      String(limit),
+    );
+    if (!channelId) return;
+    await defaultLimitCore(interaction, channelId, limit);
+  }
+
+  async function defaultLimitCore(
+    interaction: ManageableInteraction,
+    channelId: string,
+    limit: number,
+  ): Promise<void> {
+    const guildId = interaction.guildId!;
+    const res = await run(guildId, 'cmd:defaultlimit', () =>
+      deps.settings.setDefaultLimit(guildId, channelId, limit),
     );
     await respond(interaction, { content: formatResult(res), ephemeral: true });
   }
@@ -1479,6 +1508,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     'manage',
     'position',
     'alwaysprivate',
+    'defaultlimit',
     'inheritpermissions',
     'group',
     'templateassistant',
@@ -1498,6 +1528,12 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return positionCore(interaction, channelId);
       case 'alwaysprivate':
         return alwaysPrivateCore(interaction, channelId);
+      case 'defaultlimit': {
+        const raw = parseSetupPickArg(interaction.customId);
+        const limit = raw === null ? Number.NaN : Number(raw);
+        if (!Number.isInteger(limit)) return;
+        return defaultLimitCore(interaction, channelId, limit);
+      }
       case 'inheritpermissions':
         return inheritCore(interaction, channelId);
       case 'group':
@@ -1742,12 +1778,14 @@ async function resolveOrPick(
   interaction: ChatInputCommandInteraction,
   command: string,
   prompt: string,
+  /** Carried through the picker for commands with a required option. */
+  arg?: string,
 ): Promise<string | undefined> {
   const channelId = currentVoiceChannelId(interaction);
   if (channelId) return channelId;
   await interaction.reply({
     content: prompt,
-    components: [channelPickerRow(command)],
+    components: [channelPickerRow(arg === undefined ? command : `${command}:${arg}`)],
     ephemeral: true,
   });
   return undefined;
