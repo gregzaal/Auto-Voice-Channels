@@ -178,7 +178,7 @@ export interface SetupPanelInput {
 }
 
 const INTRO =
-  '**The original auto-voice-channel bot**, open-source and self-hostable.\n' +
+  '**Open-source and self-hostable.**\n' +
   'Members join a **creator channel** and AVC spins up a personal voice channel for ' +
   'them, auto-named, and cleaned up when empty.';
 
