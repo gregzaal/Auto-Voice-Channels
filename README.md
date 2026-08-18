@@ -1,5 +1,10 @@
 # Auto-Voice-Channels
 
+> **Looking for the Python bot?** It is still here, on the
+> [`master`](https://github.com/GregZaal/Auto-Voice-Channels/tree/master) branch:
+> MIT licensed, still clonable, still runnable. It is no longer maintained. This
+> branch is the TypeScript rewrite that replaces it.
+
 A single Discord bot that automatically creates and cleans up voice channels on
 demand. One codebase serves both the **scaled hosted service** (many shards
 across multiple instances) and a **private self-hosted instance** (one container
@@ -97,4 +102,5 @@ Debug by querying state, not dashboards:
 - **`runtime_flags`** — DB-backed no-deploy levers; every change is recorded in
   `ops_audit`.
 
-See [`AGENTS.md`](./AGENTS.md) for the full runbook and diagnostics cookbook.
+See [`rewrite.md`](./rewrite.md#agent-operated-operations) for the design behind
+these.
