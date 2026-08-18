@@ -10,5 +10,9 @@ coverage/
 *.log
 .DS_Store
 plans/
-migrate/
+# Anchored to the repo root. Unanchored, this also swallowed
+# `core/src/migrate/`, the legacy importer, so a commit that added it pushed
+# only the export lines and broke the build on main. The rule was always meant
+# for the root-level scratch directory the legacy migration used.
+/migrate/
 .claude/
