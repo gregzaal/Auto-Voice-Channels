@@ -16,6 +16,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # pg_dump / pg_restore for the backup round-trip test. The runtime image
+      # installs its own (Dockerfile), but the integration suite runs on the
+      # runner. Pinned to 16 to match the server the tests boot; a client older
+      # than the server refuses the dump outright, and the test would then skip
+      # silently rather than fail, which is the worst outcome for a backup test.
+      - name: PostgreSQL client (for the backup round trip)
+        run: |
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-16
+          pg_dump --version
+
       - uses: pnpm/action-setup@v4
         with:
           version: 9.15.0

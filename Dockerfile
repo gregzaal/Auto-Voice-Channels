@@ -34,6 +34,11 @@ RUN pnpm install --frozen-lockfile --prod
 # --- Runtime ---
 FROM base AS runtime
 ENV NODE_ENV=production
+# `pg_dump` and `pg_restore` for the backup pipeline (plans/backups.md). Pinned
+# to the PG 16 client series to match the server; a client older than the server
+# refuses the dump outright. ~20MB, and it ships in both profiles so a
+# self-hoster gets backups from the same image with no extra moving parts.
+RUN apk add --no-cache postgresql16-client
 # Build/version stamps surfaced on /health and /diagnostics. Passed at build
 # time (e.g. --build-arg GIT_COMMIT="$(git rev-parse HEAD)"); default to dev so
 # self-host `docker compose up` still builds without extra flags.

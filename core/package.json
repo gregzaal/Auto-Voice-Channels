@@ -22,6 +22,8 @@
     "db:migrate": "tsx ./src/db/migrate-cli.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1113.0",
+    "@aws-sdk/lib-storage": "^3.1113.0",
     "drizzle-orm": "^0.38.2",
     "pg": "^8.13.1",
     "pino": "^9.5.0",
