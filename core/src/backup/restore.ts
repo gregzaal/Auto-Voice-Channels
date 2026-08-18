@@ -145,11 +145,20 @@ export async function restoreBackup(opts: RestoreOptions): Promise<RestoreResult
     },
   });
 
+  // `-d` needs the real database name. `-d -` is not "read stdin", it is a
+  // database literally called "-", which is how CI first failed this. The
+  // archive comes from stdin implicitly, because no filename is given.
+  const pgEnv = pgEnvFromUrl(opts.targetDatabaseUrl);
+  const dbName = pgEnv.PGDATABASE;
+  if (!dbName) {
+    throw new Error(`Target connection string names no database: ${opts.targetDatabaseUrl}`);
+  }
+
   const child = spawn(
     'pg_restore',
-    ['--no-owner', '--no-privileges', '--clean', '--if-exists', '-d', '-'],
+    ['--no-owner', '--no-privileges', '--clean', '--if-exists', '--dbname', dbName],
     {
-      env: { ...process.env, ...pgEnvFromUrl(opts.targetDatabaseUrl) },
+      env: { ...process.env, ...pgEnv },
       stdio: ['pipe', 'ignore', 'pipe'],
     },
   );
