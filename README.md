@@ -1,5 +1,16 @@
 # Auto-Voice-Channels
 
+> [!IMPORTANT]
+> **This branch is an archive. The Python bot is no longer maintained.**
+>
+> Development moved to a TypeScript rewrite, which lives on the
+> [`main`](https://github.com/GregZaal/Auto-Voice-Channels/tree/main) branch. If
+> you are here to run the bot yourself, or to read the current code, start there.
+>
+> `master` is staying put. Nothing is being deleted or force-pushed, so existing
+> clones and forks keep working and every `blob/master/...` link keeps resolving.
+> It just will not get further changes.
+
 ### A Discord bot that automatically creates voice channels as they are needed.
 
 - [Public bot invite link](https://discordapp.com/api/oauth2/authorize?client_id=479393422705426432&permissions=286280784&scope=bot)
