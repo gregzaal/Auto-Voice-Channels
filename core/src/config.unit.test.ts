@@ -154,3 +154,59 @@ describe('fleet', () => {
     expect(loadConfig({ ...hostedBase, SELF_HOSTED: 'true', FLEET: undefined }).fleet).toBe('prod');
   });
 });
+
+/**
+ * The regression that shipped: `docker compose up`, the one self-hosting command
+ * the README and the website both advertise, could not boot.
+ *
+ * Compose forwards the optional vars as `${AVC_AI_BASE_URL:-}`, which sets them
+ * to the empty string rather than leaving them unset. zod applies `.default()`
+ * and `.optional()` only to `undefined`, so all three reached `.min(1)` and the
+ * process failed fast on keys the user had been told to leave alone.
+ */
+describe('empty env vars are treated as absent', () => {
+  /** Exactly what compose injects for a .env holding only the two required keys. */
+  const composeEnv: NodeJS.ProcessEnv = {
+    DISCORD_TOKEN: 'token',
+    CLIENT_ID: 'client',
+    DATABASE_URL: 'postgres://postgres:postgres@postgres:5432/avc',
+    DEV_GUILD_ID: '',
+    AVC_AI_BASE_URL: '',
+    AVC_AI_API_KEY: '',
+    AVC_AI_MODEL: '',
+    TOTAL_SHARDS: '1',
+    INSTANCE_ID: 'selfhost',
+    HTTP_PORT: '8080',
+    LOG_LEVEL: 'info',
+    NODE_ENV: 'production',
+  };
+
+  it('boots the documented self-host command', () => {
+    expect(() => loadConfig(composeEnv)).not.toThrow();
+  });
+
+  it('falls back to the declared defaults rather than the empty string', () => {
+    const config = loadConfig(composeEnv);
+    expect(config.aiBaseUrl).toBe('https://api.openai.com/v1');
+    expect(config.aiModel).toBe('gpt-5.4-mini');
+  });
+
+  /** An empty key must not switch a feature on: no key means no assistant. */
+  it('leaves an optional key undefined, not empty', () => {
+    const config = loadConfig(composeEnv);
+    expect(config.aiApiKey).toBeUndefined();
+    expect(config.devGuildId).toBeUndefined();
+  });
+
+  /** Whitespace is the same mistake wearing a hat. */
+  it('treats whitespace as absent too', () => {
+    expect(loadConfig({ ...composeEnv, AVC_AI_API_KEY: '   ' }).aiApiKey).toBeUndefined();
+  });
+
+  /** A required key set to empty still fails, just with the clearer message. */
+  it('still rejects a required key that is blank', () => {
+    expect(() => loadConfig({ ...composeEnv, DISCORD_TOKEN: '' })).toThrow(
+      /DISCORD_TOKEN is required/,
+    );
+  });
+});

@@ -17,9 +17,11 @@ const booleanish = z
 export const configSchema = z
   .object({
     /** Discord bot token. Never commit this; supply via env / secrets. */
-    discordToken: z.string().min(1, 'DISCORD_TOKEN is required'),
+    discordToken: z
+      .string({ required_error: 'DISCORD_TOKEN is required' })
+      .min(1, 'DISCORD_TOKEN is required'),
     /** Discord application (client) id, used for slash-command registration. */
-    clientId: z.string().min(1, 'CLIENT_ID is required'),
+    clientId: z.string({ required_error: 'CLIENT_ID is required' }).min(1, 'CLIENT_ID is required'),
     /**
      * Optional dev/test guild id. When set, slash commands are registered to this
      * guild only (they appear instantly, vs. up to ~1h for global). Leave unset in
@@ -27,7 +29,9 @@ export const configSchema = z
      */
     devGuildId: z.string().optional(),
     /** Postgres connection string (source of truth). */
-    databaseUrl: z.string().min(1, 'DATABASE_URL is required'),
+    databaseUrl: z
+      .string({ required_error: 'DATABASE_URL is required' })
+      .min(1, 'DATABASE_URL is required'),
 
     /**
      * When true, the entitlement gate always allows (no trial/active/expired/billing).
@@ -176,31 +180,57 @@ export function shardCapFor(totalShards: number, expectedInstances: number): num
   return Math.max(1, Math.ceil(totalShards / Math.max(1, expectedInstances)));
 }
 
+/**
+ * An env var that was set to the empty string, treated as absent.
+ *
+ * Every optional key below relies on `.default()` or `.optional()`, and zod only
+ * applies either to `undefined`. An empty string is a present value, so it
+ * reaches `.min(1)` and fails.
+ *
+ * That is not a hypothetical. `docker compose up` -- the one self-hosting command
+ * the README and the website both advertise -- could not boot: the compose file
+ * forwards the optional AI vars as `${AVC_AI_BASE_URL:-}`, which sets them to the
+ * empty string when unset, and the process fails fast on three keys the user was
+ * told to leave alone. Normalising here rather than per-key fixes the whole class
+ * and covers any orchestrator that does the same thing (Fly, k8s, CI).
+ *
+ * Required keys still fail, and still name the env var: each carries a
+ * `required_error` as well as its `.min(1)` message, because normalising a blank
+ * to `undefined` otherwise swaps "DISCORD_TOKEN is required" for the useless
+ * "discordToken: Required", which names an internal key the user never typed.
+ */
+function blankToUndefined(value: string | undefined): string | undefined {
+  return value === undefined || value.trim() === '' ? undefined : value;
+}
+
 /** Maps process env to the config schema's input shape. */
 function envToInput(env: NodeJS.ProcessEnv): Record<string, unknown> {
+  const e = new Proxy(env, {
+    get: (target, key: string) => blankToUndefined(target[key]),
+  }) as NodeJS.ProcessEnv;
   return {
-    discordToken: env.DISCORD_TOKEN,
-    clientId: env.CLIENT_ID,
-    devGuildId: env.DEV_GUILD_ID,
-    databaseUrl: env.DATABASE_URL,
-    selfHosted: env.SELF_HOSTED,
-    fleet: env.FLEET,
-    totalShards: env.TOTAL_SHARDS,
-    expectedInstances: env.EXPECTED_INSTANCES,
+    discordToken: e.DISCORD_TOKEN,
+    clientId: e.CLIENT_ID,
+    devGuildId: e.DEV_GUILD_ID,
+    databaseUrl: e.DATABASE_URL,
+    selfHosted: e.SELF_HOSTED,
+    fleet: e.FLEET,
+    totalShards: e.TOTAL_SHARDS,
+    expectedInstances: e.EXPECTED_INSTANCES,
     // Prefer an explicit INSTANCE_ID; on Fly fall back to the per-machine
     // FLY_MACHINE_ID so each machine gets a unique, stable lease identity.
-    instanceId: env.INSTANCE_ID ?? env.FLY_MACHINE_ID,
-    httpPort: env.HTTP_PORT,
-    adminChannelId: env.ADMIN_CHANNEL_ID,
-    diagnosticsToken: env.DIAGNOSTICS_TOKEN,
-    aiBaseUrl: env.AVC_AI_BASE_URL,
-    aiApiKey: env.AVC_AI_API_KEY,
-    aiModel: env.AVC_AI_MODEL,
-    aiTimeoutMs: env.AVC_AI_TIMEOUT_MS,
-    aiPriceInputPerMTok: env.AVC_AI_PRICE_INPUT_PER_MTOK,
-    aiPriceOutputPerMTok: env.AVC_AI_PRICE_OUTPUT_PER_MTOK,
-    logLevel: env.LOG_LEVEL,
-    nodeEnv: env.NODE_ENV,
+    instanceId: e.INSTANCE_ID ?? e.FLY_MACHINE_ID,
+    httpPort: e.HTTP_PORT,
+    adminChannelId: e.ADMIN_CHANNEL_ID,
+    diagnosticsToken: e.DIAGNOSTICS_TOKEN,
+    aiBaseUrl: e.AVC_AI_BASE_URL,
+    aiApiKey: e.AVC_AI_API_KEY,
+    aiModel: e.AVC_AI_MODEL,
+    aiTimeoutMs: e.AVC_AI_TIMEOUT_MS,
+    aiPriceInputPerMTok: e.AVC_AI_PRICE_INPUT_PER_MTOK,
+    aiPriceOutputPerMTok: e.AVC_AI_PRICE_OUTPUT_PER_MTOK,
+    logLevel: e.LOG_LEVEL,
+    nodeEnv: e.NODE_ENV,
   };
 }
 

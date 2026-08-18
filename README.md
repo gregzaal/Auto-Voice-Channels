@@ -51,7 +51,9 @@ Requirements: Docker + Docker Compose, and a Discord application/bot.
    ```
 
    Postgres starts, migrations run automatically on boot, and slash commands
-   self-register. Health/diagnostics are served on `http://localhost:8080`.
+   self-register. Health and diagnostics are served on `http://localhost:8477`
+   (the container listens on 8080; compose publishes it on 8477 so it does not
+   collide with whatever else you already run on 8080).
 
 ## Development
 

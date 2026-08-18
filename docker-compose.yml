@@ -25,23 +25,22 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Pass the whole of `.env` through, rather than naming keys here. Naming them
+    # meant every optional key had to be repeated in two files, and the list had
+    # already drifted: ADMIN_CHANNEL_ID and DIAGNOSTICS_TOKEN are documented in
+    # `.env.example`, and setting either of them did nothing at all under the one
+    # command the README tells you to run.
+    env_file:
+      - .env
     environment:
-      DISCORD_TOKEN: ${DISCORD_TOKEN}
-      CLIENT_ID: ${CLIENT_ID}
-      # Optional: register slash commands to one guild (instant) for local testing.
-      DEV_GUILD_ID: ${DEV_GUILD_ID:-}
-      # Optional: setting AVC_AI_API_KEY is the whole switch for /templateassistant.
-      # Unset (the default) and the command is never registered. See .env.example.
-      AVC_AI_BASE_URL: ${AVC_AI_BASE_URL:-}
-      AVC_AI_API_KEY: ${AVC_AI_API_KEY:-}
-      AVC_AI_MODEL: ${AVC_AI_MODEL:-}
+      # Only the values compose itself has to decide. These override `.env`.
+      # Inside the compose network Postgres answers to `postgres`, not localhost.
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/avc
-      # SELF_HOSTED defaults to true, so self-hosting needs nothing here.
-      TOTAL_SHARDS: '1'
-      INSTANCE_ID: selfhost
+      # The container always serves on 8080; the host port is the mapping below.
       HTTP_PORT: '8080'
-      LOG_LEVEL: info
+      INSTANCE_ID: selfhost
       NODE_ENV: production
+      # SELF_HOSTED defaults to true, so self-hosting needs nothing here.
     ports:
       # Host port kept uncommon to avoid clashing with other local services
       # (8080 is a common conflict). Container still serves on 8080.
