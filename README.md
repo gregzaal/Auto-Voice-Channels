@@ -10,8 +10,7 @@ demand. One codebase serves both the **scaled hosted service** (many shards
 across multiple instances) and a **private self-hosted instance** (one container
 + Postgres) — differentiated only by configuration.
 
-This is the **TypeScript rewrite**. See [`rewrite.md`](./rewrite.md) for the full
-design and decision log.
+This is the **TypeScript rewrite** of the Python bot, rebuilt for scale.
 
 **License:** AGPL-3.0-only.
 
@@ -101,6 +100,3 @@ Debug by querying state, not dashboards:
   `v_recent_ops`) for global state straight from Postgres.
 - **`runtime_flags`** — DB-backed no-deploy levers; every change is recorded in
   `ops_audit`.
-
-See [`rewrite.md`](./rewrite.md#agent-operated-operations) for the design behind
-these.
