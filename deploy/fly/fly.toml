@@ -7,10 +7,20 @@
 #   AVC_AI_API_KEY  (optional: enables /templateassistant; without it the
 #                    command is not registered at all)
 #
-# `avc-dev` is the live beta app (running the beta bot 701117810549588038). At
-# the production cutover this becomes the prod app / identity (see
-# plans/migration.md); update `app`, secrets, and CLIENT_ID together then.
-app = "avc-dev"
+# `avc-beta` is the app that becomes the beta fleet. Renamed from `avc-dev` on
+# 2026-08-18: Fly app names are the hostname and cannot be changed in place, so
+# the rename was a new app plus a secret copy. `avc-dev` was a testing artifact
+# of a name for something that will serve real users, and the kind of name that
+# eventually gets treated as disposable.
+#
+# It still runs the private testbed bot (Lohner, 701117810549588038) and still
+# sets FLEET = "prod", because today it is the only fleet. Both change together
+# at the beta switch (plans/fleets.md 7.1), which swaps in AVC Beta
+# (675405085752164372) and flips FLEET to "beta". **Flipping FLEET without
+# re-seeding runtime_flags for the new fleet silently reverts every flag to its
+# code default** - the table is keyed (fleet, key). Production gets its own app,
+# `avc-prod`, at the cutover.
+app = "avc-beta"
 primary_region = "iad"
 
 [build]
