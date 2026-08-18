@@ -10,6 +10,8 @@ import {
   loadConfig,
   ManagedChannelRepository,
   OpsAuditRepository,
+  DEFAULT_FLEET,
+  probeForManifest,
   PgNotifier,
   runMigrations,
   RUNTIME_FLAGS,
@@ -27,6 +29,7 @@ import { RuntimeCreationGate } from './runtime/creationGate.js';
 import { ShardLeaseManager } from './runtime/shardLeaseManager.js';
 import { PgIdentifyThrottler } from './runtime/identifyThrottler.js';
 import { installShutdown } from './runtime/shutdown.js';
+import { BackupScheduler } from './runtime/backupScheduler.js';
 import { HealthServer, type HealthReport, type SubsystemStatus } from './ops/health.js';
 import {
   AdminChannelReporter,
@@ -334,6 +337,32 @@ async function main(): Promise<void> {
    * makes a self-hoster's own `/diagnostics` output readable.
    */
   const disposeGuildIdentity = registerGuildIdentity({ client, guilds: guildsRepo, logger });
+
+  /**
+   * Scheduled Postgres backups (`plans/backups.md`). Absent unless the operator
+   * configured storage, which is the whole enablement switch: `config.backup`
+   * is undefined until every required BACKUP_S3_* var is set. Runs on self-host
+   * too, deliberately, so a self-hoster gets backups from the same image.
+   */
+  const backupScheduler = config.backup
+    ? new BackupScheduler({
+        db,
+        fleet: config.fleet ?? DEFAULT_FLEET,
+        flags,
+        opsAudit: new OpsAuditRepository(db, config.fleet),
+        logger: logger.child({ component: 'backup' }),
+        config: {
+          databaseUrl: config.databaseUrl,
+          instanceId: config.instanceId,
+          nodeEnv: config.nodeEnv,
+          backup: config.backup,
+        },
+        appVersion: VERSION,
+        commit: COMMIT,
+        report: (message, context) => errorReporter.report(message, context),
+        probe: () => probeForManifest(db),
+      })
+    : undefined;
   const billingReconciler = config.selfHosted
     ? undefined
     : new BillingReconciler({
@@ -470,6 +499,7 @@ async function main(): Promise<void> {
         runtimeFlags,
         billing: billingReconciler ? { ...billingReconciler.stats } : null,
         ai: assistant ? { ...assistant.stats } : null,
+        backup: backupScheduler ? { ...backupScheduler.stats } : { enabled: false },
       };
     },
   });
@@ -522,12 +552,18 @@ async function main(): Promise<void> {
     disposeOnboarding,
     disposeGuildIdentity,
     billingReconciler,
+    backupScheduler,
     entitlementGate,
     closeDb,
   });
 
-  // Start heartbeating only now that the graceful-drain handler is installed, so a
-  // lease-loss reaction always drains cleanly before exiting for a restart.
+  // Both start only now that the graceful-drain handler is installed: a
+  // lease-loss reaction must always drain cleanly, and a backup must never
+  // begin during a drain it cannot be part of.
+  if (backupScheduler) {
+    await backupScheduler.hydrate();
+    backupScheduler.start();
+  }
   leaseManager.startHeartbeat();
 }
 

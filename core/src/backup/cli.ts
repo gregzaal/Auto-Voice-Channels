@@ -14,7 +14,7 @@ import { sql } from 'drizzle-orm';
 import { loadConfig } from '../config.js';
 import { createDatabase } from '../db/client.js';
 import { BackupStorage } from './storage.js';
-import { runBackup } from './runBackup.js';
+import { probeForManifest, runBackup } from './runBackup.js';
 import { listBackups, restoreBackup, selectBackup, verifyBackup } from './restore.js';
 
 /* eslint-disable no-console */
@@ -49,44 +49,6 @@ async function countTables(databaseUrl: string): Promise<number> {
   }
 }
 
-/** Row counts and versions for the manifest. Best-effort by design: a probe
- * failure must never stop a backup from being taken. */
-async function probe(databaseUrl: string): Promise<{
-  pgServerVersion: string | null;
-  migrationVersion: string | null;
-  rowCounts: Record<string, number>;
-}> {
-  const handle = createDatabase({ connectionString: databaseUrl });
-  try {
-    const version = await handle.db
-      .execute<{ v: string }>(sql`SHOW server_version`)
-      .then((r) => r.rows[0]?.v ?? null)
-      .catch(() => null);
-
-    const migrationVersion = await handle.db
-      .execute<{ h: string }>(
-        sql`SELECT hash AS h FROM drizzle.__drizzle_migrations ORDER BY created_at DESC LIMIT 1`,
-      )
-      .then((r) => r.rows[0]?.h ?? null)
-      .catch(() => null);
-
-    const rowCounts: Record<string, number> = {};
-    for (const table of ['guilds', 'auto_channels', 'secondary_channels', 'subscriptions']) {
-      try {
-        const res = await handle.db.execute<{ n: string }>(
-          sql`SELECT count(*)::text AS n FROM ${sql.identifier(table)}`,
-        );
-        rowCounts[table] = Number(res.rows[0]?.n ?? 0);
-      } catch {
-        // A table that does not exist yet is not an error worth failing over.
-      }
-    }
-    return { pgServerVersion: version, migrationVersion, rowCounts };
-  } finally {
-    await handle.close();
-  }
-}
-
 async function main(): Promise<void> {
   const command = process.argv[2];
   const config = loadConfig();
@@ -108,7 +70,14 @@ async function main(): Promise<void> {
           instanceId: config.instanceId ?? 'cli',
           appVersion: process.env.APP_VERSION ?? '0.0.0',
           commit: process.env.GIT_COMMIT ?? 'dev',
-          probe: () => probe(config.databaseUrl),
+          probe: async () => {
+            const handle = createDatabase({ connectionString: config.databaseUrl });
+            try {
+              return await probeForManifest(handle.db);
+            } finally {
+              await handle.close();
+            }
+          },
           log: (event, data) => console.log(event, JSON.stringify(data)),
         });
         console.log(`\nBacked up to ${result.key}`);

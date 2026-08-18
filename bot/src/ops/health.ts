@@ -40,6 +40,15 @@ export interface DiagnosticsReport {
    * configured (the self-host default).
    */
   ai: Record<string, unknown> | null;
+  /**
+   * Scheduled-backup state (`plans/backups.md` §8). `{ enabled: false }` when no
+   * storage is configured, which is the self-host default.
+   *
+   * Reported here rather than in `/health` on purpose: `stale` is informational
+   * and **must never gate a deploy**. A backup that has not run is a reason to
+   * alert a human, never a reason to block a rollout that might be the fix.
+   */
+  backup: Record<string, unknown>;
 }
 
 export interface HealthServerOptions {

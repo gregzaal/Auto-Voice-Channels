@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import { sql } from 'drizzle-orm';
+import type { Database } from '../db/client.js';
 import { createHash } from 'node:crypto';
 import { PassThrough, Transform, type Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -233,4 +235,46 @@ export function parseKeyDate(key: string): Date | null {
     `T${t!.slice(0, 2)}:${t!.slice(2, 4)}:${t!.slice(4, 6)}Z`;
   const parsed = new Date(iso);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+/**
+ * Row counts and versions for the manifest.
+ *
+ * Lives here rather than in each caller so the bot needs no SQL of its own and
+ * the CLI cannot drift from the scheduler. Best-effort throughout: a probe
+ * failure must never be the reason a backup does not get taken, so every part
+ * degrades to null rather than throwing.
+ */
+export async function probeForManifest(db: Database): Promise<{
+  pgServerVersion: string | null;
+  migrationVersion: string | null;
+  rowCounts: Record<string, number>;
+}> {
+  const pgServerVersion = await db
+    .execute<{ v: string }>(sql`SHOW server_version`)
+    .then((r) => r.rows[0]?.v ?? null)
+    .catch(() => null);
+
+  // The schema the dump was taken on. Without it a restore cannot tell that it
+  // is loading an older shape into a newer deployment, which is the failure
+  // this field exists to catch.
+  const migrationVersion = await db
+    .execute<{ h: string }>(
+      sql`SELECT hash AS h FROM drizzle.__drizzle_migrations ORDER BY created_at DESC LIMIT 1`,
+    )
+    .then((r) => r.rows[0]?.h ?? null)
+    .catch(() => null);
+
+  const rowCounts: Record<string, number> = {};
+  for (const table of ['guilds', 'auto_channels', 'secondary_channels', 'subscriptions']) {
+    try {
+      const res = await db.execute<{ n: string }>(
+        sql`SELECT count(*)::text AS n FROM ${sql.identifier(table)}`,
+      );
+      rowCounts[table] = Number(res.rows[0]?.n ?? 0);
+    } catch {
+      // Absent on an older schema. Not worth failing a backup over.
+    }
+  }
+  return { pgServerVersion, migrationVersion, rowCounts };
 }

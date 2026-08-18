@@ -39,6 +39,22 @@ export const RUNTIME_FLAGS = {
   AI_BUDGET_ALERT_FRACTION: 'ai.budget_alert_fraction',
   /** Kill-switch for the assistant, independent of whether a key is configured. */
   AI_DISABLED: 'ai.disabled',
+
+  // -- Backups (plans/backups.md section 8) ----------------------------------
+  /** Kill-switch for scheduled backups. Sibling of `sweep.disabled`. */
+  BACKUP_DISABLED: 'backup.disabled',
+  /**
+   * ISO timestamp of the last successful backup, written by the scheduler.
+   *
+   * Lives in the shared DB rather than in a process, which is what makes the
+   * schedule survive a leader change: a new leader neither double-runs nor
+   * skips, because "when did this last happen" is fleet state, not local state.
+   */
+  BACKUP_LAST_COMPLETED_AT: 'backup.last_completed_at',
+  /** Summary of the last successful run (object key, size, duration). */
+  BACKUP_LAST_RESULT: 'backup.last_result',
+  /** Message from the last failure, cleared on the next success. */
+  BACKUP_LAST_ERROR: 'backup.last_error',
 } as const;
 
 /** Defaults for the AI levers, kept next to the keys so bot + tooling agree. */

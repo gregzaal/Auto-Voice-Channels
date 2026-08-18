@@ -5,6 +5,7 @@ import type { ShardLeaseManager } from './shardLeaseManager.js';
 import type { HealthServer } from '../ops/health.js';
 import type { Reconciler } from '../features/voice/index.js';
 import type { BillingReconciler, EntitlementGate } from '../features/billing/index.js';
+import type { BackupScheduler } from './backupScheduler.js';
 
 export interface ShutdownDeps {
   logger: Logger;
@@ -24,6 +25,7 @@ export interface ShutdownDeps {
   disposeGuildIdentity: () => void;
   /** Undefined when SELF_HOSTED (the job never exists there). */
   billingReconciler: BillingReconciler | undefined;
+  backupScheduler: BackupScheduler | undefined;
   entitlementGate: EntitlementGate;
   closeDb: () => Promise<void>;
 }
@@ -43,6 +45,9 @@ export async function gracefulDrain(deps: ShutdownDeps): Promise<void> {
   // Awaited: an in-flight billing pass must finish (or bail at its next
   // per-guild checkpoint) before the DB pool goes away.
   await deps.billingReconciler?.stop();
+  // Awaited, not aborted: a half-uploaded object with no manifest is worse than
+  // a slower deploy, and the next boot could not tell it from a good one.
+  await deps.backupScheduler?.stop();
   deps.disposeInteractions();
   deps.disposeJoinRequests();
   deps.disposeVoiceGateway();
