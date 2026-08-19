@@ -22,6 +22,9 @@ Free until {{EXPIRY}}.
 
 === pricing:short ===
 Free until {{EXPIRY}}, shorter for big servers.
+
+=== pricing:active ===
+You already pay, nothing changes.
 `;
 
 describe('parseCopy', () => {
@@ -29,7 +32,7 @@ describe('parseCopy', () => {
     const s = parseCopy(GOOD);
     expect(s.body).toContain('## Hello');
     expect(s.body).toContain('{{PRICING}}');
-    expect(Object.keys(s.pricing).sort()).toEqual(['dormant', 'short', 'year']);
+    expect(Object.keys(s.pricing).sort()).toEqual(['active', 'dormant', 'short', 'year']);
     expect(s.pricing.year).toBe('Free until {{EXPIRY}}.');
   });
 
@@ -52,6 +55,15 @@ describe('parseCopy', () => {
   it('refuses a missing pricing variant rather than sending some guilds nothing', () => {
     const bad = GOOD.replace('=== pricing:short ===', '=== pricing:typo ===');
     expect(() => parseCopy(bad)).toThrow(/pricing:short/);
+  });
+
+  /**
+   * A paying guild told its service is "free until 2027" is worse than one told
+   * nothing, so the variant has to exist before a send can start.
+   */
+  it('refuses copy with no active variant, which would mis-price paying guilds', () => {
+    const bad = GOOD.replace('=== pricing:active ===', '=== pricing:unused ===');
+    expect(() => parseCopy(bad)).toThrow(/pricing:active/);
   });
 
   it('refuses a file with no body at all', () => {

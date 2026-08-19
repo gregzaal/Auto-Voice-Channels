@@ -69,7 +69,7 @@ export function parseCopy(raw: string): Sections {
   for (const [name, text] of sections) {
     if (name.startsWith('pricing:')) pricing[name.slice('pricing:'.length)] = text;
   }
-  for (const policy of ['dormant', 'year', 'short']) {
+  for (const policy of ['dormant', 'year', 'short', 'active']) {
     if (!pricing[policy]) throw new Error(`The copy file has no \`pricing:${policy}\` section.`);
   }
   return { body, pricing };
@@ -93,11 +93,17 @@ export function checkCopyRules(label: string, text: string): string[] {
   return problems;
 }
 
-function renderFor(
-  sections: Sections,
-  policy: Exclude<TrialPolicy, 'hard_gate'>,
-  expiresAt: Date | null,
-): string {
+/**
+ * Which pricing paragraph a guild gets.
+ *
+ * Not the same question as which trial band it is in. A paying guild is
+ * `active` whatever its size, and telling a customer their service is "free
+ * until 2027" is both wrong and the kind of thing that prompts a refund
+ * request.
+ */
+type Variant = Exclude<TrialPolicy, 'hard_gate'> | 'active';
+
+function renderFor(sections: Sections, policy: Variant, expiresAt: Date | null): string {
   let pricing = sections.pricing[policy]!;
   if (pricing.includes('{{EXPIRY}}')) {
     if (!expiresAt) {
@@ -116,7 +122,7 @@ function renderFor(
 
 interface Target {
   guildId: string;
-  policy: Exclude<TrialPolicy, 'hard_gate'>;
+  policy: Variant;
   expiresAt: Date | null;
   content: string;
 }
@@ -195,7 +201,7 @@ export async function main(rawArgv: string[]): Promise<number> {
   ];
   // Length is checked per rendered variant, not on the body, because the
   // pricing paragraph is what pushes it over.
-  for (const policy of ['dormant', 'year', 'short'] as const) {
+  for (const policy of ['dormant', 'year', 'short', 'active'] as const) {
     const sample = renderFor(sections, policy, new Date('2027-08-28T00:00:00Z'));
     if (sample.length > MAX_MESSAGE) {
       problems.push(
@@ -248,7 +254,15 @@ export async function main(rawArgv: string[]): Promise<number> {
         skipped.otherFleet++;
         continue;
       }
-      if (g.authStatus === 'blocked') {
+      /**
+       * Auth status decides the pricing paragraph before size does.
+       *
+       * `blocked` is off. `grace` and `expired` are mid-conversation about a
+       * failed payment and the leniency ladder is already messaging them on its
+       * own schedule, so a cheerful "free until 2027" would contradict it and a
+       * payment nag would duplicate it. Leave both to the ladder.
+       */
+      if (g.authStatus === 'blocked' || g.authStatus === 'grace' || g.authStatus === 'expired') {
         skipped.notEntitled++;
         continue;
       }
@@ -260,9 +274,13 @@ export async function main(rawArgv: string[]): Promise<number> {
         skipped.noMemberCount++;
         continue;
       }
-      const policy = trialPolicyFor(g.memberCount);
+      // Paying beats size. An XXL guild that already subscribed is a customer,
+      // not a bespoke arrangement waiting to happen, so it gets the `active`
+      // paragraph like any other subscriber. Only an unsubscribed XXL is left
+      // out, because a form letter about a free trial is wrong for one.
+      const policy: Variant | 'hard_gate' =
+        g.authStatus === 'active' ? 'active' : trialPolicyFor(g.memberCount);
       if (policy === 'hard_gate') {
-        // A form letter about a free trial is wrong for a bespoke arrangement.
         skipped.hardGate.push(g.guildId);
         continue;
       }
@@ -304,7 +322,7 @@ export async function main(rawArgv: string[]): Promise<number> {
        * first target was a small server, so the dry run never showed the
        * sentence that was wrong.
        */
-      for (const policy of ['dormant', 'year', 'short'] as const) {
+      for (const policy of ['dormant', 'year', 'short', 'active'] as const) {
         const sample = targets.find((t) => t.policy === policy);
         if (!sample) {
           console.log(`
