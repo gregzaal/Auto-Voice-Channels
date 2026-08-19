@@ -11,6 +11,8 @@ export * from './repositories/guilds.js';
 export * from './repositories/subscriptions.js';
 export * from './repositories/billingEvents.js';
 export * from './repositories/billingRuns.js';
+export * from './repositories/billingNotifications.js';
+export * from './repositories/guildFleetPresence.js';
 export * from './repositories/aiUsage.js';
 export * from './repositories/legacyCustomers.js';
 export * from './repositories/runtimeFlags.js';

@@ -14,6 +14,19 @@ export const RUNTIME_FLAGS = {
   CREATE_RATE_LIMIT: 'create.rate_limit_per_min',
   /** Disable the billing/trial reconcile job entirely (sampling + ladder + notifications). */
   BILLING_RECONCILE_DISABLED: 'billing.reconcile_disabled',
+  /**
+   * Stop THIS fleet advancing the leniency ladder, without stopping it
+   * sampling or delivering (`plans/fleets.md` §4).
+   *
+   * Advancing is fleet-wide work on shared rows and must happen on exactly one
+   * fleet; the shared `BILLING_ADVISORY_LOCK` already guarantees that by
+   * construction, so this is the *config* half §4 asks for rather than the
+   * only defence. It exists because `billing.reconcile_disabled` is
+   * all-or-nothing: setting that on prod to keep the ladder on beta would also
+   * stop prod delivering its own guilds' notifications, which is the failure
+   * the ladder/delivery split was built to prevent.
+   */
+  BILLING_ADVANCE_DISABLED: 'billing.advance_disabled',
   /** Leniency grace-window length in days (number; default 60 — monetization.md §4). */
   BILLING_GRACE_DAYS: 'billing.grace_days',
   /** Consecutive daily over-limit samples before the grace clock starts (number; default 7). */

@@ -1,9 +1,11 @@
 import {
   AiUsageRepository,
   AutoChannelRepository,
+  BillingNotificationRepository,
   BillingRunRepository,
   createDatabase,
   createLogger,
+  GuildFleetPresenceRepository,
   GuildRepository,
   isEntitled,
   JoinChannelRepository,
@@ -63,6 +65,15 @@ import {
 } from './features/billing/index.js';
 import { backfillGuildIdentities, registerGuildIdentity } from './features/guildIdentity.js';
 import { COMMIT, VERSION } from './version.js';
+
+/**
+ * How often each instance re-derives its fleet's guild presence.
+ *
+ * Cheap (one bulk upsert plus one narrowing update) and only has to be
+ * faster than the notification TTL, since its job is to stop a queued
+ * notification being handed to a fleet that has been kicked out.
+ */
+const PRESENCE_SYNC_INTERVAL_MS = 60 * 60 * 1000;
 
 /**
  * Composition root. Wires config → logging → DB (+ migrations) → shard leases →
@@ -142,6 +153,7 @@ async function main(): Promise<void> {
   const managed = new ManagedChannelRepository(db, config.fleet);
   const joinChannelsRepo = new JoinChannelRepository(db, config.fleet);
   const guildsRepo = new GuildRepository(db);
+  const presenceRepo = new GuildFleetPresenceRepository(db, config.fleet ?? DEFAULT_FLEET);
   const flags = new RuntimeFlagsRepository(db, config.fleet);
   const actions = new DiscordVoiceActions(client, logger);
   const voice = new DiscordVoiceView(client);
@@ -371,6 +383,7 @@ async function main(): Promise<void> {
         store: settingsCache,
         subscriptions: subscriptionsRepo,
         runs: new BillingRunRepository(db),
+        notifications: new BillingNotificationRepository(db),
         flags,
         opsAudit: new OpsAuditRepository(db, config.fleet),
         notifier: billingNotifier,
@@ -393,6 +406,8 @@ async function main(): Promise<void> {
         },
         logger,
         instanceId: config.instanceId,
+        // Decides which queued notifications this instance may deliver.
+        fleet: config.fleet ?? DEFAULT_FLEET,
       });
 
   let gatewayStatus: SubsystemStatus = 'unknown';
@@ -403,8 +418,13 @@ async function main(): Promise<void> {
   client.on('guildCreate', (guild) => {
     if (!client.isReady()) return;
     // Clear any removal marker: the bot is demonstrably back in this guild.
+    // Both the shared column and this fleet's presence row, while the former
+    // still exists (expand/contract — the dashboard and admin console read it).
     void guildsRepo.setBotPresence(guild.id, null).catch((err: unknown) => {
       logger.warn({ err, guildId: guild.id }, 'failed to clear bot-removed marker');
+    });
+    void presenceRepo.markPresent(guild.id).catch((err: unknown) => {
+      logger.warn({ err, guildId: guild.id }, 'failed to record fleet presence');
     });
     void reconciler.reconcileGuild(guild.id).catch((err: unknown) => {
       logger.error({ err, guildId: guild.id }, 'reconcile-on-guildCreate failed');
@@ -425,8 +445,12 @@ async function main(): Promise<void> {
    */
   client.on('guildDelete', (guild) => {
     if (guild.available === false) return;
-    void guildsRepo.setBotPresence(guild.id, new Date()).catch((err: unknown) => {
+    const removedAt = new Date();
+    void guildsRepo.setBotPresence(guild.id, removedAt).catch((err: unknown) => {
       logger.warn({ err, guildId: guild.id }, 'failed to record bot removal');
+    });
+    void presenceRepo.markRemoved(guild.id, removedAt).catch((err: unknown) => {
+      logger.warn({ err, guildId: guild.id }, 'failed to record fleet removal');
     });
     logger.info({ guildId: guild.id }, 'removed from guild');
   });
@@ -438,6 +462,54 @@ async function main(): Promise<void> {
       .reconcileGuilds(client.guilds.cache.keys())
       .catch((err: unknown) => logger.error({ err }, 'initial reconcile failed'));
     reconciler.startSweep();
+    /**
+     * Presence, from the guild list rather than from the event stream
+     * (`plans/fleets.md` §6.1).
+     *
+     * `guildCreate`/`guildDelete` are missable: a kick while the process is
+     * down is never replayed, so the periodic truth has to be what the bot can
+     * actually see. Narrowing (marking guilds removed) is only correct when
+     * this instance holds every shard, because a partial-shard instance sees a
+     * partial guild list and "not in my cache" would read as "not in the
+     * guild". Widening is always safe, so a sharded fleet still self-heals on
+     * the add side and relies on `guildDelete` for removals.
+     */
+    /**
+     * Presence, from the guild list rather than from the event stream
+     * (`plans/fleets.md` §6.1).
+     *
+     * `guildCreate`/`guildDelete` are missable: a kick while the process is
+     * down is never replayed, and neither is one that lands during a gateway
+     * outage, because a re-IDENTIFY does not diff the new guild list against
+     * the old cache. So this repeats on a timer rather than running once at
+     * boot. Narrowing (marking guilds removed) is only correct when this
+     * instance holds every shard, because a partial-shard instance sees a
+     * partial guild list and "not in my cache" would read as "not in the
+     * guild". Widening is always safe, so a sharded fleet still self-heals on
+     * the add side and relies on `guildDelete` for removals.
+     */
+    const syncPresence = async (): Promise<void> => {
+      const guildIds = [...client.guilds.cache.keys()];
+      const holdsEveryShard = leaseManager.ownedShards.length >= config.totalShards;
+      const result = holdsEveryShard
+        ? await presenceRepo.reconcilePresence(guildIds)
+        : await presenceRepo.markManyPresent(guildIds);
+      if (result.removed > 0 || result.added > 0) {
+        logger.info(
+          { ...result, narrowed: holdsEveryShard, fleet: config.fleet ?? DEFAULT_FLEET },
+          'fleet presence reconciled',
+        );
+      }
+    };
+    const presenceReady = syncPresence().catch((err: unknown) =>
+      logger.error({ err }, 'fleet presence reconcile failed'),
+    );
+    const presenceTimer = setInterval(() => {
+      void syncPresence().catch((err: unknown) =>
+        logger.error({ err }, 'fleet presence reconcile failed'),
+      );
+    }, PRESENCE_SYNC_INTERVAL_MS);
+    presenceTimer.unref();
     // The identity listeners only see *changes*; the guilds already in cache at
     // READY have never fired one. Catch them up once.
     void backfillGuildIdentities({ client, guilds: guildsRepo, logger })
@@ -445,13 +517,36 @@ async function main(): Promise<void> {
         if (recorded > 0) logger.info({ recorded }, 'guild identities backfilled');
       })
       .catch((err: unknown) => logger.error({ err }, 'guild identity backfill failed'));
-    // Billing job only makes sense once the guild cache is populated (its
-    // sampling phase reads it). Hourly ticks + one immediate pass.
+    /**
+     * Billing job only makes sense once the guild cache is populated (its
+     * sampling phase reads it). Hourly ticks + one immediate pass.
+     *
+     * Sequenced after the presence write, not merely after READY. The deliver
+     * phase claims by joining `guild_fleet_presence`, so a first pass that
+     * raced it would find no rows for any guild joined since the 0017 backfill
+     * and quietly deliver nothing. Harmless (the queue is durable and the next
+     * tick catches up) but it would make the first hour after every deploy
+     * look broken, which is worse than an ordering nobody has to explain.
+     */
     if (billingReconciler) {
+      /**
+       * The timer starts now; only the FIRST pass waits on presence.
+       *
+       * The deliver phase claims by joining `guild_fleet_presence`, so a first
+       * pass that raced the presence write would find no rows for any guild
+       * joined since the 0017 backfill and quietly deliver nothing. But making
+       * `start()` itself wait would mean a presence write that hangs (a slow
+       * pool, a stuck connection) silently leaves the billing job with no timer
+       * at all, forever, with nothing but a null `lastRunAt` to say so. That is
+       * this codebase's signature failure mode, so the ordering is applied
+       * where it is needed and nowhere else.
+       */
       billingReconciler.start();
-      void billingReconciler.runOnce().catch((err: unknown) => {
-        logger.error({ err }, 'initial billing reconcile failed');
-      });
+      void presenceReady.then(() =>
+        billingReconciler.runOnce().catch((err: unknown) => {
+          logger.error({ err }, 'initial billing reconcile failed');
+        }),
+      );
     }
   });
   client.on('error', (err) => {

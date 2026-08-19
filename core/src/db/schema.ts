@@ -8,6 +8,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
 /**
@@ -382,6 +383,108 @@ export const billingEvents = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index('billing_events_guild_idx').on(t.guildId, t.createdAt)],
+);
+
+/**
+ * Billing notifications waiting to be delivered (`plans/fleets.md` §4).
+ *
+ * **The queue exists because advancing the ladder and delivering its message
+ * are done by different bots.** Advancement is fleet-wide work on shared rows,
+ * so exactly one instance across the whole cluster does it
+ * (`BILLING_ADVISORY_LOCK`, deliberately not fleet-scoped). Delivery needs a
+ * bot that is actually in the guild, and the fleet that won the lock may not
+ * be. Before this table the two were one loop, which worked only because there
+ * has never been more than one fleet: the moment beta and prod are both up, a
+ * guild transitioned by the fleet that cannot see it is a guild that is never
+ * told anything, silently, forever.
+ *
+ * Rows are the *intent* to notify. The dedupe stamp that stops the ladder
+ * re-deciding lives where it always did, in `guilds.metadata.billing
+ * .notifications`, and is written only once a delivery actually lands. So an
+ * undelivered row keeps being re-derived by every advance pass, which is why
+ * enqueue has to be idempotent rather than merely cheap.
+ */
+export const billingNotifications = pgTable(
+  'billing_notifications',
+  {
+    id: bigint('id', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
+    guildId: text('guild_id').notNull(),
+    /** The leniency dedupe key (e.g. `trial_warning:7:m`). Repeats over time. */
+    key: text('key').notNull(),
+    kind: text('kind').notNull(),
+    /** The whole `LeniencyNotification`, so delivery needs no re-derivation. */
+    notification: jsonb('notification')
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    /**
+     * Member count as the advance pass saw it, carried rather than re-read.
+     *
+     * The message quotes a tier that was chosen from this number. Re-reading it
+     * at delivery time would let the two disagree, and a notice that names a
+     * tier the count no longer implies is worse than a slightly stale one.
+     */
+    memberCount: integer('member_count').notNull().default(0),
+    /**
+     * Named `enqueued_at`, not the schema-wide `created_at`.
+     *
+     * The drain's claim is a raw CTE (the `FOR UPDATE ... SKIP LOCKED` form
+     * has no builder equivalent), so the SQL column name is written out by
+     * hand and a property/column mismatch here is a runtime error nothing
+     * typechecks.
+     */
+    enqueuedAt: timestamp('enqueued_at', { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * When this stops being worth sending.
+     *
+     * A trial-ending warning delivered three weeks late is not a late warning,
+     * it is a wrong one. Expiry is what keeps a guild no fleet can reach from
+     * accumulating a backlog that would all arrive at once if a bot were ever
+     * re-added.
+     */
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+    /** Which fleet delivered it. Diagnostics only; nothing branches on it. */
+    deliveredByFleet: text('fleet', { enum: FLEETS }),
+    attempts: integer('attempts').notNull().default(0),
+    /**
+     * A claim lease: this row is spoken for until then.
+     *
+     * `FOR UPDATE ... SKIP LOCKED` alone is not enough here, and the difference
+     * is easy to miss. The row lock lives exactly as long as the claiming
+     * transaction, and delivery deliberately happens *after* it commits (a
+     * Discord round-trip inside the transaction would serialize the whole drain
+     * on the slowest HTTP call). So SKIP LOCKED only separates two claims that
+     * overlap in time. Two instances of one fleet ticking a second apart would
+     * each claim the same row and each send the message. This column is what
+     * makes the claim outlive its transaction.
+     */
+    claimedUntil: timestamp('claimed_until', { withTimezone: true }),
+    lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true }),
+    lastError: text('last_error'),
+  },
+  (t) => [
+    /**
+     * Idempotent enqueue, and **partial on purpose**.
+     *
+     * Every advance pass re-derives the same pending notification until it is
+     * delivered, so a plain unique key is what makes re-enqueue a no-op rather
+     * than a duplicate message. It has to be scoped to undelivered rows though:
+     * `grace_nudge` is deliberately re-sent weekly, and a total unique
+     * constraint on (guild, key) would let the first nudge silence every one
+     * after it.
+     */
+    uniqueIndex('billing_notifications_pending_key')
+      .on(t.guildId, t.key)
+      .where(sql`delivered_at IS NULL`),
+    // The drain's own query: undelivered, unclaimed, unexpired, oldest first.
+    index('billing_notifications_pending_idx').on(
+      t.deliveredAt,
+      t.claimedUntil,
+      t.expiresAt,
+      t.enqueuedAt,
+    ),
+    index('billing_notifications_guild_idx').on(t.guildId, t.enqueuedAt),
+  ],
 );
 
 /**
