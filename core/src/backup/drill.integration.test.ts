@@ -181,6 +181,44 @@ describe.skipIf(!hasPgTools())('runDrill (integration)', () => {
     }, 600_000);
 
     /**
+     * The wipe above passes as the schema owner, which is what a Testcontainers
+     * superuser always is and what managed Postgres never gives you. On Fly MPG
+     * the platform owns schema `public`, `DROP SCHEMA public CASCADE` fails with
+     * "must be owner of schema public", and it fails at the END of the drill --
+     * so the drill reported failure and left the full copy of production behind,
+     * which is the exact outcome the test above exists to prevent. Found in
+     * production 2026-08-19 (`plans/backups.md` §9).
+     *
+     * This reproduces that privilege shape: a role that may create and drop its
+     * own objects in `public` but does not own the schema.
+     */
+    it('wipes the scratch database as a role that does not own schema public', async () => {
+      const role = 'drill_nonowner';
+      const pw = 'drill-nonowner-pw';
+      await scratch.handle.db.execute(sql.raw(`DROP ROLE IF EXISTS ${role}`)).catch(() => {});
+      await scratch.handle.db.execute(sql.raw(`CREATE ROLE ${role} LOGIN PASSWORD '${pw}'`));
+      await scratch.handle.db.execute(sql.raw(`GRANT CREATE, USAGE ON SCHEMA public TO ${role}`));
+
+      const url = new URL(scratch.connectionString);
+      url.username = role;
+      url.password = pw;
+
+      await take('nonowner');
+      const result = await drill('nonowner', {
+        scratchDatabaseUrl: url.toString(),
+        liveDatabaseUrl: source.connectionString,
+      });
+
+      expect(result.problems).toEqual([]);
+      expect(result.restored).toBe(true);
+
+      const left = await scratch.handle.db.execute<{ n: string }>(
+        sql`SELECT count(*)::text AS n FROM pg_tables WHERE schemaname = 'public'`,
+      );
+      expect(Number(left.rows[0]?.n)).toBe(0);
+    }, 900_000);
+
+    /**
      * Both test containers use the database name `avc`, which is exactly the
      * case the first implementation refused: it compared database names and
      * called two separate servers the same database. A scratch Postgres using

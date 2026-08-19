@@ -470,6 +470,7 @@ export class BackupScheduler {
         restored: result.restored,
         tablesInArchive: result.tablesInArchive.length,
         problems: result.problems,
+        notes: result.notes,
         durationMs: result.durationMs,
       },
       { actor: 'backup-scheduler' },
@@ -481,13 +482,26 @@ export class BackupScheduler {
       details: {
         restored: result.restored,
         problems: result.problems,
+        notes: result.notes,
         durationMs: result.durationMs,
       },
     });
 
     if (result.ok) {
+      /**
+       * `notes` is logged, not just stored. A drill that passes only because
+       * something was tolerated must leave a trace someone can find later --
+       * otherwise the tolerance is invisible exactly where it matters most, on
+       * the unattended weekly run rather than the CLI where a human is reading
+       * the output anyway.
+       */
       logger.info(
-        { key: result.key, restored: result.restored, durationMs: result.durationMs },
+        {
+          key: result.key,
+          restored: result.restored,
+          durationMs: result.durationMs,
+          ...(result.notes.length ? { notes: result.notes } : {}),
+        },
         'restore drill passed',
       );
       return;

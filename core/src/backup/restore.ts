@@ -7,6 +7,9 @@ import { isManifestKey, manifestKey, parseManifest, type BackupManifest } from '
 import { parseKeyDate, pgEnvFromUrl } from './runBackup.js';
 import type { BackupStorage } from './storage.js';
 
+/** How much of `pg_restore`'s stderr we keep. Enough for any real report. */
+const STDERR_LIMIT = 16384;
+
 /**
  * Download, decrypt, verify, `pg_restore` (`plans/backups.md` §10).
  *
@@ -98,6 +101,64 @@ export interface RestoreOptions {
   log?: (event: string, data: Record<string, unknown>) => void;
 }
 
+/**
+ * Does a non-zero `pg_restore` exit describe only errors we can safely ignore?
+ *
+ * `pg_restore` exits 1 for ANY error it met, including ones it deliberately
+ * ignored and summarised as "errors ignored on restore: N". On managed
+ * Postgres the archive's `DROP EXTENSION` and `COMMENT ON EXTENSION`
+ * statements always fail, because the platform owns `pgaudit` and
+ * `pg_stat_monitor` and our role does not. Every table, index and row lands
+ * correctly and the exit code says otherwise.
+ *
+ * That is not cosmetic. Left alone it fails the weekly restore drill every
+ * week against a backup that is perfectly good, which is alert fatigue on the
+ * one check standing between us and data loss. Worse, during a real incident
+ * it tells whoever is recovering that their restore failed when it succeeded,
+ * at the exact moment they are least able to second-guess it.
+ *
+ * Three conditions, and the last two matter more than the first:
+ *
+ *  1. Every `pg_restore: error:` line is an extension-ownership error.
+ *  2. The `errors ignored on restore: N` summary is PRESENT. pg_restore emits
+ *     it immediately before returning, whenever it ignored anything. Its
+ *     absence therefore means the process never reached the end, or that the
+ *     stderr we are reading was truncated before it got there. Either way we
+ *     are deciding on a partial picture and must not tolerate anything.
+ *  3. N equals the number of error lines we actually matched. If pg_restore
+ *     counted more errors than we can see, the ones we cannot see are the ones
+ *     that would have failed this check.
+ *
+ * Conditions 2 and 3 exist because the caller's stderr buffer is capped and
+ * drops what overflows, and because `--clean` runs its DROP phase FIRST: the
+ * tolerable extension errors are at the front of the buffer and any real error
+ * from the data or post-data phase is what falls off the end. Reading condition
+ * 1 alone off a truncated buffer reports a broken restore as a good one.
+ *
+ * Do not widen this. An error this function cannot name is exactly the one
+ * worth stopping for.
+ */
+export function restoreErrorsAreIgnorable(stderr: string): boolean {
+  const lines = stderr.split('\n').map((line) => line.trim());
+
+  /**
+   * `pg_restore: error:` is the PG12+ unified format, which is what the runtime
+   * image installs. An older client logs `pg_restore: [archiver (db)]` instead
+   * and matches nothing here, which fails closed. Leave it that way.
+   */
+  const errors = lines.filter((line) => line.startsWith('pg_restore: error:'));
+  if (errors.length === 0) return false;
+  if (!errors.every((line) => /must be owner of extension/i.test(line))) return false;
+
+  const summary = lines
+    .map((line) => /errors ignored on restore:\s*(\d+)\s*$/.exec(line))
+    .filter((m): m is RegExpExecArray => m !== null)
+    .pop();
+  if (!summary) return false;
+
+  return Number(summary[1]) === errors.length;
+}
+
 export interface RestoreResult {
   key: string;
   bytes: number;
@@ -162,10 +223,18 @@ export async function restoreBackup(opts: RestoreOptions): Promise<RestoreResult
       stdio: ['pipe', 'ignore', 'pipe'],
     },
   );
+  /**
+   * Bounded, and it says so when it bounds. Silently dropping the tail is how a
+   * truncated buffer starts looking like a clean one to
+   * `restoreErrorsAreIgnorable`, whose summary-line check depends on the END of
+   * the output being present.
+   */
   let stderr = '';
+  let stderrTruncated = false;
   child.stderr.setEncoding('utf8');
   child.stderr.on('data', (d: string) => {
-    if (stderr.length < 16384) stderr += d;
+    if (stderr.length < STDERR_LIMIT) stderr += d;
+    else stderrTruncated = true;
   });
 
   const exited = new Promise<void>((resolve, reject) => {
@@ -176,11 +245,25 @@ export async function restoreBackup(opts: RestoreOptions): Promise<RestoreResult
         ),
       ),
     );
-    child.on('close', (code) =>
-      code === 0
-        ? resolve()
-        : reject(new Error(`pg_restore exited ${code}: ${stderr.trim() || '(no stderr)'}`)),
-    );
+    child.on('close', (code, signal) => {
+      if (code === 0) return resolve();
+      /**
+       * A signal-terminated child reports `code === null`, so without this it
+       * would fall through to the predicate and be judged on whatever stderr it
+       * had produced before it died. A kill during the post-data phase is the
+       * dangerous one: stdin is long since consumed, so the pipeline has
+       * already resolved and cannot flag it, and the result is every row
+       * present with no indexes, primary keys or foreign keys. Nothing
+       * downstream can see that, because the row counts are all correct.
+       */
+      if (signal !== null) {
+        return reject(
+          new Error(`pg_restore was killed by ${signal}: ${stderr.trim() || '(no stderr)'}`),
+        );
+      }
+      if (!stderrTruncated && restoreErrorsAreIgnorable(stderr)) return resolve();
+      reject(new Error(`pg_restore exited ${code}: ${stderr.trim() || '(no stderr)'}`));
+    });
   });
 
   // The checksum is over the *stored* bytes, matching how runBackup computed it,
@@ -205,7 +288,27 @@ export async function restoreBackup(opts: RestoreOptions): Promise<RestoreResult
   if (sha256Matched === null) {
     warnings.push('No manifest, so the object could not be checksum-verified.');
   }
-  if (stderr.trim()) warnings.push(`pg_restore reported: ${stderr.trim().slice(0, 500)}`);
+  if (stderr.trim()) {
+    /**
+     * Say what is known, and no more. An earlier version of this line added
+     * "and does not affect the data", which is a reassurance this code cannot
+     * actually verify, addressed to someone mid-incident who is least able to
+     * second-guess it.
+     */
+    const tolerated = !stderrTruncated && restoreErrorsAreIgnorable(stderr);
+    warnings.push(
+      (tolerated
+        ? 'pg_restore could not drop or comment the platform-owned extensions, which managed ' +
+          'Postgres always refuses. Tolerated, and reported here so it is not invisible: '
+        : 'pg_restore reported: ') + stderr.trim().slice(0, 500),
+    );
+    if (stderrTruncated) {
+      warnings.push(
+        `pg_restore produced more than ${STDERR_LIMIT} bytes of stderr and the rest was dropped, ` +
+          'so the report above is incomplete.',
+      );
+    }
+  }
 
   log('restore.done', { key: opts.backup.key, bytes, sha256Matched });
   return { key: opts.backup.key, bytes, sha256, sha256Matched, warnings };

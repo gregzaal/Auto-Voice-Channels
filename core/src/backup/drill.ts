@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { sql } from 'drizzle-orm';
 import type { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { createDatabase } from '../db/client.js';
+import { createDatabase, type Database } from '../db/client.js';
 import { decryptStream, parseKey } from './encryption.js';
 import { pgEnvFromUrl } from './runBackup.js';
 import {
@@ -469,14 +469,57 @@ async function drillRestore(
      *
      * A drill that leaves a full copy of production sitting in a second
      * database has quietly created a second thing to secure, and nobody is
-     * watching that one. Dropping the schema also needs no CREATE DATABASE
-     * right, which the plan's original "drop the scratch DB" would have.
+     * watching that one.
+     *
+     * This drops the objects one by one rather than the schema. `DROP SCHEMA
+     * public CASCADE` reads better and does not work: on managed Postgres the
+     * platform owns schema `public`, so it fails with "must be owner of schema
+     * public" -- and it fails at the END of the drill, after the restore, so
+     * the drill reported failure AND left the copy behind, which is precisely
+     * the outcome the paragraph above exists to prevent. Found on Fly MPG
+     * 2026-08-19 (`plans/backups.md` §9).
+     *
+     * Filtering on `current_user` is what keeps this honest. The platform
+     * installs its own objects in `public` (`pg_stat_monitor` is a view there),
+     * we cannot drop them, and trying is an error rather than a no-op. We drop
+     * what we created, which is exactly what the restore put there.
      */
-    await handle.db.execute(sql`DROP SCHEMA IF EXISTS public CASCADE`);
-    await handle.db.execute(sql`CREATE SCHEMA public`);
+    await wipeOwnedObjects(handle.db);
   } catch (error) {
     problems.push(`Restore into the scratch database failed: ${(error as Error).message}`);
   } finally {
     await handle.close().catch(() => {});
   }
+}
+
+/**
+ * Drop every object in `public` this role owns, plus the `drizzle` schema.
+ *
+ * Views before tables, because our diagnostics views select from the tables and
+ * would otherwise need the CASCADE to do it. Each drop is CASCADE anyway, so
+ * ordering is belt and braces rather than load-bearing.
+ *
+ * Schema-qualified, because an unqualified name resolves through `search_path`
+ * and the pooled endpoint on managed Postgres serves sessions with an empty
+ * one. We already know these objects are in `public`; the query said so.
+ */
+async function wipeOwnedObjects(db: Database): Promise<void> {
+  const views = await db.execute<{ name: string }>(sql`
+    SELECT viewname AS name FROM pg_views
+     WHERE schemaname = 'public' AND viewowner = current_user
+  `);
+  for (const { name } of views.rows) {
+    await db.execute(sql`DROP VIEW IF EXISTS public.${sql.identifier(name)} CASCADE`);
+  }
+
+  const tables = await db.execute<{ name: string }>(sql`
+    SELECT tablename AS name FROM pg_tables
+     WHERE schemaname = 'public' AND tableowner = current_user
+  `);
+  for (const { name } of tables.rows) {
+    await db.execute(sql`DROP TABLE IF EXISTS public.${sql.identifier(name)} CASCADE`);
+  }
+
+  // Ours: the migration runner creates it. Nothing else lives in it.
+  await db.execute(sql`DROP SCHEMA IF EXISTS drizzle CASCADE`);
 }
