@@ -580,8 +580,8 @@ export async function main(rawArgv: string[]): Promise<number> {
     await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 
     console.log(
-      `\nsent ${counts.system_channel} to system channels, ${counts.owner_dm} to owner DMs, ` +
-        `${counts.failed} failed`,
+      `\nsent ${counts.system_channel} to system channels, ${counts.owner_dm} to DMs, ` +
+        `${counts.creator_channel} to creator channels (last resort), ${counts.failed} failed`,
     );
     if (failures.length) {
       console.log('\nfailures (re-running will retry exactly these):');
