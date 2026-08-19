@@ -323,11 +323,12 @@ export class BackupScheduler {
         },
         { actor: 'backup-scheduler' },
       );
-      if (this.lastError === null) {
-        await flags
-          .set(RUNTIME_FLAGS.BACKUP_LAST_ERROR, null, { actor: 'backup-scheduler' })
-          .catch(() => {});
-      }
+      // Removed rather than set to null: the column is NOT NULL, so the
+      // previous `set(key, null)` raised inside its own catch and the last
+      // failure was never actually cleared.
+      await flags
+        .clear(RUNTIME_FLAGS.BACKUP_LAST_ERROR, { actor: 'backup-scheduler' })
+        .catch(() => {});
       await opsAudit.record({
         actor: 'backup-scheduler',
         action: 'backup.completed',

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { sql } from 'drizzle-orm';
 import { RuntimeFlagsRepository } from './runtimeFlags.js';
 import { OpsAuditRepository } from './opsAudit.js';
 import type { PgTestEnv } from '../test/pgContainer.js';
@@ -52,5 +53,27 @@ describe('RuntimeFlags + OpsAudit (integration)', () => {
     await audit.record({ actor: 'agent', action: 'guild.block', target: 'g-99' });
     const recent = await audit.recent(1);
     expect(recent[0]?.action).toBe('guild.block');
+  });
+  /**
+   * `value` is NOT NULL, so the obvious way to clear a flag raises a
+   * constraint violation. The backup scheduler did exactly that on every
+   * success, inside a catch that swallowed it, so a recovered fleet kept
+   * showing the failure that was already over.
+   */
+  it('clears a flag by removing it, and records the removal', async () => {
+    await flags.set('backup.last_error', 'pg_dump exited 1', { actor: 'test' });
+    expect(await flags.get('backup.last_error')).toBe('pg_dump exited 1');
+
+    await flags.clear('backup.last_error', { actor: 'test' });
+    expect(await flags.get('backup.last_error')).toBeUndefined();
+
+    const rows = await env.handle.db.execute<{ action: string }>(
+      sql`SELECT action FROM ops_audit WHERE target = 'backup.last_error' ORDER BY created_at DESC LIMIT 1`,
+    );
+    expect(rows.rows[0]?.action).toBe('flag.clear');
+  });
+
+  it('is a no-op on a flag that was never set', async () => {
+    await expect(flags.clear('backup.never_set', { actor: 'test' })).resolves.toBeUndefined();
   });
 });
