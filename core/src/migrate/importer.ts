@@ -215,6 +215,29 @@ export async function importDump(opts: ImportOptions): Promise<ImportSummary> {
           trialStartFor(plan.guildId, importedAt).getTime() + TRIAL_YEAR_DAYS * 86_400_000,
         ),
       });
+
+      /**
+       * No welcome message for an imported guild.
+       *
+       * Onboarding sends its one-time welcome when a guild is on `trial`, has
+       * no `onboardedAt`, and its row is under a week old. Every imported
+       * guild satisfies all three, because the importer creates the row: the
+       * first time the bot connects, a four-figure burst of "your free trial
+       * just started" goes out to servers that have been running AVC happily
+       * for years. The copy is written for a new install and is wrong for a
+       * migration, the volume is a rate-limit and trust problem, and a mass
+       * message is the single most distinguishable thing a fleet whose whole
+       * premise is being indistinguishable from production could do.
+       *
+       * Stamping the flag here is what suppresses it. Migrated servers get a
+       * written announcement instead, at a time somebody chose.
+       *
+       * Written after the trial clock, deliberately: `markOnboarded` is a
+       * no-op once set, so a re-run cannot un-suppress anything, and a guild
+       * whose `transitionAuth` failed has no clock and is therefore not yet
+       * onboarded either. The two stay consistent under partial failure.
+       */
+      await guilds.markOnboarded(plan.guildId, importedAt);
     } catch (error) {
       summary.failures.push({ guildId: plan.guildId, error: (error as Error).message });
       log(`FAILED ${plan.guildId}: ${(error as Error).message}`);

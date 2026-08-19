@@ -6,6 +6,7 @@ import { eq } from 'drizzle-orm';
 import { startPostgres, type PgTestEnv } from '../test/pgContainer.js';
 import { autoChannels, guilds, joinChannels, secondaryChannels } from '../db/schema.js';
 import { GuildRepository } from '../repositories/guilds.js';
+import { parseBillingMeta } from '../domain/billing.js';
 import { importDump } from './importer.js';
 import { snowflakeToDate, trialStartFor } from './legacy.js';
 import { TRIAL_YEAR_DAYS } from '../domain/tiers.js';
@@ -224,5 +225,47 @@ describe('importDump (integration)', () => {
     expect(summary.files).toBe(3);
     expect(summary.unreadable).toEqual([]);
     expect(summary.orphanedTextChannels).toEqual([]);
+  }, 300_000);
+  /**
+   * The welcome-suppression stamp (`plans/fleets.md` §7.1, owner decision
+   * 2026-08-19).
+   *
+   * Onboarding's welcome fires when a guild is on `trial`, has no
+   * `onboardedAt`, and its row is under a week old. An imported guild is all
+   * three by construction, because the importer creates the row, so without
+   * this every migrated server would be told its free trial had just started
+   * the first time the bot connected.
+   *
+   * The consequence is asserted on the bot side, where `decideOnboarding`
+   * lives (`onboarding.unit.test.ts`); core cannot import from bot. What is
+   * checked here is the only half core owns: the stamp is written.
+   */
+  it('marks an imported guild as already onboarded, so it gets no welcome', async () => {
+    const repo = new GuildRepository(pg.handle.db);
+    const row = await repo.getOrThrow(LIVE);
+    expect(parseBillingMeta(row.metadata).onboardedAt).toBeDefined();
+  }, 300_000);
+
+  /**
+   * Stamped at the import moment, not at wall-clock now.
+   *
+   * Only matters for readability of the row, but a stamp dated after the run
+   * that wrote it is the kind of thing that makes a later investigator doubt
+   * the whole table.
+   */
+  it('stamps the onboarding flag with the import moment', async () => {
+    const repo = new GuildRepository(pg.handle.db);
+    const row = await repo.getOrThrow(LIVE);
+    const stamped = parseBillingMeta(row.metadata).onboardedAt;
+    expect(stamped).toBe(IMPORTED_AT.toISOString());
+  }, 300_000);
+
+  /** A re-run must not disturb a stamp that is already there. */
+  it('leaves an existing onboarding stamp alone on a re-run', async () => {
+    const repo = new GuildRepository(pg.handle.db);
+    const before = parseBillingMeta((await repo.getOrThrow(LIVE)).metadata).onboardedAt;
+    await run(true);
+    const after = parseBillingMeta((await repo.getOrThrow(LIVE)).metadata).onboardedAt;
+    expect(after).toBe(before);
   }, 300_000);
 });
