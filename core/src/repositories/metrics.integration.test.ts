@@ -678,6 +678,45 @@ describe('MetricsRepository (integration)', () => {
       expect(betaOnly.map((p) => p.value)).toEqual([10, 2]);
     });
 
+    /**
+     * The reason the admin reader falls back to hourly on a young store.
+     *
+     * A daily series gains one point per UTC day and a chart needs two, so a
+     * collector deployed this morning has a daily series that cannot be drawn while
+     * the hourly table under it already has several points. This pins that the two
+     * resolutions really do differ that way over the same window - it is the fact
+     * the fallback depends on.
+     */
+    it('has a drawable hourly series before it has a drawable daily one', async () => {
+      await metrics.writePoints(
+        [
+          { metric: METRICS.ROOMS_TRACKED, value: 12, bucket: HOUR },
+          { metric: METRICS.ROOMS_TRACKED, value: 14, bucket: NEXT_HOUR },
+        ],
+        'beta',
+      );
+      await metrics.rollupDaily(DAY, NEXT_DAY);
+
+      const daily = await metrics.readSeries({
+        metric: METRICS.ROOMS_TRACKED,
+        from: DAY,
+        to: NEXT_DAY,
+        resolution: 'daily',
+      });
+      const hourly = await metrics.readSeries({
+        metric: METRICS.ROOMS_TRACKED,
+        from: DAY,
+        to: NEXT_DAY,
+        resolution: 'hourly',
+      });
+
+      expect(daily).toHaveLength(1);
+      expect(hourly).toHaveLength(2);
+      // And the daily row is the peak of the hours under it, not the last of them.
+      expect(daily[0]!.value).toBe(14);
+      expect(hourly.map((p) => p.value)).toEqual([12, 14]);
+    });
+
     it('keeps a keyed metric split by key', async () => {
       await metrics.writePoints(
         [
