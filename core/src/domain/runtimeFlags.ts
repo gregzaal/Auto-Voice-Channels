@@ -80,6 +80,17 @@ export const RUNTIME_FLAGS = {
   BACKUP_LAST_DRILL_AT: 'backup.last_drill_at',
   /** Summary of the last drill: what was checked, and anything wrong with it. */
   BACKUP_LAST_DRILL_RESULT: 'backup.last_drill_result',
+
+  // -- Metric store (plans/admin-dashboard.md §3.4) ---------------------------
+  /**
+   * Kill-switch for the metrics collector, matching every other collector here.
+   *
+   * Per fleet, like every flag, and that is the useful shape: the rollup is a
+   * cluster singleton but the counter flush is per instance, so disabling one
+   * fleet stops it reporting its own counters while the other fleet keeps the
+   * shared gauges coming. `global.pause` stops both.
+   */
+  METRICS_DISABLED: 'metrics.disabled',
 } as const;
 
 /** Defaults for the AI levers, kept next to the keys so bot + tooling agree. */

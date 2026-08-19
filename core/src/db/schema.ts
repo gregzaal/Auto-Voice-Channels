@@ -740,3 +740,92 @@ export const opsAudit = pgTable(
   },
   (t) => [index('ops_audit_created_idx').on(t.createdAt)],
 );
+
+// ---------------------------------------------------------------------------
+// Metric store (plans/admin-dashboard.md §3.4). Two narrow tables hold every
+// operational time series; `domain/metrics.ts` owns what each name means.
+// ---------------------------------------------------------------------------
+
+/**
+ * The fleet column on a metric row: a `Fleet`, or the literal `'shared'` for a
+ * fact about the customer base rather than about one bot.
+ *
+ * Deliberately plain `text` and NOT the `FLEETS` enum, and deliberately NOT
+ * NULL. See `METRIC_SHARED_SCOPE` in `domain/metrics.ts` for the reasoning:
+ * nullable is impossible in a primary key, and widening `Fleet` to carry
+ * `'shared'` would leak a non-fleet into `shard_leases`, `runtime_flags` and the
+ * advisory-lock ordinals.
+ */
+const metricFleet = () => text('fleet').notNull().default('prod');
+
+/**
+ * The writing instance, or `''` for a row nobody owns privately.
+ *
+ * This column is what makes a counter write idempotent instead of additive. Each
+ * instance owns its own row per bucket and rewrites its own running total, so a
+ * retried flush lands on the same number rather than doubling it (golden rule 1,
+ * applied to telemetry). Readers sum across instances. Rows computed by the
+ * cluster-singleton rollup are shared facts and carry `''`.
+ */
+const metricInstance = () => text('instance').notNull().default('');
+
+/**
+ * Hourly operational metrics.
+ *
+ * The five-column primary key is the whole design and every part earns its
+ * place: `bucket` is when, `metric` is what, `fleet` is whose bot (or nobody's),
+ * `instance` is which writer (see above), and `key` is the metric's own
+ * dimension - a command name, an auth status, a tier - or `''` for a metric with
+ * no dimension.
+ *
+ * Retention is 90 days here and forever in {@link metricsDaily}.
+ */
+export const metricsHourly = pgTable(
+  'metrics_hourly',
+  {
+    /** `date_trunc('hour', ...)`, UTC. */
+    bucket: timestamp('bucket', { withTimezone: true }).notNull(),
+    metric: text('metric').notNull(),
+    fleet: metricFleet(),
+    instance: metricInstance(),
+    key: text('key').notNull().default(''),
+    value: bigint('value', { mode: 'number' }).notNull(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.bucket, t.metric, t.fleet, t.instance, t.key] }),
+    /**
+     * "One metric over time" is every chart's query, and the primary key leads
+     * with `bucket`, so it cannot serve it without scanning every metric in the
+     * range.
+     */
+    index('metrics_hourly_metric_idx').on(t.metric, t.bucket),
+  ],
+);
+
+/**
+ * Daily operational metrics, kept forever.
+ *
+ * Derived from {@link metricsHourly} by a recompute-and-overwrite rollup, which
+ * is what makes re-running it idempotent, and **collapses `instance` to `''`**:
+ * nobody asks which machine created rooms on a given day two years ago, and
+ * machine ids churn, so keeping them here would grow the long-term table without
+ * bound for no reader.
+ */
+export const metricsDaily = pgTable(
+  'metrics_daily',
+  {
+    /** `date_trunc('day', ...)`, UTC. */
+    bucket: timestamp('bucket', { withTimezone: true }).notNull(),
+    metric: text('metric').notNull(),
+    fleet: metricFleet(),
+    instance: metricInstance(),
+    key: text('key').notNull().default(''),
+    value: bigint('value', { mode: 'number' }).notNull(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.bucket, t.metric, t.fleet, t.instance, t.key] }),
+    index('metrics_daily_metric_idx').on(t.metric, t.bucket),
+  ],
+);

@@ -42,11 +42,23 @@ export class BillingRunRepository {
     job: string,
     spacingMs: number,
     instanceId: string,
+    /**
+     * Which sub-key of the namespace to serialize on. Default 0 is the billing
+     * advance.
+     *
+     * Distinct jobs need distinct slots, and not merely for tidiness: the
+     * advance pass walks the whole install base and holds its lock until it
+     * commits, so a second job sharing slot 0 would block behind it for the
+     * length of a fleet sweep and miss its own window. The durable spacing in
+     * `billing_runs` is already per `job`, so the slot is the only part that has
+     * to be chosen.
+     */
+    lockSlot = 0,
   ): Promise<{ ok: boolean; waitMs: number }> {
     return this.db.transaction(async (tx) => {
-      // Serialize cluster-wide per job. Lock key: (namespace, job-hash 0) — a
-      // single billing job today; released automatically at commit.
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(${BILLING_ADVISORY_LOCK}, 0)`);
+      // Serialize cluster-wide per job. Lock key: (namespace, slot); released
+      // automatically at commit.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${BILLING_ADVISORY_LOCK}, ${lockSlot})`);
 
       const result = await tx.execute(sql`SELECT last_run_at FROM billing_runs WHERE job = ${job}`);
       const lastRaw = (result.rows[0] as { last_run_at?: string | Date } | undefined)?.last_run_at;
