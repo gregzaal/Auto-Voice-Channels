@@ -199,9 +199,7 @@ describe('planGuild', () => {
      */
     it('dates the channel from its snowflake', () => {
       const plan = withSecondary({});
-      expect(plan.secondaries[0]!.createdAt.getTime()).toBe(
-        snowflakeToDate(SECONDARY)!.getTime(),
-      );
+      expect(plan.secondaries[0]!.createdAt.getTime()).toBe(snowflakeToDate(SECONDARY)!.getTime());
     });
 
     it('carries the private flag', () => {

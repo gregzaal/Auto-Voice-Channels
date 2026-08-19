@@ -31,9 +31,11 @@ describe('parseLegacyJson', () => {
       }
     }`;
     const parsed = parseLegacyJson(text) as Record<string, never>;
-    const secondary = (parsed as never as {
-      auto_channels: Record<string, { secondaries: Record<string, Record<string, string>> }>;
-    }).auto_channels['605724722902204416']!.secondaries['700000000000000123']!;
+    const secondary = (
+      parsed as never as {
+        auto_channels: Record<string, { secondaries: Record<string, Record<string, string>> }>;
+      }
+    ).auto_channels['605724722902204416']!.secondaries['700000000000000123']!;
     expect(secondary.creator).toBe('291185187105275904');
     expect(secondary.jc).toBe('718375705951338548');
     expect(secondary.tc).toBe('718375705951338549');
@@ -48,10 +50,9 @@ describe('parseLegacyJson', () => {
   });
 
   it('leaves booleans, null and strings alone', () => {
-    const parsed = parseLegacyJson('{"enabled": true, "left": null, "general": "General"}') as Record<
-      string,
-      unknown
-    >;
+    const parsed = parseLegacyJson(
+      '{"enabled": true, "left": null, "general": "General"}',
+    ) as Record<string, unknown>;
     expect(parsed).toEqual({ enabled: true, left: null, general: 'General' });
   });
 
@@ -73,7 +74,10 @@ describe('parseLegacyJson', () => {
   });
 
   it('leaves floats and exponents as numbers', () => {
-    const parsed = parseLegacyJson('{"a": 1234567890123456.5, "b": 1e20}') as Record<string, number>;
+    const parsed = parseLegacyJson('{"a": 1234567890123456.5, "b": 1e20}') as Record<
+      string,
+      number
+    >;
     expect(typeof parsed.a).toBe('number');
     expect(typeof parsed.b).toBe('number');
   });
