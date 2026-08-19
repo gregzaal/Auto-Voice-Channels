@@ -118,6 +118,22 @@ export interface VoiceFeatureDeps {
   serverLog?: (guildId: string, level: 1 | 2 | 3, message: string) => void;
   /** Records "I lost access to this channel" incidents for `/setup` + `/logging`. */
   permissionProblems?: PermissionProblemTracker;
+  /**
+   * Counts a room's birth or death, for the metric store. Fire-and-forget, and
+   * optional so tests need not supply one.
+   *
+   * Counted here because `secondary_channels` rows are deleted with the channels
+   * they describe: the table holds a live count and no history whatsoever, so a
+   * room that is not counted as it happens is unrecoverable, not merely
+   * un-charted.
+   *
+   * `deleted` means **the bot cleaned a room up**, not "a room stopped existing".
+   * A channel a human deletes by hand, and a stale row reconcile drops, are
+   * deliberately not counted: they are different events, and folding them in
+   * would make the number useless for the question it exists to answer, which is
+   * whether cleanup is working.
+   */
+  countRoom?: (event: 'created' | 'deleted') => void;
 }
 
 /** Common option for state-changing operations: report without acting. */
@@ -323,7 +339,21 @@ export class VoiceFeature {
     member: VoiceMember,
     opts: ReconcileOptions = {},
   ): Promise<CreateOutcome> {
-    if (!(await this.deps.autoChannels.isPrimary(guildId, channelId))) return { action: 'skip' };
+    /**
+     * One read, not two. This is the first thing a voice join does.
+     *
+     * `isPrimary(guildId, channelId)` and `get(channelId)` fetch the SAME ROW,
+     * and this method called both, sequentially, a few lines apart. Two round
+     * trips for one lookup is free when the database is next door and it is
+     * not free here: the bot runs in `iad` and the cluster in `ams`, measured
+     * at 91ms per round trip on 2026-08-19, so the duplicate alone cost every
+     * room creation about a tenth of a second.
+     *
+     * `get` is fleet-scoped by the repository, so the guild check that
+     * `isPrimary` added on top is preserved explicitly below rather than lost.
+     */
+    const primary = await this.deps.autoChannels.get(channelId);
+    if (!primary || primary.guildId !== guildId) return { action: 'skip' };
 
     const guild = await this.deps.guilds.ensure(guildId);
     const settings = parseVoiceSettings(guild.settings);
@@ -365,7 +395,8 @@ export class VoiceFeature {
       'creating secondary: creator presence',
     );
 
-    const primary = await this.deps.autoChannels.get(channelId);
+    // `primary` was read once at the top of this method; re-reading it here is
+    // the duplicate round trip that used to be on this path.
     // When the primary's category is grouped, number group-wide (across all the
     // category's primaries) and append at the bottom; otherwise number per-primary.
     const categoryKey = groupKeyFor(this.deps.voice.categoryOf?.(channelId));
@@ -425,6 +456,7 @@ export class VoiceFeature {
       // Seed the arrival roster with the creator (longest-present from birth).
       state: { name, index, seed, roster: [member.id] },
     });
+    this.deps.countRoom?.('created');
 
     // Default-private primaries: lock the new channel before the creator lands in
     // it (granting Connect to them by id, since their move isn't cached yet).
@@ -536,6 +568,7 @@ export class VoiceFeature {
     await this.deps.secondaries.remove(channelId);
     await this.deps.onSecondaryRemoved?.(guildId, channelId);
 
+    this.deps.countRoom?.('deleted');
     this.deps.logger.info({ guildId, secondaryId: channelId }, 'deleted empty secondary channel');
     this.deps.serverLog?.(
       guildId,
