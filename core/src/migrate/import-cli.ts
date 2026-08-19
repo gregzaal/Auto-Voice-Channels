@@ -39,8 +39,21 @@ function readGuildList(path: string): Set<string> {
   return new Set(ids);
 }
 
+/**
+ * Positional arguments, with pnpm's `--` separator dropped.
+ *
+ * `pnpm --filter @avc/core run migrate:import -- <dir>` is the documented
+ * invocation, and pnpm 9 forwards the `--` as a literal argument rather than
+ * consuming it, so the first positional was `--` and the command printed its
+ * own usage instead of running. Found by running exactly what the plan tells
+ * someone to type, which is not the same thing as running the CLI.
+ */
+function positionals(): string[] {
+  return process.argv.slice(2).filter((a) => a !== '--');
+}
+
 async function main(): Promise<void> {
-  const dir = process.argv[2];
+  const dir = positionals()[0];
   const apply = process.argv.includes('--apply');
   const listPath = arg('live-guilds');
 

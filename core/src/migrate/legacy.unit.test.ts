@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { hasLeft, planGuild, snowflakeToDate, trialStartFor } from './legacy.js';
+import { hasLeft, mapInheritPerms, planGuild, snowflakeToDate, trialStartFor } from './legacy.js';
 
 const GUILD = '460459401086763010';
 const PRIMARY = '605724722902204416';
@@ -319,5 +319,45 @@ describe('trialStartFor', () => {
 
   it('produces whole days, so starts land at the same time of day', () => {
     for (let i = 0; i < 50; i++) expect(Number.isInteger(days(`3000000000000${i}`))).toBe(true);
+  });
+});
+
+/**
+ * 90 guilds in the real dump set this, and it was being dropped by omission
+ * rather than by decision: absent from the plan's mapping table *and* from its
+ * dropped-fields list. The two systems agree exactly, so there was nothing to
+ * decide once anyone looked.
+ */
+describe('mapInheritPerms', () => {
+  it('lowercases the two legacy keywords', () => {
+    expect(mapInheritPerms('CATEGORY')).toBe('category');
+    expect(mapInheritPerms('PRIMARY')).toBe('primary');
+  });
+
+  it('keeps a channel id exactly', () => {
+    expect(mapInheritPerms('580996833577271306')).toBe('580996833577271306');
+  });
+
+  /**
+   * The dump stores these as JSON numbers, and `parseLegacyJson` quotes them
+   * before parsing for exactly this reason. A number reaching here has already
+   * lost its last digits, so converting it would hand back a channel id that
+   * does not exist. The first version of this test proved the point by failing:
+   * the literal below is `...300` by the time TypeScript is done with it.
+   */
+  it('rejects a number rather than returning a corrupted id', () => {
+    // Exactly what an unquoted dump value becomes. Written as a parse rather
+    // than a literal because eslint's no-loss-of-precision rejects the literal
+    // outright, which is the same objection this test exists to make.
+    const rounded = (JSON.parse('{"v":580996833577271306}') as { v: number }).v;
+    expect(String(rounded)).toBe('580996833577271300');
+    expect(mapInheritPerms(rounded)).toBeUndefined();
+  });
+
+  /** Unset beats guessed: `primary` is the runtime default anyway. */
+  it('drops anything it does not recognise', () => {
+    for (const value of [undefined, null, '', 'PARENT', 'yes', true, {}, '12']) {
+      expect(mapInheritPerms(value)).toBeUndefined();
+    }
   });
 });

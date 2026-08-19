@@ -50,6 +50,7 @@ export const legacyPrimarySchema = z
     template: z.unknown(),
     above: z.unknown(),
     limit: z.unknown(),
+    inheritperms: z.unknown(),
     secondaries: z.unknown(),
   })
   .passthrough();
@@ -195,6 +196,26 @@ export interface PlanOptions {
 /**
  * Maps one legacy guild onto the new schema. No I/O, no clock, no randomness.
  */
+/**
+ * Legacy `PRIMARY` / `CATEGORY` / `<channel id>` to what the renderer accepts.
+ *
+ * **A JS number is rejected, not converted.** By the time a snowflake is a
+ * `number` its precision is already gone: `580996833577271306` is
+ * `...300` before any code here runs. `parseLegacyJson` quotes long integers
+ * before parsing precisely so this never happens, so a number arriving here
+ * means the value came from somewhere that skipped it and is already wrong.
+ * Returning a plausible-but-wrong channel id would point the permission copy at
+ * a channel that does not exist; returning undefined falls back to `primary`,
+ * which is the runtime default and merely not what they asked for.
+ */
+export function mapInheritPerms(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (/^\d{5,25}$/.test(trimmed)) return trimmed;
+  const lowered = trimmed.toLowerCase();
+  return lowered === 'primary' || lowered === 'category' ? lowered : undefined;
+}
+
 export function planGuild(guildId: string, raw: unknown, options: PlanOptions = {}): GuildPlan {
   const parsed = legacyGuildSchema.safeParse(raw);
   const base: GuildPlan = {
@@ -284,6 +305,24 @@ export function planGuild(guildId: string, raw: unknown, options: PlanOptions = 
      * written explicitly for every primary rather than ever left to a default.
      */
     template.above = p.above !== false;
+
+    /**
+     * `inheritperms` (90 guilds in the dump: 77 `CATEGORY`, 24 `PRIMARY`, the
+     * rest a channel id).
+     *
+     * This was in neither the mapping nor the dropped-fields list, so it was
+     * being dropped by omission rather than by decision, and the two systems
+     * happen to agree exactly: the rewrite's `template.inheritperms` accepts
+     * `primary`, `category`, or a channel id, and legacy stores the same three
+     * things in upper case. Dropping it would silently reset a permission
+     * choice its owner made deliberately, and permissions are the one setting
+     * where "silently different from before" means strangers in a private room.
+     *
+     * Anything unrecognised is left unset rather than guessed. `primary` is the
+     * runtime default, and defaulting is safer than inventing a source.
+     */
+    const inherit = mapInheritPerms(p.inheritperms);
+    if (inherit) template.inheritperms = inherit;
 
     primaries.push({ channelId: primaryId, template });
 
