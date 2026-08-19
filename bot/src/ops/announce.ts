@@ -156,7 +156,7 @@ interface Target {
   contactId: string | null;
 }
 
-type Outcome = 'system_channel' | 'owner_dm' | 'failed';
+type Outcome = 'system_channel' | 'owner_dm' | 'creator_channel' | 'failed';
 
 /**
  * Posts to the guild's system channel, falling back to the owner's DM.
@@ -170,6 +170,7 @@ async function deliver(
   guildId: string,
   content: string,
   contactId: string | null,
+  creatorChannelIds: readonly string[],
 ): Promise<{ outcome: Outcome; error?: string }> {
   let guild: { name: string; system_channel_id: string | null; owner_id: string };
   try {
@@ -179,16 +180,17 @@ async function deliver(
   }
 
   /**
-   * System channel or owner DM. There is no third option, and the obvious one
-   * is a trap.
+   * System channel, then a private DM, then a creator channel as a last resort.
    *
    * ~38% of guilds have no usable system channel, and nearly all of them do
-   * have some other text channel the bot could post in. **Do not post in it.**
-   * Picking "the first channel we can write to" is precisely what spam bots do,
-   * and servers defend against it with honeypot channels that auto-ban anything
-   * posting there. The upside is a nicer delivery surface; the downside is
-   * getting the bot banned from the servers it is trying to talk to. Owner's
-   * call, 2026-08-19, and it is not a close one.
+   * have some other text channel the bot could post in. **Do not post in an
+   * arbitrary one.** Picking "the first channel we can write to" is precisely
+   * what spam bots do, and servers defend against it with honeypot channels
+   * that auto-ban anything posting there. Owner's call, 2026-08-19.
+   *
+   * A CREATOR channel is a different thing and is allowed, at the very end:
+   * an admin deliberately configured it for this bot and we hold a row for it.
+   * It is last because its text chat is publicly visible.
    */
   /**
    * Who to address. The guild's recorded contact if they are still a member,
@@ -228,20 +230,47 @@ ${content}`,
     }
   }
 
+  let dmError = 'not attempted';
   try {
     const dm = (await rest.post(Routes.userChannels(), {
-      body: { recipient_id: guild.owner_id },
+      body: { recipient_id: mention },
     })) as { id: string };
     await rest.post(Routes.channelMessages(dm.id), {
       body: { content: `**${guild.name}**\n\n${content}` },
     });
     return { outcome: 'owner_dm' };
   } catch (err) {
-    return {
-      outcome: 'failed',
-      error: `system channel and owner DM both failed: ${(err as Error).message}`,
-    };
+    dmError = (err as Error).message;
   }
+
+  /**
+   * Last resort: the built-in text chat of a creator channel.
+   *
+   * Several are tried, because one may sit in a category that denies the bot
+   * Send Messages while another does not. Publicly visible, so this only runs
+   * once both private routes are gone: reaching the guild badly beats not
+   * reaching it at all.
+   */
+  for (const channelId of creatorChannelIds) {
+    try {
+      await rest.post(Routes.channelMessages(channelId), {
+        body: {
+          content: `<@${mention}>\n${content}`,
+          allowed_mentions: { users: [mention] },
+        },
+      });
+      return { outcome: 'creator_channel' };
+    } catch {
+      // Try the next one.
+    }
+  }
+
+  return {
+    outcome: 'failed',
+    error:
+      `system channel, DM and ${creatorChannelIds.length} creator channel(s) all failed. ` +
+      `DM said: ${dmError}`,
+  };
 }
 
 /**
@@ -354,6 +383,26 @@ export async function main(rawArgv: string[]): Promise<number> {
 
   try {
     const present = await presence.presentGuildIds();
+
+    /**
+     * Creator channels per guild, for the last-resort delivery path. One query
+     * rather than `listByGuild` a thousand times, and capped at a handful per
+     * guild because we only ever try them until one works.
+     */
+    const creatorChannels = new Map<string, string[]>();
+    {
+      // `config.fleet` is a zod-validated enum member, not input, so it is safe
+      // to inline. drizzle-orm is not a direct dependency of the bot package.
+      const { rows } = await handle.db.execute<{ guild_id: string; channel_id: string }>(
+        `SELECT guild_id, channel_id FROM auto_channels
+          WHERE fleet = '${config.fleet}' ORDER BY guild_id, created_at`,
+      );
+      for (const r of rows) {
+        const list = creatorChannels.get(String(r.guild_id)) ?? [];
+        if (list.length < 3) list.push(String(r.channel_id));
+        creatorChannels.set(String(r.guild_id), list);
+      }
+    }
     const targets: Target[] = [];
     const skipped = {
       notEntitled: 0,
@@ -486,7 +535,12 @@ export async function main(rawArgv: string[]): Promise<number> {
       return 0;
     }
 
-    const counts: Record<Outcome, number> = { system_channel: 0, owner_dm: 0, failed: 0 };
+    const counts: Record<Outcome, number> = {
+      system_channel: 0,
+      owner_dm: 0,
+      creator_channel: 0,
+      failed: 0,
+    };
     const failures: string[] = [];
     let done = 0;
 
@@ -500,6 +554,7 @@ export async function main(rawArgv: string[]): Promise<number> {
           target.guildId,
           target.content,
           target.contactId,
+          creatorChannels.get(target.guildId) ?? [],
         );
         counts[outcome]++;
         if (outcome === 'failed') {
