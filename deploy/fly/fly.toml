@@ -13,13 +13,15 @@
 # of a name for something that will serve real users, and the kind of name that
 # eventually gets treated as disposable.
 #
-# It still runs the private testbed bot (Lohner, 701117810549588038) and still
-# sets FLEET = "prod", because today it is the only fleet. Both change together
-# at the beta switch (plans/fleets.md 7.1), which swaps in AVC Beta
-# (675405085752164372) and flips FLEET to "beta". **Flipping FLEET without
-# re-seeding runtime_flags for the new fleet silently reverts every flag to its
-# code default** - the table is keyed (fleet, key). Production gets its own app,
-# `avc-prod`, at the cutover.
+# It runs AVC Beta (675405085752164372) as FLEET = "beta" since the beta switch
+# on 2026-08-19 (plans/fleets.md 7.1), which swapped out the private testbed bot
+# (Lohner, 701117810549588038) and flipped the fleet in the same deploy, on
+# purpose: a restart that changed one without the other would have brought AVC
+# Beta up reading production's runtime flags and claiming production's shard
+# leases. **Flipping FLEET without re-seeding runtime_flags for the new fleet
+# silently reverts every flag to its code default** - the table is keyed
+# (fleet, key), and the beta rows were seeded before this deploy. Production
+# gets its own app, `avc-prod`, at the cutover.
 app = "avc-beta"
 primary_region = "iad"
 
@@ -32,9 +34,8 @@ primary_region = "iad"
   # SELF_HOSTED=false: the process refuses to boot without it, deliberately,
   # because a hosted instance that silently defaulted to "prod" would let the
   # beta bot claim production's shard leases and read production's runtime
-  # flags. The beta fleet's own app sets FLEET = "beta" and nothing else here
-  # changes.
-  FLEET = "prod"
+  # flags.
+  FLEET = "beta"
   HTTP_PORT = "8080"
   LOG_LEVEL = "info"
   NODE_ENV = "production"
