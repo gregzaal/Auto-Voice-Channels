@@ -54,3 +54,30 @@ function detail(err: unknown): string {
 function truncate(text: string): string {
   return text.length > MAX_LEN ? `${text.slice(0, MAX_LEN - 1)}…` : text;
 }
+
+/**
+ * Coarse category for an error, for the `errors` metric's key dimension.
+ *
+ * Deliberately coarse. The useful question a chart of errors answers is "did the
+ * shape of our failures change", and a category per Discord error code would be
+ * a cardinality problem answering a question nobody asks. The codes stay in the
+ * logs, where they are actionable, and the correlation id is how one is found.
+ */
+export function categorizeError(err: unknown): string {
+  if (err instanceof DiscordAPIError) {
+    const code = Number(err.code);
+    if (code === 50001 || code === 50013) return 'permission';
+    if (code === 30013) return 'channel_limit';
+    if (code >= 10000 && code < 11000) return 'gone';
+    if (Number(err.status) === 429) return 'rate_limit';
+    return 'discord';
+  }
+  if (err instanceof Error) {
+    // A circuit-breaker rejection is our own back-pressure working, not a fault
+    // of its own, and lumping it in with real failures would make a guild that
+    // is already failing look several times worse than it is.
+    if (err.name === 'CircuitOpenError') return 'circuit_open';
+    return 'internal';
+  }
+  return 'unknown';
+}

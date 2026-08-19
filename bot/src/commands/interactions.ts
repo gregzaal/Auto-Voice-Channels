@@ -131,6 +131,16 @@ export interface InteractionDeps {
   logger: Logger;
   /** Optional sink for significant interaction failures (admin reporting). */
   reportError?: (message: string, context?: Record<string, unknown>) => void;
+  /**
+   * Counts a command invocation. Optional so tests and a self-host with the
+   * collector switched off need not supply one.
+   *
+   * This is the one product question nothing else in the schema can answer:
+   * every other metric in the plan's §4.6 is derivable from a table after the
+   * fact, and "which commands do people actually use" leaves no trace at all
+   * unless it is counted as it happens.
+   */
+  countCommand?: (commandName: string) => void;
 }
 
 const KICK_PREFIX = 'avc:kick:';
@@ -250,6 +260,14 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
     const channelId = currentVoiceChannelId(interaction);
+
+    /**
+     * Counted here rather than in `route`, so the number means "commands that
+     * ran". `route` also sees buttons, modals and selects, and it refuses
+     * blocked and hard-gated guilds above this point - counting there would fold
+     * refusals into usage and make a gated guild look like an active one.
+     */
+    deps.countCommand?.(interaction.commandName);
 
     switch (interaction.commandName) {
       case 'limit':

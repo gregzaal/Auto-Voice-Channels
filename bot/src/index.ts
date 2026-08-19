@@ -11,6 +11,8 @@ import {
   JoinChannelRepository,
   loadConfig,
   ManagedChannelRepository,
+  METRICS,
+  MetricsRepository,
   OpsAuditRepository,
   DEFAULT_FLEET,
   probeForManifest,
@@ -32,6 +34,8 @@ import { ShardLeaseManager } from './runtime/shardLeaseManager.js';
 import { PgIdentifyThrottler } from './runtime/identifyThrottler.js';
 import { installShutdown } from './runtime/shutdown.js';
 import { BackupScheduler } from './runtime/backupScheduler.js';
+import { MetricsCollector } from './runtime/metricsCollector.js';
+import { categorizeError } from './ops/describeError.js';
 import { HealthServer, type HealthReport, type SubsystemStatus } from './ops/health.js';
 import {
   AdminChannelReporter,
@@ -129,7 +133,21 @@ async function main(): Promise<void> {
     },
   });
 
-  const dispatcher = new GuildDispatcher({ logger });
+  /**
+   * The dispatcher's error sink, filled in once the metrics collector exists.
+   *
+   * Late-bound rather than reordered because the two genuinely point at each
+   * other: the dispatcher reports its failures to the collector, and the
+   * collector samples the dispatcher's queue depth. Same shape as `shutdown`
+   * above, and the optional call means a failure raised before the collector is
+   * built is simply not counted rather than a crash on the error path.
+   */
+  const countError: { record?: (err: unknown) => void } = {};
+  const dispatcher = new GuildDispatcher({
+    logger,
+    // The per-guild boundary is the only place that sees every isolated failure.
+    onTaskFailure: (err) => countError.record?.(err),
+  });
 
   // Boot-time claim retries across the lease-expiry window so a replacement
   // instance reliably picks up a dead peer's orphaned shards.
@@ -213,6 +231,10 @@ async function main(): Promise<void> {
       privacy.makePrivateForCreation(gid, cid, ownerId, ownerName),
     serverLog: (gid, level, message) => serverLogger.log(gid, level, message),
     permissionProblems,
+    countRoom: (event) =>
+      metricsCollector.increment(
+        event === 'created' ? METRICS.ROOMS_CREATED : METRICS.ROOMS_DELETED,
+      ),
     logger,
   });
   // The one carve-out from the hard-gate short-circuit: joining a creator
@@ -306,6 +328,8 @@ async function main(): Promise<void> {
     selfHosted: config.selfHosted,
     clientId: config.clientId,
     reportError: (message, context) => errorReporter.report(message, context),
+    countCommand: (commandName) =>
+      metricsCollector.increment(METRICS.COMMANDS_INVOKED, commandName),
     logger,
   });
 
@@ -376,6 +400,48 @@ async function main(): Promise<void> {
         probe: () => probeForManifest(db),
       })
     : undefined;
+  /**
+   * The metric store's collector (`plans/admin-dashboard.md` §3.4).
+   *
+   * Unconditional, like the backup scheduler and unlike the billing job: the
+   * things it counts (rooms created, commands invoked, errors by category) are
+   * deleted-with-the-row or leave no trace at all, so they are unrecoverable
+   * rather than merely un-charted if nobody counts them, and that is as true on a
+   * self-host as it is here. `metrics.disabled` is the off switch.
+   *
+   * The `countRoom` and `countCommand` closures wired further up resolve this
+   * name at call time, which is always after the `client.login` at the end of
+   * this function, so they cannot observe it uninitialized. `countError` is the
+   * one that could - the dispatcher exists long before this line - which is why
+   * that one goes through a holder instead of closing over the binding.
+   */
+  const metricsCollector = new MetricsCollector({
+    metrics: new MetricsRepository(db),
+    runs: new BillingRunRepository(db),
+    flags,
+    fleet: config.fleet ?? DEFAULT_FLEET,
+    instanceId: config.instanceId,
+    logger: logger.child({ component: 'metrics' }),
+    sample: () => ({
+      queueDepth: dispatcher.totalDepth(),
+      trippedCircuits: dispatcher.trippedCount(),
+    }),
+  });
+  countError.record = (err) => metricsCollector.increment(METRICS.ERRORS, categorizeError(err));
+  /**
+   * Resumed here, before the gateway connects, and that ordering is the whole
+   * correctness argument.
+   *
+   * `hydrate` reloads this instance's already-flushed counters for the current
+   * bucket, and the accumulator holds running totals rather than deltas - so if a
+   * room were created between `client.login` and this resolving, the stored total
+   * and the live count would be disjoint numbers with no way to combine them
+   * safely. Awaiting it before login means the accumulator is provably empty, which
+   * makes the resume exact instead of approximate. The timers still start later,
+   * with the drain handler installed.
+   */
+  await metricsCollector.hydrate();
+
   const billingReconciler = config.selfHosted
     ? undefined
     : new BillingReconciler({
@@ -620,6 +686,7 @@ async function main(): Promise<void> {
         billing: billingReconciler ? { ...billingReconciler.stats } : null,
         ai: assistant ? { ...assistant.stats } : null,
         backup: backupScheduler ? { ...backupScheduler.stats } : { enabled: false },
+        metrics: { ...metricsCollector.stats },
       };
     },
   });
@@ -673,6 +740,7 @@ async function main(): Promise<void> {
     disposeGuildIdentity,
     billingReconciler,
     backupScheduler,
+    metricsCollector,
     entitlementGate,
     closeDb,
   });
@@ -684,6 +752,13 @@ async function main(): Promise<void> {
     await backupScheduler.hydrate();
     backupScheduler.start();
   }
+  /**
+   * Started after the drain handler for the same reason as the backup scheduler:
+   * the drain performs a final flush, and a collector ticking before that handler
+   * exists could be killed mid-flush with nothing to write its accumulators.
+   * (`hydrate` already ran, much earlier, before the gateway connected.)
+   */
+  metricsCollector.start();
   leaseManager.startHeartbeat();
 }
 

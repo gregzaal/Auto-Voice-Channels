@@ -5,6 +5,14 @@ import type { CircuitBreakerOptions } from './circuitBreaker.js';
 export interface DispatcherOptions {
   logger: Logger;
   circuit?: CircuitBreakerOptions;
+  /**
+   * Called with every error that reaches a per-guild boundary, for telemetry.
+   *
+   * Passed through to each queue rather than counted here, because the boundary
+   * is inside the queue: by the time a rejection surfaces to a caller it has
+   * already been handled, and several callers do not look at it at all.
+   */
+  onTaskFailure?: (err: unknown) => void;
 }
 
 /**
@@ -16,10 +24,12 @@ export class GuildDispatcher {
   private readonly queues = new Map<string, GuildQueue>();
   private readonly logger: Logger;
   private readonly circuit: CircuitBreakerOptions | undefined;
+  private readonly onTaskFailure: ((err: unknown) => void) | undefined;
 
   constructor(options: DispatcherOptions) {
     this.logger = options.logger;
     this.circuit = options.circuit;
+    this.onTaskFailure = options.onTaskFailure;
   }
 
   private queueFor(guildId: string): GuildQueue {
@@ -29,6 +39,7 @@ export class GuildDispatcher {
         guildId,
         logger: this.logger,
         onIdle: () => this.maybeEvict(guildId),
+        ...(this.onTaskFailure ? { onTaskFailure: this.onTaskFailure } : {}),
         ...(this.circuit ? { circuit: this.circuit } : {}),
       });
       this.queues.set(guildId, queue);

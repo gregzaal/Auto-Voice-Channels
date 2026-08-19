@@ -30,6 +30,9 @@ function depsRecording(order: string[]): ShutdownDeps {
       destroy: step('client.destroy'),
     } as unknown as ShutdownDeps['client'],
     dispatcher: { drainAll: step('drainAll') } as unknown as ShutdownDeps['dispatcher'],
+    metricsCollector: {
+      stop: step('metricsCollector.stop'),
+    } as unknown as ShutdownDeps['metricsCollector'],
     leaseManager: { releaseAll: step('releaseAll') } as unknown as ShutdownDeps['leaseManager'],
     settingsCache: { stop: step('settingsCache.stop') } as unknown as ShutdownDeps['settingsCache'],
     notifier: { close: step('notifier.close') } as unknown as ShutdownDeps['notifier'],
@@ -53,6 +56,7 @@ describe('gracefulDrain', () => {
       'disposeGuildIdentity',
       'removeAllListeners',
       'drainAll',
+      'metricsCollector.stop',
       'releaseAll',
       'client.destroy',
       'settingsCache.stop',
@@ -67,6 +71,13 @@ describe('gracefulDrain', () => {
     const order: string[] = [];
     await gracefulDrain(depsRecording(order));
     expect(order.indexOf('drainAll')).toBeLessThan(order.indexOf('releaseAll'));
+    /**
+     * The final metrics flush sits between the drain and the pool teardown: work
+     * finished during the drain still gets counted, and the flush still has a
+     * database to write to.
+     */
+    expect(order.indexOf('drainAll')).toBeLessThan(order.indexOf('metricsCollector.stop'));
+    expect(order.indexOf('metricsCollector.stop')).toBeLessThan(order.indexOf('closeDb'));
     // And the DB pool closes last (everything that might query it is gone first).
     expect(order.indexOf('closeDb')).toBe(order.length - 1);
   });

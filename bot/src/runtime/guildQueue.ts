@@ -16,6 +16,15 @@ export interface GuildQueueOptions {
   circuit?: CircuitBreakerOptions;
   /** Called when the queue goes idle (drained empty), so the owner can evict it. */
   onIdle?: () => void;
+  /**
+   * Called with any error that reached this per-guild boundary, for telemetry.
+   *
+   * The boundary is the only place that sees every isolated failure, which makes
+   * it the only honest place to count them. Must not throw: it is invoked from
+   * the failure path, and an error there would replace a contained fault with an
+   * uncontained one.
+   */
+  onTaskFailure?: (err: unknown) => void;
 }
 
 /**
@@ -35,6 +44,7 @@ export class GuildQueue {
   private readonly breaker: CircuitBreaker;
   private readonly tasks: QueuedTask[] = [];
   private readonly onIdle: (() => void) | undefined;
+  private readonly onTaskFailure: ((err: unknown) => void) | undefined;
   private running = false;
   private inFlight = 0;
   private draining = false;
@@ -44,6 +54,7 @@ export class GuildQueue {
     this.logger = options.logger.child({ guildId: options.guildId });
     this.breaker = new CircuitBreaker(options.circuit);
     this.onIdle = options.onIdle;
+    this.onTaskFailure = options.onTaskFailure;
   }
 
   get depth(): number {
@@ -108,6 +119,7 @@ export class GuildQueue {
     } catch (err) {
       this.inFlight = 0;
       this.logger.warn({ task: task.name, err }, 'task rejected by circuit breaker');
+      this.reportFailure(err);
       task.reject(err);
       return;
     }
@@ -125,7 +137,23 @@ export class GuildQueue {
         { task: task.name, err, circuit: this.breaker.getState() },
         'task failed (isolated)',
       );
+      this.reportFailure(err);
       task.reject(err);
+    }
+  }
+
+  /**
+   * Hands a contained failure to the telemetry hook, guarded.
+   *
+   * Guarded because this runs inside the fault-isolation boundary: a throw from a
+   * metrics counter here would escape the very catch that exists to keep one
+   * guild's problem inside that guild.
+   */
+  private reportFailure(err: unknown): void {
+    try {
+      this.onTaskFailure?.(err);
+    } catch (hookErr) {
+      this.logger.debug({ err: hookErr }, 'task-failure hook threw');
     }
   }
 }
