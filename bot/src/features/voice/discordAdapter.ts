@@ -93,7 +93,39 @@ export function withBotAccess(overwrites: ResolvedOverwrite[], botId: string): R
   ];
 }
 
-/** Maps a channel's permission-overwrite cache to `channels.create` input. */
+/**
+ * `Manage Roles` (a.k.a. Manage Permissions), which we must never copy.
+ *
+ * Discord, on Create Guild Channel: "If setting permission overwrites, only
+ * permissions your bot has in the guild can be allowed/denied. **Setting
+ * MANAGE_ROLES permission in channels is only possible for guild
+ * administrators.**"
+ *
+ * Not "only if you hold Manage Roles" — only if you are an *administrator*.
+ * AVC is not, and should not be.
+ */
+const MANAGE_ROLES = 1n << 28n;
+
+/**
+ * Maps a channel's permission-overwrite cache to `channels.create` input,
+ * dropping any `Manage Roles` bit.
+ *
+ * **Dropping it is the whole point, and it is not a nicety.** Inheriting
+ * permissions copies the source channel's overwrites verbatim, and Discord
+ * rejects the ENTIRE create with a bare `403 Missing Permissions` if any one
+ * overwrite touches `MANAGE_ROLES` — in allow or in deny, on any role,
+ * regardless of role position. So a single moderator overwrite carrying
+ * "Manage Permissions", which is an entirely ordinary thing for a server to
+ * have on a voice channel, silently broke every room creation in that guild.
+ *
+ * The symptom is maximally misleading: the bot has every permission it needs,
+ * `/setup` says the permissions look fine, and the admin is told to grant
+ * permissions they have already granted. Diagnosed on 2026-08-19 against a
+ * real guild by replaying the create with pieces removed.
+ *
+ * Degrading is correct here: a room that lacks one inherited permission bit
+ * still works, and a room that was never created does not.
+ */
 function mapOverwrites(cache: {
   values(): IterableIterator<{
     id: string;
@@ -105,8 +137,8 @@ function mapOverwrites(cache: {
   return [...cache.values()].map((o) => ({
     id: o.id,
     type: o.type,
-    allow: o.allow.bitfield,
-    deny: o.deny.bitfield,
+    allow: o.allow.bitfield & ~MANAGE_ROLES,
+    deny: o.deny.bitfield & ~MANAGE_ROLES,
   }));
 }
 

@@ -263,6 +263,44 @@ describe('DiscordVoiceActions.createVoiceChannel', () => {
       expect(ow!.find((o) => o.id === BOT)!.allow & VIEW).toBe(VIEW);
     });
 
+    /**
+     * Discord, on Create Guild Channel: "Setting MANAGE_ROLES permission in
+     * channels is only possible for guild administrators."
+     *
+     * Not "only if you hold Manage Roles" - only if you are an administrator,
+     * which AVC is not and should not be. Copying an overwrite that carries
+     * the bit makes Discord reject the ENTIRE create with a bare 403, so one
+     * ordinary moderator overwrite silently broke every room creation in a
+     * real guild on 2026-08-19. Dropping the bit degrades one permission on
+     * the new room; keeping it means no room at all.
+     */
+    it('strips Manage Roles from a copied allow, and still creates the channel', async () => {
+      const { client, guild } = clientWithSource({
+        guildId: 'g1',
+        permissionOverwrites: overwriteCache([
+          { id: 'mod', type: 0, allow: MANAGE | MANAGE_ROLES, deny: 0n },
+        ]),
+      });
+      const ow = await create(client, guild);
+      const mod = ow!.find((o) => o.id === 'mod')!;
+      expect(mod.allow & MANAGE_ROLES).toBe(0n);
+      expect(mod.allow & MANAGE).toBe(MANAGE); // everything else survives
+    });
+
+    /** Deny carries the same restriction, so it gets the same treatment. */
+    it('strips Manage Roles from a copied deny', async () => {
+      const { client, guild } = clientWithSource({
+        guildId: 'g1',
+        permissionOverwrites: overwriteCache([
+          { id: 'mod', type: 0, allow: 0n, deny: VIEW | MANAGE_ROLES },
+        ]),
+      });
+      const ow = await create(client, guild);
+      const mod = ow!.find((o) => o.id === 'mod')!;
+      expect(mod.deny & MANAGE_ROLES).toBe(0n);
+      expect(mod.deny & VIEW).toBe(VIEW);
+    });
+
     /** `client.channels.fetch` is global; legacy used `guild.get_channel`. */
     it('refuses a channel in another guild and falls back to the primary', async () => {
       const { client, guild } = clientWithSource({
