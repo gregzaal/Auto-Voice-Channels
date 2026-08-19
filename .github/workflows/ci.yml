@@ -21,13 +21,27 @@ jobs:
       # runner. Pinned to 16 to match the server the tests boot; a client older
       # than the server refuses the dump outright, and the test would then skip
       # silently rather than fail, which is the worst outcome for a backup test.
+      # Only installs when the runner does not already carry a new enough client.
+      # The first version of this step added the PGDG apt repo unconditionally
+      # and piped a key through `gpg --dearmor -o`, which prompts to overwrite an
+      # existing file and then waits for input that never comes. It hung for ten
+      # minutes before being cancelled. Everything here is now non-interactive,
+      # bounded by a timeout, and skipped entirely when it is not needed.
       - name: PostgreSQL client (for the backup round trip)
+        timeout-minutes: 5
         run: |
-          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq postgresql-client-16
+          set -euo pipefail
+          have=$(pg_dump --version 2>/dev/null | grep -oE '[0-9]+' | head -1 || echo 0)
+          if [ "${have:-0}" -ge 16 ]; then
+            echo "pg_dump $have already present, skipping install"
+          else
+            sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+            curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc               | sudo gpg --batch --yes --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client-16
+          fi
           pg_dump --version
+          pg_restore --version
 
       - uses: pnpm/action-setup@v4
         with:
