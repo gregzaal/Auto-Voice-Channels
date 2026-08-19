@@ -81,7 +81,15 @@ restore, which is the worst possible moment to learn about it.
 ```bash
 docker compose exec bot node core/dist/backup/cli.js list     # what exists
 docker compose exec bot node core/dist/backup/cli.js drill    # is the newest one restorable
-docker compose exec bot node core/dist/backup/cli.js restore --force
+```
+
+Restoring is different, because `pg_restore --clean` drops and recreates tables
+the running bot is holding connections and locks on. Stop it first:
+
+```bash
+docker compose stop bot
+docker compose run --rm bot node core/dist/backup/cli.js restore --force
+docker compose start bot
 ```
 
 (The image ships compiled JavaScript and production dependencies only, so it is

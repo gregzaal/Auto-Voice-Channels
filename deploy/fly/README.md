@@ -71,8 +71,17 @@ fly secrets set   BACKUP_S3_ENDPOINT=https://s3.us-west-002.backblazeb2.com   BA
 
 The group is all-or-nothing: set some of it and the process refuses to boot
 rather than run with backups quietly off. Tuning (`BACKUP_INTERVAL_HOURS`,
-`BACKUP_PREFERRED_HOUR_UTC`, the three `BACKUP_RETENTION_*`, `BACKUP_PREFIX`)
-is plain `[env]` in `fly.toml`, not secrets.
+`BACKUP_PREFERRED_HOUR_UTC`, the three `BACKUP_RETENTION_*`, `BACKUP_PREFIX`,
+`BACKUP_DRILL_INTERVAL_HOURS`) is plain `[env]` in `fly.toml`, not secrets.
+
+**`BACKUP_DRILL_DATABASE_URL` is the exception and must be a secret**, because
+it carries a password. It is optional and unset here: without it the weekly
+drill still downloads, checksums, decrypts and parses the newest backup, which
+is what catches storage going bad. With it, the drill also restores into that
+database and compares row counts, then wipes it. It must point at a **separate
+and initially empty** database. The drill refuses anything that already holds
+tables it did not put there, so a mistake fails loudly rather than restoring
+over something.
 
 **`BACKUP_ENCRYPTION_KEY` is the one that cannot be regenerated.** Losing it
 loses every backup it protects, and the loss is invisible until a restore.

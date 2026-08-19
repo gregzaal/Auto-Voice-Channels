@@ -132,10 +132,16 @@ async function main(): Promise<void> {
           log: (event, data) => console.log(event, JSON.stringify(data)),
         });
         console.log(`\n${result.key ?? '(no backup)'}`);
-        console.log(`  taken ${result.takenAt ?? '-'} (${result.ageHours ?? '-'}h ago)`);
-        console.log(`  checksum ${result.checksumOk ? 'matches' : 'DOES NOT MATCH'}`);
-        console.log(`  archive lists ${result.tocEntries ?? 0} objects`);
-        console.log(`  tables: ${result.tablesInArchive.join(', ') || '(none)'}`);
+        if (result.key) {
+          console.log(`  taken ${result.takenAt} (${result.ageHours}h ago)`);
+          // `null` means nothing was checked, which under pressure must not
+          // read as "the checksum failed".
+          console.log(
+            `  checksum ${result.checksumOk === null ? 'not checked' : result.checksumOk ? 'matches' : 'DOES NOT MATCH'}`,
+          );
+          console.log(`  archive lists ${result.tocEntries ?? 0} objects`);
+          console.log(`  tables: ${result.tablesInArchive.join(', ') || '(none)'}`);
+        }
         if (result.restored) {
           console.log('  restored into the scratch database:');
           for (const [table, counts] of Object.entries(result.rowCounts)) {

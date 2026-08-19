@@ -72,6 +72,7 @@ export interface BackupSchedulerDeps {
 export interface BackupSchedulerStats {
   enabled: boolean;
   running: boolean;
+  drilling: boolean;
   lastRunAt: string | null;
   lastStatus: 'ok' | 'failed' | null;
   lastKey: string | null;
@@ -99,6 +100,8 @@ function readStamp(value: unknown): Date | null {
 export class BackupScheduler {
   private timer: NodeJS.Timeout | undefined;
   private inFlight: Promise<void> | undefined;
+  /** Which job `inFlight` is, so `/diagnostics` does not call a drill a backup. */
+  private inFlightKind: 'backup' | 'drill' | undefined;
   private stopping = false;
 
   private lastRunAt: Date | null = null;
@@ -140,7 +143,8 @@ export class BackupScheduler {
     const next = nextDueAt({ lastCompletedAt: this.lastRunAt, intervalHours, preferredHourUtc });
     return {
       enabled: true,
-      running: this.inFlight !== undefined,
+      running: this.inFlightKind === 'backup',
+      drilling: this.inFlightKind === 'drill',
       lastRunAt: this.lastRunAt?.toISOString() ?? null,
       lastStatus: this.lastStatus,
       lastKey: this.lastKey,
@@ -182,6 +186,23 @@ export class BackupScheduler {
       const parsed = new Date(drilled);
       if (!Number.isNaN(parsed.getTime())) this.lastDrillAt = parsed;
     }
+
+    /**
+     * The drill's verdict, not just its timestamp.
+     *
+     * Drills are weekly and machine restarts are not, so without this the
+     * steady state on `/diagnostics` is a recent `lastDrillAt` beside a null
+     * result. Worse, a drill that *failed* would read as "no result" after the
+     * next deploy, which is the one rendering that must not happen. Both
+     * READMEs point operators at this field.
+     */
+    const verdict = await this.deps.flags
+      .get<{ ok?: boolean; problems?: string[] }>(RUNTIME_FLAGS.BACKUP_LAST_DRILL_RESULT)
+      .catch(() => null);
+    if (verdict && typeof verdict === 'object') {
+      this.lastDrillResult = verdict.ok === true ? 'passed' : 'failed';
+      this.lastDrillProblems = Array.isArray(verdict.problems) ? verdict.problems : [];
+    }
   }
 
   async tick(): Promise<void> {
@@ -203,12 +224,21 @@ export class BackupScheduler {
       !backupDisabled &&
       isBackupDue({ now, lastCompletedAt: this.lastRunAt, intervalHours, preferredHourUtc })
     ) {
-      await this.guard(() => this.runOnce());
-      // One heavy job per tick. The drill is weekly and the next check is
-      // fifteen minutes away, so deferring it costs nothing, and stacking a
-      // full download onto a just-finished dump on a shared-cpu-1x machine is
-      // not free.
-      return;
+      await this.guard('backup', () => this.runOnce());
+      /**
+       * One heavy job per tick, but only when the backup actually produced
+       * one. The drill is weekly and the next check is fifteen minutes away,
+       * so deferring costs nothing, and stacking a full download onto a
+       * just-finished dump on a shared-cpu-1x machine is not free.
+       *
+       * **Returning unconditionally here starved the drill forever.** A failed
+       * backup does not advance `lastRunAt`, by design, so `isBackupDue` stays
+       * true on every subsequent tick and this branch would be taken every
+       * time. The drill would never run again, which loses precisely the
+       * signal that matters most while backups are broken: is the last good
+       * object still restorable.
+       */
+      if (this.lastStatus === 'ok') return;
     }
 
     if (flags[RUNTIME_FLAGS.BACKUP_DRILL_DISABLED] === true) return;
@@ -222,18 +252,20 @@ export class BackupScheduler {
         preferredHourUtc,
       })
     ) {
-      await this.guard(() => this.drillOnce());
+      await this.guard('drill', () => this.drillOnce(backupDisabled));
     }
   }
 
   /** Runs one job at a time, and lets `stop()` wait for it. */
-  private async guard(fn: () => Promise<void>): Promise<void> {
+  private async guard(kind: 'backup' | 'drill', fn: () => Promise<void>): Promise<void> {
     // Re-checked here, not only at the top of the tick: `stop()` can land
     // during the flag read, and it only waits for work that is already in
     // flight. Without this a drain could start a job it will not wait for.
     if (this.stopping) return;
+    this.inFlightKind = kind;
     this.inFlight = fn().finally(() => {
       this.inFlight = undefined;
+      this.inFlightKind = undefined;
     });
     await this.inFlight;
   }
@@ -347,7 +379,7 @@ export class BackupScheduler {
    * means is that the newest object may not restore, which is worth a loud
    * alert and nothing else.
    */
-  async drillOnce(): Promise<void> {
+  async drillOnce(backupsDisabled = false): Promise<void> {
     const { pool, fleet, logger, config, flags, opsAudit } = this.deps;
     const storage = new BackupStorage(config.backup);
 
@@ -361,9 +393,17 @@ export class BackupScheduler {
           encryptionKey: config.backup.encryptionKey,
           scratchDatabaseUrl: config.backup.drillDatabaseUrl,
           liveDatabaseUrl: config.databaseUrl,
-          // The drill is weekly, so the newest backup should be a day old.
-          // Anything past the staleness threshold is itself the finding.
-          maxAgeHours: config.backup.intervalHours * 1.5,
+          /**
+           * The drill is weekly, so the newest backup should be a day old and
+           * anything past the staleness threshold is itself the finding.
+           *
+           * Unless an operator switched backups off, in which case the object
+           * being old is the thing they asked for. Reporting a deliberate
+           * action as a fault every week trains people to ignore the alert,
+           * and the rest of the drill still runs: is the newest object we do
+           * have still restorable.
+           */
+          maxAgeHours: backupsDisabled ? Infinity : config.backup.intervalHours * 1.5,
           log: (event, data) => logger.info(data, event),
         });
       });

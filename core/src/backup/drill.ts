@@ -31,6 +31,15 @@ import type { BackupStorage } from './storage.js';
  * system hides best: bit rot, a truncated upload, a rotated encryption key
  * nobody noticed, a bucket lifecycle rule quietly deleting objects.
  *
+ * **The two steps do not overlap as much as they look.** A custom-format
+ * archive keeps its table of contents at the front, so `pg_restore --list`
+ * reports a complete, clean TOC and exits 0 for an archive truncated to 40KB of
+ * 1.6MB (measured, not assumed). It proves the header and the catalogue are
+ * intact and says nothing whatever about the body. Truncation and rot are
+ * caught by step 1's checksum alone, and the TOC parse earns its place by
+ * catching a *structurally* wrong archive and by naming the tables. Neither
+ * step is redundant, and neither substitutes for the other.
+ *
  * The *restore* drill additionally loads the dump into a scratch database and
  * compares row counts against the manifest. It runs only when the operator
  * points `BACKUP_DRILL_DATABASE_URL` at somewhere safe, because the plan's
@@ -59,7 +68,8 @@ export interface DrillOptions {
   scratchDatabaseUrl?: string | undefined;
   /** The live database, so the drill can refuse to point at it. */
   liveDatabaseUrl?: string | undefined;
-  /** Flags a backup older than this as a problem. Defaults to 1.5 days. */
+  /** Flags a backup older than this as a problem. Defaults to 1.5 days;
+   * `Infinity` disables the check, for when backups are deliberately off. */
   maxAgeHours?: number;
   now?: () => Date;
   log?: (event: string, data: Record<string, unknown>) => void;
@@ -131,6 +141,20 @@ async function readToc(
   encryptionKey: string | undefined,
   encrypted: boolean,
 ): Promise<{ entries: number; tables: string[]; withData: string[] }> {
+  /**
+   * Everything that can throw happens before the spawn.
+   *
+   * `parseKey` rejects a malformed key, and a missing one is refused outright.
+   * Both used to throw *after* the child existed, leaving a `pg_restore`
+   * blocked forever on a stdin whose write end this process still held: a
+   * ref'd handle that keeps the event loop alive, plus an S3 response socket
+   * never returned to the agent. It leaked exactly when the key had been
+   * rotated or mistyped, which is one of the failures the drill exists to
+   * catch, so it would have leaked weekly in the configuration where the drill
+   * was doing its job.
+   */
+  const decrypt = encrypted ? decryptStream(parseKey(requireKey(encryptionKey))) : undefined;
+
   const child = spawn('pg_restore', ['--list'], { stdio: ['pipe', 'pipe', 'pipe'] });
 
   let stdout = '';
@@ -155,13 +179,7 @@ async function readToc(
     child.on('close', (code) => resolve(code ?? 0));
   });
 
-  const stages: (Readable | Transform)[] = [body];
-  if (encrypted) {
-    if (!encryptionKey) {
-      throw new Error('The backup is encrypted and no key is configured to read it.');
-    }
-    stages.push(decryptStream(parseKey(encryptionKey)));
-  }
+  const stages: (Readable | Transform)[] = decrypt ? [body, decrypt] : [body];
 
   const fed = pipeline([...stages, child.stdin] as unknown as [
     Readable,
@@ -173,10 +191,24 @@ async function readToc(
   });
 
   const [, code] = await Promise.all([fed, exited]);
-  if (code !== 0 && stdout.trim() === '') {
+  /**
+   * A non-zero exit is a failure even when a table of contents was printed.
+   *
+   * An archive that parses far enough to emit part of its TOC and then errors
+   * exits non-zero with non-empty stdout. Adopting that partial list would let
+   * the drill pass or fail on whether the truncation happened to fall after the
+   * last table the manifest names, which is not a check, it is a coin flip. The
+   * whole job of this step is noticing a bad archive.
+   */
+  if (code !== 0) {
     throw new Error(`pg_restore --list exited ${code}: ${stderr.trim() || '(no stderr)'}`);
   }
   return parseRestoreToc(stdout);
+}
+
+function requireKey(key: string | undefined): string {
+  if (!key) throw new Error('The backup is encrypted and no key is configured to read it.');
+  return key;
 }
 
 /** Host, port and database, so two spellings of one database compare equal. */
@@ -270,7 +302,16 @@ export async function runDrill(opts: DrillOptions): Promise<DrillResult> {
   }
 
   // 3. Optional: the dump actually loads, and brings the rows with it.
-  if (opts.scratchDatabaseUrl) {
+  if (opts.scratchDatabaseUrl && !opts.liveDatabaseUrl) {
+    // Refuse rather than quietly running with one of two guards. `runDrill` is
+    // exported, so a future caller can reach this without the scheduler's
+    // wiring, and "the safety check was skipped because you did not pass the
+    // thing it compares against" is not a failure mode worth having.
+    problems.push(
+      'A drill database was configured with no live database to compare it against. ' +
+        'Refusing to restore.',
+    );
+  } else if (opts.scratchDatabaseUrl) {
     await drillRestore(opts, backup, result, problems, notes, log);
   } else {
     notes.push(
@@ -326,12 +367,20 @@ async function drillRestore(
 
   const handle = createDatabase({ connectionString: scratch });
   try {
+    /**
+     * `pg_tables`, not `information_schema.tables`.
+     *
+     * The information schema is privilege-filtered: a role with no privileges
+     * on a populated database reads zero tables there and would sail through
+     * the emptiness check into a restore. `pg_tables` reports the catalogue
+     * regardless of what this role may read, which is the question being asked.
+     */
     const inventory = await handle.db.execute<{ tables: string; marked: boolean }>(sql`
       SELECT
         count(*)::text AS tables,
-        bool_or(table_name = ${MARKER_TABLE}) AS marked
-      FROM information_schema.tables
-      WHERE table_schema = 'public'
+        coalesce(bool_or(tablename = ${MARKER_TABLE}), false) AS marked
+      FROM pg_tables
+      WHERE schemaname = 'public'
     `);
     const tables = Number(inventory.rows[0]?.tables ?? 0);
     const marked = inventory.rows[0]?.marked === true;
