@@ -48,6 +48,18 @@ describe.skipIf(!hasPgTools())('runDrill (integration)', () => {
     for (const id of ['g-drill-1', 'g-drill-2', 'g-drill-3', 'g-drill-4']) {
       await source.handle.db.execute(sql`INSERT INTO guilds (guild_id) VALUES (${id})`);
     }
+
+    /**
+     * The scratch database starts genuinely empty, because that is what the
+     * drill demands and what the docs tell an operator to provide.
+     *
+     * `startPostgres()` applies every migration, so out of the box this
+     * container holds 26 tables and the drill refuses it -- correctly. That
+     * refusal is asserted separately below; here it would only be a fixture
+     * that does not match the documented setup.
+     */
+    await scratch.handle.db.execute(sql`DROP SCHEMA public CASCADE`);
+    await scratch.handle.db.execute(sql`CREATE SCHEMA public`);
   }, 600_000);
 
   afterAll(async () => {
@@ -174,6 +186,11 @@ describe.skipIf(!hasPgTools())('runDrill (integration)', () => {
      * called two separate servers the same database. A scratch Postgres using
      * the default name is the normal setup, not a mistake, and the test above
      * passing is what proves the guard no longer rejects it.
+     */
+    /**
+     * Including a database that merely has the bot's own schema in it. Empty
+     * means empty on first use: "it looks like one of ours" is exactly what the
+     * live database also looks like.
      */
     it('refuses a populated database even with no live URL to compare against', async () => {
       const result = await drill('scratch', {
