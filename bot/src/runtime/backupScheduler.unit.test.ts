@@ -230,6 +230,28 @@ describe('BackupScheduler.hydrate', () => {
     expect(scheduler.stats.lastDrillProblems).toEqual(['Checksum does not match the manifest.']);
   });
 
+  /**
+   * The stamp is only ever written on success, so a restored timestamp with a
+   * null status rendered a healthy backup as "ran, outcome unknown".
+   */
+  it('infers the backup status from the completion stamp', async () => {
+    const { scheduler, flagValues } = makeScheduler();
+    flagValues[RUNTIME_FLAGS.BACKUP_LAST_COMPLETED_AT] = '2026-08-19T06:22:56.103Z';
+    await scheduler.hydrate();
+    expect(scheduler.stats.lastRunAt).toBe('2026-08-19T06:22:56.103Z');
+    expect(scheduler.stats.lastStatus).toBe('ok');
+  });
+
+  /** The error flag is deleted on success, so its presence outranks the stamp. */
+  it('reports failed when an uncleared error outlives the last success', async () => {
+    const { scheduler, flagValues } = makeScheduler();
+    flagValues[RUNTIME_FLAGS.BACKUP_LAST_COMPLETED_AT] = '2026-08-18T03:00:00.000Z';
+    flagValues[RUNTIME_FLAGS.BACKUP_LAST_ERROR] = 'pg_dump exited 1';
+    await scheduler.hydrate();
+    expect(scheduler.stats.lastStatus).toBe('failed');
+    expect(scheduler.stats.lastError).toBe('pg_dump exited 1');
+  });
+
   it('survives a fleet that has never drilled', async () => {
     const { scheduler } = makeScheduler();
     await scheduler.hydrate();

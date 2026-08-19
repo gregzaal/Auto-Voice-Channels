@@ -179,7 +179,21 @@ export class BackupScheduler {
     const raw = await this.deps.flags.get(RUNTIME_FLAGS.BACKUP_LAST_COMPLETED_AT).catch(() => null);
     if (typeof raw === 'string') {
       const parsed = new Date(raw);
-      if (!Number.isNaN(parsed.getTime())) this.lastRunAt = parsed;
+      if (!Number.isNaN(parsed.getTime())) {
+        this.lastRunAt = parsed;
+        // The stamp is only written on success, so its presence *is* the
+        // status. Leaving it null rendered a real backup as "ran at 06:22,
+        // outcome unknown" on every `/diagnostics` after a restart.
+        this.lastStatus = 'ok';
+      }
+    }
+
+    // Written on failure and deleted on the next success, so its presence
+    // means the most recent attempt is the one that failed.
+    const failure = await this.deps.flags.get(RUNTIME_FLAGS.BACKUP_LAST_ERROR).catch(() => null);
+    if (typeof failure === 'string') {
+      this.lastError = failure;
+      this.lastStatus = 'failed';
     }
     const drilled = await this.deps.flags.get(RUNTIME_FLAGS.BACKUP_LAST_DRILL_AT).catch(() => null);
     if (typeof drilled === 'string') {
