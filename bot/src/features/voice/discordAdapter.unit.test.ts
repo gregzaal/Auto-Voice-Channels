@@ -274,7 +274,7 @@ describe('DiscordVoiceActions.createVoiceChannel', () => {
      * real guild on 2026-08-19. Dropping the bit degrades one permission on
      * the new room; keeping it means no room at all.
      */
-    it('strips Manage Roles from a copied allow, and still creates the channel', async () => {
+    it('drops Manage Roles from a copied allow, and still creates the channel', async () => {
       const { client, guild } = clientWithSource({
         guildId: 'g1',
         permissionOverwrites: overwriteCache([
@@ -287,8 +287,15 @@ describe('DiscordVoiceActions.createVoiceChannel', () => {
       expect(mod.allow & MANAGE).toBe(MANAGE); // everything else survives
     });
 
-    /** Deny carries the same restriction, so it gets the same treatment. */
-    it('strips Manage Roles from a copied deny', async () => {
+    /**
+     * Deny carries the same restriction, so it gets the same treatment.
+     *
+     * Note this one fails OPEN: a role denied Manage Permissions on the source
+     * keeps whatever it has guild-wide on the new room. Accepted, because the
+     * alternative is no room at all, and recorded so it is a known divergence
+     * rather than a surprise.
+     */
+    it('drops Manage Roles from a copied deny', async () => {
       const { client, guild } = clientWithSource({
         guildId: 'g1',
         permissionOverwrites: overwriteCache([
@@ -299,6 +306,27 @@ describe('DiscordVoiceActions.createVoiceChannel', () => {
       const mod = ow!.find((o) => o.id === 'mod')!;
       expect(mod.deny & MANAGE_ROLES).toBe(0n);
       expect(mod.deny & VIEW).toBe(VIEW);
+    });
+
+    /**
+     * The administrator exception, which is the whole reason this is
+     * conditional rather than an unconditional strip.
+     *
+     * Discord allows setting MANAGE_ROLES in an overwrite when the bot is an
+     * administrator. A server that has given AVC admin can carry the bit, and
+     * dropping it there would quietly remove an inherited permission Discord
+     * was willing to grant.
+     */
+    it('keeps Manage Roles when the bot is an administrator', async () => {
+      const { client, guild } = clientWithSource({
+        guildId: 'g1',
+        permissionOverwrites: overwriteCache([
+          { id: 'mod', type: 0, allow: MANAGE | MANAGE_ROLES, deny: 0n },
+        ]),
+      });
+      guild.members.me.permissions.bitfield = FULL_BOT_PERMS | PermissionFlagsBits.Administrator;
+      const ow = await create(client, guild);
+      expect(ow!.find((o) => o.id === 'mod')!.allow & MANAGE_ROLES).toBe(MANAGE_ROLES);
     });
 
     /** `client.channels.fetch` is global; legacy used `guild.get_channel`. */

@@ -66,8 +66,36 @@ export function maskOverwrites(
   overwrites: ResolvedOverwrite[],
   botPerms: bigint,
 ): ResolvedOverwrite[] {
+  /**
+   * `Manage Roles` needs ADMINISTRATOR, not `Manage Roles`.
+   *
+   * Discord states two rules for overwrites on Create Guild Channel, and the
+   * mask above only implemented the first: "only permissions your bot has in
+   * the guild can be allowed/denied. **Setting MANAGE_ROLES permission in
+   * channels is only possible for guild administrators.**"
+   *
+   * AVC holds Manage Roles, so `allow & botPerms` happily kept the bit and
+   * Discord rejected the ENTIRE create with a bare 403 — on any role, in allow
+   * or deny, regardless of role position. One ordinary moderator overwrite
+   * carrying "Manage Permissions" silently broke every room creation in a real
+   * guild on 2026-08-19, while `/setup` reported the permissions looked fine.
+   *
+   * Conditioned on ADMINISTRATOR rather than stripped outright: a server that
+   * has given AVC admin *can* set the bit, and dropping it there would quietly
+   * take away an inherited permission Discord was willing to grant.
+   *
+   * **Where this diverges from what the admin asked for**, in the far commoner
+   * non-admin case: a role allowed Manage Permissions on the source does not
+   * get it on the new room (fails safe), and a role explicitly *denied* it does
+   * not carry that denial (fails open, so a role holding it guild-wide keeps it
+   * here). Neither is a regression, because before this the channel was not
+   * created at all, but the second one is a real, if narrow, divergence from
+   * intent and is the reason this is documented rather than just fixed.
+   */
+  const canSetManageRoles = (botPerms & PermissionFlagsBits.Administrator) !== 0n;
+  const settable = canSetManageRoles ? botPerms : botPerms & ~PermissionFlagsBits.ManageRoles;
   return overwrites
-    .map((o) => ({ id: o.id, type: o.type, allow: o.allow & botPerms, deny: o.deny & botPerms }))
+    .map((o) => ({ id: o.id, type: o.type, allow: o.allow & settable, deny: o.deny & settable }))
     .filter((o) => o.allow !== 0n || o.deny !== 0n);
 }
 
@@ -93,39 +121,7 @@ export function withBotAccess(overwrites: ResolvedOverwrite[], botId: string): R
   ];
 }
 
-/**
- * `Manage Roles` (a.k.a. Manage Permissions), which we must never copy.
- *
- * Discord, on Create Guild Channel: "If setting permission overwrites, only
- * permissions your bot has in the guild can be allowed/denied. **Setting
- * MANAGE_ROLES permission in channels is only possible for guild
- * administrators.**"
- *
- * Not "only if you hold Manage Roles" — only if you are an *administrator*.
- * AVC is not, and should not be.
- */
-const MANAGE_ROLES = 1n << 28n;
-
-/**
- * Maps a channel's permission-overwrite cache to `channels.create` input,
- * dropping any `Manage Roles` bit.
- *
- * **Dropping it is the whole point, and it is not a nicety.** Inheriting
- * permissions copies the source channel's overwrites verbatim, and Discord
- * rejects the ENTIRE create with a bare `403 Missing Permissions` if any one
- * overwrite touches `MANAGE_ROLES` — in allow or in deny, on any role,
- * regardless of role position. So a single moderator overwrite carrying
- * "Manage Permissions", which is an entirely ordinary thing for a server to
- * have on a voice channel, silently broke every room creation in that guild.
- *
- * The symptom is maximally misleading: the bot has every permission it needs,
- * `/setup` says the permissions look fine, and the admin is told to grant
- * permissions they have already granted. Diagnosed on 2026-08-19 against a
- * real guild by replaying the create with pieces removed.
- *
- * Degrading is correct here: a room that lacks one inherited permission bit
- * still works, and a room that was never created does not.
- */
+/** Maps a channel's permission-overwrite cache to `channels.create` input. */
 function mapOverwrites(cache: {
   values(): IterableIterator<{
     id: string;
@@ -137,8 +133,8 @@ function mapOverwrites(cache: {
   return [...cache.values()].map((o) => ({
     id: o.id,
     type: o.type,
-    allow: o.allow.bitfield & ~MANAGE_ROLES,
-    deny: o.deny.bitfield & ~MANAGE_ROLES,
+    allow: o.allow.bitfield,
+    deny: o.deny.bitfield,
   }));
 }
 
@@ -256,6 +252,19 @@ export class DiscordVoiceActions implements VoiceActions {
       (botPerms & PermissionFlagsBits.ManageRoles) !== 0n
     ) {
       const masked = maskOverwrites(overwrites, botPerms);
+      // Inheriting promises to copy the source's permissions, and this is the
+      // one bit it may quietly not copy. Debug rather than warn: it is correct
+      // behaviour, but "why can my mods not edit these rooms" needs an answer
+      // that does not require reading the source.
+      if (
+        (botPerms & PermissionFlagsBits.Administrator) === 0n &&
+        overwrites.some((o) => ((o.allow | o.deny) & PermissionFlagsBits.ManageRoles) !== 0n)
+      ) {
+        this.logger?.debug(
+          { guildId: input.guildId, source: input.inheritFrom ?? 'category' },
+          'dropped Manage Roles from inherited overwrites (needs Administrator)',
+        );
+      }
       if (masked.length > 0) permissionOverwrites = masked;
     }
 
