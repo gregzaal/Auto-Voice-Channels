@@ -40,9 +40,21 @@ app = "avc-beta"
 #
 # **Do not "fix" this by moving the app to ams.** The REST numbers above make
 # the two regions look equivalent and they are not: REST terminates at a
-# Cloudflare anycast edge, the gateway WebSocket does not. If the database
-# distance ever does hurt, the designed answer is a read replica in `iad`
-# (rewrite.md already says single primary, replica-ready), not a region move.
+# Cloudflare anycast edge, the gateway WebSocket does not.
+#
+# If the database distance does start to hurt, the options are narrower than
+# they look. Managed Postgres runs in 13 regions and `iad` is one of them, so
+# the cluster COULD live next to this app, but that only moves the 87ms onto
+# `avc-web` in ams. There is no in-place region change and, as of 2026-08-19,
+# **no read replica**: `flyctl mpg` has no replica command and the MPG docs do
+# not mention replicas at all (they list migration tooling as still under
+# development). `rewrite.md`'s "single primary, replica-ready" describes what
+# the app can consume, not something the platform currently offers.
+#
+# So a move means a new cluster plus a restore, which our own backup CLI can
+# do (`node core/dist/backup/cli.js restore --to postgres://...`) independently
+# of Fly's tooling. Treat it as a planned maintenance window, not a flag flip,
+# and only after deciding which side should pay the latency.
 primary_region = "iad"
 
 [build]
