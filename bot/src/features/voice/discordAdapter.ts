@@ -284,11 +284,35 @@ export class DiscordVoiceActions implements VoiceActions {
         const parent = near?.isVoiceBased() ? near.parent : null;
         return parent ? mapOverwrites(parent.permissionOverwrites.cache) : undefined;
       }
-      // Otherwise `mode` is a channel id to copy from.
+      /**
+       * Otherwise `mode` is a channel id to copy from.
+       *
+       * **Two guards, both matching what the legacy bot did.**
+       *
+       * The channel must be in *this* guild. `client.channels.fetch` is global,
+       * where legacy used `guild.get_channel`, so without the check a stored id
+       * pointing at another server would copy that server's overwrites into
+       * this one. Nothing in the dump does this today (23 id values, all
+       * in-guild) but the id is admin-supplied and lives forever.
+       *
+       * And an id that no longer resolves falls back to the primary, not to
+       * nothing. Returning undefined here means the caller creates the channel
+       * with no overwrites at all, which makes Discord sync it to the category
+       * -- so a locked primary inside an open category silently produces an
+       * *open* room. Legacy started from the primary's overwrites and only
+       * replaced them if the id resolved, and its help text promised exactly
+       * that. **11 of the 23 id values in the dump are already dead**, so this
+       * is the common case for them, not the edge case.
+       */
       const source = await this.client.channels.fetch(mode).catch(() => null);
-      return source && 'permissionOverwrites' in source
-        ? mapOverwrites(source.permissionOverwrites.cache)
-        : undefined;
+      const sameGuild =
+        source && 'guildId' in source && near && 'guildId' in near
+          ? source.guildId === near.guildId
+          : false;
+      if (source && sameGuild && 'permissionOverwrites' in source) {
+        return mapOverwrites(source.permissionOverwrites.cache);
+      }
+      return near?.isVoiceBased() ? mapOverwrites(near.permissionOverwrites.cache) : undefined;
     } catch {
       return undefined;
     }

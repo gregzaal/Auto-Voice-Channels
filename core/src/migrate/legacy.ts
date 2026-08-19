@@ -307,8 +307,16 @@ export function planGuild(guildId: string, raw: unknown, options: PlanOptions = 
     template.above = p.above !== false;
 
     /**
-     * `inheritperms` (90 guilds in the dump: 77 `CATEGORY`, 24 `PRIMARY`, the
-     * rest a channel id).
+     * `inheritperms`. Measured against the live fleet after importing it: 37
+     * auto-channels carry one, being 23 channel ids, 10 `category` and 4
+     * `primary`. (90 guild files in the whole dump mention the field, most of
+     * them departed. An earlier version of this comment mixed the two
+     * denominators and gave counts that summed to more than its own total.)
+     *
+     * **11 of those 23 channel ids no longer resolve**, which is why
+     * `resolveInheritedOverwrites` falls back to the primary rather than to
+     * nothing: see the note there, and legacy's own help text, which promised
+     * exactly that fallback.
      *
      * This was in neither the mapping nor the dropped-fields list, so it was
      * being dropped by omission rather than by decision, and the two systems

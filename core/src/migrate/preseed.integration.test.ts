@@ -122,12 +122,48 @@ describe('preseedNames (integration)', () => {
     expect(summary.candidates).toBe(2);
   }, 300_000);
 
-  /** Only the name is added: a private flag or a stored index must survive. */
-  it('preserves the rest of the state it found', async () => {
-    const repo = new SecondaryChannelRepository(pg.handle.db, 'prod');
-    await repo.updateState(ADOPTED, { private: true, index: 3 });
+  /**
+   * Only the name is added, and **including keys this build has never heard
+   * of**.
+   *
+   * The first version of this test used `private` and `index`, both in the
+   * schema, so it could not fail for the case that mattered: the code parsed
+   * the row through `secondaryStateSchema` before writing it back, and a bare
+   * `z.object` strips unknown keys, so an older build would silently delete a
+   * field a newer bot had written. `updateState` replaces `state` wholesale, so
+   * stripping is data loss, not validation.
+   */
+  it('preserves the rest of the state, including keys it does not know', async () => {
+    await pg.handle.db
+      .update(secondaryChannels)
+      .set({ state: { private: true, index: 3, fromAFutureRelease: 'keep me' } })
+      .where(eq(secondaryChannels.channelId, ADOPTED));
+
     await run(true);
-    expect(await stateOf(ADOPTED)).toEqual({ private: true, index: 3, name: '🎮 Alice-s room' });
+
+    expect(await stateOf(ADOPTED)).toEqual({
+      private: true,
+      index: 3,
+      fromAFutureRelease: 'keep me',
+      name: '🎮 Alice-s room',
+    });
+  }, 300_000);
+
+  /**
+   * `state -> 'name' IS NULL` is true for a missing key but false for a JSON
+   * null, so a row shaped this way was skipped here and then renamed by the
+   * reconciler, which is the exact outcome the pass exists to prevent.
+   */
+  it('treats an explicit null name as unnamed', async () => {
+    await pg.handle.db
+      .update(secondaryChannels)
+      .set({ state: { name: null } })
+      .where(eq(secondaryChannels.channelId, ADOPTED));
+
+    const summary = await run(true);
+
+    expect(summary.named).toBe(1);
+    expect(await stateOf(ADOPTED)).toEqual({ name: '🎮 Alice-s room' });
   }, 300_000);
 
   /** The query must not pick up rows belonging to another fleet. */

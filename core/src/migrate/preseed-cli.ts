@@ -43,8 +43,19 @@ async function main(): Promise<void> {
     console.log(`  adopted, unnamed:  ${summary.candidates}`);
     console.log(`  names found:       ${summary.named}`);
     console.log(`  channels gone:     ${summary.missing}`);
-    console.log(`  guilds unreachable:${summary.unreachable.length}`);
-    console.log(`  failures:          ${summary.failures.length}`);
+    console.log(`  guilds unreachable: ${summary.unreachable.length}`);
+    console.log(`  failures:           ${summary.failures.length}`);
+
+    /**
+     * The ids, not just the count. An unreachable guild means the import
+     * adopted rows for a server the bot is not in, which is a finding worth
+     * chasing, and "200 unreachable" with nothing to grep is not actionable at
+     * three in the morning.
+     */
+    for (const g of summary.unreachable.slice(0, 40)) console.log(`  UNREACHABLE ${g}`);
+    if (summary.unreachable.length > 40) {
+      console.log(`  ... and ${summary.unreachable.length - 40} more`);
+    }
     for (const f of summary.failures.slice(0, 20))
       console.log(`  FAILED ${f.channelId}: ${f.error}`);
 

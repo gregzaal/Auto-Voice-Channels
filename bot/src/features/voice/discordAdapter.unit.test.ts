@@ -189,6 +189,92 @@ describe('DiscordVoiceActions.createVoiceChannel', () => {
     expect(createArg(guild).permissionOverwrites).toBeUndefined();
   });
 
+  /**
+   * `inheritperms` pointing at a specific channel (`/inheritpermissions <id>`,
+   * and 23 auto-channels imported from the legacy dump).
+   *
+   * The failure this guards is quiet and it is the bad direction: returning no
+   * overwrites makes Discord sync the new channel to its category, so a locked
+   * primary inside an open category produces an **open** room. Legacy started
+   * from the primary's overwrites and only replaced them when the id resolved.
+   * 11 of the 23 imported ids are already dead, so the fallback is the common
+   * path for them rather than an edge case.
+   */
+  describe('inheriting from a specific channel id', () => {
+    const LOCKED: Row[] = [{ id: 'g1', type: 0, allow: 0n, deny: VIEW }];
+    const SOURCE: Row[] = [{ id: 'roleX', type: 0, allow: VIEW, deny: 0n }];
+
+    function clientWithSource(source: unknown) {
+      const created = { id: 'new', setPosition: vi.fn() };
+      const guild = {
+        channels: { create: vi.fn().mockResolvedValue(created) },
+        members: { me: { permissions: { bitfield: FULL_BOT_PERMS } } },
+      };
+      const primary = {
+        isVoiceBased: () => true,
+        guildId: 'g1',
+        parent: { id: 'cat' },
+        rawPosition: 0,
+        position: 0,
+        permissionOverwrites: overwriteCache(LOCKED),
+      };
+      const client = {
+        user: { id: BOT },
+        guilds: { fetch: vi.fn().mockResolvedValue(guild) },
+        channels: {
+          fetch: vi.fn((id: string) => {
+            if (id === 'prim') return Promise.resolve(primary);
+            if (id === 'cat') return Promise.resolve({ permissionOverwrites: overwriteCache([]) });
+            return Promise.resolve(source);
+          }),
+        },
+      } as unknown as Client;
+      return { client, guild };
+    }
+
+    const create = async (
+      client: Client,
+      guild: { channels: { create: ReturnType<typeof vi.fn> } },
+    ) => {
+      await new DiscordVoiceActions(client).createVoiceChannel({
+        guildId: 'g1',
+        name: 'x',
+        nearChannelId: 'prim',
+        inheritFrom: '999888777666555444',
+      });
+      return createArg(guild).permissionOverwrites;
+    };
+
+    it('copies the named channel when it resolves in the same guild', async () => {
+      const { client, guild } = clientWithSource({
+        guildId: 'g1',
+        permissionOverwrites: overwriteCache(SOURCE),
+      });
+      const ow = await create(client, guild);
+      expect(ow!.find((o) => o.id === 'roleX')).toBeDefined();
+      expect(ow!.find((o) => o.id === 'g1')).toBeUndefined();
+    });
+
+    it('falls back to the primary when the channel is gone', async () => {
+      const { client, guild } = clientWithSource(null);
+      const ow = await create(client, guild);
+      // The primary's @everyone deny, not category sync.
+      expect(ow!.find((o) => o.id === 'g1')!.deny & VIEW).toBe(VIEW);
+      expect(ow!.find((o) => o.id === BOT)!.allow & VIEW).toBe(VIEW);
+    });
+
+    /** `client.channels.fetch` is global; legacy used `guild.get_channel`. */
+    it('refuses a channel in another guild and falls back to the primary', async () => {
+      const { client, guild } = clientWithSource({
+        guildId: 'someone-elses-server',
+        permissionOverwrites: overwriteCache(SOURCE),
+      });
+      const ow = await create(client, guild);
+      expect(ow!.find((o) => o.id === 'roleX')).toBeUndefined();
+      expect(ow!.find((o) => o.id === 'g1')!.deny & VIEW).toBe(VIEW);
+    });
+  });
+
   it('snapshots a hidden category for a no-inherit channel (e.g. a primary)', async () => {
     const { client, guild } = makeClient([{ id: 'g1', type: 0, allow: 0n, deny: VIEW }]);
     const actions = new DiscordVoiceActions(client);

@@ -323,10 +323,10 @@ describe('trialStartFor', () => {
 });
 
 /**
- * 90 guilds in the real dump set this, and it was being dropped by omission
- * rather than by decision: absent from the plan's mapping table *and* from its
- * dropped-fields list. The two systems agree exactly, so there was nothing to
- * decide once anyone looked.
+ * Dropped by omission rather than by decision: absent from the plan's mapping
+ * table *and* from its dropped-fields list. The two systems agree exactly, so
+ * there was nothing to decide once anyone looked. 37 auto-channels on the live
+ * fleet carry one.
  */
 describe('mapInheritPerms', () => {
   it('lowercases the two legacy keywords', () => {
