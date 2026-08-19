@@ -40,6 +40,16 @@ const MAX_MESSAGE = 2000;
 const CONCURRENCY = 4;
 const PAUSE_MS = 250;
 
+/**
+ * Extra delay after a message that went to an owner DM rather than a channel.
+ *
+ * Posting into a thousand servers the bot was invited to is ordinary traffic.
+ * Sending a few hundred unsolicited DMs quickly is the exact shape of a spam
+ * run, and Discord's abuse heuristics do not know our intentions. Channel posts
+ * stay brisk, DMs are deliberately slow.
+ */
+const DM_PAUSE_MS = 3_000;
+
 interface Sections {
   body: string;
   pricing: Record<string, string>;
@@ -148,6 +158,18 @@ async function deliver(
     return { outcome: 'failed', error: `cannot read guild: ${(err as Error).message}` };
   }
 
+  /**
+   * System channel or owner DM. There is no third option, and the obvious one
+   * is a trap.
+   *
+   * ~38% of guilds have no usable system channel, and nearly all of them do
+   * have some other text channel the bot could post in. **Do not post in it.**
+   * Picking "the first channel we can write to" is precisely what spam bots do,
+   * and servers defend against it with honeypot channels that auto-ban anything
+   * posting there. The upside is a nicer delivery surface; the downside is
+   * getting the bot banned from the servers it is trying to talk to. Owner's
+   * call, 2026-08-19, and it is not a close one.
+   */
   if (guild.system_channel_id) {
     try {
       await rest.post(Routes.channelMessages(guild.system_channel_id), { body: { content } });
@@ -173,6 +195,41 @@ async function deliver(
       error: `system channel and owner DM both failed: ${(err as Error).message}`,
     };
   }
+}
+
+/**
+ * Where a guild's message would actually land, resolved without sending.
+ *
+ * The dry run used to print the message and the guild id, which is not the same
+ * as knowing who reads it. A test send to "my two servers" delivered one of them
+ * to a DIFFERENT PERSON, because the fallback targets the guild OWNER and the
+ * tester was only an admin there. Correct behaviour, surprising result, so the
+ * target is now shown before anything goes out.
+ */
+async function resolveTarget(rest: REST, guildId: string): Promise<string> {
+  let guild: { name: string; system_channel_id: string | null; owner_id: string };
+  try {
+    guild = (await rest.get(Routes.guild(guildId))) as typeof guild;
+  } catch (err) {
+    return `UNREADABLE (${(err as Error).message})`;
+  }
+  if (guild.system_channel_id) {
+    try {
+      const ch = (await rest.get(Routes.channel(guild.system_channel_id))) as { name: string };
+      return `${guild.name} -> #${ch.name} (system channel)`;
+    } catch {
+      // No View Channel, so it falls through to the DM. Showing that is the
+      // entire point of this function.
+    }
+  }
+  let who = guild.owner_id;
+  try {
+    const user = (await rest.get(Routes.user(guild.owner_id))) as { username: string };
+    who = `${user.username} (${guild.owner_id})`;
+  } catch {
+    /* the id alone is still useful */
+  }
+  return `${guild.name} -> DM to owner ${who}`;
 }
 
 function arg(argv: string[], name: string): string | undefined {
@@ -337,6 +394,22 @@ export async function main(rawArgv: string[]): Promise<number> {
         );
         console.log(sample.content);
       }
+      /**
+       * Resolve real delivery targets. Capped, because it is a REST call per
+       * guild and a full dry run over a thousand of them would be slow for no
+       * extra insight. A single --guild run always resolves, since that is the
+       * test path where the recipient matters most.
+       */
+      const toResolve = onlyGuild ? targets : targets.slice(0, 15);
+      if (toResolve.length) {
+        console.log(`\n--- where ${toResolve.length} of ${targets.length} would land ---`);
+        for (const t of toResolve) {
+          console.log(`  ${await resolveTarget(rest, t.guildId)}`);
+        }
+        if (targets.length > toResolve.length) {
+          console.log(`  ... ${targets.length - toResolve.length} more not resolved`);
+        }
+      }
       console.log('\nDRY RUN, nothing sent. Re-run with --apply.');
       return 0;
     }
@@ -361,7 +434,7 @@ export async function main(rawArgv: string[]): Promise<number> {
         }
         done++;
         if (done % 50 === 0) console.log(`  ${done}/${targets.length}`);
-        await new Promise((r) => setTimeout(r, PAUSE_MS));
+        await new Promise((r) => setTimeout(r, outcome === 'owner_dm' ? DM_PAUSE_MS : PAUSE_MS));
       }
     };
     await Promise.all(Array.from({ length: CONCURRENCY }, worker));
