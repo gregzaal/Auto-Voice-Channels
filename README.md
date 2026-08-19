@@ -55,6 +55,43 @@ Requirements: Docker + Docker Compose, and a Discord application/bot.
    (the container listens on 8080; compose publishes it on 8477 so it does not
    collide with whatever else you already run on 8080).
 
+### Data persistence and backups
+
+Your data lives in the `pgdata` Docker volume, which survives `docker compose
+down` and does not survive `docker compose down -v`. That volume is the whole
+of your bot's state: guild settings, name templates, aliases, and every channel
+it is tracking.
+
+Backups off-machine are optional and off by default. Set the five
+`BACKUP_S3_*` variables in `.env` and the bot dumps Postgres on a schedule,
+encrypts it, uploads it, prunes old copies on a grandfather-father-son
+retention, and re-checks the newest one every week. No extra container, no
+cron, no second thing to keep running. It works against Backblaze B2,
+Cloudflare R2, AWS S3, MinIO, or anything else S3-compatible.
+
+Set `BACKUP_ENCRYPTION_KEY` too. The dump contains everything, and with it set
+the storage provider only ever sees ciphertext. Generate one with `openssl rand
+-base64 32`, and keep a copy somewhere other than the machine it protects:
+without the key the backups cannot be recovered by anyone, including you.
+
+Setting only some of the group is a startup error rather than a silent
+disable, because a typo that quietly turned backups off would surface during a
+restore, which is the worst possible moment to learn about it.
+
+```bash
+docker compose exec bot node core/dist/backup/cli.js list     # what exists
+docker compose exec bot node core/dist/backup/cli.js drill    # is the newest one restorable
+docker compose exec bot node core/dist/backup/cli.js restore --force
+```
+
+(The image ships compiled JavaScript and production dependencies only, so it is
+`node core/dist/backup/cli.js` in a container and `pnpm --filter @avc/core run
+backup:list` from a source checkout.)
+
+`backup:restore` refuses to write over a database that already has tables
+unless you pass `--force`, and `--at <ISO timestamp>` restores the newest
+backup at or before a moment rather than the latest.
+
 ## Development
 
 Requirements: Node 22 LTS, pnpm (via corepack), Docker (for integration tests).

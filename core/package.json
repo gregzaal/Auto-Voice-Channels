@@ -23,6 +23,7 @@
     "backup:run": "tsx ./src/backup/cli.ts run",
     "backup:list": "tsx ./src/backup/cli.ts list",
     "backup:verify": "tsx ./src/backup/cli.ts verify",
+    "backup:drill": "tsx ./src/backup/cli.ts drill",
     "backup:restore": "tsx ./src/backup/cli.ts restore",
     "migrate:import": "tsx ./src/migrate/import-cli.ts"
   },

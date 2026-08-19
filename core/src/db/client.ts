@@ -4,6 +4,15 @@ import * as schema from './schema.js';
 
 export type Database = NodePgDatabase<typeof schema>;
 
+/**
+ * The connection pool behind a {@link Database}.
+ *
+ * Exported because a few things genuinely need a *connection* rather than a
+ * query runner: session-scoped advisory locks and `LISTEN` both belong to one
+ * client and break silently when each statement gets whichever client is free.
+ */
+export type DbPool = pg.Pool;
+
 export interface DbHandle {
   db: Database;
   pool: pg.Pool;

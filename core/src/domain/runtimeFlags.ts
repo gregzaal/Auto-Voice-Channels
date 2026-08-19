@@ -55,6 +55,18 @@ export const RUNTIME_FLAGS = {
   BACKUP_LAST_RESULT: 'backup.last_result',
   /** Message from the last failure, cleared on the next success. */
   BACKUP_LAST_ERROR: 'backup.last_error',
+  /**
+   * Kill-switch for the weekly restore drill, separate from `backup.disabled`.
+   *
+   * Separate on purpose: the drill re-downloads the newest object, so it costs
+   * egress, and an operator watching a bill must be able to stop the check
+   * without also stopping the thing being checked.
+   */
+  BACKUP_DRILL_DISABLED: 'backup.drill_disabled',
+  /** ISO timestamp of the last drill that ran, pass or fail. */
+  BACKUP_LAST_DRILL_AT: 'backup.last_drill_at',
+  /** Summary of the last drill: what was checked, and anything wrong with it. */
+  BACKUP_LAST_DRILL_RESULT: 'backup.last_drill_result',
 } as const;
 
 /** Defaults for the AI levers, kept next to the keys so bot + tooling agree. */

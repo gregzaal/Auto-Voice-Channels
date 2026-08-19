@@ -5,6 +5,7 @@
  *   backup:run
  *   backup:list
  *   backup:verify [--at <ISO|key>]
+ *   backup:drill  [--scratch <DATABASE_URL>]
  *   backup:restore [--at <ISO|key>] [--to <DATABASE_URL>] [--force]
  *
  * Reads configuration from the environment through `loadConfig`, so it behaves
@@ -16,6 +17,7 @@ import { createDatabase } from '../db/client.js';
 import { BackupStorage } from './storage.js';
 import { probeForManifest, runBackup } from './runBackup.js';
 import { listBackups, restoreBackup, selectBackup, verifyBackup } from './restore.js';
+import { runDrill } from './drill.js';
 
 /* eslint-disable no-console */
 
@@ -119,6 +121,34 @@ async function main(): Promise<void> {
         break;
       }
 
+      case 'drill': {
+        const result = await runDrill({
+          storage,
+          prefix,
+          env,
+          encryptionKey: backupConfig.encryptionKey,
+          scratchDatabaseUrl: arg('scratch') ?? backupConfig.drillDatabaseUrl,
+          liveDatabaseUrl: config.databaseUrl,
+          log: (event, data) => console.log(event, JSON.stringify(data)),
+        });
+        console.log(`\n${result.key ?? '(no backup)'}`);
+        console.log(`  taken ${result.takenAt ?? '-'} (${result.ageHours ?? '-'}h ago)`);
+        console.log(`  checksum ${result.checksumOk ? 'matches' : 'DOES NOT MATCH'}`);
+        console.log(`  archive lists ${result.tocEntries ?? 0} objects`);
+        console.log(`  tables: ${result.tablesInArchive.join(', ') || '(none)'}`);
+        if (result.restored) {
+          console.log('  restored into the scratch database:');
+          for (const [table, counts] of Object.entries(result.rowCounts)) {
+            console.log(`    ${table}: ${counts.restored} rows (manifest ${counts.manifest})`);
+          }
+        }
+        for (const note of result.notes) console.log(`  NOTE: ${note}`);
+        for (const problem of result.problems) console.log(`  PROBLEM: ${problem}`);
+        console.log(result.ok ? '\nDRILL PASSED' : '\nDRILL FAILED');
+        if (!result.ok) process.exitCode = 1;
+        break;
+      }
+
       case 'restore': {
         const target = arg('to') ?? config.databaseUrl;
         const chosen = selectBackup(await listBackups(storage, prefix, env), arg('at'));
@@ -151,6 +181,7 @@ async function main(): Promise<void> {
             '  backup run\n' +
             '  backup list\n' +
             '  backup verify  [--at <ISO|key>]\n' +
+            '  backup drill   [--scratch <DATABASE_URL>]\n' +
             '  backup restore [--at <ISO|key>] [--to <DATABASE_URL>] [--force]',
         );
         process.exitCode = command ? 1 : 0;

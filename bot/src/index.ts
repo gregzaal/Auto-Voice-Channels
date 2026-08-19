@@ -346,7 +346,8 @@ async function main(): Promise<void> {
    */
   const backupScheduler = config.backup
     ? new BackupScheduler({
-        db,
+        // The pool, so leader election can pin one client (`withBackupLock`).
+        pool,
         fleet: config.fleet ?? DEFAULT_FLEET,
         flags,
         opsAudit: new OpsAuditRepository(db, config.fleet),

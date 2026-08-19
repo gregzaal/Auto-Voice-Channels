@@ -58,6 +58,58 @@ Keep `EXPECTED_INSTANCES` in sync with the machine count: too low and some shard
 go unclaimed; too high and instances under-fill. One instance (`EXPECTED_INSTANCES=1`)
 claims every shard.
 
+## Backups
+
+Backups run **in the fleet**, not on a separate machine: the scheduler is
+in-process and elects a leader with a Postgres advisory lock, so exactly one
+instance takes each backup no matter how many are running. Nothing extra to
+deploy, and nothing extra to notice when it stops.
+
+```bash
+fly secrets set   BACKUP_S3_ENDPOINT=https://s3.us-west-002.backblazeb2.com   BACKUP_S3_REGION=us-west-002   BACKUP_S3_BUCKET=...   BACKUP_S3_ACCESS_KEY_ID=...   BACKUP_S3_SECRET_ACCESS_KEY=...   BACKUP_ENCRYPTION_KEY=...
+```
+
+The group is all-or-nothing: set some of it and the process refuses to boot
+rather than run with backups quietly off. Tuning (`BACKUP_INTERVAL_HOURS`,
+`BACKUP_PREFERRED_HOUR_UTC`, the three `BACKUP_RETENTION_*`, `BACKUP_PREFIX`)
+is plain `[env]` in `fly.toml`, not secrets.
+
+**`BACKUP_ENCRYPTION_KEY` is the one that cannot be regenerated.** Losing it
+loses every backup it protects, and the loss is invisible until a restore.
+Escrow it outside Fly.
+
+Check on it without deploying anything:
+
+```bash
+curl -H "Authorization: Bearer $DIAGNOSTICS_TOKEN" https://<app>.fly.dev/diagnostics | jq .backup
+fly ssh console -C "node /app/core/dist/backup/cli.js list"
+```
+
+`/diagnostics` reports `lastRunAt`, `nextDueAt`, `lastSizeBytes`, `stale`, and
+the weekly drill's `lastDrillAt` / `lastDrillResult` / `lastDrillProblems`.
+`stale` is informational and never gates a deploy: a missing backup is a reason
+to page someone, not a reason to block a rollout.
+
+Two runtime flags turn things off without a deploy, through `/admin/ops` or
+`RuntimeFlagsRepository.set`: `backup.disabled` stops backups, and
+`backup.drill_disabled` stops only the weekly verification. `global.pause`
+stops both.
+
+### Restoring
+
+```bash
+fly ssh console
+cd /app
+node core/dist/backup/cli.js list
+node core/dist/backup/cli.js drill      # is the newest one restorable
+node core/dist/backup/cli.js restore --force
+```
+
+Restore into a **new** database first and point `DATABASE_URL` at it once the
+row counts look right. Restoring over the live database is possible with
+`--force` and is almost never the fastest way back: a fresh database can be
+checked before anything starts reading it.
+
 ## Health & rollback
 
 `/health` reports per-subsystem readiness (db, leases, gateway), with the db status

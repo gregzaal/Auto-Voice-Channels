@@ -29,6 +29,7 @@ export * from './backup/encryption.js';
 export * from './backup/runBackup.js';
 export * from './backup/restore.js';
 export * from './backup/scheduler.js';
+export * from './backup/drill.js';
 export * from './db/client.js';
 export * from './db/migrate.js';
 export * from './db/notify.js';

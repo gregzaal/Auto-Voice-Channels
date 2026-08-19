@@ -161,6 +161,18 @@ export const configSchema = z
         }),
         /** Object-key namespace, so one bucket can hold unrelated backup sets. */
         prefix: z.string().optional(),
+        /** How often the restore drill runs. Weekly (`plans/backups.md` §9). */
+        drillIntervalHours: z.coerce.number().int().positive().default(168),
+        /**
+         * A scratch database the drill may restore into and then wipe.
+         *
+         * Optional, and unset is the sane default: without it the drill still
+         * re-downloads, decrypts, checksums and parses the archive, which is
+         * what catches storage-side rot. With it, the drill also proves the
+         * dump loads. Never point this at the live database. The drill checks
+         * that you have not, and refuses, but a check is not a reason to try.
+         */
+        drillDatabaseUrl: z.string().min(1).optional(),
       })
       .optional(),
 
@@ -300,6 +312,8 @@ function backupInput(e: NodeJS.ProcessEnv): Record<string, unknown> | undefined 
     'BACKUP_RETENTION_WEEKLY',
     'BACKUP_RETENTION_MONTHLY',
     'BACKUP_PREFIX',
+    'BACKUP_DRILL_INTERVAL_HOURS',
+    'BACKUP_DRILL_DATABASE_URL',
   ] as const;
   if (!keys.some((k) => e[k] !== undefined)) return undefined;
   return {
@@ -317,6 +331,8 @@ function backupInput(e: NodeJS.ProcessEnv): Record<string, unknown> | undefined 
       monthly: e.BACKUP_RETENTION_MONTHLY,
     },
     prefix: e.BACKUP_PREFIX,
+    drillIntervalHours: e.BACKUP_DRILL_INTERVAL_HOURS,
+    drillDatabaseUrl: e.BACKUP_DRILL_DATABASE_URL,
   };
 }
 

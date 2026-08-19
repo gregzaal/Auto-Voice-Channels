@@ -3,9 +3,12 @@ import {
   isBackupDue,
   nextDueAt,
   runBackup,
+  runDrill,
   withBackupLock,
+  withDrillLock,
   RUNTIME_FLAGS,
-  type Database,
+  type DbPool,
+  type DrillResult,
   type Fleet,
   type OpsAuditRepository,
   type RuntimeFlagsRepository,
@@ -26,7 +29,12 @@ import type { Logger } from 'pino';
  */
 
 export interface BackupSchedulerDeps {
-  db: Database;
+  /**
+   * The pool, not a `Database`. Leader election pins one client for the length
+   * of a backup, which a per-statement query runner cannot do
+   * (`withBackupLock`).
+   */
+  pool: DbPool;
   fleet: Fleet;
   flags: RuntimeFlagsRepository;
   opsAudit: OpsAuditRepository;
@@ -46,6 +54,8 @@ export interface BackupSchedulerDeps {
       preferredHourUtc: number;
       retention: { daily: number; weekly: number; monthly: number };
       prefix?: string | undefined;
+      drillIntervalHours: number;
+      drillDatabaseUrl?: string | undefined;
     };
   };
   appVersion: string;
@@ -70,10 +80,21 @@ export interface BackupSchedulerStats {
   lastError: string | null;
   nextDueAt: string | null;
   stale: boolean;
+  lastDrillAt: string | null;
+  lastDrillResult: 'passed' | 'failed' | null;
+  lastDrillProblems: string[];
+  nextDrillDueAt: string | null;
 }
 
 /** How often to *check*. The due calculation decides whether to act. */
 const CHECK_INTERVAL_MS = 15 * 60_000;
+
+/** A flag value that should be an ISO timestamp, or null if it is not one. */
+function readStamp(value: unknown): Date | null {
+  if (typeof value !== 'string') return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
 
 export class BackupScheduler {
   private timer: NodeJS.Timeout | undefined;
@@ -86,6 +107,9 @@ export class BackupScheduler {
   private lastSizeBytes: number | null = null;
   private lastDurationMs: number | null = null;
   private lastError: string | null = null;
+  private lastDrillAt: Date | null = null;
+  private lastDrillResult: 'passed' | 'failed' | null = null;
+  private lastDrillProblems: string[] = [];
 
   constructor(private readonly deps: BackupSchedulerDeps) {}
 
@@ -127,6 +151,15 @@ export class BackupScheduler {
       // Informational only. A stale backup must never gate a rollout, so this
       // is reported and alerted on, never returned as unhealthy (section 8).
       stale: this.isStale(),
+      lastDrillAt: this.lastDrillAt?.toISOString() ?? null,
+      lastDrillResult: this.lastDrillResult,
+      lastDrillProblems: this.lastDrillProblems,
+      nextDrillDueAt:
+        nextDueAt({
+          lastCompletedAt: this.lastDrillAt,
+          intervalHours: this.deps.config.backup.drillIntervalHours,
+          preferredHourUtc,
+        })?.toISOString() ?? null,
     };
   }
 
@@ -144,6 +177,11 @@ export class BackupScheduler {
       const parsed = new Date(raw);
       if (!Number.isNaN(parsed.getTime())) this.lastRunAt = parsed;
     }
+    const drilled = await this.deps.flags.get(RUNTIME_FLAGS.BACKUP_LAST_DRILL_AT).catch(() => null);
+    if (typeof drilled === 'string') {
+      const parsed = new Date(drilled);
+      if (!Number.isNaN(parsed.getTime())) this.lastDrillAt = parsed;
+    }
   }
 
   async tick(): Promise<void> {
@@ -151,29 +189,50 @@ export class BackupScheduler {
 
     const flags = await this.deps.flags.getAll().catch(() => ({}) as Record<string, unknown>);
     if (flags[RUNTIME_FLAGS.GLOBAL_PAUSE] === true) return;
-    if (flags[RUNTIME_FLAGS.BACKUP_DISABLED] === true) return;
 
-    // Re-read the shared stamp every tick: another instance may have been the
+    // Re-read the shared stamps every tick: another instance may have been the
     // leader since last time, and its success is ours too.
-    const stamp = flags[RUNTIME_FLAGS.BACKUP_LAST_COMPLETED_AT];
-    if (typeof stamp === 'string') {
-      const parsed = new Date(stamp);
-      if (!Number.isNaN(parsed.getTime())) this.lastRunAt = parsed;
-    }
+    this.lastRunAt = readStamp(flags[RUNTIME_FLAGS.BACKUP_LAST_COMPLETED_AT]) ?? this.lastRunAt;
+    this.lastDrillAt = readStamp(flags[RUNTIME_FLAGS.BACKUP_LAST_DRILL_AT]) ?? this.lastDrillAt;
 
-    const { intervalHours, preferredHourUtc } = this.deps.config.backup;
+    const { intervalHours, preferredHourUtc, drillIntervalHours } = this.deps.config.backup;
+    const now = new Date();
+
+    const backupDisabled = flags[RUNTIME_FLAGS.BACKUP_DISABLED] === true;
     if (
-      !isBackupDue({
-        now: new Date(),
-        lastCompletedAt: this.lastRunAt,
-        intervalHours,
-        preferredHourUtc,
-      })
+      !backupDisabled &&
+      isBackupDue({ now, lastCompletedAt: this.lastRunAt, intervalHours, preferredHourUtc })
     ) {
+      await this.guard(() => this.runOnce());
+      // One heavy job per tick. The drill is weekly and the next check is
+      // fifteen minutes away, so deferring it costs nothing, and stacking a
+      // full download onto a just-finished dump on a shared-cpu-1x machine is
+      // not free.
       return;
     }
 
-    this.inFlight = this.runOnce().finally(() => {
+    if (flags[RUNTIME_FLAGS.BACKUP_DRILL_DISABLED] === true) return;
+    // A drill with no backup to check is noise, not a finding.
+    if (!this.lastRunAt) return;
+    if (
+      isBackupDue({
+        now,
+        lastCompletedAt: this.lastDrillAt,
+        intervalHours: drillIntervalHours,
+        preferredHourUtc,
+      })
+    ) {
+      await this.guard(() => this.drillOnce());
+    }
+  }
+
+  /** Runs one job at a time, and lets `stop()` wait for it. */
+  private async guard(fn: () => Promise<void>): Promise<void> {
+    // Re-checked here, not only at the top of the tick: `stop()` can land
+    // during the flag read, and it only waits for work that is already in
+    // flight. Without this a drain could start a job it will not wait for.
+    if (this.stopping) return;
+    this.inFlight = fn().finally(() => {
       this.inFlight = undefined;
     });
     await this.inFlight;
@@ -184,11 +243,11 @@ export class BackupScheduler {
    * force a run without waiting for the schedule.
    */
   async runOnce(): Promise<void> {
-    const { db, fleet, logger, config, flags, opsAudit } = this.deps;
+    const { pool, fleet, logger, config, flags, opsAudit } = this.deps;
     const storage = new BackupStorage(config.backup);
 
     try {
-      const outcome = await withBackupLock(db, fleet, async () => {
+      const outcome = await withBackupLock(pool, fleet, async () => {
         logger.info('backup starting');
         return runBackup({
           databaseUrl: config.databaseUrl,
@@ -276,5 +335,113 @@ export class BackupScheduler {
     } finally {
       storage.destroy();
     }
+  }
+
+  /**
+   * Runs one restore drill if this instance wins the drill lock
+   * (`plans/backups.md` §9). Exposed so an operator can force one.
+   *
+   * **A failed drill is not a failed backup**, and the two are kept apart
+   * deliberately: `backup.last_error` stays clear, `lastStatus` stays `ok`, and
+   * nothing here can make a healthy backup look broken. What a failed drill
+   * means is that the newest object may not restore, which is worth a loud
+   * alert and nothing else.
+   */
+  async drillOnce(): Promise<void> {
+    const { pool, fleet, logger, config, flags, opsAudit } = this.deps;
+    const storage = new BackupStorage(config.backup);
+
+    try {
+      const outcome = await withDrillLock(pool, fleet, async () => {
+        logger.info('restore drill starting');
+        return runDrill({
+          storage,
+          prefix: config.backup.prefix ?? config.nodeEnv,
+          env: config.nodeEnv,
+          encryptionKey: config.backup.encryptionKey,
+          scratchDatabaseUrl: config.backup.drillDatabaseUrl,
+          liveDatabaseUrl: config.databaseUrl,
+          // The drill is weekly, so the newest backup should be a day old.
+          // Anything past the staleness threshold is itself the finding.
+          maxAgeHours: config.backup.intervalHours * 1.5,
+          log: (event, data) => logger.info(data, event),
+        });
+      });
+
+      if (!outcome.ran) return;
+      await this.recordDrill(outcome.result);
+    } catch (error) {
+      // The drill itself broke, which is not the same as the backup failing to
+      // verify, but it is equally a reason nobody should trust the bucket.
+      const message = (error as Error).message;
+      this.lastDrillAt = new Date();
+      this.lastDrillResult = 'failed';
+      this.lastDrillProblems = [message];
+      logger.error({ err: error }, 'restore drill errored');
+      await flags
+        .set(RUNTIME_FLAGS.BACKUP_LAST_DRILL_AT, this.lastDrillAt.toISOString(), {
+          actor: 'backup-scheduler',
+        })
+        .catch(() => {});
+      await opsAudit
+        .record({
+          actor: 'backup-scheduler',
+          action: 'backup.drill.failed',
+          target: config.backup.bucket,
+          details: { error: message },
+        })
+        .catch(() => {});
+      this.deps.report('Backup restore drill could not run', { error: message });
+    } finally {
+      storage.destroy();
+    }
+  }
+
+  private async recordDrill(result: DrillResult): Promise<void> {
+    const { flags, opsAudit, logger } = this.deps;
+    this.lastDrillAt = new Date();
+    this.lastDrillResult = result.ok ? 'passed' : 'failed';
+    this.lastDrillProblems = result.problems;
+
+    await flags.set(RUNTIME_FLAGS.BACKUP_LAST_DRILL_AT, this.lastDrillAt.toISOString(), {
+      actor: 'backup-scheduler',
+    });
+    await flags.set(
+      RUNTIME_FLAGS.BACKUP_LAST_DRILL_RESULT,
+      {
+        ok: result.ok,
+        key: result.key,
+        ageHours: result.ageHours,
+        restored: result.restored,
+        tablesInArchive: result.tablesInArchive.length,
+        problems: result.problems,
+        durationMs: result.durationMs,
+      },
+      { actor: 'backup-scheduler' },
+    );
+    await opsAudit.record({
+      actor: 'backup-scheduler',
+      action: result.ok ? 'backup.drill.passed' : 'backup.drill.failed',
+      target: result.key ?? this.deps.config.backup.bucket,
+      details: {
+        restored: result.restored,
+        problems: result.problems,
+        durationMs: result.durationMs,
+      },
+    });
+
+    if (result.ok) {
+      logger.info(
+        { key: result.key, restored: result.restored, durationMs: result.durationMs },
+        'restore drill passed',
+      );
+      return;
+    }
+
+    logger.error({ key: result.key, problems: result.problems }, 'restore drill failed');
+    this.deps.report('Backup restore drill failed', {
+      key: result.key,
+      problems: result.problems.join(' | '),
+    });
   }
 }
