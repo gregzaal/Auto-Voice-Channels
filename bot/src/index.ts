@@ -599,6 +599,17 @@ async function main(): Promise<void> {
         version: VERSION,
         commit: COMMIT,
         claimedShards: leaseManager.ownedShards,
+        /**
+         * Heartbeat round trip to the gateway node actually serving us.
+         *
+         * The one latency number that cannot be measured from outside the
+         * process, and the one that decides whether this app belongs in its
+         * current region. Everything else is probeable over SSH: Discord's
+         * REST and gateway edges are Cloudflare anycast and answer in about
+         * the same time from anywhere, so they say nothing about where
+         * Discord's own servers are. `-1` means no shard is connected yet.
+         */
+        gatewayPingMs: Math.round(client.ws.ping),
         queueDepth: dispatcher.totalDepth(),
         trippedCircuits: dispatcher.trippedCount(),
         queues: dispatcher.snapshot(),
