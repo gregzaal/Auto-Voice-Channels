@@ -149,6 +149,50 @@ describe('buildSetupPanel', () => {
     expect(json).toContain('<#x9>');
   });
 
+  /**
+   * Creating and losing access are both Discord 50013 and have nothing in
+   * common as fixes. Reporting a create failure as "I lost access" sent an
+   * admin to check four permissions the bot already held (2026-08-19).
+   */
+  it('tells a create failure apart from a lost-access one', () => {
+    const created = JSON.stringify(
+      buildSetupPanel({
+        ...baseInput,
+        isAdmin: true,
+        problems: [{ channelId: 'x9', operation: 'create' }],
+      }),
+    );
+    expect(created).toContain('could not create rooms');
+    expect(created).not.toContain('lost access');
+
+    const lost = JSON.stringify(
+      buildSetupPanel({
+        ...baseInput,
+        isAdmin: true,
+        problems: [{ channelId: 'x9', operation: 'move' }],
+      }),
+    );
+    expect(lost).toContain('lost access');
+    expect(lost).not.toContain('could not create rooms');
+  });
+
+  /** Both kinds at once must report both, not pick one. */
+  it('reports create and access problems together', () => {
+    const json = JSON.stringify(
+      buildSetupPanel({
+        ...baseInput,
+        isAdmin: true,
+        problems: [
+          { channelId: 'a1', operation: 'create' },
+          { channelId: 'b2', operation: 'delete' },
+        ],
+      }),
+    );
+    expect(json).toContain('could not create rooms');
+    expect(json).toContain('lost access');
+    expect(json).toContain('Needs attention (2)');
+  });
+
   it('omits the needs-attention field when there are no problems', () => {
     const json = JSON.stringify(buildSetupPanel({ ...baseInput, isAdmin: true, problems: [] }));
     expect(json).not.toContain('Needs attention');

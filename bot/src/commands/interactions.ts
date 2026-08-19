@@ -1445,13 +1445,43 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     });
   }
 
+  /**
+   * Opens the panel, acknowledging FIRST.
+   *
+   * Discord gives an interaction three seconds to be acknowledged, and this
+   * handler cannot promise that. `buildSetupReply` already runs its queries in
+   * parallel, but it goes through `run()`, which puts the work on the guild's
+   * own queue behind whatever else that guild is doing. A guild retrying failed
+   * channel creations, each one a Discord round trip, can hold the queue for
+   * seconds. Add a database in another region (about 91ms per round trip from
+   * `iad` to `ams`, measured 2026-08-19) and the budget is genuinely tight.
+   *
+   * When it is missed the admin sees "The application did not respond", which
+   * reads as a broken bot rather than a slow one, and the reply that eventually
+   * arrives is thrown away with `Unknown interaction` (10062). That happened to
+   * a real `/setup` during the beta switch, in the very guild whose queue was
+   * busy failing.
+   *
+   * Deferring converts three seconds into fifteen minutes. It costs a visible
+   * "thinking" state, which is the correct trade for a panel that reads the
+   * database.
+   */
   async function openSetup(interaction: ChatInputCommandInteraction): Promise<void> {
-    await interaction.reply(await buildSetupReply(interaction));
+    await interaction.deferReply({ ephemeral: true });
+    const { embeds, components } = await buildSetupReply(interaction);
+    await interaction.editReply({ embeds: embeds ?? [], components: components ?? [] });
   }
 
-  /** Re-render the (already-open) setup panel in place after a panel action. */
+  /**
+   * Re-renders the (already-open) panel in place, acknowledging first.
+   *
+   * Same three-second budget as {@link openSetup} and the same queue behind it.
+   * `deferUpdate` keeps the existing message on screen while the work runs,
+   * which is what an in-place refresh should look like.
+   */
   async function refreshSetupPanel(interaction: ButtonInteraction): Promise<void> {
-    await interaction.update(toUpdate(await buildSetupReply(interaction)));
+    if (!interaction.deferred && !interaction.replied) await interaction.deferUpdate();
+    await interaction.editReply(toUpdate(await buildSetupReply(interaction)));
   }
 
   /** The `/setup` panel buttons. (`lang` is disabled and never fires.) */

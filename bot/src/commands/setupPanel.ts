@@ -167,8 +167,15 @@ export interface SetupPanelInput {
   missingPermissions: string[];
   primaries: { channelId: string }[];
   managed: { channelId: string }[];
-  /** Channels the bot recently lost access to (a permission override hid them). */
-  problems?: { channelId: string }[];
+  /**
+   * Channels with a recent permission incident, and what was being attempted.
+   *
+   * The operation is load-bearing: "I could not create a room here" and "I have
+   * lost access to this channel" are both Discord `50013` and have completely
+   * different fixes. Reporting them with one message sent an admin chasing four
+   * permissions the bot already held (2026-08-19).
+   */
+  problems?: { channelId: string; operation?: 'create' | 'move' | 'delete' | 'rename' }[];
   /**
    * Whether `/templateassistant` is available on this instance. Off is the
    * self-host default (no model endpoint configured), and the button is hidden
@@ -223,18 +230,36 @@ export function buildSetupPanel(input: SetupPanelInput): InteractionReplyOptions
     )
     .toJSON();
 
-  // Surface any channels the bot recently lost access to (a permission override),
-  // with the one-line fix, so admins aren't left guessing why automation stalled.
+  // Surface recent permission incidents with the fix that actually matches
+  // what failed, so admins aren't left guessing why automation stalled.
   if (input.problems && input.problems.length > 0) {
+    const list = (ps: { channelId: string }[]): string =>
+      ps
+        .slice(0, 5)
+        .map((p) => `<#${p.channelId}>`)
+        .join(', ');
+    const creates = input.problems.filter((p) => p.operation === 'create');
+    const access = input.problems.filter((p) => p.operation !== 'create');
+    const lines: string[] = [];
+    if (creates.length > 0) {
+      lines.push(
+        `I could not create rooms from ${list(creates)}. I need **Manage Channels** and ` +
+          '**Manage Roles** there or on the category, and I can only copy permissions I hold ' +
+          'myself, so an override granting something I do not have will stop me. If my ' +
+          'permissions already look right, that override is the thing to check.',
+      );
+    }
+    if (access.length > 0) {
+      lines.push(
+        `I lost access to ${list(access)} and stopped managing ` +
+          `${access.length === 1 ? 'it' : 'them'}. Grant my role **View Channel**, ` +
+          '**Connect**, **Manage Channels** and **Move Members** on the channel (or its ' +
+          "category), then it'll work again.",
+      );
+    }
     embed.fields!.push({
       name: `⚠️ Needs attention (${input.problems.length})`,
-      value:
-        `I lost access to ${input.problems
-          .slice(0, 5)
-          .map((p) => `<#${p.channelId}>`)
-          .join(', ')} and stopped managing ${input.problems.length === 1 ? 'it' : 'them'}.\n` +
-        'Grant my role **View Channel**, **Connect**, **Manage Channels** and **Move Members** ' +
-        'on the channel (or its category), then it’ll work again.',
+      value: lines.join('\n\n'),
     });
   }
 

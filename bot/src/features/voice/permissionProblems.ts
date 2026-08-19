@@ -42,22 +42,35 @@ export class PermissionProblemTracker {
   }
 }
 
-/** The actionable `/logging` message for an incident, tailored to the operation. */
+/**
+ * The actionable message for an incident, tailored to the operation.
+ *
+ * **Creating and losing access are different failures and must not share
+ * wording.** Both surface as Discord's `50013`, but the fixes have nothing in
+ * common, and for months every one of them was reported as "I lost access to
+ * this channel, grant me View Channel, Connect, Manage Channels and Move
+ * Members". On 2026-08-19 that sent an admin to check four permissions the bot
+ * already held, on the channel and on its category, while the real cause was
+ * an overwrite the bot is not allowed to copy. Advice that names the wrong fix
+ * is worse than no advice: it burns the admin's trust in the panel.
+ */
 export function permissionProblemMessage(
   channelId: string,
   operation: PermissionOperation | 'access' = 'access',
 ): string {
   if (operation === 'create') {
     return (
-      `⚠️ I could not create a channel from <#${channelId}>, I am missing permissions. To copy ` +
-      'its permissions I need **Manage Roles**, plus **Manage Channels**, **Connect** and ' +
-      '**Move Members** on it (or its category). Grant those and new channels will work.'
+      `⚠️ I could not create a channel from <#${channelId}>. I need **Manage Channels** and ` +
+      '**Manage Roles** on it or its category, and I can only copy permissions I hold myself, ' +
+      'so an override there granting something I do not have will stop me. If my permissions ' +
+      'look right already, that override is the thing to look at, or point me somewhere ' +
+      'simpler with `/inheritpermissions`.'
     );
   }
   return (
     `⚠️ I cannot manage <#${channelId}>, I have lost access to it (a permission override is ` +
     'hiding it from me). Grant my role **View Channel**, **Connect**, **Manage Channels** and ' +
-    '**Move Members** on that channel or its category, then it’ll work again. ' +
-    '(I’ve stopped managing it for now.)'
+    "**Move Members** on that channel or its category, then it'll work again. " +
+    "(I've stopped managing it for now.)"
   );
 }

@@ -191,6 +191,32 @@ describe('registerInteractionHandler (router)', () => {
     expect(env.settings.getConfig).toHaveBeenCalled();
   });
 
+  /**
+   * `/setup` acknowledges before it works.
+   *
+   * It reads the database through the per-guild queue, so it cannot promise
+   * Discord's three-second budget: a guild busy retrying failed channel
+   * creations holds that queue, and the database is a region away. A real
+   * `/setup` blew the budget during the beta switch and died with 10062
+   * "Unknown interaction", which the admin sees as "The application did not
+   * respond". The panel must arrive by editReply, not reply.
+   */
+  it('defers /setup and delivers the panel by editReply', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, reply, editReply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'setup',
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+
+    expect(interaction.deferReply).toHaveBeenCalled();
+    expect(reply).not.toHaveBeenCalled();
+    expect(editReply).toHaveBeenCalled();
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('embeds');
+  });
+
   it('grace guilds are fully entitled (no gating)', async () => {
     const env = setup({
       selfHosted: false,
