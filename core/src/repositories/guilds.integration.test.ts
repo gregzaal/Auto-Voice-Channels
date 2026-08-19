@@ -74,4 +74,39 @@ describe('GuildRepository (integration)', () => {
     const after = await repo.updateSettings('g-4', { limit: 10 });
     expect(after.settings).toMatchObject({ prefix: '!', limit: 10 });
   });
+
+  describe('markAnnounced', () => {
+    /**
+     * The bug this pins: `jsonb_set` with `create_missing` does NOT create an
+     * intermediate level, so stamping into a metadata with no `announcements`
+     * object silently wrote nothing. A broadcast interrupted halfway would then
+     * re-send to every guild it had already reached.
+     */
+    it('stamps a guild whose metadata has no announcements object yet', async () => {
+      await repo.ensure('g-ann-1');
+      await repo.markAnnounced('g-ann-1', 'rewrite_2026_08');
+      const row = await repo.ensure('g-ann-1');
+      const announcements = (row.metadata as Record<string, Record<string, string>>).announcements;
+      expect(announcements?.rewrite_2026_08).toBeTruthy();
+    });
+
+    it('keeps sibling announcement keys', async () => {
+      await repo.ensure('g-ann-2');
+      await repo.markAnnounced('g-ann-2', 'first');
+      await repo.markAnnounced('g-ann-2', 'second');
+      const row = await repo.ensure('g-ann-2');
+      const announcements = (row.metadata as Record<string, Record<string, string>>).announcements;
+      expect(Object.keys(announcements).sort()).toEqual(['first', 'second']);
+    });
+
+    it('does not disturb metadata.billing, which another job round-trips', async () => {
+      await repo.ensure('g-ann-3');
+      await repo.recordMemberCountSample('g-ann-3', 42, { at: new Date('2026-08-19T00:00:00Z') });
+      await repo.markAnnounced('g-ann-3', 'rewrite_2026_08');
+      const row = await repo.ensure('g-ann-3');
+      const meta = row.metadata as Record<string, Record<string, unknown>>;
+      expect(meta.billing?.samples).toBeDefined();
+      expect(meta.announcements?.rewrite_2026_08).toBeTruthy();
+    });
+  });
 });

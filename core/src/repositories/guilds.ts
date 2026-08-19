@@ -421,11 +421,24 @@ export class GuildRepository {
     await this.db
       .update(guilds)
       .set({
-        metadata: sql`jsonb_set(
-          ${guilds.metadata},
-          ${`{announcements,${key}}`}::text[],
-          ${JSON.stringify(at.toISOString())}::jsonb,
-          true
+        /**
+         * Merged with `||`, NOT `jsonb_set`.
+         *
+         * `jsonb_set(metadata, '{announcements,key}', v, true)` looks right and
+         * silently does nothing when `metadata` has no `announcements` object:
+         * `create_missing` creates only the FINAL key, never an intermediate
+         * level, and a path that cannot be walked returns the input unchanged.
+         * No error, no row skipped, just a stamp that was never written. This
+         * shipped and meant an interrupted broadcast would have re-sent to every
+         * guild it had already reached.
+         *
+         * `||` creates the object when absent and preserves sibling keys when
+         * present.
+         */
+        metadata: sql`${guilds.metadata} || jsonb_build_object(
+          'announcements',
+          coalesce(${guilds.metadata} -> 'announcements', '{}'::jsonb)
+            || jsonb_build_object(${key}::text, ${at.toISOString()}::text)
         )`,
         updatedAt: new Date(),
       })
