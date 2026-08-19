@@ -64,6 +64,8 @@ export const legacyGuildSchema = z
     custom_nicks: z.unknown(),
     logging: z.unknown(),
     log_level: z.unknown(),
+    /** Whoever last ran the legacy `create` command. Carried since 2026-08-19. */
+    server_contact: z.unknown(),
     auto_channels: z.unknown(),
     /**
      * Truthy when the bot has left the guild: a `"YYYY-MM-DD HH:MM"` stamp on
@@ -91,7 +93,6 @@ export const DROPPED_FIELDS = [
   'last_activity',
   'last_channel',
   'guild_name',
-  'server_contact',
   'left',
 ] as const;
 
@@ -216,6 +217,25 @@ export function mapInheritPerms(value: unknown): string | undefined {
   return lowered === 'primary' || lowered === 'category' ? lowered : undefined;
 }
 
+/**
+ * The legacy `server_contact`: whoever last ran the create command.
+ *
+ * **Rejects numbers rather than stringifying them**, taking `mapInheritPerms`'s
+ * stance and not `asId`'s. In a dump read through `parseLegacyJson` a snowflake
+ * arrives as a string, because `quoteLongIntegers` rewrites 16+ digit integers
+ * before parsing. So a NUMBER here means the value came in through some other
+ * path and has already lost precision past 2^53. Stringifying that produces a
+ * plausible id belonging to nobody, which we would then DM.
+ *
+ * Dropping it is cheap: the caller falls back to the guild owner, which is what
+ * happens for the 57 imported guilds that never had a contact at all.
+ */
+export function mapServerContact(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return /^\d{17,20}$/.test(trimmed) ? trimmed : undefined;
+}
+
 export function planGuild(guildId: string, raw: unknown, options: PlanOptions = {}): GuildPlan {
   const parsed = legacyGuildSchema.safeParse(raw);
   const base: GuildPlan = {
@@ -262,6 +282,10 @@ export function planGuild(guildId: string, raw: unknown, options: PlanOptions = 
   // The new schema stores channel ids as text; legacy wrote them as numbers.
   const loggingId = asId(guild.logging);
   if (loggingId) settings.logging = loggingId;
+  // Restored 2026-08-19. Was in DROPPED_FIELDS; the rewrite now has somewhere to
+  // put it and a reason to want it (who to talk to when automation breaks).
+  const contact = mapServerContact(guild.server_contact);
+  if (contact) settings.contact_user_id = contact;
   if (guild.log_level !== undefined && guild.log_level !== null) {
     const level = Math.trunc(Number(guild.log_level));
     if (Number.isFinite(level)) settings.log_level = Math.min(3, Math.max(1, level));

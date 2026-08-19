@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { hasLeft, mapInheritPerms, planGuild, snowflakeToDate, trialStartFor } from './legacy.js';
+import {
+  DROPPED_FIELDS,
+  hasLeft,
+  mapInheritPerms,
+  mapServerContact,
+  planGuild,
+  snowflakeToDate,
+  trialStartFor,
+} from './legacy.js';
 
 const GUILD = '460459401086763010';
 const PRIMARY = '605724722902204416';
@@ -359,5 +367,48 @@ describe('mapInheritPerms', () => {
     for (const value of [undefined, null, '', 'PARENT', 'yes', true, {}, '12']) {
       expect(mapInheritPerms(value)).toBeUndefined();
     }
+  });
+});
+
+describe('mapServerContact', () => {
+  it('carries a snowflake string', () => {
+    expect(mapServerContact('201444089835552768')).toBe('201444089835552768');
+    expect(mapServerContact('  201444089835552768  ')).toBe('201444089835552768');
+  });
+
+  /**
+   * The dump stores snowflakes as JSON numbers, and `parseLegacyJson` rewrites
+   * them to strings before parsing. A number reaching here means it came in
+   * some other way and has already lost precision past 2^53, so it is a
+   * plausible id belonging to someone else. Same stance as mapInheritPerms.
+   */
+  it('rejects a number rather than stringifying a corrupted id', () => {
+    expect(mapServerContact(201444089835552768)).toBeUndefined();
+    expect(mapServerContact(Number('201444089835552768'))).toBeUndefined();
+  });
+
+  it('rejects anything that is not snowflake-shaped', () => {
+    expect(mapServerContact('')).toBeUndefined();
+    expect(mapServerContact('nobody')).toBeUndefined();
+    expect(mapServerContact('123')).toBeUndefined();
+    expect(mapServerContact('2014440898355527681234')).toBeUndefined();
+    expect(mapServerContact(null)).toBeUndefined();
+    expect(mapServerContact(undefined)).toBeUndefined();
+  });
+});
+
+describe('server_contact is carried, not dropped', () => {
+  it('lands in settings as contact_user_id', () => {
+    const plan = planGuild('1', { server_contact: '201444089835552768' });
+    expect(plan.settings.contact_user_id).toBe('201444089835552768');
+  });
+
+  it('is absent rather than null when the legacy guild never had one', () => {
+    const plan = planGuild('1', {});
+    expect('contact_user_id' in plan.settings).toBe(false);
+  });
+
+  it('is no longer reported as a dropped field', () => {
+    expect(DROPPED_FIELDS).not.toContain('server_contact');
   });
 });

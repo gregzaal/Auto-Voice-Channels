@@ -5,6 +5,7 @@ import { startPostgres } from '../../test/pgContainer.js';
 import { fakeLogger } from '../../runtime/testUtils.js';
 import { RecordingVoiceActions } from './actions.js';
 import { DEFAULT_CHANNEL_NAME_TEMPLATE } from './nameTemplate.js';
+import { readContact } from './guildSettings.js';
 import { GuildSettingsService } from './settings.js';
 
 const GUILD = 'guild-settings-test';
@@ -310,5 +311,64 @@ describe('GuildSettingsService (integration)', () => {
     await settings.setLogging(GUILD, null, 1);
     s = (await guilds.get(GUILD))!.settings;
     expect(s.logging).toBe(false);
+  });
+
+  describe('recordContact', () => {
+    const ADMIN = '291185187105275904';
+    const OTHER = '224358985464152064';
+
+    it('stores the contact so readContact can find it', async () => {
+      await settings.recordContact(GUILD, ADMIN);
+      const guild = await guilds.ensure(GUILD);
+      expect(readContact(guild.settings)).toBe(ADMIN);
+    });
+
+    it('overwrites with whoever set up most recently', async () => {
+      await settings.recordContact(GUILD, ADMIN);
+      await settings.recordContact(GUILD, OTHER);
+      const guild = await guilds.ensure(GUILD);
+      expect(readContact(guild.settings)).toBe(OTHER);
+    });
+
+    /**
+     * The early return is what stops a repeated admin action bumping
+     * `updated_at` and firing a settings-cache NOTIFY across the whole fleet.
+     */
+    it('does not write again when the contact is unchanged', async () => {
+      await settings.recordContact(GUILD, ADMIN);
+      const before = (await guilds.ensure(GUILD)).updatedAt;
+      await new Promise((r) => setTimeout(r, 25));
+      await settings.recordContact(GUILD, ADMIN);
+      expect((await guilds.ensure(GUILD)).updatedAt).toEqual(before);
+    });
+
+    it('refuses a value that is not a snowflake, rather than storing junk', async () => {
+      await settings.recordContact(GUILD, 'not-an-id');
+      await settings.recordContact(GUILD, '123');
+      const guild = await guilds.ensure(GUILD);
+      expect(readContact(guild.settings)).toBeNull();
+    });
+
+    /** Bookkeeping on an already-succeeded action must never throw upward. */
+    it('swallows a store failure instead of failing the caller', async () => {
+      const broken = new GuildSettingsService({
+        guilds: {
+          ensure: () => Promise.reject(new Error('db down')),
+        } as unknown as typeof guilds,
+        autoChannels,
+        secondaries,
+        actions,
+        logger: fakeLogger(),
+      });
+      await expect(broken.recordContact(GUILD, ADMIN)).resolves.toBeUndefined();
+    });
+
+    it('leaves the rest of the settings blob alone', async () => {
+      await settings.setGeneral(GUILD, 'lobby');
+      await settings.recordContact(GUILD, ADMIN);
+      const guildAfter = await guilds.ensure(GUILD);
+      expect(guildAfter.settings.general).toBe('lobby');
+      expect(readContact(guildAfter.settings)).toBe(ADMIN);
+    });
   });
 });

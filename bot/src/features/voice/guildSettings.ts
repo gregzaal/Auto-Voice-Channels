@@ -16,7 +16,50 @@ export const SETTINGS_KEYS = {
   logging: 'logging',
   logLevel: 'log_level',
   groups: 'groups',
+  contact: 'contact_user_id',
 } as const;
+
+/**
+ * A Discord user snowflake, 17 to 20 digits.
+ *
+ * Checked at both ends. The settings blob is `record(unknown)` at the repo
+ * boundary, so a bad value is only ever caught here, and the legacy dump stores
+ * snowflakes as JSON NUMBERS, which lose precision above 2^53 and arrive as a
+ * plausible-looking but wrong id.
+ */
+const DIGITS = /^[0-9]+$/;
+
+/**
+ * The guild's designated contact: whoever most recently set up a creator
+ * channel or its template.
+ *
+ * Restored from the legacy bot's `server_contact`, which was set on channel
+ * creation and used for exactly this, working out who to talk to when the
+ * automation breaks. The person who configured the bot is a better bet than the
+ * server owner, who often has never touched it. Callers must still fall back to
+ * the owner: 20% of imported contacts have already left their server.
+ */
+export function readContact(settings: Record<string, unknown>): string | null {
+  const raw = settings[SETTINGS_KEYS.contact];
+  return isSnowflake(raw) ? raw : null;
+}
+
+/**
+ * Validates a snowflake, at both the read and the write end.
+ *
+ * The length check is explicit rather than leaning on the regex's `$`, which
+ * without the `m` flag also matches before a trailing newline: `/^\d{17,20}$/`
+ * happily accepts `"123...
+"`. That would render as an inert `<@123...
+>` and
+ * put a newline inside `allowed_mentions.users`, which Discord rejects, failing
+ * the whole send.
+ */
+export function isSnowflake(value: unknown): value is string {
+  return (
+    typeof value === 'string' && value.length >= 17 && value.length <= 20 && DIGITS.test(value)
+  );
+}
 
 /** Settings-key sentinel for grouping creator channels that sit at the server root. */
 export const ROOT_GROUP_KEY = '@root';

@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_CHANNEL_NAME_TEMPLATE } from './nameTemplate.js';
 import {
+  ROOT_GROUP_KEY,
   groupKeyFor,
   isStringMap,
   parseVoiceSettings,
+  readContact,
   readGroup,
   readGroups,
-  ROOT_GROUP_KEY,
   readLogging,
 } from './guildSettings.js';
 
@@ -88,5 +89,28 @@ describe('guildSettings', () => {
     const settings = { groups: { 'cat-1': { above: true } } };
     expect(readGroup(settings, 'cat-1')).toEqual({ above: true });
     expect(readGroup(settings, 'cat-9')).toBeUndefined();
+  });
+});
+
+describe('readContact', () => {
+  it('reads a stored snowflake', () => {
+    expect(readContact({ contact_user_id: '201444089835552768' })).toBe('201444089835552768');
+  });
+
+  it('is null when unset, so callers fall back to the owner', () => {
+    expect(readContact({})).toBeNull();
+  });
+
+  /**
+   * The settings blob is `record(unknown)` at the repo boundary, so a bad value
+   * is only ever caught here. A number is the realistic failure: that is how
+   * the legacy dump stored snowflakes, and above 2^53 it is silently wrong.
+   */
+  it('rejects anything that is not snowflake-shaped', () => {
+    expect(readContact({ contact_user_id: 201444089835552768 })).toBeNull();
+    expect(readContact({ contact_user_id: '' })).toBeNull();
+    expect(readContact({ contact_user_id: '123' })).toBeNull();
+    expect(readContact({ contact_user_id: null })).toBeNull();
+    expect(readContact({ contact_user_id: { id: '201444089835552768' } })).toBeNull();
   });
 });

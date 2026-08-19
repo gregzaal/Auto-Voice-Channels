@@ -9,7 +9,15 @@ import type {
 import type { VoiceActions } from './actions.js';
 import { DEFAULT_CHANNEL_NAME_TEMPLATE } from './nameTemplate.js';
 import { MAX_USER_LIMIT } from './commands.js';
-import { isStringMap, parseVoiceSettings, readGroups, readLogging } from './guildSettings.js';
+import {
+  SETTINGS_KEYS,
+  isSnowflake,
+  isStringMap,
+  parseVoiceSettings,
+  readContact,
+  readGroups,
+  readLogging,
+} from './guildSettings.js';
 import type { GroupConfig } from './guildSettings.js';
 import { type CommandResult } from './commands.js';
 
@@ -70,6 +78,40 @@ const INHERIT_MODES: Record<string, string> = {
  */
 export class GuildSettingsService {
   constructor(private readonly deps: GuildSettingsServiceDeps) {}
+
+  /**
+   * Records who most recently set up a creator channel or its template.
+   *
+   * Restores the legacy bot's `server_contact`. It exists to answer "who do I
+   * talk to when this guild's automation is broken", and the person who
+   * configured it beats the server owner, who frequently has never touched it.
+   *
+   * **Reads before writing, and returns early when unchanged.** The shape is
+   * borrowed from `recordIdentity`, though the reason is stronger here: that one
+   * writes columns through the raw repository and never notifies, while this
+   * writes the settings blob through the cache, so a blind repeat would bump
+   * `updated_at` AND evict that guild's settings on every instance in the fleet
+   * for no change at all. These call sites repeat freely (re-opening a template
+   * panel and saving the same thing).
+   *
+   * Never throws. This is bookkeeping hung off a user action that has already
+   * succeeded, so failing it must not fail the action. It also deliberately
+   * sits OUTSIDE the per-guild dispatcher, unlike every sibling call in the
+   * command layer: a failure here must not count against the guild's circuit
+   * breaker. The cost of that choice is that it misses `onTaskFailure`, so the
+   * `errors` metric never sees it, which is why the log below is `warn` and not
+   * `debug` -- it is the only signal a broken contact write produces anywhere.
+   */
+  async recordContact(guildId: string, userId: string): Promise<void> {
+    try {
+      if (!isSnowflake(userId)) return;
+      const guild = await this.deps.guilds.ensure(guildId);
+      if (readContact(guild.settings) === userId) return;
+      await this.deps.guilds.updateSettings(guildId, { [SETTINGS_KEYS.contact]: userId });
+    } catch (err) {
+      this.deps.logger.warn({ err, guildId }, 'could not record the server contact');
+    }
+  }
 
   async getConfig(guildId: string): Promise<GuildConfig> {
     const guild = await this.deps.guilds.ensure(guildId);

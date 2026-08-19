@@ -1083,6 +1083,15 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       await interaction.update({ content: formatResult(res), embeds: [], components: [] });
       return;
     }
+    /**
+     * Adoption writes a template WITHOUT going through `applyEditor`, so it needs
+     * its own hook. It is also the strongest signal of the three: taking an
+     * existing channel under management is unambiguously an act of setup.
+     *
+     * Not awaited, for the same reason as `handleCreateSubmit`: nothing has
+     * acknowledged the interaction yet.
+     */
+    void deps.settings.recordContact(guildId, interaction.user.id);
     // Drop straight into the managed-channel editor so they can tweak the template.
     const state = await run(guildId, 'adopt:state', () =>
       deps.feature.getManagedEditorState(guildId, channelId),
@@ -1163,6 +1172,18 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       }
     }
     if (!result.ok) return { ok: false, message: result.message };
+    /**
+     * Record who set this up, for the two ADMIN scopes only.
+     *
+     * `scope === 'channel'` is `/name`, the per-channel override, and `nameCore`
+     * deliberately lets any channel OWNER use it without ManageChannels. Writing
+     * the guild-wide contact from there inverts the whole point of the field: on
+     * a fleet where renaming your own room is an everyday user action and
+     * creating a creator channel happens once, the contact would converge on
+     * "the last person to rename a room" and never point at an admin. It would
+     * also make a common user command fire a fleet-wide settings-cache NOTIFY.
+     */
+    if (scope !== 'channel') await deps.settings.recordContact(guildId, interaction.user.id);
     const state = await run(guildId, 'editor:refresh', () =>
       deps.feature.getEditorState(scope, guildId, channelId),
     );
@@ -1322,6 +1343,14 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       components: [row],
       ephemeral: true,
     });
+    /**
+     * After the reply, and not awaited before it. This handler does not defer,
+     * so everything ahead of the first `reply` sits inside Discord's 3-second
+     * acknowledgement budget, behind an entitlement read, a `getConfig` and a
+     * channel-create REST call. Bookkeeping must not be what pushes an
+     * already-successful create into "This interaction failed".
+     */
+    void deps.settings.recordContact(guildId, interaction.user.id);
   }
 
   /**

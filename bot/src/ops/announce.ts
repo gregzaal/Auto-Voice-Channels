@@ -17,6 +17,7 @@
 
 import { readFileSync } from 'node:fs';
 import { REST, Routes } from 'discord.js';
+import { readContact } from '../features/voice/guildSettings.js';
 import {
   GuildFleetPresenceRepository,
   GuildRepository,
@@ -28,6 +29,22 @@ import {
 
 /** Discord's hard limit for a plain message. */
 const MAX_MESSAGE = 2000;
+
+/**
+ * Room reserved for the `<@id>` mention prefix added at delivery time.
+ *
+ * The preflight runs on the copy alone, before any guild is known, so without a
+ * reserve a message could pass the check and then fail the send once a prefix is
+ * prepended. There are TWO prefixes and the DM one is much larger:
+ *
+ *   system channel  `<@` + 20-digit id + `>` + newline                     = 24
+ *   owner DM        `**` + guild name (Discord caps it at 100) + `**
+
+`  = 106
+ *
+ * Reserve the larger, since the preflight cannot know which path a guild takes.
+ */
+const DELIVERY_PREFIX_RESERVE = 106;
 
 /**
  * How many guilds are in flight at once.
@@ -135,6 +152,8 @@ interface Target {
   policy: Variant;
   expiresAt: Date | null;
   content: string;
+  /** The guild's recorded setup contact, if it has one. Owner is the fallback. */
+  contactId: string | null;
 }
 
 type Outcome = 'system_channel' | 'owner_dm' | 'failed';
@@ -150,6 +169,7 @@ async function deliver(
   rest: REST,
   guildId: string,
   content: string,
+  contactId: string | null,
 ): Promise<{ outcome: Outcome; error?: string }> {
   let guild: { name: string; system_channel_id: string | null; owner_id: string };
   try {
@@ -170,9 +190,36 @@ async function deliver(
    * getting the bot banned from the servers it is trying to talk to. Owner's
    * call, 2026-08-19, and it is not a close one.
    */
+  /**
+   * Who to address. The guild's recorded contact if they are still a member,
+   * else the owner. 20% of imported contacts have already left, and a mention
+   * of someone who is gone renders as a raw id and pings nobody.
+   */
+  let mention: string | null = null;
+  if (contactId) {
+    try {
+      await rest.get(Routes.guildMember(guildId, contactId));
+      mention = contactId;
+    } catch {
+      // Left, or unreadable. Fall through to the owner.
+    }
+  }
+  mention ??= guild.owner_id;
+
   if (guild.system_channel_id) {
     try {
-      await rest.post(Routes.channelMessages(guild.system_channel_id), { body: { content } });
+      /**
+       * The mention is opt-in via `allowed_mentions`, listing exactly one user.
+       * Defaulting would let any stray `@everyone` in hand-edited copy reach a
+       * thousand servers at once.
+       */
+      await rest.post(Routes.channelMessages(guild.system_channel_id), {
+        body: {
+          content: `<@${mention}>
+${content}`,
+          allowed_mentions: { users: [mention] },
+        },
+      });
       return { outcome: 'system_channel' };
     } catch {
       // Usually a missing Send Messages. Fall through to the DM, but the caller
@@ -206,30 +253,51 @@ async function deliver(
  * tester was only an admin there. Correct behaviour, surprising result, so the
  * target is now shown before anything goes out.
  */
-async function resolveTarget(rest: REST, guildId: string): Promise<string> {
+async function resolveTarget(
+  rest: REST,
+  guildId: string,
+  contactId: string | null,
+): Promise<string> {
   let guild: { name: string; system_channel_id: string | null; owner_id: string };
   try {
     guild = (await rest.get(Routes.guild(guildId))) as typeof guild;
   } catch (err) {
     return `UNREADABLE (${(err as Error).message})`;
   }
+  /**
+   * Resolve the mention exactly as `deliver` will. Naming the channel without
+   * naming the person reintroduces the surprise this function exists to stop,
+   * one layer down: the right channel, pinging someone nobody reviewed.
+   */
+  let who = 'owner';
+  let mentionId = guild.owner_id;
+  if (contactId) {
+    try {
+      await rest.get(Routes.guildMember(guildId, contactId));
+      mentionId = contactId;
+      who = 'contact';
+    } catch {
+      who = 'owner (contact has left)';
+    }
+  }
+  let name = mentionId;
+  try {
+    const user = (await rest.get(Routes.user(mentionId))) as { username: string };
+    name = user.username;
+  } catch {
+    /* the id alone is still useful */
+  }
+
   if (guild.system_channel_id) {
     try {
       const ch = (await rest.get(Routes.channel(guild.system_channel_id))) as { name: string };
-      return `${guild.name} -> #${ch.name} (system channel)`;
+      return `${guild.name} -> #${ch.name}, pinging ${name} (${who})`;
     } catch {
       // No View Channel, so it falls through to the DM. Showing that is the
       // entire point of this function.
     }
   }
-  let who = guild.owner_id;
-  try {
-    const user = (await rest.get(Routes.user(guild.owner_id))) as { username: string };
-    who = `${user.username} (${guild.owner_id})`;
-  } catch {
-    /* the id alone is still useful */
-  }
-  return `${guild.name} -> DM to owner ${who}`;
+  return `${guild.name} -> DM to owner ${name} (${guild.owner_id})`;
 }
 
 function arg(argv: string[], name: string): string | undefined {
@@ -259,10 +327,13 @@ export async function main(rawArgv: string[]): Promise<number> {
   // Length is checked per rendered variant, not on the body, because the
   // pricing paragraph is what pushes it over.
   for (const policy of ['dormant', 'year', 'short', 'active'] as const) {
-    const sample = renderFor(sections, policy, new Date('2027-08-28T00:00:00Z'));
-    if (sample.length > MAX_MESSAGE) {
+    // The longest month name and a two-digit day, so the preflight stays
+    // conservative against every real expiry it will render.
+    const sample = renderFor(sections, policy, new Date('2027-09-30T00:00:00Z'));
+    if (sample.length + DELIVERY_PREFIX_RESERVE > MAX_MESSAGE) {
       problems.push(
-        `pricing:${policy}: rendered message is ${sample.length} chars, max ${MAX_MESSAGE}`,
+        `pricing:${policy}: rendered message is ${sample.length} chars and a delivery prefix can ` +
+          `add ${DELIVERY_PREFIX_RESERVE} more, over the ${MAX_MESSAGE} limit`,
       );
     }
   }
@@ -346,6 +417,7 @@ export async function main(rawArgv: string[]): Promise<number> {
         policy,
         expiresAt: g.authExpiresAt ?? null,
         content: renderFor(sections, policy, g.authExpiresAt ?? null),
+        contactId: readContact(g.settings),
       });
       if (limit && targets.length >= limit) break;
     }
@@ -389,7 +461,7 @@ export async function main(rawArgv: string[]): Promise<number> {
         console.log(
           `
 --- ${policy}: what ${sample.guildId} would receive ` +
-            `(${sample.content.length} chars) ---
+            `(${sample.content.length} chars, plus a mention prefix on the system-channel path) ---
 `,
         );
         console.log(sample.content);
@@ -404,7 +476,7 @@ export async function main(rawArgv: string[]): Promise<number> {
       if (toResolve.length) {
         console.log(`\n--- where ${toResolve.length} of ${targets.length} would land ---`);
         for (const t of toResolve) {
-          console.log(`  ${await resolveTarget(rest, t.guildId)}`);
+          console.log(`  ${await resolveTarget(rest, t.guildId, t.contactId)}`);
         }
         if (targets.length > toResolve.length) {
           console.log(`  ... ${targets.length - toResolve.length} more not resolved`);
@@ -423,7 +495,12 @@ export async function main(rawArgv: string[]): Promise<number> {
       for (;;) {
         const target = queue.shift();
         if (!target) return;
-        const { outcome, error } = await deliver(rest, target.guildId, target.content);
+        const { outcome, error } = await deliver(
+          rest,
+          target.guildId,
+          target.content,
+          target.contactId,
+        );
         counts[outcome]++;
         if (outcome === 'failed') {
           failures.push(`${target.guildId}: ${error ?? 'unknown'}`);
