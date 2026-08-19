@@ -60,6 +60,14 @@ export interface CreateSecondaryInput {
   /** The channel's original creator; defaults to `ownerId` when omitted. */
   originalCreator?: string;
   state?: SecondaryState;
+  /**
+   * Overrides the DB default. Only the legacy importer sets this, and it must:
+   * the reconciler derives `##` numbering from sibling `createdAt` order, so
+   * adopting channels with today's date would renumber every room in a guild on
+   * the first reconcile. It passes the channel's real creation time, recovered
+   * from its snowflake (`plans/migration.md` §3.3).
+   */
+  createdAt?: Date;
 }
 
 /**
@@ -103,6 +111,7 @@ export class SecondaryChannelRepository {
         // The creator is the first owner unless a specific one is given.
         originalCreator: input.originalCreator ?? input.ownerId ?? null,
         state: input.state ?? {},
+        ...(input.createdAt ? { createdAt: input.createdAt } : {}),
       })
       .onConflictDoNothing({ target: secondaryChannels.channelId })
       .returning();

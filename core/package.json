@@ -23,7 +23,8 @@
     "backup:run": "tsx ./src/backup/cli.ts run",
     "backup:list": "tsx ./src/backup/cli.ts list",
     "backup:verify": "tsx ./src/backup/cli.ts verify",
-    "backup:restore": "tsx ./src/backup/cli.ts restore"
+    "backup:restore": "tsx ./src/backup/cli.ts restore",
+    "migrate:import": "tsx ./src/migrate/import-cli.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1113.0",
