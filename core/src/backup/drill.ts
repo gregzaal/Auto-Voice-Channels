@@ -181,27 +181,54 @@ async function readToc(
 
   const stages: (Readable | Transform)[] = decrypt ? [body, decrypt] : [body];
 
+  /**
+   * Feeding errors are collected, never thrown. **The child's exit code and
+   * output are the source of truth, not what happened to the pipe.**
+   *
+   * We are deliberately writing into a consumer that stops early: a
+   * custom-format archive keeps its table of contents at the front, so
+   * `pg_restore --list` has everything it came for long before the body is
+   * finished and closes stdin under us. The teardown that follows is the
+   * healthy path, and its error is whatever the source stream happens to raise.
+   *
+   * The first version allowlisted `EPIPE` and `ERR_STREAM_PREMATURE_CLOSE`,
+   * which is what MinIO over plain HTTP on localhost produces, so all thirteen
+   * integration tests passed. The first run against B2 over TLS raised
+   * `aborted` instead, the allowlist missed it, and the drill threw away a
+   * perfectly good table of contents and reported the backup unreadable. CI
+   * could not have caught that: it is a property of the transport, not of the
+   * code. Hence no list of error codes at all.
+   */
+  let feedError: Error | undefined;
   const fed = pipeline([...stages, child.stdin] as unknown as [
     Readable,
     ...NodeJS.WritableStream[],
-  ]).catch((error: NodeJS.ErrnoException) => {
-    // See above: pg_restore closing stdin early is the normal path.
-    if (error.code === 'EPIPE' || error.code === 'ERR_STREAM_PREMATURE_CLOSE') return;
-    throw error;
+  ]).catch((error: Error) => {
+    feedError = error;
   });
 
-  const [, code] = await Promise.all([fed, exited]);
+  await fed;
+  // `pipeline` destroys the destination on a source error, so the child sees
+  // EOF either way and this cannot hang.
+  const code = await exited;
+
   /**
    * A non-zero exit is a failure even when a table of contents was printed.
    *
    * An archive that parses far enough to emit part of its TOC and then errors
    * exits non-zero with non-empty stdout. Adopting that partial list would let
    * the drill pass or fail on whether the truncation happened to fall after the
-   * last table the manifest names, which is not a check, it is a coin flip. The
-   * whole job of this step is noticing a bad archive.
+   * last table the manifest names, which is not a check, it is a coin flip.
    */
   if (code !== 0) {
     throw new Error(`pg_restore --list exited ${code}: ${stderr.trim() || '(no stderr)'}`);
+  }
+  // Exit 0 with nothing printed means it never got a readable archive, and
+  // then the feeding error is the explanation rather than noise.
+  if (stdout.trim() === '') {
+    throw new Error(
+      `pg_restore --list read no archive${feedError ? `: ${feedError.message}` : '.'}`,
+    );
   }
   return parseRestoreToc(stdout);
 }
