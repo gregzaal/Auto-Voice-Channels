@@ -294,11 +294,30 @@ export async function main(rawArgv: string[]): Promise<number> {
     }
 
     if (!apply) {
-      const sample = targets[0];
-      if (sample) {
-        console.log(`\n--- what ${sample.guildId} (${sample.policy}) would receive ---\n`);
+      /**
+       * One real sample per band, not just the first target.
+       *
+       * Printing only `targets[0]` hides every variant the first guild does not
+       * happen to use. That is not hypothetical: a draft of this announcement
+       * told large servers they were on a "shorter trial" while the importer
+       * had actually given them the same year window as everyone else, and the
+       * first target was a small server, so the dry run never showed the
+       * sentence that was wrong.
+       */
+      for (const policy of ['dormant', 'year', 'short'] as const) {
+        const sample = targets.find((t) => t.policy === policy);
+        if (!sample) {
+          console.log(`
+--- no ${policy} guilds in this run ---`);
+          continue;
+        }
+        console.log(
+          `
+--- ${policy}: what ${sample.guildId} would receive ` +
+            `(${sample.content.length} chars) ---
+`,
+        );
         console.log(sample.content);
-        console.log(`\n--- ${sample.content.length} chars ---`);
       }
       console.log('\nDRY RUN, nothing sent. Re-run with --apply.');
       return 0;
