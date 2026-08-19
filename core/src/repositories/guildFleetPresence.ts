@@ -114,6 +114,23 @@ export class GuildFleetPresenceRepository {
   }
 
   /**
+   * Every guild this fleet is currently in.
+   *
+   * The bulk form of {@link isPresent}, for jobs that walk the whole install
+   * base. `guilds` is a SHARED table, so anything iterating it and acting per
+   * guild must intersect with this or it will act on guilds whose bot is a
+   * different fleet entirely. That is the same mistake the billing
+   * ladder/delivery split exists to prevent (`plans/fleets.md` §4).
+   */
+  async presentGuildIds(): Promise<Set<string>> {
+    const rows = await this.db
+      .select({ guildId: guildFleetPresence.guildId })
+      .from(guildFleetPresence)
+      .where(and(eq(guildFleetPresence.fleet, this.fleet), isNull(guildFleetPresence.removedAt)));
+    return new Set(rows.map((r) => r.guildId));
+  }
+
+  /**
    * Every fleet currently in the guild.
    *
    * The dashboard's question, per §6.1: "is *any* fleet here". Asking per fleet

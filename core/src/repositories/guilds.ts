@@ -405,6 +405,33 @@ export class GuildRepository {
     });
   }
 
+  /**
+   * Records that a one-off announcement was delivered to this guild
+   * (`metadata.announcements.<key>`).
+   *
+   * Separate from `metadata.billing` on purpose: that object is parsed by
+   * `parseBillingMeta` and round-tripped by the reconcile job, so putting
+   * unrelated keys in it risks them being dropped by a schema that does not
+   * know about them. Announcements are their own namespace.
+   *
+   * Idempotent, and the caller should only stamp on a CONFIRMED delivery, so a
+   * re-run retries the guilds that failed rather than skipping them forever.
+   */
+  async markAnnounced(guildId: string, key: string, at = new Date()): Promise<void> {
+    await this.db
+      .update(guilds)
+      .set({
+        metadata: sql`jsonb_set(
+          ${guilds.metadata},
+          ${`{announcements,${key}}`}::text[],
+          ${JSON.stringify(at.toISOString())}::jsonb,
+          true
+        )`,
+        updatedAt: new Date(),
+      })
+      .where(eq(guilds.guildId, guildId));
+  }
+
   /** Marks the one-time new-guild onboarding as done (`metadata.billing.onboardedAt`). */
   async markOnboarded(guildId: string, at = new Date()): Promise<void> {
     await this.db.transaction(async (tx) => {
