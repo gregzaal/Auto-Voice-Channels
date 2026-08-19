@@ -1,4 +1,4 @@
-import { asc, eq, gt, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, isNotNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Database } from '../db/client.js';
 import { guildAuthEvents, guilds, opsAudit } from '../db/schema.js';
@@ -110,6 +110,48 @@ export class GuildRepository {
       .update(guilds)
       .set({ botRemovedAt: removedAt, updatedAt: new Date() })
       .where(eq(guilds.guildId, guildId));
+  }
+
+  /**
+   * Clears the removal marker for every guild the bot can currently see.
+   *
+   * The event-driven writer above cannot do this. `guildCreate` is guarded on
+   * `client.isReady()`, and discord.js does not emit it for the initial guild
+   * batch at all, so a guild that was re-added while the fleet was down keeps
+   * `bot_removed_at` set **forever**. `attentionFor` reads that column and
+   * tells the owner, at `critical`, that they are paying for a server AVC is
+   * not in, while the bot sits in it working perfectly.
+   *
+   * Latent since the column existed and harmless at three test guilds. It
+   * stopped being harmless on 2026-08-19, when the beta fleet inherited 1004
+   * real ones, some of them paying.
+   *
+   * Only ever clears, never sets: an instance owning a subset of shards sees a
+   * subset of guilds, so "not in my cache" is not evidence of removal. Marking
+   * removal stays with `guildDelete`, which is per-guild and unambiguous.
+   *
+   * Returns how many rows actually changed, so a boot that clears hundreds is
+   * visible in the logs rather than inferred later from a support ticket.
+   */
+  async clearBotRemovedFor(guildIds: readonly string[]): Promise<number> {
+    const ids = [...new Set(guildIds)];
+    if (ids.length === 0) return 0;
+    const cleared = await this.db
+      .update(guilds)
+      .set({ botRemovedAt: null, updatedAt: new Date() })
+      .where(
+        and(
+          isNotNull(guilds.botRemovedAt),
+          // A single JSON parameter rather than one bind per guild: `inArray`
+          // expands to `IN ($1, $2, ...)` and walks into Postgres's 65535
+          // parameter ceiling at cutover scale.
+          sql`${guilds.guildId} = ANY(
+            ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(ids)}::jsonb))
+          )`,
+        ),
+      )
+      .returning({ guildId: guilds.guildId });
+    return cleared.length;
   }
 
   /**

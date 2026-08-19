@@ -45,6 +45,19 @@ primary_region = "iad"
   # shards. Keep this in sync with the running machine count so shards spread
   # evenly (and a replacement machine reliably re-claims a dead peer's share).
   EXPECTED_INSTANCES = "1"
+  # Keep the next memory failure legible.
+  #
+  # At 512mb V8 sized its heap below the container limit, so the OOM on
+  # 2026-08-19 arrived as a clean "Reached heap limit Allocation failed" in the
+  # log. At 2gb the auto-sized cap can sit at or above the container limit, and
+  # the failure becomes a kernel OOM-kill: exit 137, no JS stack, nothing in the
+  # log explaining it. Capping the heap below the container keeps V8 the thing
+  # that reports the problem.
+  #
+  # Not a fix for growth. The member and presence caches are unbounded by
+  # design (rewrite.md decision 12) and `shared-cpu-1x` tops out at 2gb, so the
+  # next raise is a VM-class change. See fleets.md 7.2.
+  NODE_OPTIONS = "--max-old-space-size=1700"
   # AI-assisted templates. The endpoint and model are plain config; only the key
   # is a secret. Free on every tier and never entitlement-gated — the only limit
   # is the uniform per-guild monthly cap, tunable live via `runtime_flags`

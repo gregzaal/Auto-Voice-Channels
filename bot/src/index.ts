@@ -500,6 +500,19 @@ async function main(): Promise<void> {
           'fleet presence reconciled',
         );
       }
+
+      /**
+       * The shared column too, while it still exists (expand/contract).
+       *
+       * `guildCreate` clears it, but that event is guarded on `isReady()` and
+       * discord.js never fires it for the initial batch, so a guild re-added
+       * while this fleet was down would keep the marker forever and the
+       * dashboard would tell a paying owner they are paying for a server the
+       * bot is not in. Clearing only, never setting: removal stays with
+       * `guildDelete`, which is unambiguous per guild.
+       */
+      const cleared = await guildsRepo.clearBotRemovedFor(guildIds);
+      if (cleared > 0) logger.info({ cleared }, 'cleared stale bot-removed markers');
     };
     const presenceReady = syncPresence().catch((err: unknown) =>
       logger.error({ err }, 'fleet presence reconcile failed'),
