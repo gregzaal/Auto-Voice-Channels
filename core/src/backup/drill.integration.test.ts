@@ -191,12 +191,16 @@ describe.skipIf(!hasPgTools())('runDrill (integration)', () => {
      * Including a database that merely has the bot's own schema in it. Empty
      * means empty on first use: "it looks like one of ours" is exactly what the
      * live database also looks like.
+     *
+     * The two URLs here are genuinely different servers, so the URL guard is
+     * satisfied and passes it through. Only the marker check can refuse this,
+     * which is the point: the URL comparison is a courtesy and the marker is
+     * the actual guard.
      */
-    it('refuses a populated database even with no live URL to compare against', async () => {
+    it('refuses a populated database the URL guard has no objection to', async () => {
       const result = await drill('scratch', {
-        // A real database full of tables, and nothing configured to recognise
-        // it by. Only the marker check can catch this, which is the point.
         scratchDatabaseUrl: source.connectionString,
+        liveDatabaseUrl: scratch.connectionString,
       });
       expect(result.restored).toBe(false);
       expect(result.problems.join(' ')).toMatch(/was not left by a drill/);
@@ -205,6 +209,13 @@ describe.skipIf(!hasPgTools())('runDrill (integration)', () => {
         sql`SELECT count(*)::text AS n FROM guilds`,
       );
       expect(Number(rows.rows[0]?.n)).toBe(4);
+    }, 600_000);
+
+    /** A scratch database with nothing to compare it against is refused too. */
+    it('refuses a drill database configured without a live one', async () => {
+      const result = await drill('scratch', { scratchDatabaseUrl: scratch.connectionString });
+      expect(result.restored).toBe(false);
+      expect(result.problems.join(' ')).toMatch(/no live database to compare it against/);
     }, 600_000);
 
     /**
