@@ -88,4 +88,16 @@ primary_region = "iad"
 
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "512mb"
+  # 2GB, raised from 512mb at the beta switch on 2026-08-19.
+  #
+  # 512mb was sized for the Lohner testbed's three guilds. The beta fleet
+  # inherited 1004, and the first boot on that identity died with
+  # "Reached heap limit Allocation failed" four times before it got through.
+  #
+  # The cost is decision 12 in plans/rewrite.md: message and reaction caches
+  # are off, but guild, channel, voice-state, member AND presence caches are
+  # kept, because the game-name templates read member.presence. That is a
+  # deliberate trade of memory for a feature, and it means memory scales with
+  # the member count of the install base, not the guild count. Size the node
+  # up rather than scoping the cache down.
+  memory = "2gb"
