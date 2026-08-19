@@ -326,7 +326,15 @@ async function resolveTarget(
       // entire point of this function.
     }
   }
-  return `${guild.name} -> DM to owner ${name} (${guild.owner_id})`;
+  /**
+   * Name the id we will actually DM, not the owner's.
+   *
+   * This line used to hardcode "owner" and `guild.owner_id` while `deliver` had
+   * already moved to DMing the resolved contact, so it printed the contact's
+   * username beside the owner's id and called them the owner. Exactly the
+   * mislabelling this function exists to prevent.
+   */
+  return `${guild.name} -> DM to ${who} ${name} (${mentionId})`;
 }
 
 function arg(argv: string[], name: string): string | undefined {
