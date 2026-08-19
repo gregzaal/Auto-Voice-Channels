@@ -288,11 +288,25 @@ export async function runDrill(opts: DrillOptions): Promise<DrillResult> {
 /**
  * The scratch-database half.
  *
- * Guarded twice before it writes anything, because it restores with `--clean`
- * and `force`, which is "drop everything here and replace it". A misconfigured
- * `BACKUP_DRILL_DATABASE_URL` pointing at the live database would otherwise be
- * a weekly scheduled outage that looks like a health check.
+ * This restores with `force` over `--clean --if-exists`, which is "drop what is
+ * here and replace it". A misconfigured `BACKUP_DRILL_DATABASE_URL` pointing at
+ * the live database would be a weekly scheduled outage wearing a health check's
+ * clothes, so it is guarded twice.
+ *
+ * **The guard that does the work is the marker table, not the URL comparison.**
+ * Comparing connection strings is guesswork: `localhost` and `127.0.0.1` are the
+ * same server spelled differently, a pooler hides the host entirely, and two
+ * genuinely separate databases very often share a name (ours are both `avc`,
+ * which is what broke the first version of this). So the URL check only catches
+ * the exact-match case, and the real invariant is positive rather than negative:
+ * **this database must be empty, or must be one a previous drill used.** Live is
+ * never empty and never carries the marker, so it cannot pass.
+ *
+ * The marker is written *before* the restore, not after, so a drill that dies
+ * between restoring and wiping leaves a database the next drill can still
+ * recognise. Written after, a single crash would wedge every future run.
  */
+const MARKER_TABLE = 'avc_drill_scratch';
 async function drillRestore(
   opts: DrillOptions,
   backup: BackupListing,
@@ -309,17 +323,32 @@ async function drillRestore(
     );
     return;
   }
-  const scratchName = pgEnvFromUrl(scratch).PGDATABASE;
-  if (opts.liveDatabaseUrl && scratchName === pgEnvFromUrl(opts.liveDatabaseUrl).PGDATABASE) {
-    problems.push(
-      `The drill database is also named "${scratchName}". Refusing, in case the host ` +
-        'differs only by a typo.',
-    );
-    return;
-  }
 
   const handle = createDatabase({ connectionString: scratch });
   try {
+    const inventory = await handle.db.execute<{ tables: string; marked: boolean }>(sql`
+      SELECT
+        count(*)::text AS tables,
+        bool_or(table_name = ${MARKER_TABLE}) AS marked
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+    `);
+    const tables = Number(inventory.rows[0]?.tables ?? 0);
+    const marked = inventory.rows[0]?.marked === true;
+
+    if (tables > 0 && !marked) {
+      problems.push(
+        `The drill database already holds ${tables} tables and was not left by a drill. ` +
+          'Refusing to overwrite it. Point BACKUP_DRILL_DATABASE_URL at an empty database.',
+      );
+      return;
+    }
+
+    // Claims the database before anything destructive happens.
+    await handle.db.execute(
+      sql`CREATE TABLE IF NOT EXISTS ${sql.identifier(MARKER_TABLE)} (claimed_at timestamptz NOT NULL DEFAULT now())`,
+    );
+
     const restored = await restoreBackup({
       storage: opts.storage,
       backup,

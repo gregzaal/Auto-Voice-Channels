@@ -169,6 +169,28 @@ describe.skipIf(!hasPgTools())('runDrill (integration)', () => {
     }, 600_000);
 
     /**
+     * Both test containers use the database name `avc`, which is exactly the
+     * case the first implementation refused: it compared database names and
+     * called two separate servers the same database. A scratch Postgres using
+     * the default name is the normal setup, not a mistake, and the test above
+     * passing is what proves the guard no longer rejects it.
+     */
+    it('refuses a populated database even with no live URL to compare against', async () => {
+      const result = await drill('scratch', {
+        // A real database full of tables, and nothing configured to recognise
+        // it by. Only the marker check can catch this, which is the point.
+        scratchDatabaseUrl: source.connectionString,
+      });
+      expect(result.restored).toBe(false);
+      expect(result.problems.join(' ')).toMatch(/was not left by a drill/);
+
+      const rows = await source.handle.db.execute<{ n: string }>(
+        sql`SELECT count(*)::text AS n FROM guilds`,
+      );
+      expect(Number(rows.rows[0]?.n)).toBe(4);
+    }, 600_000);
+
+    /**
      * The guard that stops a misconfigured drill from being a weekly scheduled
      * outage. It must refuse *before* restoring, so the live rows survive.
      */
@@ -193,6 +215,14 @@ describe.skipIf(!hasPgTools())('runDrill (integration)', () => {
   /**
    * A drill artifact carries `drill: true` so it can never become the object a
    * later drill checks. Otherwise the system ends up verifying its own copy.
+   *
+   * **The two are a day apart on purpose.** The first version put them an hour
+   * apart and failed for a reason worth keeping: retention keeps the newest
+   * backup per day, so the drill artifact evicted the real backup taken an hour
+   * earlier, and the drill then found nothing at all to check. Nothing uploads
+   * artifacts today, so this is latent rather than live, but any future code
+   * that writes one into the backup prefix inherits the problem: **a drill
+   * artifact must never be able to prune a real backup.**
    */
   it('ignores drill artifacts when choosing what to check', async () => {
     await take('artifacts', '2026-08-19T03:00:00Z');
@@ -207,12 +237,12 @@ describe.skipIf(!hasPgTools())('runDrill (integration)', () => {
       appVersion: '0.1.0',
       commit: 'c',
       drill: true,
-      now: () => new Date('2026-08-19T04:00:00Z'),
+      now: () => new Date('2026-08-20T04:00:00Z'),
       probe: async () => ({ pgServerVersion: '16', migrationVersion: 't', rowCounts: {} }),
     });
 
-    const result = await drill('artifacts');
-    // The 03:00 scheduled backup, not the 04:00 drill artifact.
+    const result = await drill('artifacts', { maxAgeHours: 24 * 365 });
+    // The scheduled backup, not the newer drill artifact.
     expect(result.takenAt).toBe('2026-08-19T03:00:00.000Z');
   }, 900_000);
 });
