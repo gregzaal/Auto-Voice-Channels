@@ -29,32 +29,48 @@ app = "avc-beta"
 #                                iad      ams
 #   gateway open -> HELLO      38.5ms   134.1ms   <- the real Discord node
 #   REST /api/v10/gateway      14.1ms    14.9ms   <- anycast edge, tells you nothing
-#   Postgres SELECT 1          91.2ms     3.7ms   <- the `avc` cluster lives in ams
 #
-# So the bot sits ~96ms closer to Discord and ~87ms further from its database
-# than it would in `ams`. That is the right way round: gateway latency is paid
-# on every voice event a user can feel, while guild settings are cached
-# in-process with LISTEN/NOTIFY (rewrite.md decision) so the hot path does not
-# read Postgres at all. The database distance lands on batch jobs and on
-# interactions, and the interaction case is handled by deferring.
+# The bot sits ~96ms closer to Discord here. That is what a user feels: gateway
+# latency is paid on every voice event.
+#
+# **The database was moved to `iad` on 2026-08-19 to match** (cluster `avc-iad`,
+# `w86750817gqr3pk4`). It was in `ams`, which cost 91.2ms per round trip, and
+# the join path is NOT cache-served the way guild settings are: three
+# sequential reads before a room can be created, measured at 273ms in `ams` and
+# 16ms now. The earlier claim in this file that the hot path does not read
+# Postgres was wrong; only `guilds.settings` is cached.
+#
+# `avc-web` in `ams` now pays that distance instead. That is the correct side to
+# put it on: a dashboard page is request/response and tolerant, a gamer waiting
+# for a voice channel is not.
 #
 # **Do not "fix" this by moving the app to ams.** The REST numbers above make
 # the two regions look equivalent and they are not: REST terminates at a
 # Cloudflare anycast edge, the gateway WebSocket does not.
 #
-# If the database distance does start to hurt, the options are narrower than
-# they look. Managed Postgres runs in 13 regions and `iad` is one of them, so
-# the cluster COULD live next to this app, but that only moves the 87ms onto
-# `avc-web` in ams. There is no in-place region change and, as of 2026-08-19,
-# **no read replica**: `flyctl mpg` has no replica command and the MPG docs do
-# not mention replicas at all (they list migration tooling as still under
-# development). `rewrite.md`'s "single primary, replica-ready" describes what
-# the app can consume, not something the platform currently offers.
+# **DATABASE_URL must point at `direct.<cluster>.flympg.net`, NOT `pgbouncer.`**
 #
-# So a move means a new cluster plus a restore, which our own backup CLI can
-# do (`node core/dist/backup/cli.js restore --to postgres://...`) independently
-# of Fly's tooling. Treat it as a planned maintenance window, not a flag flip,
-# and only after deciding which side should pay the latency.
+# The newer Managed Postgres generation (the one `avc-iad` runs, distinguishable
+# by its `_pgbouncer` role where the old cluster has `_crunchypgbouncer`) resets
+# `search_path` to EMPTY on every pooled session. `pg_settings` reports the
+# source as `session`, so no `ALTER ROLE` or `ALTER DATABASE` can override it,
+# and both of those are refused to `fly-user` anyway.
+#
+# With an empty search_path every unqualified query fails with "relation does
+# not exist", so the bot would boot into a total outage. It is worse than a
+# plain failure while operating: `drop table if exists ops_audit` resolves to
+# nothing, reports `DROP TABLE`, and drops nothing, which is how this was found.
+#
+# The direct endpoint has the normal `"$user", public` default, is a stable DNS
+# name (not the raw 6PN address), and gives 100 max_connections against the ~24
+# this deployment uses at peak. Losing pgbouncer costs nothing here and removes
+# the pooler that caused the `statement_timeout` startup-parameter trap in
+# AGENTS.md.
+#
+# There is no in-place region change and no read replica in MPG as of
+# 2026-08-19, so any future move is a new cluster plus a restore. Our own
+# backup CLI does that independently of Fly's tooling
+# (`node core/dist/backup/cli.js restore --to postgres://...`).
 primary_region = "iad"
 
 [build]
