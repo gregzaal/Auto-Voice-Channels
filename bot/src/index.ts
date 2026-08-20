@@ -28,7 +28,7 @@ import {
   SubscriptionRepository,
   type Logger,
 } from '@avc/core';
-import { REST, Routes } from 'discord.js';
+import { REST, Routes, type Client } from 'discord.js';
 import { GuildDispatcher } from './runtime/dispatcher.js';
 import { RuntimeCreationGate } from './runtime/creationGate.js';
 import { ShardLeaseManager } from './runtime/shardLeaseManager.js';
@@ -37,14 +37,14 @@ import { installShutdown } from './runtime/shutdown.js';
 import { AlertScheduler } from './runtime/alertScheduler.js';
 import { BackupScheduler } from './runtime/backupScheduler.js';
 import { buildWatchChecks } from './runtime/watchChecks.js';
-import { MetricsCollector } from './runtime/metricsCollector.js';
+import { MetricsCollector, type GatewayLimits } from './runtime/metricsCollector.js';
 import { categorizeError } from './ops/describeError.js';
 import { HealthServer, type HealthReport, type SubsystemStatus } from './ops/health.js';
 import {
   AdminChannelReporter,
   NullErrorReporter,
   PersistentErrorReporter,
-  TeeErrorReporter,
+  RecordingErrorReporter,
   type ErrorReporter,
 } from './ops/errorReporter.js';
 import { ServerLogger } from './ops/serverLog.js';
@@ -213,9 +213,10 @@ async function main(): Promise<void> {
    * billing tables already behave. Persisting for an audience with no console
    * to read it would be storage with no reader.
    */
-  const channelReporter: ErrorReporter = config.adminChannelId
+  const adminChannel = config.adminChannelId
     ? new AdminChannelReporter({ client, channelId: config.adminChannelId, logger })
-    : new NullErrorReporter();
+    : undefined;
+  const channelReporter: ErrorReporter = adminChannel ?? new NullErrorReporter();
   /**
    * One repository, shared with the watcher below.
    *
@@ -224,13 +225,24 @@ async function main(): Promise<void> {
    * audience with no console to read it would be storage with no reader.
    */
   const alertRepo = config.selfHosted ? undefined : new AlertRepository(db, config.fleet);
-  const errorReporter: ErrorReporter =
-    config.selfHosted || !alertRepo
-      ? channelReporter
-      : new TeeErrorReporter([
-          new PersistentErrorReporter({ alerts: alertRepo, logger }),
-          channelReporter,
-        ]);
+  /**
+   * Hosted posts AND records, correlated, so the row knows what happened to the
+   * post (`plans/agentic_management.md` step 4b). Without that correlation every
+   * row was permanently undelivered and a failed Discord post was simply lost.
+   *
+   * The `Tee` shape it replaces is still right when there is no channel to
+   * correlate with: a persisted row alone is better than nothing.
+   */
+  const errorReporter: ErrorReporter = !alertRepo
+    ? channelReporter
+    : adminChannel
+      ? new RecordingErrorReporter({
+          alerts: alertRepo,
+          channel: adminChannel,
+          logger,
+          instanceId: config.instanceId,
+        })
+      : new PersistentErrorReporter({ alerts: alertRepo, logger });
   opsReport.report = (kind, message, context) => errorReporter.report(kind, message, context);
   const creationGate = new RuntimeCreationGate({ flags, logger });
   // Guild settings cache: avoids a Postgres read/write on every voice event, with
@@ -513,6 +525,15 @@ async function main(): Promise<void> {
       trippedCircuits: dispatcher.trippedCount(),
     }),
     report: (kind, message, context) => errorReporter.report(kind, message, context),
+    /**
+     * Polled on the flush tick (5 minutes), not the sample tick (30 seconds).
+     *
+     * These numbers change on the order of hours, so 288 calls a day per
+     * instance is already generous and 2,880 would be waste. Uses the client's
+     * own REST handler, which means the existing token and the existing global
+     * rate-limit bucket, and therefore no second credential anywhere.
+     */
+    pollGateway: () => fetchGatewayLimits(client, logger),
   });
   countError.record = (err) => metricsCollector.increment(METRICS.ERRORS, categorizeError(err));
   /**
@@ -582,6 +603,12 @@ async function main(): Promise<void> {
     flags,
     logger: logger.child({ component: 'watcher' }),
     notify: (kind, message, context) => channelReporter.report(kind, message, context),
+    /**
+     * Absent without an admin channel, which switches the retry loop off
+     * entirely. There is nowhere to deliver to, so claiming rows would only
+     * burn attempts against a destination that does not exist.
+     */
+    ...(adminChannel ? { deliver: (content: string) => adminChannel.sendDirect(content) } : {}),
     instanceId: config.instanceId,
     checks: buildWatchChecks({
       client,
@@ -589,6 +616,12 @@ async function main(): Promise<void> {
       dbStatus: () => dbStatus,
       heartbeat: () => leaseManager.heartbeatHealth,
       selfHosted: config.selfHosted,
+      /**
+       * Read by the self-host check only. Passed unconditionally because the
+       * gating lives in `buildWatchChecks`, where the reason for it can be
+       * written down next to the check it gates.
+       */
+      permissionProblems: (sinceMs) => permissionProblems.activeGuilds(sinceMs),
     }),
     watchdogPingUrl: config.watchdogPingUrl,
   });
@@ -904,6 +937,44 @@ async function main(): Promise<void> {
  * parallel per 5s window) from `GET /gateway/bot`. Falls back to 1 — the safe,
  * universal floor — if the call fails, so the throttler still serializes.
  */
+/**
+ * This application's gateway limits, for the metric store.
+ *
+ * Separate from {@link fetchIdentifyConcurrency} rather than a widening of it,
+ * because the two want opposite things on failure. Boot needs a number and
+ * falls back to the safe floor of 1; this needs to write nothing, since a 1 in
+ * the store is indistinguishable from Discord genuinely cutting the identify
+ * budget to one.
+ */
+async function fetchGatewayLimits(
+  client: Client,
+  logger: Logger,
+): Promise<GatewayLimits | undefined> {
+  try {
+    const info = (await client.rest.get(Routes.gatewayBot())) as {
+      shards?: number;
+      session_start_limit?: { max_concurrency?: number; remaining?: number; total?: number };
+    };
+    const limit = info.session_start_limit;
+    if (!limit || typeof limit.total !== 'number' || typeof limit.remaining !== 'number') {
+      return undefined;
+    }
+    return {
+      recommendedShards: info.shards ?? 0,
+      maxConcurrency: limit.max_concurrency ?? 1,
+      // Recorded as USED so the daily peak is the worst moment of the day. A
+      // remaining-style gauge would summarise to its last hourly sample, which
+      // lands after the reset has restored the budget and hides the whole
+      // restart loop.
+      sessionUsed: Math.max(0, limit.total - limit.remaining),
+      sessionTotal: limit.total,
+    };
+  } catch (err) {
+    logger.debug({ err }, 'gateway limits poll failed');
+    return undefined;
+  }
+}
+
 async function fetchIdentifyConcurrency(token: string, logger: Logger): Promise<number> {
   try {
     const rest = new REST({ version: '10' }).setToken(token);

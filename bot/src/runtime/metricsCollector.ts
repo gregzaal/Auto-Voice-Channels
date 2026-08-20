@@ -42,6 +42,20 @@ import {
  * event, or throw into one, is worse than no telemetry.
  */
 
+/**
+ * What `GET /gateway/bot` tells us about this application's identify budget.
+ *
+ * `sessionUsed` rather than `remaining`, computed at the poll, because a
+ * remaining-style gauge summarises to its last hourly sample and the daily
+ * reset would erase the very restart loop it exists to catch.
+ */
+export interface GatewayLimits {
+  recommendedShards: number;
+  maxConcurrency: number;
+  sessionUsed: number;
+  sessionTotal: number;
+}
+
 export interface MetricsCollectorDeps {
   metrics: MetricsRepository;
   /** Durable spacing + the cluster-singleton lock for the rollup half. */
@@ -58,6 +72,18 @@ export interface MetricsCollectorDeps {
    * change, and polling it costs a map walk.
    */
   sample: () => { queueDepth: number; trippedCircuits: number };
+  /** Injectable RSS reader, for tests. Defaults to `process.memoryUsage.rss`. */
+  readRss?: () => number;
+  /**
+   * Polls Discord for this application's gateway limits, or undefined to skip.
+   *
+   * Returns undefined on failure rather than a fallback, and the distinction
+   * matters: boot falls back to `max_concurrency: 1` when the call fails, and
+   * writing that as a gauge would look like a real collapse of the identify
+   * budget rather than an unanswered question. Absence is how this store says
+   * "unknown".
+   */
+  pollGateway?: () => Promise<GatewayLimits | undefined>;
   /**
    * Reports a significant condition to the operational alert channel.
    *
@@ -224,9 +250,17 @@ export class MetricsCollector {
     this.accumulate(metric, key, by, 'counter');
   }
 
-  /** Records the highest value seen in this bucket. */
-  observePeak(metric: MetricName, value: number): void {
-    this.accumulate(metric, '', value, 'peak');
+  /**
+   * Records the highest value seen in this bucket.
+   *
+   * `key` is optional and defaults to the undimensioned form. It exists for
+   * `process.rss_peak`, which must be keyed by instance: both the daily rollup
+   * and `readSeries` sum across instances before summarising, so a per-machine
+   * number recorded without a key comes back as a fleet total. `key` survives
+   * both aggregations; the `instance` column does not.
+   */
+  observePeak(metric: MetricName, value: number, key = ''): void {
+    this.accumulate(metric, key, value, 'peak');
   }
 
   private accumulate(metric: MetricName, key: string, value: number, expected: string): void {
@@ -383,15 +417,43 @@ export class MetricsCollector {
   /* The work                                                              */
   /* ---------------------------------------------------------------------- */
 
+  /**
+   * Takes one sample now. Exposed like `BackupScheduler.runOnce`, so a test can
+   * exercise the wiring rather than the verb underneath it, and so an operator
+   * can force a sample without waiting for the tick.
+   */
+  sampleTick(): void {
+    this.sampleNow();
+  }
+
   /** Reads the live gauges into the accumulator. Memory only. */
   private sampleNow(): void {
     try {
       const { queueDepth, trippedCircuits } = this.deps.sample();
       this.observePeak(METRICS.QUEUE_DEPTH_PEAK, queueDepth);
       this.observePeak(METRICS.CIRCUITS_TRIPPED_PEAK, trippedCircuits);
+      /**
+       * Sampled here rather than pushed, on the same 30s tick, because a peak
+       * is a property of a moment nobody else is watching.
+       *
+       * Keyed by instance. Until this existed the memory alerts could only
+       * *project* from `guilds.member_reach` times the measured 1.28 KB per
+       * cached member, which is a model of expected use and by construction
+       * cannot see a leak or a discord.js regression. This is the measurement.
+       */
+      this.observePeak(METRICS.PROCESS_RSS_PEAK, this.readRss(), this.deps.instanceId);
     } catch (err) {
       this.deps.logger.debug({ err }, 'metrics sample failed');
     }
+  }
+
+  /**
+   * RSS in bytes. `process.memoryUsage.rss()` rather than `process.memoryUsage()`
+   * because the former reads only the one number and skips the heap statistics
+   * walk, which is what makes it cheap enough for a 30s tick.
+   */
+  private readRss(): number {
+    return this.deps.readRss?.() ?? process.memoryUsage.rss();
   }
 
   /** One tick: flush this instance's accumulators, then try to win the rollup. */
@@ -424,6 +486,7 @@ export class MetricsCollector {
     }
 
     await this.flush();
+    await this.flushGatewayLimits();
 
     const reserved = await this.deps.runs
       .reserveRun(
@@ -437,6 +500,54 @@ export class MetricsCollector {
         return { ok: false, waitMs: 0 };
       });
     if (reserved.ok) await this.rollup();
+  }
+
+  /**
+   * Polls this application's gateway limits and writes them straight through,
+   * bypassing the accumulator entirely.
+   *
+   * Three deliberate departures from every other metric here, each load-bearing:
+   *
+   * **`instance: ''`.** These are facts about the Discord application, not
+   * about a machine. Every instance of a fleet polls and gets the identical
+   * answer, so stamping each machine's own instance id would give N rows that
+   * `readSeries` sums into N times the real `max_concurrency`. One empty
+   * instance means one row per fleet per bucket.
+   *
+   * **No leader election.** The `gauge` write operator is `overwrite`, so
+   * concurrent writers landing the same value on the same primary key are
+   * idempotent by construction. Putting this behind the cluster-singleton
+   * rollup lock would be actively wrong: that lock is not fleet-namespaced, so
+   * one fleet would win it cluster-wide and the other fleet's gateway numbers
+   * would never be written at all. That is the same shape as the ladder and
+   * delivery bug `plans/fleets.md` section 4 exists to fix.
+   *
+   * **Nothing written on failure.** Boot falls back to `max_concurrency: 1`
+   * when this call fails, which is right for throttling and wrong to record: a
+   * 1 in the store reads as a real collapse of the identify budget rather than
+   * as an unanswered question. Absence is how this store says "unknown".
+   */
+  private async flushGatewayLimits(): Promise<void> {
+    const poll = this.deps.pollGateway;
+    if (!poll) return;
+    try {
+      const limits = await poll();
+      if (!limits) return;
+      const bucket = hourBucket(this.now());
+      await this.deps.metrics.writePoints(
+        [
+          { metric: METRICS.GATEWAY_RECOMMENDED_SHARDS, value: limits.recommendedShards },
+          { metric: METRICS.GATEWAY_MAX_CONCURRENCY, value: limits.maxConcurrency },
+          { metric: METRICS.GATEWAY_SESSION_USED, value: limits.sessionUsed },
+          { metric: METRICS.GATEWAY_SESSION_TOTAL, value: limits.sessionTotal },
+        ].map((m) => ({ ...m, key: '', bucket, instance: '' })),
+        this.deps.fleet,
+      );
+    } catch (err) {
+      // Never fatal to the tick: the counters that follow matter more than
+      // these do, and an unwritten gauge is a gap rather than a wrong number.
+      this.deps.logger.warn({ err }, 'gateway limits poll failed');
+    }
   }
 
   /** Writes every accumulator entry, then drops the ones that can no longer change. */

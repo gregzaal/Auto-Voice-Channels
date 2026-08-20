@@ -237,3 +237,40 @@ describe('problemNoticeBody', () => {
     expect(body).toContain('/setup');
   });
 });
+
+describe('PermissionProblemTracker.activeGuilds', () => {
+  const now = 1_000_000_000;
+
+  it('reports every guild with a recent incident', () => {
+    const t = new PermissionProblemTracker();
+    t.record('g1', { channelId: 'c1', operation: 'create', at: now });
+    t.record('g2', { channelId: 'c9', operation: 'rename', at: now - 1000 });
+    const active = t.activeGuilds(60_000, now);
+    expect(active.map((a) => a.guildId).sort()).toEqual(['g1', 'g2']);
+  });
+
+  /**
+   * The map is only ever pruned by a SUCCESSFUL operation on the same channel,
+   * so a guild nobody fixed and nobody revisited keeps its entry indefinitely.
+   * Without the age filter this read grows monotonically across the install
+   * base and reports a guild that broke in March as broken today.
+   */
+  it('drops a guild whose last incident is outside the window', () => {
+    const t = new PermissionProblemTracker();
+    t.record('stale', { channelId: 'c1', operation: 'create', at: now - 10 * 3_600_000 });
+    expect(t.activeGuilds(6 * 3_600_000, now)).toEqual([]);
+  });
+
+  it('keeps only the fresh incidents of a partially stale guild', () => {
+    const t = new PermissionProblemTracker();
+    t.record('mixed', { channelId: 'old', operation: 'create', at: now - 10 * 3_600_000 });
+    t.record('mixed', { channelId: 'new', operation: 'move', at: now });
+    const [g] = t.activeGuilds(6 * 3_600_000, now);
+    expect(g?.problems.map((p) => p.channelId)).toEqual(['new']);
+    expect(g?.lastAt).toBe(now);
+  });
+
+  it('is empty when nothing has been recorded', () => {
+    expect(new PermissionProblemTracker().activeGuilds(6 * 3_600_000, now)).toEqual([]);
+  });
+});

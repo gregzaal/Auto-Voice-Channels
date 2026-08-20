@@ -22,6 +22,15 @@ export interface ErrorReporter {
   report(kind: string, message: string, context?: Record<string, unknown>): void;
 }
 
+/**
+ * What became of one attempted post.
+ *
+ * `suppressed` is its own outcome rather than a flavour of failure: nothing is
+ * wrong, the message was deliberately withheld, and the row it describes still
+ * needs delivering by something else.
+ */
+export type DeliveryOutcome = 'sent' | 'failed' | 'suppressed';
+
 /** No-op reporter, used when no admin channel is configured. */
 export class NullErrorReporter implements ErrorReporter {
   report(): void {
@@ -74,6 +83,21 @@ export class AdminChannelReporter implements ErrorReporter {
   }
 
   report(kind: string, message: string, context: Record<string, unknown> = {}): void {
+    void this.reportWithOutcome(kind, message, context);
+  }
+
+  /**
+   * The same send, but it tells you what happened to it.
+   *
+   * `report()` stays `void` by contract, so this is the seam the delivery
+   * recorder uses to stamp a row without anything else learning that alerting
+   * has an outcome at all.
+   */
+  reportWithOutcome(
+    kind: string,
+    message: string,
+    context: Record<string, unknown> = {},
+  ): Promise<DeliveryOutcome> {
     const now = Date.now();
     const entry = this.state.get(kind) ?? { lastSentAt: 0, suppressed: 0, inFlight: false };
 
@@ -91,7 +115,15 @@ export class AdminChannelReporter implements ErrorReporter {
     if (entry.inFlight || now - entry.lastSentAt < this.throttleMs) {
       entry.suppressed += 1;
       this.state.set(kind, entry);
-      return;
+      /**
+       * `suppressed`, not `sent`, and the distinction is what stops a real
+       * alert being lost. The channel throttles per KIND while a row is keyed
+       * `(fleet, key, target)`, so two guilds hitting the same condition inside
+       * one window are two rows and one message: the first is genuinely
+       * delivered and the second genuinely is not. Reporting both as sent would
+       * mark the unsent one delivered and it would never be retried.
+       */
+      return Promise.resolve('suppressed');
     }
 
     const carried = entry.suppressed;
@@ -102,7 +134,7 @@ export class AdminChannelReporter implements ErrorReporter {
     entry.inFlight = true;
     this.state.set(kind, entry);
 
-    void this.send(content).then((sent) => {
+    return this.send(content).then((sent) => {
       const current = this.state.get(kind) ?? entry;
       current.inFlight = false;
       /**
@@ -124,7 +156,22 @@ export class AdminChannelReporter implements ErrorReporter {
         current.suppressed = Math.max(0, current.suppressed - carried);
       }
       this.state.set(kind, current);
+      return sent ? 'sent' : 'failed';
     });
+  }
+
+  /**
+   * Posts one message, bypassing the per-kind throttle. For the retry loop.
+   *
+   * The throttle exists to stop a storm of one condition flooding the channel,
+   * and the retry loop is already rate-limited by construction: it posts at
+   * most one batched message per tick. Routing it through `report()` would be
+   * self-defeating, because a retry is by definition for a condition posted
+   * recently, so the time gate would swallow it and the loop would then mark
+   * the row delivered on a message nobody sent.
+   */
+  async sendDirect(content: string): Promise<boolean> {
+    return this.send(content);
   }
 
   private async send(content: string): Promise<boolean> {
@@ -227,5 +274,68 @@ export class PersistentErrorReporter implements ErrorReporter {
       .catch((err: unknown) => {
         this.opts.logger.warn({ err, kind }, 'could not persist an operational alert');
       });
+  }
+}
+
+export interface RecordingReporterOptions {
+  alerts: AlertRepository;
+  channel: AdminChannelReporter;
+  logger: Logger;
+  instanceId: string;
+  audience?: AlertAudience;
+}
+
+/**
+ * Posts to Discord AND records the row, then stamps the row with what happened
+ * to the post (`plans/agentic_management.md` step 4b).
+ *
+ * Replaces tee-ing a persistent reporter and a channel reporter as two
+ * strangers. They were doing the right two things in the right order and simply
+ * had no way to tell each other the outcome, so every row was permanently
+ * `delivered_at IS NULL`, `undelivered()` had no caller, and a failed Discord
+ * post was a lost notification rather than a retry.
+ *
+ * **The Discord post is still fired first and is never gated on the database.**
+ * That ordering is the entire reason this class is shaped the way it is. The
+ * outage step 4 was built for was the DATABASE being unreachable; if the post
+ * waited on a row, the single failure mode the whole system exists to catch
+ * would be the one thing incapable of reporting itself. The stamp is a
+ * best-effort epilogue, and losing it costs one duplicate message later, which
+ * is the trade `BillingReconciler` already made deliberately.
+ *
+ * Correlation is by construction rather than by key: both halves are started
+ * inside one `report()` call, so the id and the outcome belong to each other
+ * with no map, no throttle-key mismatch and nothing to race.
+ */
+export class RecordingErrorReporter implements ErrorReporter {
+  constructor(private readonly opts: RecordingReporterOptions) {}
+
+  report(kind: string, message: string, context: Record<string, unknown> = {}): void {
+    const target = typeof context.guildId === 'string' ? context.guildId : '';
+    // Started BEFORE the raise, so a slow or failing database cannot delay it.
+    const outcome = this.opts.channel.reportWithOutcome(kind, message, context);
+
+    void (async () => {
+      const { id } = await this.opts.alerts.raise({
+        key: kind,
+        message,
+        target,
+        audience: this.opts.audience ?? 'hosted',
+        // Stamped so the retry loop and the reconciler agree about who raised
+        // this, the same way the watcher stamps what it raises.
+        details: { ...context, instance: this.opts.instanceId },
+      });
+      const result = await outcome;
+      if (result === 'sent') {
+        await this.opts.alerts.markDelivered(id);
+      } else if (result === 'failed') {
+        await this.opts.alerts.markDeliveryFailed(id, 'admin channel post failed');
+      }
+      // `suppressed` deliberately leaves the row undelivered: the throttle
+      // withheld a message about a condition nobody has actually been told
+      // about, and the retry loop is what eventually tells them.
+    })().catch((err: unknown) => {
+      this.opts.logger.warn({ err, kind }, 'could not persist an operational alert');
+    });
   }
 }

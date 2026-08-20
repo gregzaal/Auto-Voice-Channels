@@ -132,6 +132,20 @@ export const METRICS = {
   QUEUE_DEPTH_PEAK: 'queue.depth.peak',
   /** Most guilds with a tripped circuit-breaker seen in the bucket. */
   CIRCUITS_TRIPPED_PEAK: 'circuits.tripped.peak',
+  /** Highest resident set size seen in the bucket, keyed by instance. */
+  PROCESS_RSS_PEAK: 'process.rss_peak',
+
+  // -- Per fleet, polled from Discord and written straight through -----------
+  // Facts about the APPLICATION, not about a machine, so every instance polls
+  // the same answer and writes it to the same row. See the gauge block below.
+  /** Shards Discord currently recommends for this application. */
+  GATEWAY_RECOMMENDED_SHARDS: 'gateway.recommended_shards',
+  /** Shards this application may identify in parallel per 5s window. */
+  GATEWAY_MAX_CONCURRENCY: 'gateway.max_concurrency',
+  /** Identify sessions consumed out of the daily allowance. A peak. */
+  GATEWAY_SESSION_USED: 'gateway.session_used',
+  /** The daily identify allowance itself, so `used` has a denominator. */
+  GATEWAY_SESSION_TOTAL: 'gateway.session_total',
 } as const;
 
 export type MetricName = (typeof METRICS)[keyof typeof METRICS];
@@ -224,6 +238,84 @@ const DEFINITIONS: Record<MetricName, MetricDefinition> = {
     scope: 'fleet',
     dimension: null,
     describe: 'Most guilds with a tripped circuit-breaker in the bucket.',
+  },
+  /**
+   * Keyed by INSTANCE, which reads oddly next to the `instance` column and is
+   * the only shape that answers the question this metric exists for.
+   *
+   * Both aggregation levels sum across instances before summarising: the daily
+   * rollup does `sum(value) ... group by bucket, metric, fleet, key` and only
+   * then takes `max`, and `readSeries` sums across instances too. That is right
+   * for a fleet total like `rooms.tracked`, where each machine holds a share of
+   * one number, and wrong for RSS, where each machine has its own. Summed, the
+   * daily row would be total fleet memory, which is exactly not "how much did
+   * the busiest machine use" -- the number the memory-headroom alert needs.
+   *
+   * `key` survives both aggregations and `instance` does not, so the instance id
+   * goes in `key`. At one machine the two are the same number and nothing looks
+   * wrong, which is precisely why this has to be decided now rather than at the
+   * moment a second machine makes it wrong.
+   */
+  [METRICS.PROCESS_RSS_PEAK]: {
+    kind: 'peak',
+    scope: 'fleet',
+    dimension: 'instance id',
+    describe: 'Peak resident set size in bytes, per instance.',
+  },
+
+  /**
+   * The gateway block: facts about the Discord APPLICATION, not the machine.
+   *
+   * `scope: 'fleet'` rather than `'shared'`, because a Fleet *is* an
+   * application and Discord's identify limits are per application. `shared`
+   * would have two fleets overwriting one row with each other's numbers.
+   *
+   * Written directly through `writePoints` with an empty `instance`, not
+   * through the accumulator. Every instance of a fleet polls the identical
+   * answer, so an empty instance means one row per fleet per bucket and the
+   * `gauge` write operator (`overwrite`) makes concurrent writers idempotent
+   * by construction, with no leader election. Routing them through the flush
+   * path instead would stamp each machine's own instance id and `readSeries`
+   * would sum them into N times the real value.
+   *
+   * They are deliberately NOT in `DERIVED_METRICS`: the gauge sweep deletes
+   * empty-instance rows for everything in that list before re-inserting, and
+   * `collectGauges` is pure SQL with no REST client, so it could never produce
+   * a replacement.
+   */
+  [METRICS.GATEWAY_RECOMMENDED_SHARDS]: {
+    kind: 'gauge',
+    scope: 'fleet',
+    dimension: null,
+    describe: 'Shards Discord recommends for this application.',
+  },
+  [METRICS.GATEWAY_MAX_CONCURRENCY]: {
+    kind: 'gauge',
+    scope: 'fleet',
+    dimension: null,
+    describe: 'Shards that may identify in parallel per 5s window.',
+  },
+  /**
+   * `used`, not `remaining`, and a peak rather than a gauge.
+   *
+   * A gauge's day is its last hourly sample, so `session_remaining` would be
+   * recorded as the budget at 23:00 UTC -- after the daily reset has very
+   * likely restored it to full. That hides the restart loop this exists to
+   * catch, which is the whole point of watching it. Peak `used` is the same
+   * information the right way up: the maximum used is the minimum remaining,
+   * and `peak` rolls up as `max`.
+   */
+  [METRICS.GATEWAY_SESSION_USED]: {
+    kind: 'peak',
+    scope: 'fleet',
+    dimension: null,
+    describe: 'Identify sessions consumed out of the daily allowance. Peak in the bucket.',
+  },
+  [METRICS.GATEWAY_SESSION_TOTAL]: {
+    kind: 'gauge',
+    scope: 'fleet',
+    dimension: null,
+    describe: 'The daily identify allowance, so used has a denominator.',
   },
 };
 

@@ -1,5 +1,9 @@
 import { Status, type Client } from 'discord.js';
 import type { SubsystemStatus } from '../ops/health.js';
+import {
+  permissionProblemSummary,
+  type PermissionProblemSummary,
+} from '../features/voice/permissionProblems.js';
 import type { WatchCheck, WatchProblem } from './alertScheduler.js';
 
 /**
@@ -26,6 +30,8 @@ export interface WatchCheckDeps {
   /** Lease heartbeat health, from `ShardLeaseManager`. */
   heartbeat: () => { lastOkAt: number | null; consecutiveFailures: number };
   selfHosted: boolean;
+  /** Guilds with a live permission incident. Self-host only, see below. */
+  permissionProblems?: (sinceMs: number) => PermissionProblemSummary[];
   /** Injectable clock, for the trip hold-down and the heartbeat age test. */
   now?: () => number;
 }
@@ -83,6 +89,16 @@ const QUEUE_DEPTH_THRESHOLD = 100;
  * because the hold outlasts the 30s cooldown cycle.
  */
 const TRIP_HOLD_MS = 5 * 60_000;
+
+/**
+ * How recently a permission incident must have been seen to count as live.
+ *
+ * Six hours, the same window the guild-facing notifier's first backoff step
+ * uses. Deliberately reusing that number rather than inventing a second one:
+ * two different definitions of "still broken" in one codebase is how the panel
+ * and the alert end up disagreeing about the same guild.
+ */
+const PERMISSION_FRESH_MS = 6 * 3_600_000;
 
 export function buildWatchChecks(deps: WatchCheckDeps): WatchCheck[] {
   const now = deps.now ?? Date.now;
@@ -221,6 +237,52 @@ export function buildWatchChecks(deps: WatchCheckDeps): WatchCheck[] {
           })),
     },
   ];
+
+  /**
+   * The self-host half of step 4's "done when", and registered ONLY there.
+   *
+   * This closes a real blind spot rather than duplicating an existing check. A
+   * permission-caused create failure is caught and returned, not rethrown, so it
+   * is a queue SUCCESS: it never reaches the `errors` counter and never advances
+   * the circuit breaker, which means `circuit.tripped` cannot see it and no
+   * amount of tuning would make it. The tracker is the only thing that knows.
+   *
+   * **Not registered on the hosted fleet, and that is a deliberate audience
+   * call, not an oversight.** A thousand customers' own misconfigured servers
+   * are not an operator incident: they are already told directly by
+   * `PermissionProblemNotifier`, and the operator already gets
+   * `reportIfFleetwide` when enough of them break at once to mean the problem
+   * is ours. On a self-host the operator and the guild admin are the same
+   * person, so that separation collapses and the alert is exactly right.
+   *
+   * Gated by registration rather than by `audience`, because `audience` is a
+   * label on the row and does not gate the Discord post.
+   */
+  if (deps.selfHosted && deps.permissionProblems) {
+    const read = deps.permissionProblems;
+    checks.push({
+      key: 'permissions.blocked',
+      // Never critical: a confirmed critical withholds the watchdog ping
+      // fleet-wide, so one misconfigured server would read as "the bot is down".
+      severity: 'warn',
+      audience: 'self_host',
+      confirmations: 2,
+      run: () =>
+        read(PERMISSION_FRESH_MS).map((g) => ({
+          target: g.guildId,
+          // The same renderer the /setup panel and the guild notice use, so the
+          // three cannot disagree about what the fix is. It returns one line
+          // per distinct failure mode; joined here because an alert message is
+          // a single string and the operator wants all of them.
+          message: permissionProblemSummary(g.problems).join(' '),
+          details: {
+            channels: g.problems.length,
+            lastAt: new Date(g.lastAt).toISOString(),
+            operations: [...new Set(g.problems.map((p) => p.operation))].join(', '),
+          },
+        })),
+    });
+  }
 
   /**
    * Lease health is meaningless to a self-hoster: one instance, one claim, and

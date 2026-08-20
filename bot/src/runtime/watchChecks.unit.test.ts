@@ -274,6 +274,74 @@ describe('buildWatchChecks', () => {
     });
   });
 
+  describe('permissions.blocked', () => {
+    const problems = (guildId: string, at: number) => ({
+      guildId,
+      lastAt: at,
+      problems: [{ channelId: 'c1', operation: 'create' as const, at }],
+    });
+
+    /**
+     * A thousand customers' own misconfigured servers are not an operator
+     * incident. They are told directly by PermissionProblemNotifier, and the
+     * operator already gets reportIfFleetwide when enough break at once.
+     */
+    it('is not registered on the hosted fleet', () => {
+      const keys = buildWatchChecks(
+        deps({ selfHosted: false, permissionProblems: () => [problems('g1', clock.now)] }),
+      ).map((c) => c.key);
+      expect(keys).not.toContain('permissions.blocked');
+    });
+
+    it('is registered on a self-host that supplies a reader', () => {
+      const keys = buildWatchChecks(deps({ selfHosted: true, permissionProblems: () => [] })).map(
+        (c) => c.key,
+      );
+      expect(keys).toContain('permissions.blocked');
+    });
+
+    /** Self-host without the reader wired must not throw or half-register. */
+    it('is absent when no reader is supplied', () => {
+      const keys = buildWatchChecks(deps({ selfHosted: true })).map((c) => c.key);
+      expect(keys).not.toContain('permissions.blocked');
+    });
+
+    it('names each affected guild with actionable advice', async () => {
+      const d = deps({
+        selfHosted: true,
+        permissionProblems: () => [problems('g1', clock.now), problems('g2', clock.now)],
+      });
+      const found = await find(d, 'permissions.blocked').run();
+      expect(found.map((p) => p.target)).toEqual(['g1', 'g2']);
+      expect(found[0]?.message.length).toBeGreaterThan(10);
+    });
+
+    /**
+     * Never critical. A confirmed critical withholds the watchdog ping
+     * fleet-wide, so one misconfigured server would read as "the bot is down".
+     */
+    it('is a warning and needs confirming', () => {
+      const d = deps({ selfHosted: true, permissionProblems: () => [] });
+      const check = find(d, 'permissions.blocked');
+      expect(check.severity).toBe('warn');
+      expect(check.confirmations).toBeGreaterThanOrEqual(2);
+    });
+
+    it('asks the tracker for a bounded window, not for everything', async () => {
+      const asked: number[] = [];
+      const d = deps({
+        selfHosted: true,
+        permissionProblems: (since) => {
+          asked.push(since);
+          return [];
+        },
+      });
+      await find(d, 'permissions.blocked').run();
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toBe(6 * 3_600_000);
+    });
+  });
+
   /**
    * The scheduler encodes a gate id as `key` + separator + `target`, and splits
    * on it to read the pair back. A key carrying anything exotic would corrupt

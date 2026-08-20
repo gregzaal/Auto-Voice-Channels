@@ -466,6 +466,15 @@ export const alerts = pgTable(
      */
     resolvedAt: timestamp('resolved_at', { withTimezone: true }),
     deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+    /**
+     * Claim lease for the retry loop, exactly as `billing_notifications` uses
+     * it. `FOR UPDATE ... SKIP LOCKED` is not sufficient on its own: the row
+     * lock dies with the claiming transaction and the Discord post deliberately
+     * happens after the commit, so the lock only separates *simultaneous*
+     * claims. This is what stops two instances a second apart both sending.
+     */
+    claimedUntil: timestamp('claimed_until', { withTimezone: true }),
+    lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true }),
     attempts: integer('attempts').notNull().default(0),
     lastError: text('last_error'),
   },
@@ -480,6 +489,18 @@ export const alerts = pgTable(
     index('alerts_undelivered_idx')
       .on(t.openedAt)
       .where(sql`delivered_at IS NULL`),
+    /**
+     * What the retry loop actually claims over.
+     *
+     * `alerts_undelivered_idx` above is not it: nothing set `delivered_at`
+     * until the delivery loop existed, so that partial index covered 100% of
+     * the table and was worth nothing. This one also excludes resolved rows,
+     * which is the difference between "still true and nobody has been told"
+     * and "was true once".
+     */
+    index('alerts_claimable_idx')
+      .on(t.fleet, t.openedAt)
+      .where(sql`delivered_at IS NULL AND resolved_at IS NULL`),
     index('alerts_recent_idx').on(t.openedAt),
   ],
 );

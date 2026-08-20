@@ -14,12 +14,28 @@ const logger = {
 function fakeAlerts() {
   const raised: { key: string; target: string; severity: string; instance: unknown }[] = [];
   const resolved: { key: string; keep: string[]; instance?: string }[] = [];
+  const claimable: {
+    id: number;
+    key: string;
+    target: string;
+    message: string;
+    occurrences: number;
+  }[] = [];
+  const delivered: number[] = [];
+  const failed: { id: number; err: string }[] = [];
   let expiredBefore: Date | null = null;
+  let prunedBefore: Date | null = null;
   return {
     raised,
     resolved,
+    claimable,
+    delivered,
+    failed,
     get expiredBefore() {
       return expiredBefore;
+    },
+    get prunedBefore() {
+      return prunedBefore;
     },
     repo: {
       raise: async (input: {
@@ -48,6 +64,15 @@ function fakeAlerts() {
         expiredBefore = before;
         return 0;
       },
+      closeResolvedUndelivered: async () => 0,
+      claimUndelivered: async () => claimable.splice(0, claimable.length),
+      markDelivered: async (id: number) => void delivered.push(id),
+      markDeliveryFailed: async (id: number, err: string) => void failed.push({ id, err }),
+      undeliveredDepth: async () => claimable.length,
+      pruneResolved: async (before: Date) => {
+        prunedBefore = before;
+        return 0;
+      },
     } as never,
   };
 }
@@ -59,6 +84,7 @@ function build(
     flagsThrow?: boolean;
     url?: string;
     fetchFn?: typeof fetch;
+    deliver?: (content: string) => Promise<boolean>;
   } = {},
 ) {
   const notified: { kind: string; message: string }[] = [];
@@ -76,6 +102,7 @@ function build(
     notify: (kind, message) => notified.push({ kind, message }),
     checks,
     instanceId: 'inst-a',
+    ...(opts.deliver ? { deliver: opts.deliver } : {}),
     ...(opts.url !== undefined ? { watchdogPingUrl: opts.url } : {}),
     ...(opts.fetchFn ? { fetchFn: opts.fetchFn } : {}),
     // Never fires: every test drives `tick()` directly.
@@ -396,6 +423,146 @@ describe('AlertScheduler', () => {
     await scheduler.tick();
     expect(alerts.expiredBefore).toBeInstanceOf(Date);
     expect(Date.now() - (alerts.expiredBefore as Date).getTime()).toBeGreaterThan(23 * 3_600_000);
+  });
+
+  describe('the delivery retry loop', () => {
+    const claim = (id: number, key: string, target = '') => ({
+      id,
+      key,
+      target,
+      message: `${key} is unhappy`,
+      occurrences: 1,
+    });
+
+    it('posts one batched message and marks every row delivered', async () => {
+      const posts: string[] = [];
+      const { scheduler, alerts } = build([], {
+        deliver: async (c) => {
+          posts.push(c);
+          return true;
+        },
+      });
+      alerts.claimable.push(claim(1, 'db.ping'), claim(2, 'circuit.tripped', 'g7'));
+
+      await scheduler.tick();
+      expect(posts).toHaveLength(1);
+      expect(posts[0]).toContain('db.ping');
+      expect(posts[0]).toContain('g7');
+      expect(alerts.delivered).toEqual([1, 2]);
+    });
+
+    /**
+     * A failed retry must back the row off, not mark it done. Marking on a post
+     * that never landed is the silent-drop this whole layer exists to remove.
+     */
+    it('records a failure instead of a delivery when the post fails', async () => {
+      const { scheduler, alerts } = build([], { deliver: async () => false });
+      alerts.claimable.push(claim(1, 'db.ping'));
+      await scheduler.tick();
+      expect(alerts.delivered).toEqual([]);
+      expect(alerts.failed.map((f: { id: number }) => f.id)).toEqual([1]);
+    });
+
+    /**
+     * `send` truncates at 1900 characters and still returns true, so one
+     * message plus a blanket markDelivered would stamp rows whose text was cut
+     * off as delivered. That is the silent drop this layer exists to remove.
+     */
+    it('splits a long batch across messages and marks each against its own', async () => {
+      const posts: string[] = [];
+      const { scheduler, alerts } = build([], {
+        deliver: async (c) => {
+          posts.push(c);
+          return true;
+        },
+      });
+      for (let i = 1; i <= 6; i += 1) {
+        alerts.claimable.push({
+          id: i,
+          key: 'permissions.blocked',
+          target: `g${i}`,
+          message: 'x'.repeat(500),
+          occurrences: 1,
+        });
+      }
+
+      await scheduler.tick();
+      expect(posts.length).toBeGreaterThan(1);
+      for (const post of posts) expect(post.length).toBeLessThan(1900);
+      expect(alerts.delivered).toHaveLength(6);
+    });
+
+    it('marks only the rows in a chunk that failed', async () => {
+      let call = 0;
+      const { scheduler, alerts } = build([], {
+        deliver: async () => {
+          call += 1;
+          return call === 1;
+        },
+      });
+      for (let i = 1; i <= 6; i += 1) {
+        alerts.claimable.push({
+          id: i,
+          key: 'permissions.blocked',
+          target: `g${i}`,
+          message: 'x'.repeat(500),
+          occurrences: 1,
+        });
+      }
+
+      await scheduler.tick();
+      expect(alerts.delivered.length).toBeGreaterThan(0);
+      expect(alerts.failed.length).toBeGreaterThan(0);
+      expect(alerts.delivered.length + alerts.failed.length).toBe(6);
+    });
+
+    it('survives a deliver that throws', async () => {
+      const { scheduler, alerts } = build([], {
+        deliver: async () => {
+          throw new Error('discord is down');
+        },
+      });
+      alerts.claimable.push(claim(1, 'db.ping'));
+      await expect(scheduler.tick()).resolves.toBeUndefined();
+      expect(alerts.failed).toHaveLength(1);
+    });
+
+    it('posts nothing when there is nothing to deliver', async () => {
+      const posts: string[] = [];
+      const { scheduler } = build([], {
+        deliver: async (c) => {
+          posts.push(c);
+          return true;
+        },
+      });
+      await scheduler.tick();
+      expect(posts).toEqual([]);
+    });
+
+    /** No admin channel means nowhere to deliver, so claiming would only burn attempts. */
+    it('does not claim at all when no deliver is configured', async () => {
+      const { scheduler, alerts } = build([]);
+      alerts.claimable.push(claim(1, 'db.ping'));
+      await scheduler.tick();
+      expect(alerts.delivered).toEqual([]);
+      expect(alerts.claimable).toHaveLength(1);
+    });
+
+    it('reports the undelivered depth for /diagnostics', async () => {
+      const { scheduler, alerts } = build([], { deliver: async () => true });
+      alerts.claimable.push(claim(1, 'db.ping'));
+      await scheduler.tick();
+      expect(scheduler.stats.undelivered).toBe(0);
+    });
+
+    it('prunes resolved history', async () => {
+      const { scheduler, alerts } = build([], { deliver: async () => true });
+      await scheduler.tick();
+      expect(alerts.prunedBefore).toBeInstanceOf(Date);
+      expect(Date.now() - (alerts.prunedBefore as Date).getTime()).toBeGreaterThan(
+        29 * 24 * 3_600_000,
+      );
+    });
   });
 
   it('works with no repository at all, which is the self-host case', async () => {

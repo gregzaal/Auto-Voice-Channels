@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ChannelType } from 'discord.js';
-import { AdminChannelReporter, TeeErrorReporter, type ErrorReporter } from './errorReporter.js';
+import {
+  AdminChannelReporter,
+  RecordingErrorReporter,
+  TeeErrorReporter,
+  type ErrorReporter,
+} from './errorReporter.js';
 
 const logger = {
   warn: vi.fn(),
@@ -200,5 +205,125 @@ describe('TeeErrorReporter', () => {
     ]);
     expect(() => tee.report('k', 'm')).not.toThrow();
     expect(seen).toEqual(['k']);
+  });
+});
+
+describe('RecordingErrorReporter', () => {
+  function setup(opts: { send?: () => Promise<void>; throttleMs?: number } = {}) {
+    const { client, sent } = fakeClient(opts.send ? { send: opts.send } : {});
+    const channel = new AdminChannelReporter({
+      client,
+      channelId: 'c',
+      logger,
+      throttleMs: opts.throttleMs ?? 0,
+    });
+    const marks: string[] = [];
+    let nextId = 1;
+    const alerts = {
+      raise: async () => ({ opened: true, id: nextId++ }),
+      markDelivered: async (id: number) => void marks.push(`delivered:${id}`),
+      markDeliveryFailed: async (id: number) => void marks.push(`failed:${id}`),
+    } as never;
+    const reporter = new RecordingErrorReporter({
+      alerts,
+      channel,
+      logger,
+      instanceId: 'inst-a',
+    });
+    return { reporter, sent, marks };
+  }
+
+  it('posts to Discord and marks the row delivered', async () => {
+    const { reporter, sent, marks } = setup();
+    reporter.report('db.ping', 'Database down');
+    await flush();
+    expect(sent).toHaveLength(1);
+    expect(marks).toEqual(['delivered:1']);
+  });
+
+  it('marks the row failed when the post fails', async () => {
+    const client = {
+      channels: {
+        fetch: async () => {
+          throw new Error('nope');
+        },
+      },
+    } as never;
+    const channel = new AdminChannelReporter({ client, channelId: 'c', logger, throttleMs: 0 });
+    const marks: string[] = [];
+    const reporter = new RecordingErrorReporter({
+      alerts: {
+        raise: async () => ({ opened: true, id: 7 }),
+        markDelivered: async () => void marks.push('delivered'),
+        markDeliveryFailed: async () => void marks.push('failed'),
+      } as never,
+      channel,
+      logger,
+      instanceId: 'inst-a',
+    });
+    reporter.report('db.ping', 'Database down');
+    await flush();
+    expect(marks).toEqual(['failed']);
+  });
+
+  /**
+   * The channel throttles per KIND while a row is keyed (fleet, key, target), so
+   * two guilds hitting one condition inside a window are two rows and one
+   * message. Reporting the suppressed one as delivered would lose it forever.
+   */
+  it('leaves a throttle-suppressed row undelivered so the retry loop finds it', async () => {
+    const { reporter, sent, marks } = setup({ throttleMs: 60_000 });
+    reporter.report('reconcile.failed', 'guild a');
+    await flush();
+    reporter.report('reconcile.failed', 'guild b');
+    await flush();
+    expect(sent).toHaveLength(1);
+    expect(marks).toEqual(['delivered:1']);
+  });
+
+  /**
+   * The whole reason this is not a write-then-drain queue: the outage it exists
+   * for was the database being unreachable, so the post must never wait on it.
+   */
+  it('still posts to Discord when the database write fails', async () => {
+    const { client, sent } = fakeClient();
+    const channel = new AdminChannelReporter({ client, channelId: 'c', logger, throttleMs: 0 });
+    const warn = vi.fn();
+    const reporter = new RecordingErrorReporter({
+      alerts: {
+        raise: async () => {
+          throw new Error('db unreachable');
+        },
+      } as never,
+      channel,
+      logger: { ...logger, warn } as never,
+      instanceId: 'inst-a',
+    });
+    reporter.report('db.ping', 'Database down');
+    await flush();
+    expect(sent).toHaveLength(1);
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('stamps the raising instance, so reconciliation can scope to it', async () => {
+    const { client } = fakeClient();
+    const channel = new AdminChannelReporter({ client, channelId: 'c', logger, throttleMs: 0 });
+    let seen: Record<string, unknown> | undefined;
+    const reporter = new RecordingErrorReporter({
+      alerts: {
+        raise: async (input: { details?: Record<string, unknown> }) => {
+          seen = input.details;
+          return { opened: true, id: 1 };
+        },
+        markDelivered: async () => {},
+        markDeliveryFailed: async () => {},
+      } as never,
+      channel,
+      logger,
+      instanceId: 'inst-a',
+    });
+    reporter.report('db.ping', 'x', { guildId: 'g1' });
+    await flush();
+    expect(seen).toMatchObject({ instance: 'inst-a', guildId: 'g1' });
   });
 });

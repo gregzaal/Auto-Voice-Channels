@@ -18,6 +18,14 @@ export interface PermissionProblem {
 
 const MAX_PER_GUILD = 10;
 
+/** One guild's live incidents, as {@link PermissionProblemTracker.activeGuilds} reports them. */
+export interface PermissionProblemSummary {
+  guildId: string;
+  problems: PermissionProblem[];
+  /** Epoch ms of the most recent incident in `problems`. */
+  lastAt: number;
+}
+
 export class PermissionProblemTracker {
   private readonly byGuild = new Map<string, PermissionProblem[]>();
 
@@ -60,6 +68,37 @@ export class PermissionProblemTracker {
 
   recent(guildId: string): PermissionProblem[] {
     return this.byGuild.get(guildId) ?? [];
+  }
+
+  /**
+   * Every guild with an incident seen within `sinceMs`, for the self-host
+   * watcher (`plans/agentic_management.md` step 4).
+   *
+   * **Filtered on age rather than returning the whole map**, because the map is
+   * only ever pruned by a SUCCESSFUL operation on the same channel. A guild
+   * nobody has fixed and nobody has revisited keeps its entry indefinitely, so
+   * an unfiltered read would grow monotonically across the install base and
+   * report a guild that broke in March as broken today.
+   *
+   * Note what the age therefore means: `at` is stamped when an operation last
+   * FAILED, not when the problem was last true. A guild nobody has joined for
+   * seven hours reads as healthy here. That is the honest reading of what is
+   * recorded, and it is the right bias for an alert -- a problem nobody is
+   * hitting is not one to wake someone for.
+   */
+  activeGuilds(sinceMs: number, now = Date.now()): PermissionProblemSummary[] {
+    const cutoff = now - sinceMs;
+    const out: PermissionProblemSummary[] = [];
+    for (const [guildId, problems] of this.byGuild) {
+      const fresh = problems.filter((p) => p.at >= cutoff);
+      if (fresh.length === 0) continue;
+      out.push({
+        guildId,
+        problems: fresh,
+        lastAt: Math.max(...fresh.map((p) => p.at)),
+      });
+    }
+    return out;
   }
 
   /** Clears a channel's incident (e.g. once it's been resolved/cleaned up). */

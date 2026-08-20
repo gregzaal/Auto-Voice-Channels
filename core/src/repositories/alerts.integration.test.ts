@@ -181,3 +181,129 @@ describe('AlertRepository (integration)', () => {
     expect((await prod.open()).some((a) => a.key === 'fleet.scoped')).toBe(true);
   });
 });
+
+describe('AlertRepository delivery (integration)', () => {
+  let env: PgTestEnv;
+  let repo: AlertRepository;
+
+  beforeAll(async () => {
+    env = await startPostgres();
+    repo = new AlertRepository(env.handle.db, 'beta');
+  }, 600_000);
+
+  afterAll(async () => {
+    await env?.stop();
+  });
+
+  const old = (mins: number) => new Date(Date.now() - mins * 60_000);
+
+  it('claims an alert the immediate path never delivered', async () => {
+    await repo.raise({ key: 'claim.me', message: 'undelivered' }, old(10));
+    const claimed = await repo.claimUndelivered(10);
+    expect(claimed.map((c) => c.key)).toContain('claim.me');
+  });
+
+  /**
+   * The grace window. The fast path posts first and stamps afterwards, so a row
+   * seconds old is very likely already sent and simply not yet marked.
+   */
+  it('leaves a freshly raised alert alone', async () => {
+    await repo.raise({ key: 'too.new', message: 'just happened' });
+    const claimed = await repo.claimUndelivered(10);
+    expect(claimed.map((c) => c.key)).not.toContain('too.new');
+  });
+
+  /**
+   * SKIP LOCKED alone does not prevent the double-send: the row lock dies with
+   * the claiming transaction and delivery happens after the commit. The lease
+   * is what separates two claims a second apart. Both are load-bearing.
+   */
+  it('does not hand the same alert to a second claimer a moment later', async () => {
+    await repo.raise({ key: 'once.only', message: 'x' }, old(10));
+    const first = await repo.claimUndelivered(10);
+    const second = await repo.claimUndelivered(10);
+    const inFirst = first.filter((c) => c.key === 'once.only');
+    const inSecond = second.filter((c) => c.key === 'once.only');
+    expect(inFirst).toHaveLength(1);
+    expect(inSecond).toHaveLength(0);
+  });
+
+  it('does not claim a delivered alert', async () => {
+    const { id } = await repo.raise({ key: 'done.already', message: 'x' }, old(10));
+    await repo.markDelivered(id);
+    const claimed = await repo.claimUndelivered(10);
+    expect(claimed.map((c) => c.key)).not.toContain('done.already');
+  });
+
+  /**
+   * `resolveOthers` and `expireStale` clear conditions without touching
+   * `delivered_at`, so without this predicate the loop would post a backlog of
+   * things that had stopped being true: an alert storm triggered by recovery.
+   */
+  it('does not claim an alert whose condition already cleared', async () => {
+    await repo.raise({ key: 'gone.away', message: 'x' }, old(10));
+    await repo.resolve('gone.away');
+    const claimed = await repo.claimUndelivered(10);
+    expect(claimed.map((c) => c.key)).not.toContain('gone.away');
+  });
+
+  it('closes a resolved-but-unsent row so it leaves the claimable set', async () => {
+    await repo.raise({ key: 'never.sent', message: 'x' }, old(10));
+    await repo.resolve('never.sent');
+    expect(await repo.closeResolvedUndelivered()).toBeGreaterThanOrEqual(1);
+    const rows = await repo.since(old(60));
+    const row = rows.find((r) => r.key === 'never.sent');
+    expect(row?.deliveredAt).not.toBeNull();
+  });
+
+  /**
+   * The restatement case. `raise` returns the SAME row for a condition that is
+   * still open, so a later failed post lands on a row already marked delivered
+   * from an earlier success. Leaving the stamp would hide it from the loop.
+   */
+  it('makes a delivered row claimable again when a later post fails', async () => {
+    const solo = new AlertRepository(env.handle.db, 'restate');
+    const { id } = await solo.raise({ key: 'restated', message: 'first' }, old(20));
+    await solo.markDelivered(id);
+    expect((await solo.claimUndelivered(10)).map((c) => c.key)).not.toContain('restated');
+
+    await solo.markDeliveryFailed(id, 'discord refused the restatement');
+    // Past the back-off, which is what the lease is for.
+    const later = new Date(Date.now() + 20 * 60_000);
+    expect((await solo.claimUndelivered(10, later)).map((c) => c.key)).toContain('restated');
+  });
+
+  it('backs a failed delivery off rather than releasing it', async () => {
+    await repo.raise({ key: 'keeps.failing', message: 'x' }, old(10));
+    const [claimed] = (await repo.claimUndelivered(10)).filter((c) => c.key === 'keeps.failing');
+    expect(claimed).toBeDefined();
+    await repo.markDeliveryFailed(claimed!.id, 'discord said no');
+    const again = await repo.claimUndelivered(10);
+    expect(again.map((c) => c.key)).not.toContain('keeps.failing');
+  });
+
+  it('orders criticals ahead of warnings', async () => {
+    const solo = new AlertRepository(env.handle.db, 'ordering');
+    await solo.raise({ key: 'a.warn', message: 'x', severity: 'warn' }, old(10));
+    await solo.raise({ key: 'b.crit', message: 'x', severity: 'critical' }, old(9));
+    const claimed = await solo.claimUndelivered(10);
+    expect(claimed[0]?.key).toBe('b.crit');
+  });
+
+  it('counts what is still waiting, for /diagnostics', async () => {
+    const solo = new AlertRepository(env.handle.db, 'depth');
+    expect(await solo.undeliveredDepth()).toBe(0);
+    await solo.raise({ key: 'waiting', message: 'x' }, old(10));
+    expect(await solo.undeliveredDepth()).toBe(1);
+  });
+
+  /** The table shipped with neither an expiry nor a prune, so it grew forever. */
+  it('prunes resolved history but keeps what is still open', async () => {
+    const solo = new AlertRepository(env.handle.db, 'pruning');
+    await solo.raise({ key: 'ancient', message: 'x' }, old(60 * 24 * 90));
+    await solo.resolve('ancient', '', old(60 * 24 * 89));
+    await solo.raise({ key: 'current', message: 'x' });
+    expect(await solo.pruneResolved(old(60 * 24 * 30))).toBe(1);
+    expect((await solo.open()).map((a) => a.key)).toEqual(['current']);
+  });
+});

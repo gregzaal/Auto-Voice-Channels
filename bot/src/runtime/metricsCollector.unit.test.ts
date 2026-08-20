@@ -265,6 +265,95 @@ describe('MetricsCollector', () => {
     expect(failing.collector.stats.lastRollupAt).not.toBeNull();
   });
 
+  describe('the step 5 gauges', () => {
+    /**
+     * Keyed by instance, and that is the whole point. Both the daily rollup and
+     * readSeries sum across instances before summarising, so an unkeyed
+     * per-machine number comes back as a fleet total, which is exactly not the
+     * number the memory-headroom alert wants.
+     */
+    it('records rss keyed by instance so it survives both aggregations', async () => {
+      const h = harness({ readRss: () => 900 });
+      h.collector.sampleTick();
+      await h.collector.tick();
+      const row = h.writes
+        .flat()
+        .find((w: { metric: string }) => w.metric === METRICS.PROCESS_RSS_PEAK);
+      expect(row).toBeDefined();
+      expect(row?.key).toBe('i-1');
+      expect(row?.value).toBe(900);
+    });
+
+    it('keeps the highest rss in the bucket, not the latest', async () => {
+      let rss = 500;
+      const h = harness({ readRss: () => rss });
+      h.collector.sampleTick();
+      rss = 1200;
+      h.collector.sampleTick();
+      rss = 700;
+      h.collector.sampleTick();
+      await h.collector.tick();
+      expect(lastValue(h.writes, METRICS.PROCESS_RSS_PEAK, 'i-1')).toBe(1200);
+    });
+
+    /**
+     * One row per fleet per bucket. Every instance polls the identical answer,
+     * so stamping each machine's instance id would have readSeries sum them
+     * into N times the real max_concurrency.
+     */
+    it('writes the gateway gauges with an empty instance', async () => {
+      const h = harness({
+        pollGateway: async () => ({
+          recommendedShards: 2,
+          maxConcurrency: 16,
+          sessionUsed: 40,
+          sessionTotal: 1000,
+        }),
+      });
+      await h.collector.tick();
+      const rows = h.writes
+        .flat()
+        .filter((w: { metric: string }) => w.metric.startsWith('gateway.'));
+      expect(rows).toHaveLength(4);
+      expect(rows.every((r: { instance: string }) => r.instance === '')).toBe(true);
+      expect(
+        rows.find((r: { metric: string }) => r.metric === METRICS.GATEWAY_SESSION_USED)?.value,
+      ).toBe(40);
+    });
+
+    /**
+     * Boot falls back to max_concurrency 1 when this call fails. Writing that
+     * would read as Discord genuinely cutting the identify budget to one.
+     * Absence is how this store says "unknown".
+     */
+    it('writes nothing at all when the poll fails', async () => {
+      const h = harness({ pollGateway: async () => undefined });
+      await h.collector.tick();
+      expect(
+        h.writes.flat().filter((w: { metric: string }) => w.metric.startsWith('gateway.')),
+      ).toHaveLength(0);
+    });
+
+    it('a throwing poll does not stop the counter flush', async () => {
+      const h = harness({
+        pollGateway: async () => {
+          throw new Error('discord said no');
+        },
+      });
+      h.collector.increment(METRICS.ROOMS_CREATED);
+      await h.collector.tick();
+      expect(lastValue(h.writes, METRICS.ROOMS_CREATED)).toBe(1);
+    });
+
+    it('does not poll at all when no poller is configured', async () => {
+      const h = harness();
+      await h.collector.tick();
+      expect(
+        h.writes.flat().filter((w: { metric: string }) => w.metric.startsWith('gateway.')),
+      ).toHaveLength(0);
+    });
+  });
+
   describe('the rollup half', () => {
     it('runs the derived gauges and the daily rollup when it wins the reservation', async () => {
       await h.collector.tick();

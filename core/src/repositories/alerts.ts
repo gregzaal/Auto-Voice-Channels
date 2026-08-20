@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, isNull, lt, sql } from 'drizzle-orm';
+import { and, count, desc, eq, gte, isNull, lt, sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
 import { alerts } from '../db/schema.js';
 
@@ -13,6 +13,33 @@ export interface RaiseAlertInput {
   severity?: AlertSeverity;
   details?: Record<string, unknown>;
 }
+
+/** A row the retry loop has claimed and now owns for the length of its lease. */
+export interface ClaimedAlert {
+  id: number;
+  key: string;
+  target: string;
+  severity: AlertSeverity;
+  message: string;
+  occurrences: number;
+  attempts: number;
+  openedAt: Date;
+}
+
+/** How long a claim is held before another instance may take the row. */
+const CLAIM_LEASE_MS = 5 * 60_000;
+
+/**
+ * How old an undelivered alert must be before the retry loop touches it.
+ *
+ * The fast path posts to Discord immediately and stamps the outcome
+ * afterwards, so a row raised seconds ago is very likely already sent and
+ * simply not yet marked. Waiting one watcher tick means the loop only ever
+ * sees rows where the immediate path provably did not finish -- which also
+ * covers the case where the stamp itself failed slowly, something correlating
+ * on ids could not.
+ */
+const DELIVERY_GRACE_MS = 2 * 60_000;
 
 export interface AlertRow {
   id: number;
@@ -237,6 +264,181 @@ export class AlertRepository {
       .update(alerts)
       .set({ attempts: sql`${alerts.attempts} + 1`, lastError: error.slice(0, 500) })
       .where(eq(alerts.id, id));
+  }
+
+  /**
+   * Claims undelivered alerts for one fleet, for the retry loop.
+   *
+   * Structurally the same protocol as `BillingNotificationRepository.claimForFleet`,
+   * with three deliberate differences:
+   *
+   * - **No `guild_fleet_presence` join.** The recipient is a single admin
+   *   channel, not a customer guild, so "can this fleet reach the guild" is not
+   *   the question being asked.
+   * - **No instance predicate.** Reconciliation is instance-scoped because only
+   *   the raising instance knows whether its own condition cleared; delivery is
+   *   not, and must not be, because the whole value of the loop on a multi-machine
+   *   fleet is a HEALTHY peer delivering the alert of an instance whose Discord
+   *   client is the thing that broke.
+   * - **`resolved_at IS NULL`.** `resolveOthers` and `expireStale` clear
+   *   conditions without touching `delivered_at`, so without this the loop would
+   *   post a backlog of things that stopped being true -- an alert storm
+   *   triggered by recovery.
+   *
+   * The severity ordering is an explicit CASE rather than `severity DESC`.
+   * `severity` is a text column, so DESC sorts it alphabetically and puts
+   * `warn` above `critical` -- the precise opposite of the intent, and
+   * invisible until a batch is bigger than the per-tick cap.
+   */
+  async claimUndelivered(
+    limit: number,
+    at = new Date(),
+    leaseMs = CLAIM_LEASE_MS,
+    graceMs = DELIVERY_GRACE_MS,
+  ): Promise<ClaimedAlert[]> {
+    return this.db.transaction(async (tx) => {
+      const claimed = await tx.execute<{
+        id: number;
+        key: string;
+        target: string;
+        severity: AlertSeverity;
+        message: string;
+        occurrences: number;
+        attempts: number;
+        opened_at: string | Date;
+      }>(sql`
+        WITH claimed AS (
+          SELECT a.id
+            FROM ${alerts} a
+           WHERE a.fleet = ${this.fleet}
+             AND a.delivered_at IS NULL
+             AND a.resolved_at IS NULL
+             AND a.opened_at <= ${new Date(at.getTime() - graceMs)}
+             AND (a.claimed_until IS NULL OR a.claimed_until <= ${at})
+           ORDER BY CASE a.severity
+                      WHEN 'critical' THEN 0
+                      WHEN 'warn' THEN 1
+                      ELSE 2
+                    END,
+                    a.opened_at ASC
+           LIMIT ${limit}
+             FOR UPDATE OF a SKIP LOCKED
+        )
+        UPDATE ${alerts} a
+           SET attempts = a.attempts + 1,
+               last_attempt_at = ${at},
+               claimed_until = ${new Date(at.getTime() + leaseMs)}
+          FROM claimed
+         WHERE a.id = claimed.id
+        RETURNING a.id, a.key, a.target, a.severity, a.message, a.occurrences,
+                  a.attempts, a.opened_at
+      `);
+
+      return claimed.rows.map((r) => ({
+        id: Number(r.id),
+        key: r.key,
+        target: r.target,
+        severity: r.severity,
+        message: r.message,
+        occurrences: Number(r.occurrences),
+        attempts: Number(r.attempts),
+        openedAt: new Date(r.opened_at),
+      }));
+    });
+  }
+
+  /**
+   * Records a failed delivery and backs the row off, leaving it undelivered.
+   *
+   * The back-off is the lease, shortened, rather than a release. Releasing
+   * looks kinder and turns a permanently broken admin channel into one failing
+   * REST call per instance per tick, during what is by definition an incident.
+   * The `::timestamptz` cast is load-bearing: without it Postgres reads the
+   * whole expression as an interval.
+   */
+  async markDeliveryFailed(id: number, error: string, at = new Date()): Promise<void> {
+    await this.db
+      .update(alerts)
+      .set({
+        attempts: sql`${alerts.attempts} + 1`,
+        lastError: error.slice(0, 500),
+        lastAttemptAt: at,
+        /**
+         * Cleared, and this is not redundant.
+         *
+         * `raise()` upserts onto the partial unique index, so restating a
+         * condition that is still open returns the id of the SAME row -- which
+         * may already carry `delivered_at` from an earlier successful post. A
+         * failed post on that row would otherwise leave it reading delivered,
+         * and `claimUndelivered` filters on `delivered_at IS NULL`, so the
+         * retry loop would never see it. The column means "the current state of
+         * this open condition has reached someone", not "some earlier
+         * occurrence did".
+         */
+        deliveredAt: null,
+        claimedUntil: sql`${at}::timestamptz + make_interval(secs => least(${alerts.attempts}, 6) * 60)`,
+      })
+      .where(eq(alerts.id, id));
+  }
+
+  /** How many alerts are waiting to be delivered. For `/diagnostics`. */
+  async undeliveredDepth(at = new Date()): Promise<number> {
+    const [row] = await this.db
+      .select({ n: count() })
+      .from(alerts)
+      .where(
+        and(
+          eq(alerts.fleet, this.fleet),
+          isNull(alerts.deliveredAt),
+          isNull(alerts.resolvedAt),
+          lt(alerts.openedAt, at),
+        ),
+      );
+    return row?.n ?? 0;
+  }
+
+  /**
+   * Stops a resolved-but-undelivered row from sitting in the claimable index
+   * forever.
+   *
+   * A condition that cleared before anyone was told is not a delivery failure
+   * and must not be retried, but it also must not stay claimable. Stamped
+   * rather than deleted so the history still records that it was never sent.
+   */
+  async closeResolvedUndelivered(at = new Date()): Promise<number> {
+    const rows = await this.db
+      .update(alerts)
+      .set({ deliveredAt: at, lastError: 'resolved before delivery' })
+      .where(
+        and(
+          eq(alerts.fleet, this.fleet),
+          isNull(alerts.deliveredAt),
+          sql`${alerts.resolvedAt} IS NOT NULL`,
+        ),
+      )
+      .returning({ id: alerts.id });
+    return rows.length;
+  }
+
+  /**
+   * Deletes resolved alerts older than `before`.
+   *
+   * `billing_notifications` has both an expiry and a prune; this table shipped
+   * with neither, so it and its indexes grew without bound. History is worth
+   * keeping for a while and not forever.
+   */
+  async pruneResolved(before: Date): Promise<number> {
+    const rows = await this.db
+      .delete(alerts)
+      .where(
+        and(
+          eq(alerts.fleet, this.fleet),
+          sql`${alerts.resolvedAt} IS NOT NULL`,
+          lt(alerts.resolvedAt, before),
+        ),
+      )
+      .returning({ id: alerts.id });
+    return rows.length;
   }
 
   /** Everything still open, for the console and the digest. */

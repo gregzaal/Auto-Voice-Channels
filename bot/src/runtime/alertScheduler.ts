@@ -77,6 +77,15 @@ export interface AlertSchedulerDeps {
    * same row twice per tick, with the wrong severity on one of them.
    */
   notify: (kind: string, message: string, context: Record<string, unknown>) => void;
+  /**
+   * Posts one message bypassing the per-kind throttle, for the retry loop.
+   *
+   * Separate from `notify` because a retry is by definition about a condition
+   * posted recently, so the throttle would swallow it -- and `notify` is void,
+   * so the loop would then mark the row delivered on a message nobody sent.
+   * Absent means no retry loop, which is the self-host case.
+   */
+  deliver?: (content: string) => Promise<boolean>;
   checks: readonly WatchCheck[];
   /**
    * Who is doing the watching, stamped into every alert it raises.
@@ -102,6 +111,13 @@ export interface AlertSchedulerStats {
   lastTickAt: string | null;
   lastError: string | null;
   openConditions: { key: string; target: string }[];
+  /**
+   * Alerts raised but not yet delivered. Mirrors `billing.notificationQueueDepth`.
+   *
+   * A depth that does not fall means rows nobody can deliver, which is silent
+   * by construction: the alerter believes it alerted someone.
+   */
+  undelivered: number;
   watchdog: {
     configured: boolean;
     lastPingAt: string | null;
@@ -127,6 +143,27 @@ const PING_TIMEOUT_MS = 10_000;
 const MAX_TARGETS_PER_CHECK = 25;
 
 /**
+ * Alerts the retry loop delivers per tick.
+ *
+ * Its own cap, independent of the per-check one, for the same reason: each row
+ * is a round trip on a shared pool during what is by definition an incident.
+ * It does NOT bound the message length -- one `permissions.blocked` line runs to
+ * several hundred characters on its own, so {@link CHUNK_CHARS} does that.
+ */
+const MAX_DELIVER_PER_TICK = 10;
+
+/**
+ * Character budget for one retry message.
+ *
+ * Under Discord's 2000 and under the 1900 `send` truncates at, so a chunk can
+ * never be cut. The margin covers the header line and the markdown.
+ */
+const CHUNK_CHARS = 1700;
+
+/** Resolved alerts older than this are deleted. History, not an archive. */
+const PRUNE_RESOLVED_AFTER_MS = 30 * 24 * 3_600_000;
+
+/**
  * Separator for the `key`+`target` gate ids, written as an escape.
  *
  * NUL because it cannot occur in an alert key or a snowflake, and as `\u0000`
@@ -136,6 +173,35 @@ const MAX_TARGETS_PER_CHECK = 25;
  */
 const SEP = '\u0000';
 const idOf = (key: string, target: string): string => `${key}${SEP}${target}`;
+
+/**
+ * Splits rows into groups whose rendered lines fit one message.
+ *
+ * A single row longer than the budget still gets its own chunk rather than
+ * being dropped: it will be truncated by Discord, but it is then the only row
+ * marked against that message, so at most one alert is affected instead of
+ * every row that happened to share the batch.
+ */
+function chunkByLength<T extends { key: string; target: string; message: string }>(
+  rows: readonly T[],
+  budget: number,
+): T[][] {
+  const chunks: T[][] = [];
+  let current: T[] = [];
+  let length = 0;
+  for (const row of rows) {
+    const size = row.key.length + row.target.length + row.message.length + 12;
+    if (current.length > 0 && length + size > budget) {
+      chunks.push(current);
+      current = [];
+      length = 0;
+    }
+    current.push(row);
+    length += size;
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
 
 export class AlertScheduler {
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -161,6 +227,7 @@ export class AlertScheduler {
   private lastPingAt: Date | null = null;
   private lastPingError: string | null = null;
   private pingSuppressed = false;
+  private undelivered = 0;
   /** Last readable flag snapshot, so a DB blip cannot un-set a kill switch. */
   private cachedFlags: Record<string, unknown> | null = null;
 
@@ -221,6 +288,7 @@ export class AlertScheduler {
         const [key = '', target = ''] = id.split(SEP);
         return { key, target };
       }),
+      undelivered: this.undelivered,
       watchdog: {
         configured: Boolean(this.deps.watchdogPingUrl),
         lastPingAt: this.lastPingAt?.toISOString() ?? null,
@@ -277,8 +345,81 @@ export class AlertScheduler {
         this.deps.logger.warn({ err }, 'alert expiry failed');
       });
 
+    await this.deliverPending();
+    await this.prune();
+
     this.pingSuppressed = criticalOpen;
     if (!criticalOpen) await this.ping();
+  }
+
+  /**
+   * Delivers alerts the immediate path did not.
+   *
+   * The backstop half of step 4b. The fast path posts to Discord and stamps the
+   * row itself; anything still unstamped two minutes later is something that
+   * provably did not get sent -- the throttle withheld it, Discord refused it,
+   * or the process died between the post and the stamp.
+   *
+   * On a multi-instance fleet this is also the only way some alerts get out at
+   * all: a `gateway.down` is structurally undeliverable by the very instance
+   * that raised it, because the client it would post through is the thing that
+   * broke. The claim is therefore fleet-scoped but deliberately NOT
+   * instance-scoped, so a healthy peer can pick it up.
+   */
+  private async deliverPending(): Promise<void> {
+    const deliver = this.deps.deliver;
+    const alerts = this.deps.alerts;
+    if (!deliver || !alerts) return;
+
+    try {
+      // Resolved-but-unsent rows are not delivery failures and must not be
+      // retried, but they must also stop sitting in the claimable index.
+      await alerts.closeResolvedUndelivered();
+
+      const claimed = await alerts.claimUndelivered(MAX_DELIVER_PER_TICK);
+      this.undelivered = await alerts.undeliveredDepth();
+      if (claimed.length === 0) return;
+
+      /**
+       * Chunked, and each row marked only against the message that carried it.
+       *
+       * `AdminChannelReporter.send` truncates to Discord's limit and still
+       * returns true, so one batched message plus a blanket `markDelivered`
+       * would stamp rows whose text was cut off as delivered -- a silent drop,
+       * which is the one outcome this whole layer exists to remove. The
+       * per-tick row cap is not a length bound: one `permissions.blocked`
+       * line alone can run to several hundred characters.
+       */
+      for (const chunk of chunkByLength(claimed, CHUNK_CHARS)) {
+        const lines = chunk.map((a) => {
+          const where = a.target ? ` (${a.target})` : '';
+          const seen = a.occurrences > 1 ? ` x${a.occurrences}` : '';
+          return `- **${a.key}**${where}${seen}: ${a.message}`;
+        });
+        const sent = await deliver(['Undelivered alerts:', ...lines].join('\n')).catch(() => false);
+        for (const a of chunk) {
+          if (sent) await alerts.markDelivered(a.id);
+          else await alerts.markDeliveryFailed(a.id, 'retry post failed');
+        }
+      }
+      this.undelivered = await alerts.undeliveredDepth();
+    } catch (err) {
+      this.lastError = (err as Error).message;
+      this.deps.logger.warn({ err }, 'alert delivery retry failed');
+    }
+  }
+
+  /** Drops resolved history, which nothing else ever deletes. */
+  private async prune(): Promise<void> {
+    await this.deps.alerts
+      ?.pruneResolved(new Date(Date.now() - PRUNE_RESOLVED_AFTER_MS))
+      .then((n) => {
+        if (n > 0) this.deps.logger.info({ pruned: n }, 'pruned resolved alerts');
+      })
+      .catch((err: unknown) => {
+        this.lastError = (err as Error).message;
+        this.deps.logger.warn({ err }, 'alert prune failed');
+      });
   }
 
   /** Runs one check and reconciles its alerts. Returns whether it is failing. */
