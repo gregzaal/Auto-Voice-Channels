@@ -169,11 +169,31 @@ describe('buildSetupPanel', () => {
       buildSetupPanel({
         ...baseInput,
         isAdmin: true,
-        problems: [{ channelId: 'x9', operation: 'move' }],
+        problems: [{ channelId: 'x9', operation: 'delete' }],
       }),
     );
     expect(lost).toContain('lost access');
     expect(lost).not.toContain('could not create rooms');
+  });
+
+  /**
+   * A move failure is a third thing, not a flavour of either.
+   *
+   * It records against the CREATOR channel, which has just successfully made a
+   * room, so "could not create" and "lost access and stopped managing it" are
+   * both false, and the fix is a permission neither of them names.
+   */
+  it('gives a move failure its own advice', () => {
+    const moved = JSON.stringify(
+      buildSetupPanel({
+        ...baseInput,
+        isAdmin: true,
+        problems: [{ channelId: 'x9', operation: 'move' }],
+      }),
+    );
+    expect(moved).toContain('Move Members');
+    expect(moved).not.toContain('lost access');
+    expect(moved).not.toContain('could not create rooms');
   });
 
   /** Both kinds at once must report both, not pick one. */

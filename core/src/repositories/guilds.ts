@@ -445,6 +445,57 @@ export class GuildRepository {
       .where(eq(guilds.guildId, guildId));
   }
 
+  /**
+   * Records that a permission-problem notice went out to this guild
+   * (`metadata.problems`), with how many have gone out in the current run of
+   * the condition so the sender can back off and eventually stop.
+   *
+   * Its own namespace, not `metadata.billing` (which `parseBillingMeta`
+   * round-trips and would drop unknown keys) and not `metadata.announcements`
+   * (whose values are bare timestamps, and whose contract is one-off sends).
+   *
+   * Merged with `||`, NOT `jsonb_set`, for the reason spelled out on
+   * {@link markAnnounced}: `create_missing` creates only the final key, so a
+   * guild whose metadata has no `problems` object yet, which is every guild the
+   * first time, would silently not be written at all.
+   *
+   * Written on ATTEMPT rather than on confirmed delivery, which is the opposite
+   * of `markAnnounced`. A guild whose permissions are broken is exactly the
+   * guild every rung can fail for, and it is also the guild the sweep re-tests
+   * every five minutes, so stamping on success alone would re-walk the whole
+   * delivery ladder forever for the guilds least able to receive it.
+   */
+  async markProblemNotified(guildId: string, at: Date, sends: number): Promise<void> {
+    await this.db
+      .update(guilds)
+      .set({
+        metadata: sql`${guilds.metadata} || jsonb_build_object(
+          'problems',
+          coalesce(${guilds.metadata} -> 'problems', '{}'::jsonb)
+            || jsonb_build_object(
+                 'lastNotifiedAt', ${at.toISOString()}::text,
+                 'sends', ${sends}::int
+               )
+        )`,
+        updatedAt: new Date(),
+      })
+      .where(eq(guilds.guildId, guildId));
+  }
+
+  /**
+   * Forgets a guild's notice history, once its problems have all cleared, so
+   * the next unrelated problem starts from the shortest interval again.
+   */
+  async clearProblemNotified(guildId: string): Promise<void> {
+    await this.db
+      .update(guilds)
+      .set({
+        metadata: sql`${guilds.metadata} - 'problems'`,
+        updatedAt: new Date(),
+      })
+      .where(eq(guilds.guildId, guildId));
+  }
+
   /** Marks the one-time new-guild onboarding as done (`metadata.billing.onboardedAt`). */
   async markOnboarded(guildId: string, at = new Date()): Promise<void> {
     await this.db.transaction(async (tx) => {

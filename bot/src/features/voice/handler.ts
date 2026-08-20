@@ -116,7 +116,17 @@ export interface VoiceFeatureDeps {
    * joining/leaving. Fire-and-forget.
    */
   serverLog?: (guildId: string, level: 1 | 2 | 3, message: string) => void;
-  /** Records "I lost access to this channel" incidents for `/setup` + `/logging`. */
+  /**
+   * Records "I cannot act on this channel" incidents.
+   *
+   * Feeds three different things, and they are deliberately not collapsed into
+   * one. `/setup` reads it on demand. The paired `serverLog` line above each
+   * `record` call is the event log, per incident and contemporaneous, for the
+   * guilds that configured `/logging`. Its `onRecord` hook drives
+   * `PermissionProblemNotifier`, which is the only one of the three that
+   * reaches a guild that has configured nothing, and is therefore throttled
+   * and aggregated in a way a log must not be.
+   */
   permissionProblems?: PermissionProblemTracker;
   /**
    * Counts a room's birth or death, for the metric store. Fire-and-forget, and
@@ -479,18 +489,46 @@ export class VoiceFeature {
       await this.deps.secondaries.remove(newChannelId);
       await this.deps.onSecondaryRemoved?.(guildId, newChannelId);
       await this.deps.actions.deleteChannel(guildId, newChannelId).catch(() => undefined);
+      /**
+       * Recorded against the PRIMARY, not the secondary we just deleted.
+       *
+       * The incident is rendered as a `<#id>` mention for an admin to go and
+       * inspect, and the secondary is gone by this line in the common case
+       * (only Move Members was missing, so the delete succeeded). That would
+       * render as a dead channel mention naming a room the admin never saw.
+       * The creator channel is the thing they configured and can actually
+       * open. The secondary id stays in the log context, where it is useful
+       * and is not being handed to a human as somewhere to click.
+       */
       this.deps.permissionProblems?.record(guildId, {
-        channelId: newChannelId,
+        channelId,
         operation: 'move',
         at: Date.now(),
       });
-      this.deps.serverLog?.(guildId, 1, permissionProblemMessage(newChannelId));
+      this.deps.serverLog?.(guildId, 1, permissionProblemMessage(channelId, 'move'));
       this.deps.logger.warn(
-        { guildId, secondaryId: newChannelId, err },
+        { guildId, primaryId: channelId, secondaryId: newChannelId, err },
         'created secondary but cannot move member into it',
       );
       return { action: 'skip' };
     }
+
+    /**
+     * The creator channel worked end to end, so whatever was blocking it is gone.
+     *
+     * Mirrors the clear after a successful cleanup below. Nothing cleared the
+     * CREATE incident before this, and unlike a secondary (whose row and
+     * incident die together) a creator channel lives on, so the incident sat in
+     * `/setup` for the life of the process after the admin had fixed it.
+     *
+     * **After the move, not after the create.** Both failures record against
+     * this same primary, so clearing on a bare create meant a guild missing
+     * only Move Members cleared and re-recorded on every single join. That
+     * looks harmless and is not: clearing the guild's last incident resets the
+     * notifier's escalating backoff, so the notice would have gone out every
+     * time somebody joined instead of four times in total.
+     */
+    this.deps.permissionProblems?.clear(guildId, channelId);
 
     // Grouped category: slot the new channel into the group block (at the bottom,
     // since it's the newest) with one bulk reorder. Positions aren't rate-limited,

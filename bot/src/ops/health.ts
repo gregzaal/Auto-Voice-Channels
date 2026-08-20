@@ -49,6 +49,16 @@ export interface DiagnosticsReport {
    * alert a human, never a reason to block a rollout that might be the fix.
    */
   backup: Record<string, unknown>;
+  /**
+   * Guild-facing permission-problem notices: attempted, where they landed, and
+   * what suppressed the rest.
+   *
+   * The only outbound sender that talks to customers unprompted, so "too
+   * chatty" and "reaching nobody" both have to be answerable from here rather
+   * than from a complaint. A high `undeliverable` against a healthy
+   * `attempted` is a fleet-wide delivery problem, not a quiet week.
+   */
+  problems: Record<string, unknown>;
 }
 
 export interface HealthServerOptions {

@@ -382,6 +382,90 @@ describe('VoiceFeature (integration)', () => {
     expect(logs.some((l) => l.level === 1 && l.message.includes('create a channel'))).toBe(true);
   });
 
+  it('clears the create incident once a create works again', async () => {
+    const problems = new PermissionProblemTracker();
+    const resolved: string[] = [];
+    problems.onResolved = (guildId) => resolved.push(guildId);
+    const f = new VoiceFeature({
+      autoChannels,
+      secondaries,
+      guilds,
+      actions,
+      voice,
+      selfHosted: true,
+      logger: fakeLogger(),
+      permissionProblems: problems,
+    });
+    const alice = member('alice');
+    voice.put(PRIMARY, alice);
+
+    actions.failCreate = true;
+    await f.handleVoiceStateUpdate({ guildId: GUILD, member: alice, afterChannelId: PRIMARY });
+    expect(problems.recent(GUILD)).toHaveLength(1);
+
+    // The admin fixes the override. Nothing cleared the create incident before
+    // this, and unlike a secondary the creator channel lives on, so it stuck
+    // around for the life of the process and kept being reported as broken.
+    actions.failCreate = false;
+    await f.handleVoiceStateUpdate({ guildId: GUILD, member: alice, afterChannelId: PRIMARY });
+    expect(problems.recent(GUILD)).toEqual([]);
+    expect(resolved).toEqual([GUILD]);
+  });
+
+  it('blames the creator channel, not the room it just deleted, when the move fails', async () => {
+    const problems = new PermissionProblemTracker();
+    const f = new VoiceFeature({
+      autoChannels,
+      secondaries,
+      guilds,
+      actions,
+      voice,
+      selfHosted: true,
+      logger: fakeLogger(),
+      permissionProblems: problems,
+    });
+    const alice = member('alice');
+    voice.put(PRIMARY, alice);
+    actions.failMove = true;
+    await f.handleVoiceStateUpdate({ guildId: GUILD, member: alice, afterChannelId: PRIMARY });
+
+    // The secondary is created then deleted on this path, so recording it
+    // would hand the admin a `<#id>` mention for a channel that no longer
+    // exists. The creator channel is the thing they configured.
+    const recorded = problems.recent(GUILD);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]!.channelId).toBe(PRIMARY);
+    expect(recorded[0]!.operation).toBe('move');
+  });
+
+  it('does not clear-and-re-record on every join when only the move fails', async () => {
+    const problems = new PermissionProblemTracker();
+    const resolved: string[] = [];
+    problems.onResolved = (guildId) => resolved.push(guildId);
+    const f = new VoiceFeature({
+      autoChannels,
+      secondaries,
+      guilds,
+      actions,
+      voice,
+      selfHosted: true,
+      logger: fakeLogger(),
+      permissionProblems: problems,
+    });
+    const alice = member('alice');
+    voice.put(PRIMARY, alice);
+    actions.failMove = true;
+
+    await f.handleVoiceStateUpdate({ guildId: GUILD, member: alice, afterChannelId: PRIMARY });
+    await f.handleVoiceStateUpdate({ guildId: GUILD, member: alice, afterChannelId: PRIMARY });
+
+    // Both failures record against the primary, so clearing on a bare create
+    // would resolve and re-open the guild on every join, which resets the
+    // notifier's backoff and turns four notices into one per join.
+    expect(resolved).toEqual([]);
+    expect(problems.recent(GUILD)).toHaveLength(1);
+  });
+
   it('gives up a channel it can no longer delete (Missing Access), notifying instead of retrying', async () => {
     const logs: { level: number; message: string }[] = [];
     const problems = new PermissionProblemTracker();

@@ -15,6 +15,10 @@ import {
 } from 'discord.js';
 import { tierFor, type AuthStatus } from '@avc/core';
 import { SITE_URL, subscribeUrl } from '../features/billing/messages.js';
+import {
+  permissionProblemSummary,
+  type ProblemLike,
+} from '../features/voice/permissionProblems.js';
 
 /** Custom-id namespace for the `/setup` panel components. */
 export const SETUP_PREFIX = 'avc:setup:';
@@ -175,7 +179,7 @@ export interface SetupPanelInput {
    * different fixes. Reporting them with one message sent an admin chasing four
    * permissions the bot already held (2026-08-19).
    */
-  problems?: { channelId: string; operation?: 'create' | 'move' | 'delete' | 'rename' }[];
+  problems?: ProblemLike[];
   /**
    * Whether `/templateassistant` is available on this instance. Off is the
    * self-host default (no model endpoint configured), and the button is hidden
@@ -232,34 +236,14 @@ export function buildSetupPanel(input: SetupPanelInput): InteractionReplyOptions
 
   // Surface recent permission incidents with the fix that actually matches
   // what failed, so admins aren't left guessing why automation stalled.
+  //
+  // Rendered by the shared summariser, which the push notice also uses: an
+  // admin who got the notice and then opens this panel must read the same
+  // advice, or one of the two is teaching them the wrong fix.
   if (input.problems && input.problems.length > 0) {
-    const list = (ps: { channelId: string }[]): string =>
-      ps
-        .slice(0, 5)
-        .map((p) => `<#${p.channelId}>`)
-        .join(', ');
-    const creates = input.problems.filter((p) => p.operation === 'create');
-    const access = input.problems.filter((p) => p.operation !== 'create');
-    const lines: string[] = [];
-    if (creates.length > 0) {
-      lines.push(
-        `I could not create rooms from ${list(creates)}. I need **Manage Channels** and ` +
-          '**Manage Roles** there or on the category, and I can only copy permissions I hold ' +
-          'myself, so an override granting something I do not have will stop me. If my ' +
-          'permissions already look right, that override is the thing to check.',
-      );
-    }
-    if (access.length > 0) {
-      lines.push(
-        `I lost access to ${list(access)} and stopped managing ` +
-          `${access.length === 1 ? 'it' : 'them'}. Grant my role **View Channel**, ` +
-          '**Connect**, **Manage Channels** and **Move Members** on the channel (or its ' +
-          "category), then it'll work again.",
-      );
-    }
     embed.fields!.push({
       name: `⚠️ Needs attention (${input.problems.length})`,
-      value: lines.join('\n\n'),
+      value: permissionProblemSummary(input.problems).join('\n\n'),
     });
   }
 
@@ -320,7 +304,7 @@ function adminRows(enabled: boolean, assistant: boolean): ReturnType<typeof rowO
       .setStyle(ButtonStyle.Primary),
     new ButtonBuilder()
       .setCustomId(setupId('general'))
-      .setLabel('“No game” label')
+      .setLabel('"No game" label')
       .setEmoji('🎮')
       .setStyle(ButtonStyle.Primary),
     languageButton(),
@@ -400,7 +384,7 @@ export const GENERAL_MODAL_ID = 'avc:setup:label:set';
 export function buildGeneralModal(current?: string): ModalBuilder {
   const input = new TextInputBuilder()
     .setCustomId('label')
-    .setLabel('“No game” label')
+    .setLabel('"No game" label')
     .setPlaceholder('General')
     .setStyle(TextInputStyle.Short)
     .setRequired(true)

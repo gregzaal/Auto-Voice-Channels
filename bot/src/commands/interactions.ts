@@ -965,7 +965,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       return;
     }
     const res = await run(guildId, 'cmd:logging', () =>
-      deps.settings.setLogging(guildId, target, parsed.level),
+      deps.settings.setLogging(guildId, target, parsed.level, parsed.alerts),
     );
     await interaction.reply({
       content: formatResult(res),

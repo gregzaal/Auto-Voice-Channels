@@ -46,6 +46,7 @@ import {
   type ErrorReporter,
 } from './ops/errorReporter.js';
 import { ServerLogger } from './ops/serverLog.js';
+import { PermissionProblemNotifier } from './ops/permissionProblemNotifier.js';
 import { buildGatewayClient } from './gateway/client.js';
 import {
   DiscordVoiceActions,
@@ -234,6 +235,30 @@ async function main(): Promise<void> {
   await entitlementGate.start();
   // Tracks "I lost access to this channel" incidents, surfaced in /setup + /logging.
   const permissionProblems = new PermissionProblemTracker();
+  /**
+   * ...and pushed to the guild, which /setup and /logging between them were not
+   * doing: the log channel is opt-in and 5 of 1008 guilds have one, so the most
+   * actionable message the bot produces was reaching almost nobody.
+   *
+   * Runs on self-host too. A self-hoster hits the same 50013 for the same
+   * reasons, and the ladder degrades to "post in the system channel", which
+   * needs nothing configured. Gated per fleet by `problems.notify_disabled`.
+   */
+  const problemNotifier = new PermissionProblemNotifier({
+    client,
+    guilds: settingsCache,
+    store: guildsRepo,
+    problems: permissionProblems,
+    autoChannels,
+    flags,
+    selfHosted: config.selfHosted,
+    report: (kind, message, context) => errorReporter.report(kind, message, context),
+    logger: logger.child({ component: 'problem-notifier' }),
+  });
+  // Late-bound both ways: the notifier renders from the tracker, so one of the
+  // two has to be wired after the other exists.
+  permissionProblems.onRecord = (guildId) => problemNotifier.record(guildId);
+  permissionProblems.onResolved = (guildId) => problemNotifier.resolved(guildId);
   // Private-channel "⇩ Join" mechanism. Wired into the feature's cleanup hook so
   // a private channel's companion is deleted whenever the channel goes away.
   const privacy = new PrivacyService({
@@ -726,6 +751,7 @@ async function main(): Promise<void> {
         billing: billingReconciler ? { ...billingReconciler.stats } : null,
         ai: assistant ? { ...assistant.stats } : null,
         backup: backupScheduler ? { ...backupScheduler.stats } : { enabled: false },
+        problems: problemNotifier.snapshot(),
         metrics: { ...metricsCollector.stats },
       };
     },

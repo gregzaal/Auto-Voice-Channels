@@ -161,6 +161,8 @@ export class RecordingVoiceActions implements VoiceActions {
   renameGoneForChannel?: string;
   /** When true, `createVoiceChannel` throws Missing Permissions (tests the create path). */
   failCreate = false;
+  /** When true, `moveMember` throws Missing Permissions (tests the created-but-stranded path). */
+  failMove = false;
   private seq = 0;
   private readonly created = new Set<string>();
 
@@ -230,6 +232,18 @@ export class RecordingVoiceActions implements VoiceActions {
   }
 
   moveMember(guildId: string, memberId: string, channelId: string | null): Promise<void> {
+    if (this.failMove) {
+      return Promise.reject(
+        new DiscordAPIError(
+          { code: 50013, message: 'Missing Permissions' } as never,
+          50013,
+          403,
+          'PATCH',
+          'https://discord.test',
+          {} as never,
+        ),
+      );
+    }
     this.actions.push({ type: 'move', guildId, memberId, channelId });
     return Promise.resolve();
   }

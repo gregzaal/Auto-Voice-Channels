@@ -91,6 +91,21 @@ export const RUNTIME_FLAGS = {
    * shared gauges coming. `global.pause` stops both.
    */
   METRICS_DISABLED: 'metrics.disabled',
+
+  // -- Guild-facing problem notices -----------------------------------------
+  /**
+   * Kill-switch for pushing permission problems to the guilds they affect.
+   *
+   * The lever that matters most on this list, because it is the only flag
+   * guarding something that talks to customers unprompted: with it set, a
+   * problem still lands in `/setup` and in a configured `/logging` channel, and
+   * nothing is sent anywhere on its own. `global.pause` stops it too.
+   *
+   * Reach for it if the notices turn out to be too frequent or to be reaching
+   * the wrong person. Neither is visible from inside the fleet, which is what
+   * makes a no-deploy switch worth having here rather than a redeploy.
+   */
+  PROBLEM_NOTICE_DISABLED: 'problems.notify_disabled',
 } as const;
 
 /** Defaults for the AI levers, kept next to the keys so bot + tooling agree. */

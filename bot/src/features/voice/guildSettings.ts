@@ -17,6 +17,7 @@ export const SETTINGS_KEYS = {
   logLevel: 'log_level',
   groups: 'groups',
   contact: 'contact_user_id',
+  problemAlerts: 'problem_alerts',
 } as const;
 
 /**
@@ -143,6 +144,57 @@ export function readLogging(settings: Record<string, unknown>): LoggingConfig {
   const lvl = settings[SETTINGS_KEYS.logLevel];
   const level: 1 | 2 | 3 = lvl === 2 || lvl === 3 ? lvl : 1;
   return { enabled: channelId !== null, level, channelId };
+}
+
+/**
+ * How a guild wants to hear about a problem only an admin can fix.
+ *
+ * `contact` mentions the guild's recorded setup contact, and only while they are
+ * still a member. It never mentions the owner: the owner is the fallback for who
+ * receives a DM, and a fallback is a guess, which is good enough to deliver to
+ * and not good enough to ping. `quiet` still delivers, mentioning nobody. `off`
+ * stops the push entirely, and `/setup` remains the pull.
+ */
+export type ProblemAlertMode = 'contact' | 'quiet' | 'off';
+
+/**
+ * Reads the problem-alert preference, defaulting to `contact`.
+ *
+ * **On rather than off by default, which is a deliberate departure from how
+ * `/logging` works.** `/logging` is an event stream nobody asked for until they
+ * ask, so it stays silent; this fires only when the bot has already stopped
+ * doing the job the guild installed it for, and the whole reason
+ * `contact_user_id` exists is to answer "who do we talk to when a guild's
+ * automation breaks". A default of `quiet` would leave the message sitting in
+ * a channel nobody reads, which is the delivery gap this exists to close.
+ */
+export function readProblemAlerts(settings: Record<string, unknown>): ProblemAlertMode {
+  const raw = settings[SETTINGS_KEYS.problemAlerts];
+  // `false` is accepted alongside `'off'` because the `logging` key next door
+  // uses `false` for the same meaning, and an admin tool writing the obvious
+  // thing should not silently leave alerts on.
+  if (raw === false || raw === 'off') return 'off';
+  if (raw === 'quiet') return 'quiet';
+  return 'contact';
+}
+
+/**
+ * The line confirming what a guild just chose, appended to the `/logging` reply.
+ *
+ * Lives here rather than inline in `GuildSettingsService` so the copy-rules
+ * test can enumerate all three without a hand-copied list of literals, which is
+ * the thing AGENTS.md says rots.
+ *
+ * Never says "here": the notice goes to the server's system channel or a DM,
+ * not to the log channel this panel is otherwise about.
+ */
+export function problemAlertConfirmation(mode: ProblemAlertMode): string {
+  if (mode === 'off')
+    return '🔕 Problems only I can flag will show up in `/setup`, and nowhere else.';
+  if (mode === 'quiet') {
+    return '🔔 If AVC stops working I will say so in the server, without mentioning anyone.';
+  }
+  return '🔔 If AVC stops working I will say so in the server, and mention whoever set it up.';
 }
 
 /**

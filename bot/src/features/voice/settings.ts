@@ -17,8 +17,10 @@ import {
   readContact,
   readGroups,
   readLogging,
+  readProblemAlerts,
+  problemAlertConfirmation,
 } from './guildSettings.js';
-import type { GroupConfig } from './guildSettings.js';
+import type { GroupConfig, ProblemAlertMode } from './guildSettings.js';
 import { type CommandResult } from './commands.js';
 
 /** Logging verbosity levels (legacy parity): 1 lifecycle, 2 changes, 3 joins/leaves. */
@@ -378,25 +380,43 @@ export class GuildSettingsService {
   }
 
   /** Reads the current logging configuration (for pre-filling the `/logging` modal). */
-  async getLogging(
-    guildId: string,
-  ): Promise<{ enabled: boolean; level: LogLevel; channelId: string | null }> {
+  async getLogging(guildId: string): Promise<{
+    enabled: boolean;
+    level: LogLevel;
+    channelId: string | null;
+    alerts: ProblemAlertMode;
+  }> {
     const guild = await this.deps.guilds.ensure(guildId);
-    return readLogging(guild.settings);
+    return { ...readLogging(guild.settings), alerts: readProblemAlerts(guild.settings) };
   }
 
-  /** Configures the per-guild logging channel + level, or turns logging off. */
+  /**
+   * Configures the per-guild logging channel + level, or turns logging off, and
+   * the separate problem-alert preference.
+   *
+   * One write for both, because they arrive from one modal and two
+   * `updateSettings` calls would be two `pg_notify` round trips to say one
+   * thing.
+   */
   async setLogging(
     guildId: string,
     target: string | null,
     level: LogLevel,
+    alerts: ProblemAlertMode = 'contact',
   ): Promise<CommandResult> {
+    // Always says something: a silent confirmation for the default made
+    // turning alerts back on look like nothing had happened.
+    const alertLine = `\n${problemAlertConfirmation(alerts)}`;
     if (target === null) {
-      await this.deps.guilds.updateSettings(guildId, { logging: false });
-      return ok('📕 Event logging is now disabled.');
+      await this.deps.guilds.updateSettings(guildId, { logging: false, problem_alerts: alerts });
+      return ok(`📕 Event logging is now disabled.${alertLine}`);
     }
-    await this.deps.guilds.updateSettings(guildId, { logging: target, log_level: level });
-    return ok(`📗 Logging events (level **${level}**) to <#${target}>.`);
+    await this.deps.guilds.updateSettings(guildId, {
+      logging: target,
+      log_level: level,
+      problem_alerts: alerts,
+    });
+    return ok(`📗 Logging events (level **${level}**) to <#${target}>.${alertLine}`);
   }
 
   private async primaryFor(
