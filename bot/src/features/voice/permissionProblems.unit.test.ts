@@ -83,13 +83,16 @@ describe('permissionProblemMessage', () => {
     expect(msg).toContain('Manage Channels');
   });
 
-  it('gives create failures the override advice, not the lost-access advice', () => {
+  it('sends create failures to the category, not to a hunt for a copied override', () => {
     const msg = permissionProblemMessage('123', 'create');
-    expect(msg).toContain('Manage Roles');
-    expect(msg).toContain('/inheritpermissions');
+    expect(msg).toContain('Manage Channels');
+    expect(msg).toContain('category');
     // The two failures share a Discord error code and nothing else. Naming the
     // wrong fix sent an admin to check four permissions they already had.
     expect(msg).not.toContain('lost access');
+    // `maskOverwrites` drops bits the bot cannot set, so no copied override can
+    // refuse a create any more. Advice pointing at one is a hunt with no quarry.
+    expect(msg).not.toContain('granting something I do not have');
   });
 });
 

@@ -99,6 +99,14 @@ export class PermissionProblemTracker {
  * already held, on the channel and on its category, while the real cause was
  * an overwrite the bot is not allowed to copy. Advice that names the wrong fix
  * is worse than no advice: it burns the admin's trust in the panel.
+ *
+ * **Corrected 2026-08-20.** The create branch used to say a copied override
+ * granting something the bot lacks "will stop me". That stopped being true when
+ * `maskOverwrites` shipped: it masks every overwrite down to the bot's own bits
+ * before the create, and sends none at all when the bot has no Manage Roles, so
+ * no override can refuse a create any more. The wording outlived the bug by a
+ * day and sent admins hunting a cause that no longer exists, which is the exact
+ * failure the paragraph above is about.
  */
 export function permissionProblemMessage(
   channelId: string,
@@ -106,11 +114,11 @@ export function permissionProblemMessage(
 ): string {
   if (operation === 'create') {
     return (
-      `⚠️ I could not create a channel from <#${channelId}>. I need **Manage Channels** and ` +
-      '**Manage Roles** on it or its category, and I can only copy permissions I hold myself, ' +
-      'so an override there granting something I do not have will stop me. If my permissions ' +
-      'look right already, that override is the thing to look at, or point me somewhere ' +
-      'simpler with `/inheritpermissions`.'
+      `⚠️ I could not create a channel from <#${channelId}>. I need **Manage Channels** on it ` +
+      'or on its category. If my role has it server-wide, check the category for an override ' +
+      'that takes it away again, because a channel override beats a server-wide role. ' +
+      '**Manage Roles** too, if new rooms should inherit permissions rather than just match ' +
+      'the category.'
     );
   }
   if (operation === 'move') {
@@ -172,10 +180,11 @@ export function permissionProblemSummary(problems: readonly ProblemLike[]): stri
   const lines: string[] = [];
   if (creates.length > 0) {
     lines.push(
-      `I could not create rooms from ${list(creates)}. I need **Manage Channels** and ` +
-        '**Manage Roles** there or on the category, and I can only copy permissions I hold ' +
-        'myself, so an override granting something I do not have will stop me. If my ' +
-        'permissions already look right, that override is the thing to check.',
+      `I could not create rooms from ${list(creates)}. I need **Manage Channels** there or on ` +
+        'the category. If my role has it server-wide, check the category for an override that ' +
+        'takes it away again, because a channel override beats a server-wide role. ' +
+        '**Manage Roles** too, if new rooms should inherit permissions rather than just match ' +
+        'the category.',
     );
   }
   /**
