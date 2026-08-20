@@ -164,6 +164,74 @@ describe('billing repositories (integration)', () => {
       expect(await subs.getByPaddleId('psub_1')).toMatchObject({ guildId: 'sub-1' });
       expect(await subs.getByGuild('sub-1')).toMatchObject({ tier: 'l' });
     });
+
+    /**
+     * The billing origin, and specifically the asymmetry in how it is written.
+     *
+     * The country costs a second Paddle API call that is deliberately allowed
+     * to fail without failing the webhook, so a later transaction can arrive
+     * with totals and no country. Overwriting on every transaction would let
+     * one API blip erase a good value at a renewal, silently, and the row would
+     * then read as "this customer has no country" rather than "we did not ask
+     * successfully". Hence: totals always overwrite, origin only fills in.
+     */
+    it('records the billing origin and never nulls it on a later blank', async () => {
+      await subs.upsert({
+        guildId: 'sub-origin',
+        paddleSubscriptionId: 'psub_origin',
+        paddleCustomerId: 'pcus_origin',
+        tier: 'm',
+        status: 'active',
+        price: '5900',
+        currency: 'USD',
+      });
+
+      await subs.recordChargedTotals('psub_origin', {
+        total: '3900',
+        tax: '509',
+        currency: 'USD',
+        countryCode: 'ZA',
+        priceId: 'pri_standard_m',
+      });
+      expect(await subs.getByGuild('sub-origin')).toMatchObject({
+        chargedTotal: '3900',
+        billingCountryCode: 'ZA',
+        billedPriceId: 'pri_standard_m',
+      });
+
+      // A renewal whose address lookup failed: totals move, origin holds. The
+      // country is written by its own method, so the failed case is simply not
+      // calling it, which is what this asserts.
+      await subs.recordChargedTotals('psub_origin', {
+        total: '4100',
+        tax: '535',
+        currency: 'USD',
+        priceId: null,
+      });
+      expect(await subs.getByGuild('sub-origin')).toMatchObject({
+        chargedTotal: '4100',
+        billingCountryCode: 'ZA',
+        billedPriceId: 'pri_standard_m',
+      });
+
+      // A customer who actually moved does get updated.
+      await subs.recordBillingCountry('psub_origin', 'DE');
+      expect(await subs.getByGuild('sub-origin')).toMatchObject({
+        chargedTotal: '4100',
+        billingCountryCode: 'DE',
+      });
+
+      /**
+       * Lowercase is normalised on write, and it is not cosmetic:
+       * `bandForCountry` matches uppercase ISO literals and returns band A for
+       * anything it does not recognise, so a stray lowercase code would be
+       * reported as full-price revenue rather than as unattributed.
+       */
+      await subs.recordBillingCountry('psub_origin', 'za');
+      expect(await subs.getByGuild('sub-origin')).toMatchObject({
+        billingCountryCode: 'ZA',
+      });
+    });
   });
 
   describe('BillingEventRepository (webhook idempotency)', () => {

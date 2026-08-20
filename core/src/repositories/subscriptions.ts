@@ -34,6 +34,17 @@ export const subscriptionRowSchema = z.object({
   scheduledChangeAt: z.date().nullish(),
   price: z.string().nullable(),
   currency: z.string().nullable(),
+  /**
+   * Billing origin, resolved at `transaction.completed`. See schema.ts for why
+   * the band cannot be recovered from the amount.
+   *
+   * `.nullish()` for the usual two reasons plus a third specific to these: web
+   * and bot deploy independently, rows predate the column, AND the country is a
+   * best-effort second API call that is allowed to fail without failing the
+   * webhook. A null here is "not resolved", never "no country".
+   */
+  billingCountryCode: z.string().nullish(),
+  billedPriceId: z.string().nullish(),
   createdAt: z.date(),
   updatedAt: z.date(),
 });
@@ -158,7 +169,13 @@ export class SubscriptionRepository {
    */
   async recordChargedTotals(
     paddleSubscriptionId: string,
-    totals: { total: string; tax?: string | null; currency?: string | null },
+    totals: {
+      total: string;
+      tax?: string | null;
+      currency?: string | null;
+      countryCode?: string | null;
+      priceId?: string | null;
+    },
   ): Promise<void> {
     await this.db
       .update(subscriptions)
@@ -166,8 +183,41 @@ export class SubscriptionRepository {
         chargedTotal: totals.total,
         chargedTax: totals.tax ?? null,
         chargedCurrency: totals.currency ?? null,
+        // Origin fields are written only when we HAVE one, unlike the totals
+        // above, which always arrive together on the same event and are
+        // meaningless individually. A payload shape we do not recognise yields
+        // no price id, and nulling a good one over that would lose a fact we
+        // had for a fact we merely failed to parse.
+        //
+        // Uppercased because `bandForCountry` matches uppercase ISO literals
+        // and returns band A for anything unrecognised, so a lowercase code
+        // would be silently reported as full-price revenue.
+        ...(totals.countryCode ? { billingCountryCode: totals.countryCode.toUpperCase() } : {}),
+        ...(totals.priceId ? { billedPriceId: totals.priceId } : {}),
         updatedAt: new Date(),
       })
+      .where(eq(subscriptions.paddleSubscriptionId, paddleSubscriptionId));
+  }
+
+  /**
+   * Records the billing country on its own, after the totals are already down.
+   *
+   * Separate from `recordChargedTotals` because the two have different
+   * reliability: the totals arrive inside the webhook payload and are the
+   * reason the event exists, while the country costs a second Paddle API call
+   * that is deliberately allowed to fail. Writing them together would make the
+   * money figure wait on the optional one.
+   *
+   * Only ever called with a resolved value, so there is no null branch here: a
+   * failed lookup simply does not call it, and the previous value stands. That
+   * is what stops one API blip erasing a good country at a renewal, silently,
+   * and leaving the row reading as "this customer has no country" rather than
+   * "we did not ask successfully".
+   */
+  async recordBillingCountry(paddleSubscriptionId: string, countryCode: string): Promise<void> {
+    await this.db
+      .update(subscriptions)
+      .set({ billingCountryCode: countryCode.toUpperCase(), updatedAt: new Date() })
       .where(eq(subscriptions.paddleSubscriptionId, paddleSubscriptionId));
   }
 

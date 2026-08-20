@@ -341,6 +341,44 @@ export const subscriptions = pgTable('subscriptions', {
   chargedTax: text('charged_tax'),
   chargedCurrency: text('charged_currency'),
   /**
+   * ISO 3166-1 alpha-2 country the customer is billed in, resolved from the
+   * transaction's `address_id` at `transaction.completed`.
+   *
+   * **The band cannot be recovered from the amount, and this is the column that
+   * makes regional revenue reportable at all.** Three independent reasons, each
+   * sufficient on its own:
+   *
+   *   1. Two USD cells collide exactly. Across all 280 (currency, amount, tier)
+   *      cells in the catalogue only two are ambiguous, but they are USD 8 at S
+   *      and USD 27 at M, each meaning either "band C standard" or "band B
+   *      legacy" -- and every USD-denominated banded country sits behind them,
+   *      50 of 108.
+   *   2. Countries we did not override are AUTO-CONVERTED by Paddle, so their
+   *      amount is not in our table at any rounding. Measured 2026-08-20:
+   *      Iceland and Romania pay EUR 50.50 at tier M where our own EUR override
+   *      is EUR 49.00. Nothing matches 5050, and it moves with the rate.
+   *   3. A band is a policy view of a country. Storing the country means
+   *      re-cutting the bands re-derives history correctly; storing the band
+   *      freezes today's policy into every past row.
+   *
+   * Null for the rows written before this column existed and for any
+   * transaction whose address lookup failed. Both are backfillable: the raw
+   * webhook body in `billing_events.payload` keeps `address_id` forever, and
+   * Paddle resolves it on demand. See `scripts/backfill-billing-origin.ts`.
+   */
+  billingCountryCode: text('billing_country_code'),
+  /**
+   * The Paddle price id actually charged, from the transaction's line item.
+   *
+   * Free (it is already in the payload) and it is what distinguishes a legacy
+   * purchase from a standard one: the two carry different price ids, tagged
+   * `custom_data.avc_legacy`. `legacy_customers.redeemed_at` cannot answer this
+   * -- it is keyed by Discord user, not by subscription, so it says the
+   * purchaser was ELIGIBLE, never that this particular subscription was sold at
+   * the discount.
+   */
+  billedPriceId: text('billed_price_id'),
+  /**
    * Latest refund/credit adjustment on this subscription, from `adjustment.*`
    * webhooks: `pending_approval`, `approved` or `rejected`.
    *
