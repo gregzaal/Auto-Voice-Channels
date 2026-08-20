@@ -60,7 +60,7 @@ export interface BackupSchedulerDeps {
   };
   appVersion: string;
   commit: string;
-  report: (message: string, context: Record<string, unknown>) => void;
+  report: (kind: string, message: string, context: Record<string, unknown>) => void;
   /** Manifest metadata. Injected so the bot needs no SQL of its own. */
   probe: () => Promise<{
     pgServerVersion: string | null;
@@ -357,7 +357,7 @@ export class BackupScheduler {
 
       if (result.prunedFailed.length > 0) {
         // Not a backup failure, but it means the bucket grows forever if left.
-        this.deps.report('Backup retention could not prune', {
+        this.deps.report('backup.prune', 'Backup retention could not prune', {
           failed: result.prunedFailed.length,
         });
       }
@@ -378,7 +378,7 @@ export class BackupScheduler {
           details: { error: message },
         })
         .catch(() => {});
-      this.deps.report('Postgres backup failed', { error: message });
+      this.deps.report('backup.failed', 'Postgres backup failed', { error: message });
     } finally {
       storage.destroy();
     }
@@ -446,7 +446,9 @@ export class BackupScheduler {
           details: { error: message },
         })
         .catch(() => {});
-      this.deps.report('Backup restore drill could not run', { error: message });
+      this.deps.report('backup.drill.error', 'Backup restore drill could not run', {
+        error: message,
+      });
     } finally {
       storage.destroy();
     }
@@ -508,7 +510,7 @@ export class BackupScheduler {
     }
 
     logger.error({ key: result.key, problems: result.problems }, 'restore drill failed');
-    this.deps.report('Backup restore drill failed', {
+    this.deps.report('backup.drill.failed', 'Backup restore drill failed', {
       key: result.key,
       problems: result.problems.join(' | '),
     });

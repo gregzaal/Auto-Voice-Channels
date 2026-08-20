@@ -85,6 +85,17 @@ export function createDatabase(options: CreateDatabaseOptions): DbHandle {
      */
     keepAlive: true,
     keepAliveInitialDelayMillis: 10_000,
+    /**
+     * Fail rather than hang.
+     *
+     * With no timeout, a checkout during a network partition queues forever, so
+     * the INSERT recording "the database is unreachable" never settles: no row,
+     * and no rejection to log either. Silent under exactly the condition it
+     * exists for. It also means each 15s health tick leaves another pending
+     * promise, which on 2026-08-20 would have been ~1900 of them stampeding the
+     * primary on recovery.
+     */
+    connectionTimeoutMillis: 10_000,
     ...(options.applicationName !== undefined ? { application_name: options.applicationName } : {}),
   });
   /**

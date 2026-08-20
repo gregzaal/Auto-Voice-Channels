@@ -17,6 +17,7 @@ export * from './repositories/guildFleetPresence.js';
 export * from './repositories/aiUsage.js';
 export * from './repositories/legacyCustomers.js';
 export * from './repositories/runtimeFlags.js';
+export * from './repositories/alerts.js';
 export * from './repositories/opsAudit.js';
 export * from './repositories/metrics.js';
 export * from './repositories/shardLeases.js';

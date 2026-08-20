@@ -23,6 +23,11 @@ export interface ReconcilerDeps {
   /** Max guilds reconciled concurrently (bounds the DB/CPU burst). Default 10. */
   reconcileConcurrency?: number;
   /**
+   * Operational alerting. Optional so tests and self-host paths that construct
+   * this directly need not supply one, matching every other optional dep here.
+   */
+  report?: (kind: string, message: string, context?: Record<string, unknown>) => void;
+  /**
    * Entitlement gate: non-entitled (hard-gated) guilds are skipped — the gate
    * is non-destructive, so reconcile must never "clean up" (delete) a gated
    * guild's now-unmanaged channels (monetization.md §4). Omitted → all guilds
@@ -90,6 +95,16 @@ export class Reconciler {
     // per-guild query storms simultaneously against the single-primary Postgres.
     const ids = [...guildIds];
     let next = 0;
+    /**
+     * Collected rather than reported per guild.
+     *
+     * A sweep over the whole install base can fail for every guild at once when
+     * the cause is shared -- the database being unreachable, say -- and one
+     * alert per guild would be a thousand messages describing one fault. The
+     * summary below reports the shape instead: how many failed out of how many,
+     * with a sample. On 2026-08-20 this path failed silently for hours.
+     */
+    const failures: string[] = [];
     const worker = async (): Promise<void> => {
       while (next < ids.length) {
         const id = ids[next++]!;
@@ -97,11 +112,20 @@ export class Reconciler {
           await this.reconcileGuild(id, opts);
         } catch (err) {
           this.deps.logger.error({ err, guildId: id }, 'guild reconcile failed (isolated)');
+          failures.push(id);
         }
       }
     };
     const poolSize = Math.min(this.reconcileConcurrency, ids.length);
     await Promise.all(Array.from({ length: poolSize }, () => worker()));
+
+    if (failures.length > 0) {
+      this.deps.report?.('reconcile.failed', 'Guild reconciliation is failing', {
+        failed: failures.length,
+        of: ids.length,
+        sample: failures.slice(0, 5),
+      });
+    }
   }
 
   /**

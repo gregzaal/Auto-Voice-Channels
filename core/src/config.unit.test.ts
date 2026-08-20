@@ -21,7 +21,12 @@ describe('loadConfig', () => {
   it('parses booleanish SELF_HOSTED values', () => {
     // Hosted (SELF_HOSTED=false) additionally requires a diagnostics token
     // and an explicit fleet.
-    const hosted = { ...baseEnv, DIAGNOSTICS_TOKEN: 'x'.repeat(32), FLEET: 'prod' };
+    const hosted = {
+      ...baseEnv,
+      DIAGNOSTICS_TOKEN: 'x'.repeat(32),
+      FLEET: 'prod',
+      ADMIN_CHANNEL_ID: '601348321566654475',
+    };
     expect(loadConfig({ ...baseEnv, SELF_HOSTED: 'true' }).selfHosted).toBe(true);
     expect(loadConfig({ ...baseEnv, SELF_HOSTED: '1' }).selfHosted).toBe(true);
     expect(loadConfig({ ...baseEnv, SELF_HOSTED: 'yes' }).selfHosted).toBe(true);
@@ -52,8 +57,13 @@ describe('loadConfig', () => {
     it('accepts a long token on either deployment', () => {
       const token = 'y'.repeat(40);
       expect(
-        loadConfig({ ...baseEnv, SELF_HOSTED: 'false', FLEET: 'prod', DIAGNOSTICS_TOKEN: token })
-          .diagnosticsToken,
+        loadConfig({
+          ...baseEnv,
+          SELF_HOSTED: 'false',
+          FLEET: 'prod',
+          ADMIN_CHANNEL_ID: '1',
+          DIAGNOSTICS_TOKEN: token,
+        }).diagnosticsToken,
       ).toBe(token);
       expect(
         loadConfig({ ...baseEnv, SELF_HOSTED: 'true', DIAGNOSTICS_TOKEN: token }).diagnosticsToken,
@@ -134,6 +144,7 @@ describe('fleet', () => {
     DATABASE_URL: 'postgres://localhost/avc',
     SELF_HOSTED: 'false',
     DIAGNOSTICS_TOKEN: 'z'.repeat(32),
+    ADMIN_CHANNEL_ID: '601348321566654475',
   };
 
   it('is required when SELF_HOSTED=false', () => {
@@ -143,6 +154,20 @@ describe('fleet', () => {
   it('accepts each known fleet when hosted', () => {
     expect(loadConfig({ ...hostedBase, FLEET: 'prod' }).fleet).toBe('prod');
     expect(loadConfig({ ...hostedBase, FLEET: 'beta' }).fleet).toBe('beta');
+  });
+
+  /**
+   * The beta fleet ran for weeks with this unset, so every operational alert
+   * was silently discarded by NullErrorReporter with nothing saying so. A
+   * hosted fleet must not be able to boot that way.
+   */
+  it('refuses to boot hosted without an admin channel', () => {
+    const { ADMIN_CHANNEL_ID: _omitted, ...noChannel } = hostedBase;
+    expect(() => loadConfig({ ...noChannel, FLEET: 'prod' })).toThrow(/ADMIN_CHANNEL_ID/);
+  });
+
+  it('still lets a self-hoster run without one', () => {
+    expect(loadConfig({ ...baseEnv, SELF_HOSTED: 'true' }).adminChannelId).toBeUndefined();
   });
 
   it('rejects an unknown fleet', () => {

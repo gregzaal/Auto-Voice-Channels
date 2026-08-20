@@ -404,6 +404,86 @@ export const billingEvents = pgTable(
  * undelivered row keeps being re-derived by every advance pass, which is why
  * enqueue has to be idempotent rather than merely cheap.
  */
+/**
+ * Operational alerts, as rows.
+ *
+ * The load-bearing decision from `plans/agentic_management.md`: an alert is a
+ * persisted row first and delivery is a renderer over it. Before this table the
+ * only alerting was fire-and-forget into a Discord channel, so a delivery
+ * failure was indistinguishable from quiet, "what fired last month" was a
+ * scroll rather than a query, and every dedupe was in-process memory that a
+ * restart re-armed.
+ *
+ * Shape copied from `billing_notifications`, which is the reviewed precedent
+ * for this pattern here, including the part that matters most: the unique index
+ * is PARTIAL, on unresolved rows only. A total constraint on `(fleet, key,
+ * target)` would let the first occurrence of a repeating condition silence
+ * every later one forever, which is the exact bug the partial form exists to
+ * prevent.
+ */
+export const alerts = pgTable(
+  'alerts',
+  {
+    id: bigint('id', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
+    /**
+     * Which fleet the condition was observed on. Plain text, not the FLEETS
+     * enum, for the same reason `metrics_hourly.fleet` is: the out-of-process
+     * checker raises alerts that are about the cluster rather than about a bot,
+     * and needs a value (`shared`) that is not a fleet.
+     */
+    fleet: text('fleet').notNull().default('prod'),
+    /** Stable slug for the CONDITION: `db.ping`, `reconcile.failed`. */
+    key: text('key').notNull(),
+    /**
+     * What the condition is about, when that narrows it: a guild id, a shard
+     * id, a metric name. Empty string when the condition is fleet-wide, rather
+     * than null, so it can sit in a unique index without null semantics.
+     */
+    target: text('target').notNull().default(''),
+    /**
+     * Who should see it. The two populations only partly overlap: shard-lease
+     * health is meaningless to a self-hoster and a permission failure is
+     * theirs alone to fix.
+     */
+    audience: text('audience', { enum: ['hosted', 'self_host', 'both'] })
+      .notNull()
+      .default('hosted'),
+    severity: text('severity', { enum: ['info', 'warn', 'critical'] })
+      .notNull()
+      .default('warn'),
+    message: text('message').notNull(),
+    details: jsonb('details')
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    openedAt: timestamp('opened_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Bumped each time the condition is seen again while still open. */
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
+    occurrences: integer('occurrences').notNull().default(1),
+    /**
+     * Set when the condition stops being true. An alert that resolves itself is
+     * still worth keeping: "this flapped nine times last week" is a different
+     * and more useful fact than nine unrelated rows.
+     */
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+    deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+    attempts: integer('attempts').notNull().default(0),
+    lastError: text('last_error'),
+  },
+  (t) => [
+    /**
+     * Partial, on open rows only. See the note above: a total constraint would
+     * mean a condition that recurs after being resolved could never open again.
+     */
+    uniqueIndex('alerts_open_key')
+      .on(t.fleet, t.key, t.target)
+      .where(sql`resolved_at IS NULL`),
+    index('alerts_undelivered_idx')
+      .on(t.openedAt)
+      .where(sql`delivered_at IS NULL`),
+    index('alerts_recent_idx').on(t.openedAt),
+  ],
+);
+
 export const billingNotifications = pgTable(
   'billing_notifications',
   {

@@ -199,6 +199,24 @@ export const configSchema = z
     }
 
     /**
+     * Same reasoning again, and this one was learned the hard way. The beta
+     * fleet ran for weeks with ADMIN_CHANNEL_ID unset, so `ErrorReporter` was
+     * `NullErrorReporter` and every report call site was a no-op -- with
+     * nothing anywhere saying so. A hosted fleet must not be able to boot with
+     * alerting silently switched off. Self-host stays exempt: a self-hoster who
+     * does not want Discord alerts should not be forced to configure one.
+     */
+    if (!cfg.selfHosted && !cfg.adminChannelId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['adminChannelId'],
+        message:
+          'ADMIN_CHANNEL_ID is required when SELF_HOSTED=false. Without it every operational ' +
+          'alert is silently discarded. Set it to a private text channel the bot can post in.',
+      });
+    }
+
+    /**
      * Same fail-fast reasoning, different blast radius. `fleet` defaults to
      * `prod` so self-host needs no config, but on the hosted side an unset FLEET
      * means the beta bot would quietly claim prod's shard leases and read prod's

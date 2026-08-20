@@ -7,6 +7,7 @@ import {
   createLogger,
   GuildFleetPresenceRepository,
   GuildRepository,
+  AlertRepository,
   isEntitled,
   JoinChannelRepository,
   loadConfig,
@@ -40,6 +41,8 @@ import { HealthServer, type HealthReport, type SubsystemStatus } from './ops/hea
 import {
   AdminChannelReporter,
   NullErrorReporter,
+  PersistentErrorReporter,
+  TeeErrorReporter,
   type ErrorReporter,
 } from './ops/errorReporter.js';
 import { ServerLogger } from './ops/serverLog.js';
@@ -185,9 +188,28 @@ async function main(): Promise<void> {
   const voice = new DiscordVoiceView(client);
   // Significant errors are reported to the admin channel when configured; a seam
   // for a Sentry-style sink later. No admin channel (self-host default) → no-op.
-  const errorReporter: ErrorReporter = config.adminChannelId
+  /**
+   * Hosted gets both: a persisted row AND a Discord message. Neither replaces
+   * the other -- a row nobody sees wakes nobody, and a Discord message is not
+   * queryable next month.
+   *
+   * Self-host gets the channel alone. The `alerts` table exists there too (one
+   * codebase, one set of migrations) and simply stays empty, matching how the
+   * billing tables already behave. Persisting for an audience with no console
+   * to read it would be storage with no reader.
+   */
+  const channelReporter: ErrorReporter = config.adminChannelId
     ? new AdminChannelReporter({ client, channelId: config.adminChannelId, logger })
     : new NullErrorReporter();
+  const errorReporter: ErrorReporter = config.selfHosted
+    ? channelReporter
+    : new TeeErrorReporter([
+        new PersistentErrorReporter({
+          alerts: new AlertRepository(db, config.fleet),
+          logger,
+        }),
+        channelReporter,
+      ]);
   const creationGate = new RuntimeCreationGate({ flags, logger });
   // Guild settings cache: avoids a Postgres read/write on every voice event, with
   // cross-instance invalidation over LISTEN/NOTIFY (the DB stays source of truth).
@@ -317,7 +339,9 @@ async function main(): Promise<void> {
           inputPerMTok: config.aiPriceInputPerMTok,
           outputPerMTok: config.aiPriceOutputPerMTok,
         },
-        reportAlert: (message, context) => errorReporter.report(message, context),
+        // One kind for both assistant alerts: they fire at most a few times a
+        // day, so they cannot throttle each other in practice.
+        reportAlert: (message, context) => errorReporter.report('ai.alert', message, context),
         logger,
       })
     : undefined;
@@ -335,7 +359,8 @@ async function main(): Promise<void> {
     ...(assistant ? { assistant } : {}),
     selfHosted: config.selfHosted,
     clientId: config.clientId,
-    reportError: (message, context) => errorReporter.report(message, context),
+    // Its own kind: interaction failures are the one of these that can storm.
+    reportError: (message, context) => errorReporter.report('interaction.failed', message, context),
     countCommand: (commandName) =>
       metricsCollector.increment(METRICS.COMMANDS_INVOKED, commandName),
     logger,
@@ -351,6 +376,7 @@ async function main(): Promise<void> {
     managed,
     flags,
     logger,
+    report: (kind, message, context) => errorReporter.report(kind, message, context),
     // Skip hard-gated guilds: the gate is non-destructive, so reconcile must
     // never clean up a gated guild's now-unmanaged channels. Authoritative
     // (cache-backed) read rather than the sync gate — reconcile isn't hot.
@@ -404,7 +430,13 @@ async function main(): Promise<void> {
         },
         appVersion: VERSION,
         commit: COMMIT,
-        report: (message, context) => errorReporter.report(message, context),
+        /**
+         * The four backup conditions keep distinct kinds. AGENTS.md states the
+         * invariant directly: "A failed drill is never reported as a failed
+         * backup." Collapsing them onto one key would also make each occurrence
+         * overwrite the previous message on the same alert row.
+         */
+        report: (kind, message, context) => errorReporter.report(kind, message, context),
         probe: () => probeForManifest(db),
       })
     : undefined;
@@ -639,7 +671,7 @@ async function main(): Promise<void> {
   client.on('error', (err) => {
     gatewayStatus = 'down';
     logger.error({ err }, 'gateway error');
-    errorReporter.report('Gateway error', { error: String(err) });
+    errorReporter.report('gateway.error', 'Gateway error', { error: String(err) });
   });
   client.on('shardDisconnect', (_e, shardId) => {
     logger.warn({ shardId }, 'shard disconnected');
@@ -711,6 +743,16 @@ async function main(): Promise<void> {
       (err: unknown) => {
         dbStatus = 'down';
         logger.warn({ err }, 'db health ping failed');
+        /**
+         * This is the alert that would have caught the 2026-08-20 outage, and
+         * before this line it was a terminal log on a fleet running
+         * LOG_LEVEL=info. The database going away takes everything with it,
+         * because the entitlement gate reads it before any voice event or
+         * interaction is handled.
+         */
+        errorReporter.report('db.ping', 'Database health ping failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       },
     );
   }, 15_000);
