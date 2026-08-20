@@ -33,6 +33,9 @@ function depsRecording(order: string[]): ShutdownDeps {
     metricsCollector: {
       stop: step('metricsCollector.stop'),
     } as unknown as ShutdownDeps['metricsCollector'],
+    alertScheduler: {
+      stop: step('alertScheduler.stop'),
+    } as unknown as ShutdownDeps['alertScheduler'],
     leaseManager: { releaseAll: step('releaseAll') } as unknown as ShutdownDeps['leaseManager'],
     settingsCache: { stop: step('settingsCache.stop') } as unknown as ShutdownDeps['settingsCache'],
     notifier: { close: step('notifier.close') } as unknown as ShutdownDeps['notifier'],
@@ -47,6 +50,7 @@ describe('gracefulDrain', () => {
     await gracefulDrain(depsRecording(order));
 
     expect(order).toEqual([
+      'alertScheduler.stop',
       'stopSweep',
       'billingReconciler.stop',
       'disposeInteractions',
@@ -65,6 +69,17 @@ describe('gracefulDrain', () => {
       'health.stop',
       'closeDb',
     ]);
+  });
+
+  /**
+   * Everything after this line makes the instance look unhealthy on purpose, so
+   * a watcher still evaluating would post a critical and withhold the watchdog
+   * ping on every routine deploy.
+   */
+  it('stops the watcher before anything starts tearing down', async () => {
+    const order: string[] = [];
+    await gracefulDrain(depsRecording(order));
+    expect(order[0]).toBe('alertScheduler.stop');
   });
 
   it('drains in-flight work before releasing leases (no stranded work)', async () => {

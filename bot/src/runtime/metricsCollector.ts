@@ -58,6 +58,15 @@ export interface MetricsCollectorDeps {
    * change, and polling it costs a map walk.
    */
   sample: () => { queueDepth: number; trippedCircuits: number };
+  /**
+   * Reports a significant condition to the operational alert channel.
+   *
+   * Both failure paths below were `/diagnostics` fields and a log line, which
+   * means they were only ever found by someone who already suspected something
+   * and went looking. Telemetry going dark is not itself an outage, so these
+   * are reported and never allowed to gate anything.
+   */
+  report?: (kind: string, message: string, context: Record<string, unknown>) => void;
   now?: () => Date;
   /** How often accumulators are written. Default 5 minutes. */
   flushIntervalMs?: number;
@@ -472,6 +481,10 @@ export class MetricsCollector {
       this.dirty = true;
       this.lastFlushError = (err as Error).message;
       this.deps.logger.warn({ err, pending: this.accumulator.size }, 'metrics flush failed');
+      this.deps.report?.('metrics.flush', 'Metrics flush failed', {
+        error: this.lastFlushError,
+        pending: this.accumulator.size,
+      });
     }
   }
 
@@ -506,6 +519,14 @@ export class MetricsCollector {
       failures += 1;
       this.lastRollupError = `${stage}: ${(err as Error).message}`;
       this.deps.logger.error({ err, stage }, 'metrics rollup stage failed');
+      /**
+       * Keyed by stage, so a broken rollup and a broken prune are separate
+       * conditions rather than one overwriting the other's message.
+       */
+      this.deps.report?.(`metrics.rollup.${stage}`, `Metrics rollup stage ${stage} failed`, {
+        stage,
+        error: (err as Error).message,
+      });
     };
 
     let gauges: Record<string, number> = {};

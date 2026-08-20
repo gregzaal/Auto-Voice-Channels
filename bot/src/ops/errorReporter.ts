@@ -37,6 +37,23 @@ export interface AdminChannelReporterOptions {
   throttleMs?: number;
 }
 
+/**
+ * How long one condition stays quiet after it has been reported.
+ *
+ * Fifteen minutes, raised from five SECONDS, and the old value was not a
+ * throttle in any useful sense. Every alert source here is a repeating check:
+ * the db health ping runs every 15s, the metrics flush every 5 minutes, the
+ * watcher every minute. A sustained outage under the old default would have
+ * posted a message every fifteen seconds for as long as it lasted -- roughly
+ * two thousand of them across the 2026-08-20 outage -- which is not alerting,
+ * it is a denial of service against the person on call.
+ *
+ * A distinct condition is never delayed by this, because the window is per
+ * kind. What it costs is a repeat: a problem that is still true is restated
+ * every fifteen minutes, carrying the count of what it swallowed.
+ */
+const DEFAULT_THROTTLE_MS = 15 * 60_000;
+
 export class AdminChannelReporter implements ErrorReporter {
   private readonly throttleMs: number;
   /**
@@ -53,7 +70,7 @@ export class AdminChannelReporter implements ErrorReporter {
   >();
 
   constructor(private readonly opts: AdminChannelReporterOptions) {
-    this.throttleMs = opts.throttleMs ?? 5_000;
+    this.throttleMs = opts.throttleMs ?? DEFAULT_THROTTLE_MS;
   }
 
   report(kind: string, message: string, context: Record<string, unknown> = {}): void {

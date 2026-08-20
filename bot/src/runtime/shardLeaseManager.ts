@@ -29,6 +29,16 @@ export interface ShardLeaseManagerOptions {
    * lease that merely expired but is still ours (heartbeat re-affirms those).
    */
   onLeaseLost?: (lostShardIds: number[]) => void;
+  /**
+   * Reports a significant condition to the operational alert channel.
+   *
+   * Added because a failing heartbeat was a `logger.error` and nothing else
+   * (`plans/scaling.md` §6.1): the instance keeps its gateway sessions and
+   * keeps serving while its row ages past the TTL and a booting peer
+   * legitimately claims the same shard. Two instances then serve it, and the
+   * only trace is one log line on a fleet running at info.
+   */
+  report?: (kind: string, message: string, context: Record<string, unknown>) => void;
   /** Injectable interval scheduler for tests. */
   setInterval?: typeof setInterval;
   clearInterval?: typeof clearInterval;
@@ -59,11 +69,16 @@ export class ShardLeaseManager {
   private readonly claimRetryIntervalMs: number;
   private readonly claimRetryWindowMs: number;
   private readonly onLeaseLost: ((lostShardIds: number[]) => void) | undefined;
+  private readonly report:
+    | ((kind: string, message: string, context: Record<string, unknown>) => void)
+    | undefined;
   private readonly setIntervalFn: typeof setInterval;
   private readonly clearIntervalFn: typeof clearInterval;
   private readonly sleepFn: (ms: number) => Promise<void>;
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   private owned = new Set<number>();
+  private lastHeartbeatOkAt: number | null = null;
+  private consecutiveHeartbeatFailures = 0;
 
   constructor(options: ShardLeaseManagerOptions) {
     this.repo = options.repo;
@@ -76,6 +91,7 @@ export class ShardLeaseManager {
     this.claimRetryIntervalMs = options.claimRetryIntervalMs ?? 2_000;
     this.claimRetryWindowMs = options.claimRetryWindowMs ?? this.leaseTtlMs * 1.5;
     this.onLeaseLost = options.onLeaseLost;
+    this.report = options.report;
     this.setIntervalFn = options.setInterval ?? setInterval;
     this.clearIntervalFn = options.clearInterval ?? clearInterval;
     this.sleepFn = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -83,6 +99,21 @@ export class ShardLeaseManager {
 
   get ownedShards(): number[] {
     return [...this.owned].sort((a, b) => a - b);
+  }
+
+  /**
+   * Heartbeat liveness, for the in-process watcher to poll.
+   *
+   * Exposed rather than alerted on from in here alone, because the two answer
+   * different questions: this class knows when a single beat failed, and only
+   * something evaluating on a schedule can say the condition is still true and
+   * resolve it when it stops being.
+   */
+  get heartbeatHealth(): { lastOkAt: number | null; consecutiveFailures: number } {
+    return {
+      lastOkAt: this.lastHeartbeatOkAt,
+      consecutiveFailures: this.consecutiveHeartbeatFailures,
+    };
   }
 
   /** Claims this instance's share (up to its cap) in a single pass. */
@@ -136,17 +167,30 @@ export class ShardLeaseManager {
   async heartbeatOnce(): Promise<void> {
     try {
       const owned = await this.repo.heartbeat(this.instanceId);
+      this.lastHeartbeatOkAt = Date.now();
+      this.consecutiveHeartbeatFailures = 0;
       const ownedSet = new Set(owned);
       const lost = [...this.owned].filter((shardId) => !ownedSet.has(shardId));
       this.owned = ownedSet;
       if (lost.length > 0) {
         this.logger.error({ lost, stillOwned: owned }, 'lost shard lease(s) — reacting');
+        // Terminal for this instance: it drains and exits so the replacement
+        // re-claims cleanly. Nothing later in this process will report it.
+        this.report?.('shard.lease_lost', 'Shard lease lost, instance is draining', {
+          lost: lost.join(', '),
+          stillOwned: owned.length,
+          instanceId: this.instanceId,
+        });
         this.onLeaseLost?.(lost);
         return;
       }
       this.logger.debug({ count: owned.length }, 'heartbeat refreshed leases');
     } catch (err) {
-      this.logger.error({ err }, 'heartbeat failed');
+      this.consecutiveHeartbeatFailures += 1;
+      this.logger.error(
+        { err, consecutiveFailures: this.consecutiveHeartbeatFailures },
+        'heartbeat failed',
+      );
     }
   }
 

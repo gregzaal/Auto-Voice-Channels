@@ -89,6 +89,34 @@ export const configSchema = z
     adminChannelId: z.string().optional(),
 
     /**
+     * Dead-man's switch. The in-process watcher POSTs here on every healthy
+     * tick, and something outside notices when the POSTs stop.
+     *
+     * Optional and unset by default, so nothing changes for a self-hoster who
+     * does not want it -- but it is the one piece of down-detection a
+     * self-hoster can have at all. Everything else in this system is pull-based
+     * and needs an observer we do not run for them. A push to any free
+     * heartbeat service costs us nothing and gives them the signal that matters
+     * most: the bot stopped.
+     *
+     * https over the public internet, so a health signal is not a plaintext
+     * beacon announcing the deployment exists. **`http://` is allowed to a
+     * loopback or private address**, because the self-hoster running
+     * uptime-kuma on their own LAN is exactly who this option is for, and
+     * config is fail-fast: refusing that URL does not warn them, it stops the
+     * bot from booting at all.
+     */
+    watchdogPingUrl: z
+      .string()
+      .url()
+      .refine(isSafePingUrl, {
+        message:
+          'WATCHDOG_PING_URL must use https, or http to a loopback or private address ' +
+          '(localhost, 10.x, 172.16-31.x, 192.168.x, or a .local/.internal host).',
+      })
+      .optional(),
+
+    /**
      * Bearer token guarding `GET /diagnostics`.
      *
      * The endpoint discloses shard and instance topology, every runtime flag,
@@ -238,6 +266,40 @@ export const configSchema = z
   // FLEET from an explicit one. Self-host gets `prod` and never thinks about it.
   .transform((cfg) => ({ ...cfg, fleet: cfg.fleet ?? DEFAULT_FLEET }));
 
+/**
+ * Whether a watchdog ping URL is safe to send over.
+ *
+ * https anywhere, or http only to somewhere that cannot leave the operator's
+ * own network. The point is not to protect a secret (the URL is the secret, and
+ * it is in their env either way) but to avoid announcing over the open internet,
+ * in cleartext, that this deployment exists and is currently healthy.
+ */
+function isSafePingUrl(raw: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (url.protocol === 'https:') return true;
+  if (url.protocol !== 'http:') return false;
+
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  if (host.endsWith('.local') || host.endsWith('.internal')) return true;
+  // IPv6 loopback and unique-local (fc00::/7), which is what a private v6
+  // network uses.
+  if (host === '::1' || /^f[cd][0-9a-f]{2}:/.test(host)) return true;
+
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!v4) return false;
+  const [a, b] = [Number(v4[1]), Number(v4[2])];
+  if (a === 127 || a === 10) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  return false;
+}
+
 export type Config = z.infer<typeof configSchema>;
 
 /**
@@ -291,6 +353,7 @@ function envToInput(env: NodeJS.ProcessEnv): Record<string, unknown> {
     instanceId: e.INSTANCE_ID ?? e.FLY_MACHINE_ID,
     httpPort: e.HTTP_PORT,
     adminChannelId: e.ADMIN_CHANNEL_ID,
+    watchdogPingUrl: e.WATCHDOG_PING_URL,
     diagnosticsToken: e.DIAGNOSTICS_TOKEN,
     aiBaseUrl: e.AVC_AI_BASE_URL,
     aiApiKey: e.AVC_AI_API_KEY,

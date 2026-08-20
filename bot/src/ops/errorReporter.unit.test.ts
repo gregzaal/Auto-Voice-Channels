@@ -76,6 +76,24 @@ describe('AdminChannelReporter', () => {
   });
 
   /**
+   * The default window, which is the one production actually runs with.
+   *
+   * It was five SECONDS, which is not a throttle for any source here: every
+   * one of them is a repeating check, so a sustained outage would have posted
+   * a message every few seconds for as long as it lasted. Nothing asserted the
+   * default, so nothing would have caught it going back.
+   */
+  it('throttles a repeat under the default window, with no throttleMs given', async () => {
+    const { client, sent } = fakeClient();
+    const r = new AdminChannelReporter({ client, channelId: 'c', logger });
+    r.report('sustained', 'first');
+    await flush();
+    r.report('sustained', 'second');
+    await flush();
+    expect(sent).toHaveLength(1);
+  });
+
+  /**
    * The burst gate. Without a synchronous in-flight flag, every report arriving
    * during the Discord round trip reads the pre-send timestamp, passes the time
    * gate and fires its own request, which is not a throttle at all.

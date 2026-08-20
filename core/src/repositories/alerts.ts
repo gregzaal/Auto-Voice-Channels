@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, isNull, lt, sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
 import { alerts } from '../db/schema.js';
 
@@ -84,6 +84,30 @@ export class AlertRepository {
           // develops, and the stale first sighting is the less useful one.
           message: input.message,
           details: input.details ?? {},
+          /**
+           * Severity ESCALATES, it does not follow the latest writer, and the
+           * difference is load-bearing rather than tidy.
+           *
+           * The same key is reachable from two writers: an event-driven
+           * `report()` from a catch block, which knows only that something
+           * failed and never passes a severity at all, and the scheduled
+           * watcher, which has confirmed the condition is true right now and
+           * raises it `critical`. Last-writer-wins pins the row to whichever
+           * fired most recently, and the frequent writer is usually the
+           * low-severity one -- so a confirmed outage would sit in the table
+           * labelled `warn`, which is precisely the column `/api/watch`
+           * filters on.
+           *
+           * Taking the max means an open row records the worst the condition
+           * has been. It comes back down by resolving, which starts a fresh
+           * row, not by being quietly downgraded while still true.
+           */
+          severity: sql`case
+            when ${alerts.severity} = 'critical' or ${input.severity ?? 'warn'} = 'critical'
+              then 'critical'
+            when ${alerts.severity} = 'warn' or ${input.severity ?? 'warn'} = 'warn'
+              then 'warn'
+            else 'info' end`,
         },
       })
       .returning({ id: alerts.id, occurrences: alerts.occurrences });
@@ -110,6 +134,88 @@ export class AlertRepository {
       )
       .returning({ id: alerts.id });
     return rows.length > 0;
+  }
+
+  /**
+   * Reconciles a POLLED condition against reality: everything still true is
+   * named in `activeTargets`, and every open row for that key which is not
+   * gets resolved.
+   *
+   * This is the piece that lets an alert come back down on its own. Without
+   * it, one tripped breaker in one guild leaves a row open forever, and any
+   * consumer asking "is anything wrong" latches red permanently -- which is
+   * alert fatigue with a primary key, and worse than not alerting at all.
+   *
+   * An empty `activeTargets` means the condition is true nowhere and resolves
+   * everything under that key, which is the common healthy case and must not
+   * be mistaken for "no filter".
+   */
+  async resolveOthers(
+    key: string,
+    activeTargets: readonly string[],
+    opts: { instance?: string; at?: Date } = {},
+  ): Promise<number> {
+    const at = opts.at ?? new Date();
+    const where = [eq(alerts.fleet, this.fleet), eq(alerts.key, key), isNull(alerts.resolvedAt)];
+    /**
+     * Scoped to the instance that raised it, when the caller knows.
+     *
+     * Without this, reconciliation is actively wrong the moment a fleet has
+     * more than one instance: A's healthy tick would resolve B's genuinely open
+     * condition, because both write rows under the same (fleet, key) and A has
+     * no idea B's guilds exist. Read from `details` rather than a column so it
+     * needs no migration, at the cost of two instances sharing one row for a
+     * fleet-wide key like `db.ping` -- which is degraded rather than dangerous,
+     * since the surviving instance then cannot resolve the broken one's row.
+     */
+    if (opts.instance !== undefined) {
+      where.push(sql`${alerts.details} ->> 'instance' = ${opts.instance}`);
+    }
+    if (activeTargets.length > 0) {
+      /**
+       * One placeholder per target rather than a single array parameter.
+       * Drizzle binds a JS array as a RECORD, so the array forms of these
+       * operators reach Postgres as "op ANY/ALL (array) requires array on
+       * right side" -- a runtime error nothing typechecks, and one this
+       * codebase has already shipped once.
+       */
+      where.push(
+        sql`${alerts.target} not in (${sql.join(
+          activeTargets.map((t) => sql`${t}`),
+          sql`, `,
+        )})`,
+      );
+    }
+    const rows = await this.db
+      .update(alerts)
+      .set({ resolvedAt: at })
+      .where(and(...where))
+      .returning({ id: alerts.id });
+    return rows.length;
+  }
+
+  /**
+   * Ages out alerts nothing has seen for a while.
+   *
+   * The counterpart to {@link resolveOthers} for EVENT-driven conditions,
+   * which have no poll to tell them they stopped. A permission failure that
+   * last happened nine days ago is history, not an open incident, and nothing
+   * else in the system will ever say so: the catch block that raised it does
+   * not run again precisely because the problem went away.
+   */
+  async expireStale(notSeenSince: Date, at = new Date()): Promise<number> {
+    const rows = await this.db
+      .update(alerts)
+      .set({ resolvedAt: at })
+      .where(
+        and(
+          eq(alerts.fleet, this.fleet),
+          isNull(alerts.resolvedAt),
+          lt(alerts.lastSeenAt, notSeenSince),
+        ),
+      )
+      .returning({ id: alerts.id });
+    return rows.length;
   }
 
   /** Alerts opened but never delivered, oldest first. The retry queue. */

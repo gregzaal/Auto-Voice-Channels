@@ -1,0 +1,442 @@
+import {
+  RUNTIME_FLAGS,
+  type AlertAudience,
+  type AlertRepository,
+  type AlertSeverity,
+  type Logger,
+  type RuntimeFlagsRepository,
+} from '@avc/core';
+
+/**
+ * The in-process watcher (`plans/agentic_management.md` step 4).
+ *
+ * The companion to `/api/watch`, and deliberately not a duplicate of it. They
+ * see different things, and the split is the design:
+ *
+ * - `/api/watch` runs in `avc-web` and reads Postgres. It survives this process
+ *   being dead, which is the whole reason it exists, and it is therefore blind
+ *   to everything that never reaches a table: which guild's breaker is open,
+ *   how deep a queue is, whether this instance's gateway is actually connected.
+ * - This runs here, sees all of that, and cannot report its own death.
+ *
+ * Hence the third leg: a dead-man's switch. Every healthy tick POSTs
+ * `WATCHDOG_PING_URL`, and something outside notices when the POSTs stop. That
+ * is also the **only** down-detection available to a self-hoster, who has no
+ * `avc-web` and no second machine, which is why it is a plain optional URL
+ * rather than anything of ours.
+ *
+ * **Raising is the easy half. Resolving is the half that makes it usable.** An
+ * alerting system whose conditions never come back down is a system everyone
+ * learns to ignore, so every polled condition here is reconciled against
+ * reality on each tick, and event-driven ones age out.
+ */
+
+export interface WatchProblem {
+  /** Narrows the condition: a guild id, a shard id. Omit when fleet-wide. */
+  target?: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export interface WatchCheck {
+  /** Stable slug for the CONDITION, and the alert key it raises. */
+  key: string;
+  /**
+   * `critical` means "this instance is not doing its job", and it does more
+   * than colour a row: a confirmed critical suppresses the watchdog ping, so
+   * the external heartbeat monitor fires. Reserve it for conditions where the
+   * bot being up is not the same as the bot working.
+   */
+  severity: AlertSeverity;
+  audience: AlertAudience;
+  /**
+   * Consecutive ticks a problem must be seen before it opens. Anything that
+   * blips during a reconnect or a deploy wants at least 2, for the same reason
+   * the uptime monitors are configured with a confirmation threshold.
+   */
+  confirmations?: number;
+  /** Returns every currently-true instance of the condition. Empty = healthy. */
+  run: () => WatchProblem[] | Promise<WatchProblem[]>;
+}
+
+export interface AlertSchedulerDeps {
+  /**
+   * The durable record. Absent on self-host, where the table exists but stays
+   * empty (there is no console to read it), and the in-memory gate below is
+   * what keeps a Discord channel from being told the same thing every minute.
+   */
+  alerts?: AlertRepository | undefined;
+  flags: RuntimeFlagsRepository;
+  logger: Logger;
+  /**
+   * The notification transport, and deliberately the CHANNEL reporter rather
+   * than the tee'd one every other caller gets.
+   *
+   * This class does its own `raise()` with a real severity and audience, so
+   * routing notifications through a reporter that also persists would write the
+   * same row twice per tick, with the wrong severity on one of them.
+   */
+  notify: (kind: string, message: string, context: Record<string, unknown>) => void;
+  checks: readonly WatchCheck[];
+  /**
+   * Who is doing the watching, stamped into every alert it raises.
+   *
+   * Load-bearing rather than informational: reconciliation resolves what this
+   * instance itself raised and nothing else. Without it, the first instance to
+   * tick healthy would close every other instance's open conditions.
+   */
+  instanceId: string;
+  watchdogPingUrl?: string | undefined;
+  intervalMs?: number;
+  /** How long an unseen alert stays open before it is aged out. */
+  staleAfterMs?: number;
+  fetchFn?: typeof fetch;
+  setIntervalFn?: typeof setInterval;
+  clearIntervalFn?: typeof clearInterval;
+}
+
+export interface AlertSchedulerStats {
+  running: boolean;
+  paused: boolean;
+  disabled: boolean;
+  lastTickAt: string | null;
+  lastError: string | null;
+  openConditions: { key: string; target: string }[];
+  watchdog: {
+    configured: boolean;
+    lastPingAt: string | null;
+    lastError: string | null;
+    /** True when the last tick withheld the ping because of a critical. */
+    suppressed: boolean;
+  };
+}
+
+const DEFAULT_INTERVAL_MS = 60_000;
+const DEFAULT_STALE_AFTER_MS = 24 * 3_600_000;
+const PING_TIMEOUT_MS = 10_000;
+
+/**
+ * The most targets one check will raise rows for in a single tick.
+ *
+ * Targets outside the cap are resolved rather than left stale-stamped: at most
+ * this many rows exist per key, and the log line says how many were dropped.
+ * Leaving them open but un-refreshed would let `expireStale` close them at 24h
+ * while they were still true, which is the one outcome worse than not
+ * reporting them.
+ */
+const MAX_TARGETS_PER_CHECK = 25;
+
+/**
+ * Separator for the `key`+`target` gate ids, written as an escape.
+ *
+ * NUL because it cannot occur in an alert key or a snowflake, and as `\u0000`
+ * rather than a literal because a raw NUL byte in a source file makes git
+ * treat the whole file as binary, which silently costs every future diff and
+ * review of it.
+ */
+const SEP = '\u0000';
+const idOf = (key: string, target: string): string => `${key}${SEP}${target}`;
+
+export class AlertScheduler {
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private ticking = false;
+  private stopping = false;
+  private inFlight: Promise<void> | undefined;
+
+  /** Consecutive observations per condition instance, for `confirmations`. */
+  private readonly streaks = new Map<string, number>();
+  /**
+   * What this process currently believes is open, and the gate deciding whether
+   * to notify.
+   *
+   * In memory rather than read back from the table, so the behaviour is
+   * identical on a self-host that has no table at all. A restart re-notifies a
+   * condition that is still true, which is the right call: a fresh process
+   * restating a live problem is information, not noise.
+   */
+  private readonly openLocally = new Set<string>();
+
+  private lastTickAt: Date | null = null;
+  private lastError: string | null = null;
+  private lastPingAt: Date | null = null;
+  private lastPingError: string | null = null;
+  private pingSuppressed = false;
+  /** Last readable flag snapshot, so a DB blip cannot un-set a kill switch. */
+  private cachedFlags: Record<string, unknown> | null = null;
+
+  private readonly intervalMs: number;
+  private readonly staleAfterMs: number;
+  private readonly fetchFn: typeof fetch;
+  private readonly setIntervalFn: typeof setInterval;
+  private readonly clearIntervalFn: typeof clearInterval;
+
+  constructor(private readonly deps: AlertSchedulerDeps) {
+    this.intervalMs = deps.intervalMs ?? DEFAULT_INTERVAL_MS;
+    this.staleAfterMs = deps.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
+    this.fetchFn = deps.fetchFn ?? fetch;
+    this.setIntervalFn = deps.setIntervalFn ?? setInterval;
+    this.clearIntervalFn = deps.clearIntervalFn ?? clearInterval;
+  }
+
+  start(): void {
+    // `!== undefined`, not truthiness: an injected scheduler may legitimately
+    // hand back 0 as a handle, and a falsy check would then start twice.
+    if (this.timer !== undefined) return;
+    // Cleared here, not only set in `stop()`. Leaving it set made a restarted
+    // scheduler one whose every tick was a silent no-op.
+    this.stopping = false;
+    this.timer = this.setIntervalFn(() => void this.tick(), this.intervalMs);
+    (this.timer as { unref?: () => void }).unref?.();
+    /**
+     * One tick immediately, so the watchdog gets its first ping at boot rather
+     * than a full interval later. A deploy already spends a grace window's
+     * worth of time not pinging, and adding another minute to it on the far
+     * side is how a correctly-configured heartbeat monitor ends up firing on
+     * every routine deploy.
+     */
+    void this.tick();
+  }
+
+  async stop(): Promise<void> {
+    this.stopping = true;
+    if (this.timer) this.clearIntervalFn(this.timer);
+    this.timer = undefined;
+    /**
+     * No final ping, and no bulk resolve on the way out. Draining means going
+     * away: the conditions may well still be true, and the replacement instance
+     * will say so within a tick.
+     */
+    if (this.inFlight) await this.inFlight.catch(() => {});
+  }
+
+  get stats(): AlertSchedulerStats {
+    const flags = this.cachedFlags ?? {};
+    return {
+      running: this.timer !== undefined,
+      paused: flags[RUNTIME_FLAGS.GLOBAL_PAUSE] === true,
+      disabled: flags[RUNTIME_FLAGS.ALERTS_DISABLED] === true,
+      lastTickAt: this.lastTickAt?.toISOString() ?? null,
+      lastError: this.lastError,
+      openConditions: [...this.openLocally].map((id) => {
+        const [key = '', target = ''] = id.split(SEP);
+        return { key, target };
+      }),
+      watchdog: {
+        configured: Boolean(this.deps.watchdogPingUrl),
+        lastPingAt: this.lastPingAt?.toISOString() ?? null,
+        lastError: this.lastPingError,
+        suppressed: this.pingSuppressed,
+      },
+    };
+  }
+
+  async tick(): Promise<void> {
+    if (this.stopping || this.ticking) return;
+    this.ticking = true;
+    this.inFlight = this.runTick().finally(() => {
+      this.ticking = false;
+      this.inFlight = undefined;
+      this.lastTickAt = new Date();
+    });
+    await this.inFlight;
+  }
+
+  private async runTick(): Promise<void> {
+    /**
+     * Kill switches are honoured from the last readable snapshot when the
+     * database is unreachable. A switch someone deliberately set must not
+     * un-set itself the moment the database blips, and a first tick that has
+     * never read one falls through to running, which is the safe direction for
+     * a watcher.
+     */
+    const flags = await this.deps.flags
+      .getAll()
+      .then((f) => {
+        this.cachedFlags = f;
+        return f;
+      })
+      .catch(() => this.cachedFlags);
+
+    if (flags?.[RUNTIME_FLAGS.GLOBAL_PAUSE] === true) return;
+    if (flags?.[RUNTIME_FLAGS.ALERTS_DISABLED] === true) return;
+
+    let criticalOpen = false;
+    for (const check of this.deps.checks) {
+      if (this.stopping) return;
+      const failing = await this.evaluate(check);
+      if (failing && check.severity === 'critical') criticalOpen = true;
+    }
+
+    await this.deps.alerts
+      ?.expireStale(new Date(Date.now() - this.staleAfterMs))
+      .then((n) => {
+        if (n > 0) this.deps.logger.info({ expired: n }, 'aged out alerts nobody has seen');
+      })
+      .catch((err: unknown) => {
+        this.lastError = (err as Error).message;
+        this.deps.logger.warn({ err }, 'alert expiry failed');
+      });
+
+    this.pingSuppressed = criticalOpen;
+    if (!criticalOpen) await this.ping();
+  }
+
+  /** Runs one check and reconciles its alerts. Returns whether it is failing. */
+  private async evaluate(check: WatchCheck): Promise<boolean> {
+    let problems: WatchProblem[];
+    try {
+      problems = await check.run();
+    } catch (err) {
+      /**
+       * A check that throws is UNKNOWN: neither healthy nor failing. It opens
+       * no alert and suppresses no ping, because a bug in one condition must
+       * not be able to declare the whole instance dead to an external monitor.
+       */
+      this.lastError = (err as Error).message;
+      this.deps.logger.warn({ err, key: check.key }, 'watch check could not run');
+      /**
+       * Keyed by the check, not a shared `watch.check`. The notifier throttles
+       * per kind, so one shared key means the first broken check silences every
+       * other broken check for the length of the window -- the exact failure
+       * the per-kind throttle was introduced to fix.
+       */
+      this.deps.notify(`watch.check.${check.key}`, `Health check ${check.key} could not run`, {
+        check: check.key,
+        error: (err as Error).message,
+      });
+      return false;
+    }
+
+    const required = Math.max(1, check.confirmations ?? 1);
+    const seen = new Set<string>();
+    const confirmed: { target: string; problem: WatchProblem }[] = [];
+
+    for (const problem of problems) {
+      const target = problem.target ?? '';
+      const id = idOf(check.key, target);
+      seen.add(id);
+      const streak = (this.streaks.get(id) ?? 0) + 1;
+      this.streaks.set(id, streak);
+      if (streak >= required) confirmed.push({ target, problem });
+    }
+
+    /**
+     * A streak that missed a tick is deleted outright rather than decremented.
+     * `confirmations` means CONSECUTIVE: a decaying counter would let a
+     * condition that flickers once an hour eventually cross a threshold it
+     * never actually sustained, which is precisely the false positive the
+     * threshold exists to prevent.
+     */
+    for (const id of [...this.streaks.keys()]) {
+      if (id.startsWith(`${check.key}${SEP}`) && !seen.has(id)) this.streaks.delete(id);
+    }
+
+    /**
+     * Capped, and the drop is logged rather than silent.
+     *
+     * Each target costs a sequential round trip on the shared pool, every
+     * minute, and the scenario that produces a large N is a database or Discord
+     * incident, which is exactly when that is least affordable. A tick that
+     * outruns its own interval is then silently swallowed by the `ticking`
+     * guard, so an unbounded fan-out does not merely cost time, it stops the
+     * watcher watching.
+     *
+     * Twenty-five named guilds is already past the point where the list is the
+     * useful part of the alert. Beyond that the count is the finding.
+     */
+    if (confirmed.length > MAX_TARGETS_PER_CHECK) {
+      /**
+       * Sorted before truncating, so the SAME targets survive every tick.
+       * Without it the kept set follows whatever order the check happened to
+       * produce, and rows would resolve and re-open as membership shuffled --
+       * turning a cap into a flap generator.
+       */
+      confirmed.sort((a, b) => (a.target < b.target ? -1 : a.target > b.target ? 1 : 0));
+      this.deps.logger.warn(
+        { key: check.key, total: confirmed.length, reported: MAX_TARGETS_PER_CHECK },
+        'watch check matched more targets than it will report',
+      );
+      confirmed.length = MAX_TARGETS_PER_CHECK;
+    }
+
+    for (const { target, problem } of confirmed) {
+      const id = idOf(check.key, target);
+      const isNew = !this.openLocally.has(id);
+      this.openLocally.add(id);
+
+      await this.deps.alerts
+        ?.raise({
+          key: check.key,
+          target,
+          message: problem.message,
+          severity: check.severity,
+          audience: check.audience,
+          details: { ...(problem.details ?? {}), instance: this.deps.instanceId },
+        })
+        .catch((err: unknown) => {
+          this.lastError = (err as Error).message;
+          this.deps.logger.warn({ err, key: check.key }, 'could not persist a watch alert');
+        });
+
+      if (isNew) {
+        this.deps.logger.warn({ key: check.key, target }, problem.message);
+        this.deps.notify(check.key, problem.message, {
+          ...(target ? { target } : {}),
+          ...(problem.details ?? {}),
+        });
+      }
+    }
+
+    const activeTargets = confirmed.map((c) => c.target);
+    const activeIds = new Set(activeTargets.map((t) => idOf(check.key, t)));
+    for (const id of [...this.openLocally]) {
+      if (!id.startsWith(`${check.key}${SEP}`) || activeIds.has(id)) continue;
+      this.openLocally.delete(id);
+      /**
+       * Recovery is announced for criticals only. Knowing an outage ended
+       * matters; knowing that one of a thousand guilds' breakers closed again
+       * is the kind of message that teaches people to mute the channel.
+       */
+      if (check.severity === 'critical') {
+        const [, target = ''] = id.split(SEP);
+        this.deps.notify(`${check.key}.resolved`, `Recovered: ${check.key}`, {
+          ...(target ? { target } : {}),
+        });
+      }
+    }
+
+    await this.deps.alerts
+      ?.resolveOthers(check.key, activeTargets, { instance: this.deps.instanceId })
+      .catch((err: unknown) => {
+        this.lastError = (err as Error).message;
+        this.deps.logger.warn({ err, key: check.key }, 'could not resolve stale watch alerts');
+      });
+
+    return confirmed.length > 0;
+  }
+
+  private async ping(): Promise<void> {
+    const url = this.deps.watchdogPingUrl;
+    if (!url) return;
+    try {
+      const res = await this.fetchFn(url, {
+        method: 'POST',
+        signal: AbortSignal.timeout(PING_TIMEOUT_MS),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      this.lastPingAt = new Date();
+      this.lastPingError = null;
+    } catch (err) {
+      /**
+       * Logged, never reported to the admin channel.
+       *
+       * A failing ping is already about to page someone through the very
+       * monitor it feeds, so alerting on it separately is a duplicate at best.
+       * At worst the endpoint is flapping, and then this would be a message
+       * every minute about a monitor that is working exactly as designed.
+       */
+      this.lastPingError = (err as Error).message;
+      this.deps.logger.warn({ err }, 'watchdog ping failed');
+    }
+  }
+}

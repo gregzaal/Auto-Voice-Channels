@@ -47,6 +47,15 @@ export interface BillingReconcilerDeps {
   instanceId: string;
   /** Which fleet this instance belongs to. Decides what it may deliver. */
   fleet: Fleet;
+  /**
+   * Reports a significant condition to the operational alert channel.
+   *
+   * A tick that throws stops the ladder for this instance until the next hour,
+   * and everything it would have done -- sampling, advancing, delivering -- is
+   * silently not done. There is no user-visible symptom until somebody's
+   * expiry notice never arrives, which is weeks later and untraceable.
+   */
+  report?: (kind: string, message: string, context: Record<string, unknown>) => void;
   /** How often the job ticks. Default 60 min. */
   intervalMs?: number;
   /** Min spacing between cluster-wide advance passes. Default 55 min. */
@@ -157,6 +166,9 @@ export class BillingReconciler {
     this.timer = this.setIntervalFn(() => {
       void this.runOnce().catch((err: unknown) => {
         this.deps.logger.error({ err }, 'billing reconcile tick failed');
+        this.deps.report?.('billing.tick', 'Billing reconcile tick failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
     }, this.intervalMs);
     (this.timer as { unref?: () => void }).unref?.();

@@ -106,6 +106,19 @@ export const RUNTIME_FLAGS = {
    * makes a no-deploy switch worth having here rather than a redeploy.
    */
   PROBLEM_NOTICE_DISABLED: 'problems.notify_disabled',
+
+  // -- Alerting (plans/agentic_management.md step 4) -------------------------
+  /**
+   * Kill-switch for the in-process watcher on THIS fleet: no condition
+   * evaluation, no alert rows, no watchdog ping.
+   *
+   * Note what the last one means. The watchdog ping is a dead-man's switch, so
+   * silencing the watcher makes the external heartbeat monitor go red a few
+   * minutes later. That is the correct behaviour and not a bug to work around:
+   * an operator who has switched off the thing that reports health has, by
+   * definition, switched off the report. `global.pause` stops it too.
+   */
+  ALERTS_DISABLED: 'alerts.disabled',
 } as const;
 
 /** Defaults for the AI levers, kept next to the keys so bot + tooling agree. */

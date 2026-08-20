@@ -34,7 +34,9 @@ import { RuntimeCreationGate } from './runtime/creationGate.js';
 import { ShardLeaseManager } from './runtime/shardLeaseManager.js';
 import { PgIdentifyThrottler } from './runtime/identifyThrottler.js';
 import { installShutdown } from './runtime/shutdown.js';
+import { AlertScheduler } from './runtime/alertScheduler.js';
 import { BackupScheduler } from './runtime/backupScheduler.js';
+import { buildWatchChecks } from './runtime/watchChecks.js';
 import { MetricsCollector } from './runtime/metricsCollector.js';
 import { categorizeError } from './ops/describeError.js';
 import { HealthServer, type HealthReport, type SubsystemStatus } from './ops/health.js';
@@ -126,6 +128,17 @@ async function main(): Promise<void> {
   // Populated once the shutdown handler is installed; lets the lease-loss reaction
   // reuse the graceful-drain path. Until then a lease-loss falls back to exit(1).
   const shutdown: { request?: (reason: string, exitCode: number) => void } = {};
+  /**
+   * The lease manager's alert sink, filled in once the Discord client exists.
+   *
+   * Same late-binding shape as `countError` below, and for the same reason: the
+   * reporter needs a client to post with, and the client needs the lease manager
+   * to know which shards to connect. A condition raised before the reporter is
+   * built is logged and not reported, which only covers the boot-time claim.
+   */
+  const opsReport: {
+    report?: (kind: string, message: string, context: Record<string, unknown>) => void;
+  } = {};
   // Distribute shards across the fleet: each instance claims up to its cap. At one
   // instance (self-host) the cap is the full shard count, so it claims everything.
   const maxShards = shardCapFor(config.totalShards, config.expectedInstances);
@@ -143,6 +156,7 @@ async function main(): Promise<void> {
       logger.error({ lost }, 'shard lease lost — draining for clean re-claim on restart');
       (shutdown.request ?? ((_r, code) => process.exit(code)))('lease-loss', 1);
     },
+    report: (kind, message, context) => opsReport.report?.(kind, message, context),
   });
 
   /**
@@ -202,15 +216,22 @@ async function main(): Promise<void> {
   const channelReporter: ErrorReporter = config.adminChannelId
     ? new AdminChannelReporter({ client, channelId: config.adminChannelId, logger })
     : new NullErrorReporter();
-  const errorReporter: ErrorReporter = config.selfHosted
-    ? channelReporter
-    : new TeeErrorReporter([
-        new PersistentErrorReporter({
-          alerts: new AlertRepository(db, config.fleet),
-          logger,
-        }),
-        channelReporter,
-      ]);
+  /**
+   * One repository, shared with the watcher below.
+   *
+   * Undefined on self-host: the table exists there (one set of migrations) and
+   * stays empty, exactly as the billing tables already do. Persisting for an
+   * audience with no console to read it would be storage with no reader.
+   */
+  const alertRepo = config.selfHosted ? undefined : new AlertRepository(db, config.fleet);
+  const errorReporter: ErrorReporter =
+    config.selfHosted || !alertRepo
+      ? channelReporter
+      : new TeeErrorReporter([
+          new PersistentErrorReporter({ alerts: alertRepo, logger }),
+          channelReporter,
+        ]);
+  opsReport.report = (kind, message, context) => errorReporter.report(kind, message, context);
   const creationGate = new RuntimeCreationGate({ flags, logger });
   // Guild settings cache: avoids a Postgres read/write on every voice event, with
   // cross-instance invalidation over LISTEN/NOTIFY (the DB stays source of truth).
@@ -491,6 +512,7 @@ async function main(): Promise<void> {
       queueDepth: dispatcher.totalDepth(),
       trippedCircuits: dispatcher.trippedCount(),
     }),
+    report: (kind, message, context) => errorReporter.report(kind, message, context),
   });
   countError.record = (err) => metricsCollector.increment(METRICS.ERRORS, categorizeError(err));
   /**
@@ -539,7 +561,37 @@ async function main(): Promise<void> {
         instanceId: config.instanceId,
         // Decides which queued notifications this instance may deliver.
         fleet: config.fleet ?? DEFAULT_FLEET,
+        report: (kind, message, context) => errorReporter.report(kind, message, context),
       });
+
+  /**
+   * The in-process watcher (`plans/agentic_management.md` step 4).
+   *
+   * Unconditional, like the metrics collector: the conditions it evaluates are
+   * as true on a self-host as here, and the watchdog ping is the only
+   * down-detection a self-hoster can have at all. `alerts.disabled` is the off
+   * switch and `global.pause` stops it too.
+   *
+   * It notifies through the CHANNEL reporter rather than the tee'd one, because
+   * it writes its own rows with a real severity and audience. Routing it
+   * through the tee would persist the same condition twice per tick, once
+   * labelled `warn` by a reporter that has no idea what it is looking at.
+   */
+  const alertScheduler = new AlertScheduler({
+    alerts: alertRepo,
+    flags,
+    logger: logger.child({ component: 'watcher' }),
+    notify: (kind, message, context) => channelReporter.report(kind, message, context),
+    instanceId: config.instanceId,
+    checks: buildWatchChecks({
+      client,
+      snapshot: () => dispatcher.snapshot(),
+      dbStatus: () => dbStatus,
+      heartbeat: () => leaseManager.heartbeatHealth,
+      selfHosted: config.selfHosted,
+    }),
+    watchdogPingUrl: config.watchdogPingUrl,
+  });
 
   let gatewayStatus: SubsystemStatus = 'unknown';
   // After READY, a `guildCreate` means either a brand-new guild join or a guild
@@ -753,6 +805,7 @@ async function main(): Promise<void> {
         backup: backupScheduler ? { ...backupScheduler.stats } : { enabled: false },
         problems: problemNotifier.snapshot(),
         metrics: { ...metricsCollector.stats },
+        alerts: { ...alertScheduler.stats },
       };
     },
   });
@@ -817,6 +870,7 @@ async function main(): Promise<void> {
     billingReconciler,
     backupScheduler,
     metricsCollector,
+    alertScheduler,
     entitlementGate,
     closeDb,
   });
@@ -835,6 +889,13 @@ async function main(): Promise<void> {
    * (`hydrate` already ran, much earlier, before the gateway connected.)
    */
   metricsCollector.start();
+  /**
+   * Started here for the opposite reason to the others: the drain STOPS it
+   * first, before anything is torn down, so a deploy never pages about a
+   * machine that is shutting down on purpose. Starting it before the drain
+   * handler existed would leave a window where that guarantee does not hold.
+   */
+  alertScheduler.start();
   leaseManager.startHeartbeat();
 }
 

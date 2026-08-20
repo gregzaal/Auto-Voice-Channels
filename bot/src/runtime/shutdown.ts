@@ -5,6 +5,7 @@ import type { ShardLeaseManager } from './shardLeaseManager.js';
 import type { HealthServer } from '../ops/health.js';
 import type { Reconciler } from '../features/voice/index.js';
 import type { BillingReconciler, EntitlementGate } from '../features/billing/index.js';
+import type { AlertScheduler } from './alertScheduler.js';
 import type { BackupScheduler } from './backupScheduler.js';
 import type { MetricsCollector } from './metricsCollector.js';
 
@@ -27,6 +28,8 @@ export interface ShutdownDeps {
   /** Undefined when SELF_HOSTED (the job never exists there). */
   billingReconciler: BillingReconciler | undefined;
   backupScheduler: BackupScheduler | undefined;
+  /** Always present: the watcher runs on self-host too. */
+  alertScheduler: AlertScheduler;
   /** Always present: the collector runs on self-host too. */
   metricsCollector: MetricsCollector;
   entitlementGate: EntitlementGate;
@@ -43,6 +46,17 @@ export interface ShutdownDeps {
  * wraps it with the exit.
  */
 export async function gracefulDrain(deps: ShutdownDeps): Promise<void> {
+  /**
+   * The watcher stops FIRST, before anything is torn down.
+   *
+   * Everything below this line makes the instance look unhealthy on purpose:
+   * the gateway goes away, leases are released, the pool closes. A watcher
+   * still evaluating during that would confirm `gateway.down`, post a critical
+   * to the admin channel and withhold the watchdog ping, so every routine
+   * deploy would page someone about a machine that is shutting down exactly as
+   * designed.
+   */
+  await deps.alertScheduler.stop();
   clearInterval(deps.dbPingTimer);
   deps.reconciler.stopSweep();
   // Awaited: an in-flight billing pass must finish (or bail at its next
