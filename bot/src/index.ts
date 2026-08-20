@@ -97,7 +97,15 @@ async function main(): Promise<void> {
   logger.info({ selfHosted: config.selfHosted, totalShards: config.totalShards }, 'starting bot');
   installProcessGuards(logger);
 
-  const { db, pool, close: closeDb } = createDatabase({ connectionString: config.databaseUrl });
+  const {
+    db,
+    pool,
+    close: closeDb,
+  } = createDatabase({
+    connectionString: config.databaseUrl,
+    applicationName: `avc-bot-${config.fleet}`,
+    onPoolError: (err) => logger.warn({ err }, 'idle database client errored, pool discarded it'),
+  });
 
   let dbStatus: SubsystemStatus = 'unknown';
   try {

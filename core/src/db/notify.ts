@@ -78,7 +78,18 @@ export class PgNotifier {
   }
 
   private async openClient(): Promise<pg.Client> {
-    const client = new pg.Client({ connectionString: this.connectionString });
+    /**
+     * `keepAlive` matters more here than anywhere else in the codebase. A
+     * LISTEN connection is idle by definition: it sends nothing and waits. The
+     * private-network path drops idle flows after about ten minutes, so without
+     * keepalives this socket is guaranteed to die on a timer, taking settings-
+     * cache invalidation with it until the reconnect loop notices.
+     */
+    const client = new pg.Client({
+      connectionString: this.connectionString,
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 10_000,
+    });
     client.on('notification', (msg) => {
       const set = this.listeners.get(msg.channel);
       if (!set) return;
