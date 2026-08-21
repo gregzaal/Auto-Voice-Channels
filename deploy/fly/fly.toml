@@ -88,7 +88,16 @@ primary_region = "iad"
   LOG_LEVEL = "info"
   NODE_ENV = "production"
   # TOTAL_SHARDS is a managed value; set per scale.
-  TOTAL_SHARDS = "1"
+  #
+  # Raised 1 -> 2 on 2026-08-21 (plans/scaling.md §9, Step A): still one
+  # machine, which claims both shards (cap = ceil(2/1) = 2), so the discord.js
+  # cache still holds every guild and none of the partial-cache class of
+  # defects fixed just before this can fire yet. This is deliberately a
+  # config-only step to exercise real sharding mechanics (two gateway
+  # sessions, a real second identify, per-shard reconcile) before Step B adds
+  # a second machine. A shard-count change is a full stop-and-start of the
+  # fleet, not a rolling deploy (§2.2) - expect ~50-100s fully dark.
+  TOTAL_SHARDS = "2"
   # Fleet size: each instance claims up to ceil(TOTAL_SHARDS / EXPECTED_INSTANCES)
   # shards. Keep this in sync with the running machine count so shards spread
   # evenly (and a replacement machine reliably re-claims a dead peer's share).
