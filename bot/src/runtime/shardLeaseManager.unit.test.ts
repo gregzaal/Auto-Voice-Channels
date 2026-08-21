@@ -98,6 +98,45 @@ describe('ShardLeaseManager', () => {
     expect(mgr.ownedShards).toEqual([0, 2]);
   });
 
+  /**
+   * `plans/scaling.md` §9.1 finding 2: an unfiltered heartbeat re-adopts every
+   * row bearing this instance id, including a shard it no longer serves after
+   * a config change between restarts. Filtering by the currently-owned set is
+   * what lets that stale row age out and become reclaimable by the peer that's
+   * actually supposed to hold it.
+   */
+  it('heartbeatOnce passes only the currently-owned shard ids to the repo', async () => {
+    const repo = fakeRepo({
+      claimAvailable: vi.fn(async () => [0, 2]),
+      heartbeat: vi.fn(async () => [0, 2]),
+    });
+    const mgr = new ShardLeaseManager({
+      repo,
+      logger: fakeLogger(),
+      instanceId: 'i1',
+      totalShards: 3,
+    });
+    await mgr.claim();
+    await mgr.heartbeatOnce();
+    expect(repo.heartbeat).toHaveBeenCalledWith('i1', [0, 2]);
+  });
+
+  it('ownsGuild resolves the Discord shard formula against currently owned shards', async () => {
+    const repo = fakeRepo({ claimAvailable: vi.fn(async () => [1]) });
+    const mgr = new ShardLeaseManager({
+      repo,
+      logger: fakeLogger(),
+      instanceId: 'i1',
+      totalShards: 2,
+    });
+    await mgr.claim(); // owns [1]
+    // (462606582367125509n >> 22n) % 2n === 1n — a real guild id, verified
+    // against the live beta database (plans/scaling.md §9.4).
+    expect(mgr.ownsGuild('462606582367125509')).toBe(true);
+    // (332246283601313794n >> 22n) % 2n === 0n
+    expect(mgr.ownsGuild('332246283601313794')).toBe(false);
+  });
+
   it('heartbeatOnce does not fire the loss handler when nothing was lost', async () => {
     const onLeaseLost = vi.fn();
     const repo = fakeRepo();

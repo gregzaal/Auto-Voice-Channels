@@ -1,4 +1,4 @@
-import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
 import { DEFAULT_FLEET, fleetAdvisoryKey, type Fleet } from '../domain/fleets.js';
 import { identifyBuckets, shardLeases } from '../db/schema.js';
@@ -125,17 +125,32 @@ export class ShardLeaseRepository {
   }
 
   /**
-   * Refreshes the heartbeat for all shards currently owned by `instanceId` and
+   * Refreshes the heartbeat for `shardIds` currently owned by `instanceId` and
    * returns the shard ids still owned. A returned set smaller than what the caller
    * believed it owned means a lease was lost (expired under a stall, or stolen) —
    * the caller must stop serving those shards.
+   *
+   * `shardIds` is required, deliberately — not "defaults to every row this
+   * instance owns". An instance that shrank its claim (a config change between
+   * restarts, e.g. Step A's `[0,1]` down to a Step B `[0]`) can still hold a
+   * stale row for a shard it no longer serves if its own drain wasn't clean; an
+   * unfiltered heartbeat would refresh that row forever, so the peer that is
+   * supposed to own that shard can never claim it (`plans/scaling.md` §9.1
+   * finding 2). Filtering by the caller's own believed-owned set is what makes
+   * that row age out and become reclaimable instead.
    */
-  async heartbeat(instanceId: string): Promise<number[]> {
+  async heartbeat(instanceId: string, shardIds: number[]): Promise<number[]> {
     const now = new Date();
     const updated = await this.db
       .update(shardLeases)
       .set({ heartbeatAt: now, updatedAt: now })
-      .where(and(eq(shardLeases.fleet, this.fleet), eq(shardLeases.instanceId, instanceId)))
+      .where(
+        and(
+          eq(shardLeases.fleet, this.fleet),
+          eq(shardLeases.instanceId, instanceId),
+          inArray(shardLeases.shardId, shardIds),
+        ),
+      )
       .returning({ shardId: shardLeases.shardId });
     return updated.map((r) => r.shardId).sort((a, b) => a - b);
   }

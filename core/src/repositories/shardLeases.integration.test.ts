@@ -64,8 +64,8 @@ describe('ShardLeaseRepository (integration)', () => {
 
       expect((await repo.list()).every((l) => l.fleet === 'prod')).toBe(true);
       expect((await beta.list()).every((l) => l.fleet === 'beta')).toBe(true);
-      expect(await repo.heartbeat('beta-A')).toEqual([]);
-      expect(await beta.heartbeat('prod-A')).toEqual([]);
+      expect(await repo.heartbeat('beta-A', [0, 1])).toEqual([]);
+      expect(await beta.heartbeat('prod-A', [0, 1])).toEqual([]);
     });
 
     it('releases only within its own fleet', async () => {
@@ -76,7 +76,7 @@ describe('ShardLeaseRepository (integration)', () => {
       // Same instance id in both fleets: a cross-fleet release would strand the
       // other fleet's shards with no running owner and no lease-loss signal.
       expect(await beta.releaseAll('shared-name')).toBe(2);
-      expect(await repo.heartbeat('shared-name')).toEqual([0, 1]);
+      expect(await repo.heartbeat('shared-name', [0, 1])).toEqual([0, 1]);
     });
 
     it('throttles identifies per fleet, since max_concurrency is per application', async () => {
@@ -108,7 +108,7 @@ describe('ShardLeaseRepository (integration)', () => {
     await repo.claimAvailable('inst-A', 3, 30_000);
     const before = await repo.list();
     await new Promise((r) => setTimeout(r, 20));
-    const owned = await repo.heartbeat('inst-A');
+    const owned = await repo.heartbeat('inst-A', [0, 1, 2]);
     expect(owned).toEqual([0, 1, 2]);
     const after = await repo.list();
     for (let i = 0; i < 3; i++) {
@@ -121,8 +121,35 @@ describe('ShardLeaseRepository (integration)', () => {
     // Age A's heartbeat so the lease is expired, then let B steal shard 1.
     await env.handle.db.update(shardLeases).set({ heartbeatAt: new Date(Date.now() - 60_000) });
     expect((await repo.claim(1, 'inst-B', 3, 30_000))?.instanceId).toBe('inst-B');
-    // A's heartbeat now refreshes only the shards it still owns (0 and 2).
-    expect(await repo.heartbeat('inst-A')).toEqual([0, 2]);
+    // A's heartbeat, still passing its stale pre-heartbeat belief ([0,1,2] —
+    // it doesn't yet know shard 1 was stolen), now refreshes only the shards
+    // it still owns (0 and 2). That gap between belief and reality is exactly
+    // how a caller learns a lease was lost.
+    expect(await repo.heartbeat('inst-A', [0, 1, 2])).toEqual([0, 2]);
+  });
+
+  /**
+   * `plans/scaling.md` §9.1 finding 2. Simulates an instance whose own belief
+   * of what it owns has shrunk (e.g. a restart under a smaller cap between
+   * Step A and Step B) while the database still carries its stale claim on a
+   * shard it no longer serves. Before this fix, an unfiltered heartbeat would
+   * refresh that row forever — this is what stops that: the row is left
+   * alone, ages past the TTL, and becomes reclaimable by whoever the shard
+   * actually belongs to now.
+   */
+  it('does not refresh a shard outside the given ids, even though still claimed', async () => {
+    await repo.claimAvailable('inst-A', 2, 30_000); // claims [0, 1]
+    const before = await repo.list();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const owned = await repo.heartbeat('inst-A', [0]); // now believes it owns only [0]
+
+    expect(owned).toEqual([0]);
+    const after = await repo.list();
+    expect(after[0]!.heartbeatAt!.getTime()).toBeGreaterThan(before[0]!.heartbeatAt!.getTime());
+    // Shard 1: still claimed by inst-A in the DB, but NOT refreshed.
+    expect(after[1]!.instanceId).toBe('inst-A');
+    expect(after[1]!.heartbeatAt!.getTime()).toBe(before[1]!.heartbeatAt!.getTime());
   });
 
   it('release frees a lease only for its owner', async () => {

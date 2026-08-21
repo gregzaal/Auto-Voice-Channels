@@ -47,9 +47,24 @@ export class DiscordBillingNotifier implements BillingNotifier {
     try {
       // REST fetch works for any guild the bot is in, even off this instance's
       // shards — the reconcile job notifies fleet-wide from one instance.
-      const guild = await this.opts.client.guilds.fetch(guildId);
+      // `cache: false`, deliberately: without it, a fetched foreign guild is
+      // inserted into `client.guilds.cache` permanently (discord.js's
+      // `GuildManager.fetch` default), which corrupts the "my cache only
+      // covers my own shards" invariant every other partial-cache fix here
+      // depends on (`plans/scaling.md` §9.1). Once that guild is cached, its
+      // channels read as real to `channelExists` too, turning finding 1's
+      // otherwise-harmless no-op into an actual cross-shard channel delete.
+      const guild = await this.opts.client.guilds.fetch({ guild: guildId, cache: false });
       if (guild.systemChannelId) {
-        const channel = await guild.channels.fetch(guild.systemChannelId).catch(() => null);
+        // Same reasoning, same option: `GuildChannelManager.fetch` caches by
+        // default too (into the client-level `channels.cache`, independent
+        // of the guild-level cache this call already avoided) - low blast
+        // radius on its own since a text channel's id never collides with a
+        // tracked voice channel's, but it is an unbounded, never-swept leak,
+        // and the whole point of the line above was leaving no cache trail.
+        const channel = await guild.channels
+          .fetch(guild.systemChannelId, { cache: false })
+          .catch(() => null);
         if (channel?.isTextBased()) {
           try {
             await channel.send({ content });

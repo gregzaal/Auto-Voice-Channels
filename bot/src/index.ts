@@ -323,6 +323,9 @@ async function main(): Promise<void> {
       metricsCollector.increment(
         event === 'created' ? METRICS.ROOMS_CREATED : METRICS.ROOMS_DELETED,
       ),
+    // Defense in depth against a direct reconcile call for a guild this
+    // instance's shards don't cover — see the deps doc in handler.ts.
+    ownsGuild: (guildId) => leaseManager.ownsGuild(guildId),
     logger,
   });
   // The one carve-out from the hard-gate short-circuit: joining a creator
@@ -442,6 +445,9 @@ async function main(): Promise<void> {
       const row = await settingsCache.ensure(guildId);
       return isEntitled({ status: row.authStatus, selfHosted: config.selfHosted });
     },
+    // Scopes the sweep to this instance's own shards — see the deps doc in
+    // reconciler.ts. A no-op at one instance, where every shard is owned.
+    ownsGuild: (guildId) => leaseManager.ownsGuild(guildId),
   });
 
   // Monetization (dormant when SELF_HOSTED): new-guild onboarding + the
@@ -815,6 +821,12 @@ async function main(): Promise<void> {
         version: VERSION,
         commit: COMMIT,
         claimedShards: leaseManager.ownedShards,
+        // Without these, `claimedShards: [0]` is byte-identical whether this
+        // is a healthy single-shard fleet or one machine of a misconfigured
+        // multi-instance one silently serving half the guilds
+        // (`plans/scaling.md` §9.1 finding 3).
+        totalShards: config.totalShards,
+        expectedInstances: config.expectedInstances,
         /**
          * Heartbeat round trip to the gateway node actually serving us.
          *
@@ -872,12 +884,24 @@ async function main(): Promise<void> {
 
   // Self-register the global slash commands (idempotent upsert). A failure here
   // shouldn't take the bot down — log and continue; the next boot retries.
-  try {
-    await registerCommands(config.discordToken, config.clientId, logger, config.devGuildId, {
-      includeAssistant: Boolean(assistant),
-    });
-  } catch (err) {
-    logger.error({ err }, 'slash-command registration failed');
+  //
+  // Gated to the instance holding shard 0 (always claimed first, low->high
+  // packing — `ShardLeaseRepository.claimAvailable`'s doc). This is a full
+  // `PUT` replacement of the global command set on every boot, so with two
+  // instances an old-image machine restarting mid-rolling-deploy would
+  // otherwise re-register the OLD command body over the new one the other
+  // instance just registered (`plans/scaling.md` §9.1). At one instance,
+  // shard 0 is always in `ownedShards`, so this is a no-op restriction.
+  if (leaseManager.ownedShards.includes(0)) {
+    try {
+      await registerCommands(config.discordToken, config.clientId, logger, config.devGuildId, {
+        includeAssistant: Boolean(assistant),
+      });
+    } catch (err) {
+      logger.error({ err }, 'slash-command registration failed');
+    }
+  } else {
+    logger.info('skipping slash-command registration: this instance does not hold shard 0');
   }
 
   await client.login(config.discordToken);

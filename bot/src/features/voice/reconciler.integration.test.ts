@@ -1,6 +1,7 @@
 import {
   AutoChannelRepository,
   GuildRepository,
+  ManagedChannelRepository,
   RUNTIME_FLAGS,
   RuntimeFlagsRepository,
   SecondaryChannelRepository,
@@ -24,6 +25,7 @@ describe('Reconciler (integration)', () => {
   let guilds: GuildRepository;
   let autoChannels: AutoChannelRepository;
   let secondaries: SecondaryChannelRepository;
+  let managedRepo: ManagedChannelRepository;
   let flags: RuntimeFlagsRepository;
   let voice: FakeVoiceView;
   let actions: RecordingVoiceActions;
@@ -36,6 +38,7 @@ describe('Reconciler (integration)', () => {
     guilds = new GuildRepository(env.handle.db);
     autoChannels = new AutoChannelRepository(env.handle.db);
     secondaries = new SecondaryChannelRepository(env.handle.db);
+    managedRepo = new ManagedChannelRepository(env.handle.db);
     flags = new RuntimeFlagsRepository(env.handle.db);
   });
 
@@ -45,6 +48,7 @@ describe('Reconciler (integration)', () => {
 
   beforeEach(async () => {
     await env.handle.db.delete(db.schema.secondaryChannels);
+    await env.handle.db.delete(db.schema.managedChannels);
     await env.handle.db.delete(db.schema.autoChannels);
     await env.handle.db.delete(db.schema.runtimeFlags);
     voice = new FakeVoiceView();
@@ -236,5 +240,99 @@ describe('Reconciler (integration)', () => {
 
     // The member sitting in the primary got their secondary.
     expect(actions.ofType('create')).toHaveLength(1);
+  });
+
+  /**
+   * The partial-cache case (`plans/scaling.md` §9.1 finding 1). `scopedGuildIds`
+   * selects fleet-wide from Postgres with no shard predicate; this asserts the
+   * `ownsGuild` filter actually removes a foreign guild from the sweep's scope,
+   * so a channel this instance's (fake, in this test) cache knows nothing about
+   * is left alone rather than read as "gone" and deleted.
+   */
+  it('sweep does not touch a guild this instance owns no shard for', async () => {
+    await secondaries.create({
+      channelId: 'foreign-secondary',
+      guildId: GUILD,
+      primaryChannelId: PRIMARY,
+      state: { name: '#1 [General]' },
+    });
+    // `voice` knows nothing about 'foreign-secondary' — channelExists is false,
+    // exactly as it would be for any channel in a guild we don't cache at all.
+
+    const scopedReconciler = new Reconciler({
+      feature,
+      dispatcher,
+      secondaries,
+      autoChannels,
+      flags,
+      logger: fakeLogger(),
+      ownsGuild: () => false,
+    });
+
+    await scopedReconciler.sweep();
+
+    expect(actions.actions).toHaveLength(0);
+    expect(await secondaries.get('foreign-secondary')).toBeDefined();
+  });
+
+  /**
+   * Defense in depth for the same finding: even a DIRECT `reconcileGuild` call
+   * (ops tooling, or a caller that got the shard scoping wrong) must not delete
+   * a row for a guild this instance doesn't own, independent of the sweep's own
+   * scoping tested above. This exercises the guard in `handler.ts` itself.
+   */
+  it('reconcileGuild itself refuses to delete for a guild it does not own', async () => {
+    await secondaries.create({
+      channelId: 'foreign-secondary-2',
+      guildId: GUILD,
+      primaryChannelId: PRIMARY,
+      state: { name: '#1 [General]' },
+    });
+
+    const scopedFeature = new VoiceFeature({
+      autoChannels,
+      secondaries,
+      guilds,
+      actions,
+      voice,
+      selfHosted: true,
+      logger: fakeLogger(),
+      ownsGuild: () => false,
+    });
+
+    const drift = await scopedFeature.reconcileGuild(GUILD);
+
+    expect(drift.orphanedRecords).toHaveLength(0);
+    expect(actions.actions).toHaveLength(0);
+    expect(await secondaries.get('foreign-secondary-2')).toBeDefined();
+  });
+
+  /**
+   * The same guard, mirrored for the adopted/managed-channels branch
+   * (`handler.ts`'s second destructive site) — not covered by the secondaries
+   * test above, and flagged as untested by the adversarial review before
+   * this landed.
+   */
+  it('reconcileGuild refuses to drop a managed-channel record for a guild it does not own', async () => {
+    await managedRepo.create({ channelId: 'foreign-managed', guildId: GUILD });
+    // `voice` knows nothing about 'foreign-managed' — channelExists is false.
+
+    const scopedFeature = new VoiceFeature({
+      autoChannels,
+      secondaries,
+      managed: managedRepo,
+      guilds,
+      actions,
+      voice,
+      selfHosted: true,
+      logger: fakeLogger(),
+      ownsGuild: () => false,
+    });
+
+    const drift = await scopedFeature.reconcileGuild(GUILD);
+
+    expect(drift.orphanedRecords).toHaveLength(0);
+    expect(actions.actions).toHaveLength(0);
+    expect(await managedRepo.get('foreign-managed')).toBeDefined();
   });
 });

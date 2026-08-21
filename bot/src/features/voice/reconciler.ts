@@ -34,6 +34,19 @@ export interface ReconcilerDeps {
    * reconcile (tests, self-host).
    */
   entitled?: (guildId: string) => boolean | Promise<boolean>;
+  /**
+   * Scopes the sweep to guilds this instance actually owns a shard for.
+   *
+   * `scopedGuildIds()` selects fleet-wide from Postgres with no shard
+   * predicate; on a single instance that's the whole fleet and this is a
+   * no-op, but on a partial-shard instance the guilds it does NOT own would
+   * otherwise be reconciled anyway, and `channelExists` reading the local
+   * discord.js cache would read every one of them as gone — deleting live
+   * `secondary_channels`/`managed_channels` rows the other instance is
+   * actively serving (`plans/scaling.md` §9.1 finding 1). Omitted → every
+   * guild is in scope (tests, self-host, a single-instance fleet).
+   */
+  ownsGuild?: (guildId: string) => boolean;
 }
 
 const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
@@ -145,14 +158,18 @@ export class Reconciler {
     await this.reconcileGuilds(guildIds, opts);
   }
 
-  /** Distinct guilds with at least one primary, tracked secondary, or adopted channel. */
+  /**
+   * Distinct guilds with at least one primary, tracked secondary, or adopted
+   * channel, narrowed to the shards this instance owns (see `ownsGuild`'s doc).
+   */
   private async scopedGuildIds(): Promise<string[]> {
     const [withSecondaries, withPrimaries, withManaged] = await Promise.all([
       this.deps.secondaries.listGuildIds(),
       this.deps.autoChannels.listGuildIds(),
       this.deps.managed?.listGuildIds() ?? Promise.resolve([]),
     ]);
-    return [...new Set([...withSecondaries, ...withPrimaries, ...withManaged])];
+    const all = [...new Set([...withSecondaries, ...withPrimaries, ...withManaged])];
+    return this.deps.ownsGuild ? all.filter((guildId) => this.deps.ownsGuild!(guildId)) : all;
   }
 
   private isPaused(): Promise<boolean> {

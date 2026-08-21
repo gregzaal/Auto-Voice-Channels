@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ChannelType } from 'discord.js';
 import {
   AdminChannelReporter,
   RecordingErrorReporter,
@@ -14,20 +13,25 @@ const logger = {
   error: vi.fn(),
 } as unknown as Parameters<typeof AdminChannelReporter.prototype.constructor>[0]['logger'];
 
-/** A channel whose send resolves when we say so, to control the in-flight window. */
-function fakeClient(opts: { type?: number; send?: () => Promise<void>; missing?: boolean } = {}) {
+/**
+ * A `client.rest.post` whose call resolves (or rejects) when we say so, to
+ * control the in-flight window and simulate every REST failure mode
+ * (channel gone, wrong type, network error) as one shape - the reporter
+ * itself no longer distinguishes them, deliberately (`errorReporter.ts`'s
+ * `send` doc).
+ */
+function fakeClient(opts: { fails?: boolean; send?: () => Promise<void> } = {}) {
   const sent: string[] = [];
-  const channel = {
-    type: opts.type ?? ChannelType.GuildText,
-    send: async ({ content }: { content: string }) => {
-      sent.push(content);
-      if (opts.send) await opts.send();
-    },
-  };
   return {
     sent,
     client: {
-      channels: { fetch: async () => (opts.missing ? null : channel) },
+      rest: {
+        post: async (_route: unknown, { body }: { body: { content: string } }) => {
+          if (opts.fails) throw new Error('channel not found or not messageable');
+          sent.push(body.content);
+          if (opts.send) await opts.send();
+        },
+      },
     } as never,
   };
 }
@@ -132,8 +136,8 @@ describe('AdminChannelReporter', () => {
   it('backs off even when every send fails', async () => {
     const attempts: number[] = [];
     const client = {
-      channels: {
-        fetch: async () => {
+      rest: {
+        post: async () => {
           attempts.push(Date.now());
           throw new Error('nope');
         },
@@ -149,24 +153,16 @@ describe('AdminChannelReporter', () => {
   });
 
   /**
-   * Pointing ADMIN_CHANNEL_ID at a thread, forum or voice text chat used to
-   * disable alerting completely, silently, with no log anywhere.
+   * Pointing ADMIN_CHANNEL_ID at a channel that doesn't exist, or one Discord
+   * refuses a message post to (a category, a voice channel with no text
+   * chat), used to disable alerting completely, silently, with no log
+   * anywhere. There is deliberately no way from here to tell those causes
+   * apart from a channel this instance's shard just doesn't have cached
+   * (`errorReporter.ts`'s `send` doc) - all three reach Discord as a REST
+   * call, and all three must log the same way when it fails.
    */
-  it('logs rather than silently dropping when the channel is not a text channel', async () => {
-    const { client } = fakeClient({ type: ChannelType.GuildVoice });
-    const warn = vi.fn();
-    const r = new AdminChannelReporter({
-      client,
-      channelId: 'c',
-      logger: { ...logger, warn } as never,
-    });
-    r.report('k', 'm');
-    await flush();
-    expect(warn).toHaveBeenCalled();
-  });
-
-  it('logs when the channel cannot be found at all', async () => {
-    const { client } = fakeClient({ missing: true });
+  it('logs rather than silently dropping when the REST post fails', async () => {
+    const { client } = fakeClient({ fails: true });
     const warn = vi.fn();
     const r = new AdminChannelReporter({
       client,

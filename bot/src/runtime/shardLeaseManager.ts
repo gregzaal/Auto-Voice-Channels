@@ -102,6 +102,23 @@ export class ShardLeaseManager {
   }
 
   /**
+   * Whether this instance owns the shard `guildId` hashes to, per Discord's
+   * `(guild_id >> 22) % total_shards` formula.
+   *
+   * Nothing in the tree computed a guild-to-shard mapping before this
+   * (`plans/scaling.md` §9.1 finding 1) — every fleet-wide Postgres read (the
+   * sweep, chiefly) had no way to scope itself to this instance's shards, and
+   * fell back to deciding what to act on by reading the local discord.js
+   * cache instead, which is wrong the moment an instance holds only some of
+   * the shards. This is the primitive that lets a fleet-wide read scope
+   * itself correctly.
+   */
+  ownsGuild(guildId: string): boolean {
+    const shardId = Number((BigInt(guildId) >> 22n) % BigInt(this.totalShards));
+    return this.owned.has(shardId);
+  }
+
+  /**
    * Heartbeat liveness, for the in-process watcher to poll.
    *
    * Exposed rather than alerted on from in here alone, because the two answer
@@ -166,7 +183,10 @@ export class ShardLeaseManager {
 
   async heartbeatOnce(): Promise<void> {
     try {
-      const owned = await this.repo.heartbeat(this.instanceId);
+      // Filtered to what we currently believe we own — see the repo method's
+      // own doc for why an unfiltered heartbeat would let a stale claim on a
+      // shard we no longer serve refresh itself forever.
+      const owned = await this.repo.heartbeat(this.instanceId, [...this.owned]);
       this.lastHeartbeatOkAt = Date.now();
       this.consecutiveHeartbeatFailures = 0;
       const ownedSet = new Set(owned);

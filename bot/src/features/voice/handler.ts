@@ -144,6 +144,16 @@ export interface VoiceFeatureDeps {
    * whether cleanup is working.
    */
   countRoom?: (event: 'created' | 'deleted') => void;
+  /**
+   * Defense in depth for the two "cache says gone, delete the row" branches
+   * below. `reconcileGuild` is meant to run only for a guild whose shard this
+   * instance holds (a gateway event, or the sweep's own scoping), but nothing
+   * stops a direct call for the wrong guild - and on that call, the local
+   * discord.js cache has no data for it at all, so `channelExists` reads
+   * false for every real, live channel. Omitted → the cache is trusted as-is
+   * (tests, self-host, single-instance fleets, where this is always correct).
+   */
+  ownsGuild?: (guildId: string) => boolean;
 }
 
 /** Common option for state-changing operations: report without acting. */
@@ -1497,6 +1507,11 @@ export class VoiceFeature {
     for (const secondary of await this.deps.secondaries.listByGuild(guildId)) {
       const { channelId } = secondary;
       if (!this.deps.voice.channelExists(channelId)) {
+        // "Gone" is only trustworthy for a guild we actually hold a shard
+        // for - see `ownsGuild`'s doc. Skip the row entirely rather than
+        // falling through to the survivor path below, which also assumes
+        // cache data we don't have for a guild we don't own.
+        if (this.deps.ownsGuild && !this.deps.ownsGuild(guildId)) continue;
         if (!dryRun) {
           await this.deps.secondaries.remove(channelId);
           await this.deps.onSecondaryRemoved?.(guildId, channelId);
@@ -1587,6 +1602,7 @@ export class VoiceFeature {
       for (const managed of await this.deps.managed.listByGuild(guildId)) {
         const { channelId } = managed;
         if (!this.deps.voice.channelExists(channelId)) {
+          if (this.deps.ownsGuild && !this.deps.ownsGuild(guildId)) continue;
           if (!dryRun) await this.deps.managed.remove(channelId);
           drift.orphanedRecords.push(channelId);
           continue;

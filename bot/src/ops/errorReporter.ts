@@ -1,4 +1,4 @@
-import { ChannelType, type Client } from 'discord.js';
+import { Routes, type Client } from 'discord.js';
 import type { AlertAudience, AlertRepository, Logger } from '@avc/core';
 
 /**
@@ -176,33 +176,32 @@ export class AdminChannelReporter implements ErrorReporter {
 
   private async send(content: string): Promise<boolean> {
     try {
-      const channel = await this.opts.client.channels.fetch(this.opts.channelId);
-      if (!channel) {
-        this.opts.logger.warn(
-          { channelId: this.opts.channelId },
-          'admin channel not found, operational alerts are going nowhere',
-        );
-        return false;
-      }
-      if (
-        channel.type !== ChannelType.GuildText &&
-        channel.type !== ChannelType.GuildAnnouncement
-      ) {
-        /**
-         * This used to fall through the `if` and return silently, so pointing
-         * ADMIN_CHANNEL_ID at a thread, forum or voice text chat disabled
-         * alerting completely with no indication anywhere.
-         */
-        this.opts.logger.warn(
-          { channelId: this.opts.channelId, type: channel.type },
-          'admin channel is not a text channel, operational alerts are going nowhere',
-        );
-        return false;
-      }
-      await channel.send({ content: content.slice(0, 1900) });
+      /**
+       * Posted by id over REST, never via `client.channels.fetch` first.
+       *
+       * `channels.fetch` resolves through discord.js's `createChannel`, which
+       * returns `undefined` when the channel's guild isn't in
+       * `client.guilds.cache` and `allowUnknownGuild` wasn't passed — which is
+       * exactly the case for an instance that doesn't hold the support
+       * guild's shard. That instance would then log "not found" and lose
+       * push alerting for everything it reports, silently to anyone but the
+       * logs (`plans/scaling.md` §9.1 finding 4). REST doesn't care which
+       * shard this instance holds, or whether the guild is cached at all.
+       *
+       * This also folds in the old "wrong channel type" check: Discord's API
+       * itself rejects a message post to a non-messageable channel, and that
+       * rejection is caught below exactly like any other failure — never
+       * silent, which is the property both checks existed for.
+       */
+      await this.opts.client.rest.post(Routes.channelMessages(this.opts.channelId), {
+        body: { content: content.slice(0, 1900) },
+      });
       return true;
     } catch (err) {
-      this.opts.logger.warn({ err }, 'failed to report error to admin channel');
+      this.opts.logger.warn(
+        { err, channelId: this.opts.channelId },
+        'failed to report error to admin channel',
+      );
       return false;
     }
   }
