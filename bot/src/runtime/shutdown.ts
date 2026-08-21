@@ -39,8 +39,9 @@ export interface ShutdownDeps {
 /**
  * The graceful-drain sequence, ordered so in-flight work finishes before the
  * resources it depends on go away: stop new work (timers/sweep/listeners) →
- * finish in-flight per-guild queues → release shard leases → tear down the
- * gateway, settings cache/notifier, health server, and finally the DB pool.
+ * finish in-flight per-guild queues → destroy the gateway → release shard
+ * leases → tear down settings cache/notifier, health server, and finally the
+ * DB pool.
  *
  * Pure (no `process.exit`) so the ordering is unit-testable; {@link installShutdown}
  * wraps it with the exit.
@@ -80,8 +81,20 @@ export async function gracefulDrain(deps: ShutdownDeps): Promise<void> {
    * a random one.
    */
   await deps.metricsCollector.stop();
-  await deps.leaseManager.releaseAll();
+  /**
+   * The gateway is destroyed BEFORE leases are released, not after.
+   *
+   * Releasing first frees the shard ids in the database while this process
+   * still holds their live WebSocket sessions, and a booting peer retries its
+   * claim every 2s (`plans/scaling.md` §6.2) — a window where a replacement
+   * could legitimately claim a shard this instance is still actively serving.
+   * Destroying first closes those sessions before the rows go free, so
+   * nothing is ever claimable while still live here. Confirmed safe to
+   * reorder: nothing between here and `releaseAll` reads from Discord, and
+   * `client.destroy()` doesn't touch shard leases.
+   */
   await deps.client.destroy();
+  await deps.leaseManager.releaseAll();
   await deps.settingsCache.stop();
   deps.entitlementGate.stop();
   await deps.notifier.close();

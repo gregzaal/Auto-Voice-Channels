@@ -45,7 +45,7 @@ function depsRecording(order: string[]): ShutdownDeps {
 }
 
 describe('gracefulDrain', () => {
-  it('tears down in dependency order: stop work → drain → release → gateway → caches → db', async () => {
+  it('tears down in dependency order: stop work → drain → gateway → release → caches → db', async () => {
     const order: string[] = [];
     await gracefulDrain(depsRecording(order));
 
@@ -61,8 +61,8 @@ describe('gracefulDrain', () => {
       'removeAllListeners',
       'drainAll',
       'metricsCollector.stop',
-      'releaseAll',
       'client.destroy',
+      'releaseAll',
       'settingsCache.stop',
       'entitlementGate.stop',
       'notifier.close',
@@ -95,6 +95,20 @@ describe('gracefulDrain', () => {
     expect(order.indexOf('metricsCollector.stop')).toBeLessThan(order.indexOf('closeDb'));
     // And the DB pool closes last (everything that might query it is gone first).
     expect(order.indexOf('closeDb')).toBe(order.length - 1);
+  });
+
+  /**
+   * `plans/scaling.md` §6.2. The old order released a shard's lease row while
+   * this process still held its live WebSocket session, so a booting peer's
+   * 2s-interval claim retry could poach it while both were momentarily "live"
+   * for the same shard. Destroying the gateway first closes those sessions
+   * before the rows go free, so nothing is ever claimable while still served
+   * here.
+   */
+  it('destroys the gateway before releasing shard leases', async () => {
+    const order: string[] = [];
+    await gracefulDrain(depsRecording(order));
+    expect(order.indexOf('client.destroy')).toBeLessThan(order.indexOf('releaseAll'));
   });
 
   it('clears the db-ping timer (no leak after shutdown)', async () => {
