@@ -148,8 +148,42 @@ primary_region = "iad"
     grace_period = "30s"
 
 [[vm]]
-  size = "shared-cpu-1x"
-  # 2GB, raised from 512mb at the beta switch on 2026-08-19.
+  # `performance-1x` is a DEDICATED core, and the "1x" is misleading: it is not
+  # one step up from shared-cpu-1x, it is ~16x the CPU that machine actually
+  # gets. Changed 2026-08-20 to end a fleet-wide outage, and the mechanism is
+  # worth understanding before anyone sizes this back down to save money.
+  #
+  # A `shared-cpu-Nx` machine has a BASELINE entitlement (1x is ~6.25% of a
+  # physical core, 2x ~12.5%, 4x ~25%) plus a burst balance that accrues while
+  # it runs under baseline and drains while it runs over. Exhaust the balance
+  # and the host pins you at baseline, reporting the difference to the guest as
+  # CPU **steal**. Measured on the day: 92-93% steal, sustained, with the guest
+  # never once idle.
+  #
+  # Nothing crashes when that happens, which is what makes it hard to read. The
+  # process is starved, not broken, so every deadline that is wall-clock rather
+  # than CPU-bound blows at once and each one looks like its own bug: the
+  # Discord heartbeat ACK went to 9407ms against a normal 16ms, `pg` reported
+  # "timeout exceeded when trying to connect" and "Connection terminated
+  # unexpectedly", the lease heartbeat and the sweep failed, and /health missed
+  # its 2s timeout often enough that Fly flapped the service up and down for an
+  # hour. The pg errors in particular read exactly like the idle-socket incident
+  # earlier the same day (fixed in d62c069) and were a red herring.
+  #
+  # Measured steady-state demand once unthrottled: **5-7.4% of a core**, which
+  # is to say it sat almost exactly ON the 6.25% baseline. That is the whole
+  # story. It was never comfortably inside its entitlement, so every transient
+  # spent balance it could not earn back, and it survived for weeks on a
+  # slowly-draining battery before the evening peak finished it.
+  #
+  # So: do not size this by steady-state demand. Boot and reconnect catch-up
+  # measured **18-48%**, 3-8x the steady state, and a reconnect is routine (any
+  # deploy, any gateway resume). shared-cpu-4x would cover the average and still
+  # drain on every restart. A dedicated core removes the failure mode rather
+  # than moving the cliff, and this is the one machine serving 1009 guilds.
+  size = "performance-1x"
+  # 2GB, raised from 512mb at the beta switch on 2026-08-19. It is also
+  # performance-1x's base memory, so the resize did not change it.
   #
   # 512mb was sized for the Lohner testbed's three guilds. The beta fleet
   # inherited 1004, and the first boot on that identity died with
