@@ -589,7 +589,7 @@ export class DiscordVoiceActions implements VoiceActions {
     }
   }
 
-  async setVoiceStatus(_guildId: string, channelId: string, status: string): Promise<void> {
+  async setVoiceStatus(guildId: string, channelId: string, status: string): Promise<void> {
     // discord.js has no helper for voice channel status yet, so call the raw
     // endpoint. Its rate limit is far laxer than channel renames. `''` clears it.
     try {
@@ -598,7 +598,10 @@ export class DiscordVoiceActions implements VoiceActions {
       });
     } catch (err) {
       if (isApiError(err, UNKNOWN_CHANNEL)) return;
-      this.logger?.warn({ err, channelId }, 'failed to set voice channel status');
+      // The guild id was already a parameter and simply went unlogged, which
+      // left the most common cause of this warning (a guild that has not
+      // granted the permission) with nothing to identify the guild by.
+      this.logger?.warn({ err, guildId, channelId }, 'failed to set voice channel status');
     }
   }
 
