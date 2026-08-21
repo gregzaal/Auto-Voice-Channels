@@ -7,6 +7,27 @@ export const SETTINGS_INVALIDATE_CHANNEL = 'avc_settings_invalidate';
 export type NotifyListener = (payload: string) => void;
 
 /**
+ * How often to poke the `LISTEN` connection with a no-op query.
+ *
+ * TCP keepalive is configured in {@link PgNotifier.openClient} and is NOT
+ * sufficient on its own. Observed on the beta fleet 2026-08-21: 28 drop and
+ * reconnect cycles in 4.5 hours, on an exact ten-minute cadence, with
+ * `keepAlive` enabled and a 10s initial delay. Whatever the private-network
+ * path counts as activity, it is not keepalive probes.
+ *
+ * So the connection generates real traffic instead, which no middlebox can
+ * decline to count. Four minutes puts two beats inside the shortest window
+ * that has actually been seen to reap us, so losing one does not let the flow
+ * go quiet.
+ *
+ * The second effect is worth as much as the first: a blackholed socket is
+ * otherwise discovered on the next NOTIFY, which on a quiet night can be
+ * hours. A beat turns that into at most one interval, and the failure path
+ * below routes it into the same reconnect loop as any other drop.
+ */
+export const NOTIFIER_HEARTBEAT_MS = 240_000;
+
+/**
  * A thin wrapper over a dedicated `LISTEN`/`NOTIFY` connection. This is the
  * coordination seam for settings-cache invalidation and lightweight signals.
  * It is intentionally swappable: a different backend (e.g. a shared store)
@@ -23,15 +44,18 @@ export class PgNotifier {
   private readonly reconnectHandlers = new Set<() => void>();
   private closed = false;
   private reconnecting = false;
+  private heartbeat: NodeJS.Timeout | undefined;
 
   constructor(
     private readonly connectionString: string,
     private readonly logger?: Logger,
+    private readonly heartbeatIntervalMs: number = NOTIFIER_HEARTBEAT_MS,
   ) {}
 
   async connect(): Promise<void> {
     if (this.client) return;
     this.client = await this.openClient();
+    this.startHeartbeat();
   }
 
   /** Registers a handler fired after a reconnect (so consumers can resync state). */
@@ -69,11 +93,48 @@ export class PgNotifier {
 
   async close(): Promise<void> {
     this.closed = true;
+    // Cleared before `end()` so a beat cannot race the teardown and resurrect
+    // the reconnect loop on the way out.
+    if (this.heartbeat) {
+      clearInterval(this.heartbeat);
+      this.heartbeat = undefined;
+    }
     this.listeners.clear();
     this.reconnectHandlers.clear();
     if (this.client) {
       await this.client.end();
       this.client = undefined;
+    }
+  }
+
+  /**
+   * Armed once and left running across reconnects: the beat reads `this.client`
+   * each tick rather than closing over one connection, so it keeps working
+   * after the reconnect loop swaps the client out.
+   */
+  private startHeartbeat(): void {
+    if (this.heartbeat || this.heartbeatIntervalMs <= 0) return;
+    this.heartbeat = setInterval(() => void this.beat(), this.heartbeatIntervalMs);
+    // Unref'd so a notifier is never the reason the process refuses to exit.
+    this.heartbeat.unref();
+  }
+
+  private async beat(): Promise<void> {
+    const client = this.client;
+    if (!client || this.closed || this.reconnecting) return;
+    try {
+      await client.query('SELECT 1');
+    } catch (err) {
+      /**
+       * `SELECT 1` has no logical way to fail, so a rejection here is the
+       * connection, not the query. Driving `handleDrop` directly matters
+       * because a blackholed socket may never emit 'error' or 'end' at all:
+       * that is the case this beat exists to catch. It is guarded on `closed`
+       * and `reconnecting`, so calling it redundantly alongside a real event is
+       * harmless.
+       */
+      this.logger?.warn({ err }, 'pg notifier heartbeat failed; reconnecting');
+      this.handleDrop();
     }
   }
 

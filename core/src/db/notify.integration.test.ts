@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PgNotifier, SETTINGS_INVALIDATE_CHANNEL } from '../db/notify.js';
 import { SettingsCache } from '../domain/settingsCache.js';
@@ -5,9 +6,12 @@ import { GuildRepository } from '../repositories/guilds.js';
 import type { PgTestEnv } from '../test/pgContainer.js';
 import { startPostgres } from '../test/pgContainer.js';
 
-const waitFor = async (predicate: () => boolean, timeoutMs = 2000): Promise<void> => {
+const waitFor = async (
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 2000,
+): Promise<void> => {
   const start = Date.now();
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() - start > timeoutMs) throw new Error('timeout waiting for condition');
     await new Promise((r) => setTimeout(r, 10));
   }
@@ -32,6 +36,43 @@ describe('PgNotifier + SettingsCache (integration)', () => {
     await notifier.notify(SETTINGS_INVALIDATE_CHANNEL, 'guild-xyz');
     await waitFor(() => received.includes('guild-xyz'));
     expect(received).toContain('guild-xyz');
+    await notifier.close();
+  });
+
+  it('heartbeats the LISTEN connection, and keeps delivering across beats', async () => {
+    /**
+     * A LISTEN connection sends nothing and waits, so the private-network path
+     * reaps it on a timer. Keepalive probes did not stop that in production, so
+     * the notifier issues real queries. This asserts the beat is actually on
+     * the wire: `pg_stat_activity.query` holds the last statement a backend
+     * ran, and nothing else in this suite runs a bare `SELECT 1`.
+     *
+     * What it cannot cover is the reaping itself. There is no middlebox in a
+     * Testcontainers network, which is the same reason the backup drill's
+     * permission failures only ever showed up against the real cluster.
+     */
+    const notifier = new PgNotifier(env.connectionString, undefined, 50);
+    await notifier.connect();
+    const received: string[] = [];
+    await notifier.listen(SETTINGS_INVALIDATE_CHANNEL, (p) => received.push(p));
+
+    const beatSeen = async (): Promise<boolean> => {
+      const res = await env.handle.db.execute(
+        sql`SELECT 1 FROM pg_stat_activity
+             WHERE query = 'SELECT 1' AND pid <> pg_backend_pid()`,
+      );
+      return res.rows.length > 0;
+    };
+
+    let seen = false;
+    await waitFor(async () => (seen = seen || (await beatSeen())));
+    expect(seen).toBe(true);
+
+    // The beat shares the connection with LISTEN, so prove it did not disturb it.
+    await notifier.notify(SETTINGS_INVALIDATE_CHANNEL, 'after-beat');
+    await waitFor(() => received.includes('after-beat'));
+    expect(received).toContain('after-beat');
+
     await notifier.close();
   });
 
