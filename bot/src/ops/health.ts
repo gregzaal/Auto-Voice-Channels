@@ -5,7 +5,14 @@ import type { Logger } from '@avc/core';
 export type SubsystemStatus = 'up' | 'down' | 'unknown';
 
 export interface HealthReport {
-  /** Overall readiness — `up` only if every critical subsystem is `up`. */
+  /**
+   * Overall readiness — `up` if every critical subsystem is `up`, OR if the
+   * instance is deliberately `idle` (see below) and doing exactly what it
+   * should. `/health`'s HTTP status is this field, verbatim (`200` for `up`,
+   * `503` otherwise) — it is what gates a Fly rolling deploy, not a
+   * documentation nicety, so an idle instance must report `up` here or a
+   * deploy can stall waiting for a health check that is never meant to pass.
+   */
   status: SubsystemStatus;
   subsystems: {
     gateway: SubsystemStatus;
@@ -15,6 +22,16 @@ export interface HealthReport {
   version: string;
   commit: string;
   instanceId: string;
+  /**
+   * True for an instance holding zero shard leases *by design* — an
+   * over-provisioned fleet, or a spare machine ahead of a config change
+   * (`plans/scaling.md` §9). `subsystems.leases` still reads `down` (that
+   * part is a fact), but `status` reads `up` regardless, specifically so
+   * this case doesn't collide with a genuinely broken instance failing to
+   * hold leases it's supposed to. Absent (not merely `false`) on the normal
+   * path, so a reader can tell "never idle" from "not idle right now".
+   */
+  idle?: true;
 }
 
 export interface DiagnosticsReport {

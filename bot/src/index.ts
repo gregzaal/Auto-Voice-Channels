@@ -32,6 +32,7 @@ import { REST, Routes, type Client } from 'discord.js';
 import { GuildDispatcher } from './runtime/dispatcher.js';
 import { RuntimeCreationGate } from './runtime/creationGate.js';
 import { ShardLeaseManager } from './runtime/shardLeaseManager.js';
+import { runIdle } from './runtime/idle.js';
 import { PgIdentifyThrottler } from './runtime/identifyThrottler.js';
 import { installShutdown } from './runtime/shutdown.js';
 import { AlertScheduler } from './runtime/alertScheduler.js';
@@ -178,6 +179,21 @@ async function main(): Promise<void> {
   // Boot-time claim retries across the lease-expiry window so a replacement
   // instance reliably picks up a dead peer's orphaned shards.
   const claimed = await leaseManager.claimWithRetry();
+
+  /**
+   * An over-provisioned fleet (`EXPECTED_INSTANCES` ahead of the real machine
+   * count) or Step B's own deliberate window - a spare machine created ahead
+   * of a config flip, `plans/scaling.md` §9.3 - ends boot-time claiming with
+   * zero owned shards. discord.js cannot represent that: `buildGatewayClient`
+   * would pass `shards: []`, which `Client._validateOptions` rejects outright
+   * (`ClientInvalidProvidedShards`), crash-looping the process forever. Every
+   * subsystem below this point is built around a live gateway client, so
+   * there is no cheap partial bring-up - idle instead, without building one.
+   */
+  if (claimed.length === 0) {
+    await runIdle({ config, logger, leaseManager, pool, closeDb });
+    return;
+  }
 
   // Serialize identifies cluster-wide so a multi-instance deploy can't exceed
   // Discord's max_concurrency. We read the live concurrency from the gateway and
