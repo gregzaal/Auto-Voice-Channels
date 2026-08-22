@@ -101,7 +101,17 @@ primary_region = "iad"
   # Fleet size: each instance claims up to ceil(TOTAL_SHARDS / EXPECTED_INSTANCES)
   # shards. Keep this in sync with the running machine count so shards spread
   # evenly (and a replacement machine reliably re-claims a dead peer's share).
-  EXPECTED_INSTANCES = "1"
+  #
+  # Raised 1 -> 2 on 2026-08-22 (plans/scaling.md §9, Step B): the second
+  # machine (created ahead of this change, idling correctly at zero shards -
+  # see runtime/idle.ts) now gets real work. This is the step every
+  # partial-cache fix in this codebase (plans/scaling.md §9.1) was written
+  # for: each machine's discord.js cache now holds only its own shard's
+  # guilds. Deploy `--only-machines` in order - the currently-full machine
+  # first, so it drops to cap 1 and frees a shard, then the currently-idle
+  # one, so it claims exactly that shard - never both at once via Fly's own
+  # (unordered) rolling strategy.
+  EXPECTED_INSTANCES = "2"
   # Keep the next memory failure legible.
   #
   # At 512mb V8 sized its heap below the container limit, so the OOM on
