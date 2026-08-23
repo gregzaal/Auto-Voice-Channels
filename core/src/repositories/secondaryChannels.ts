@@ -208,7 +208,7 @@ export class SecondaryChannelRepository {
   /**
    * Reassigns only the current owner, leaving {@link SecondaryChannelRow.originalCreator}
    * untouched. Used when the owner leaves and the longest-present member takes over
-   * as caretaker — so the original creator keeps their standing to `/claim` it back.
+   * as caretaker — so the original creator keeps their standing to `/reclaim` it back.
    */
   async setOwner(channelId: string, ownerId: string): Promise<void> {
     await this.db
@@ -219,8 +219,8 @@ export class SecondaryChannelRepository {
 
   /**
    * Hands the channel to `memberId` as both current owner AND original creator — a
-   * deliberate takeover via `/transfer` or `/claim`. Moving `originalCreator` too
-   * means the previous holder can't later `/claim` it back; the handover sticks.
+   * deliberate takeover via `/transfer` or `/reclaim`. Moving `originalCreator` too
+   * means the previous holder can't later `/reclaim` it back; the handover sticks.
    */
   async setOwnerAndCreator(channelId: string, memberId: string): Promise<void> {
     await this.db

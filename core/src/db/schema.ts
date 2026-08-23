@@ -190,9 +190,9 @@ export const secondaryChannels = pgTable(
     ownerId: text('owner_id'),
     /**
      * The member with a durable claim on this channel: whoever created it, or
-     * whoever last took it over via `/transfer` or `/claim`. Unlike {@link ownerId}
+     * whoever last took it over via `/transfer` or `/reclaim`. Unlike {@link ownerId}
      * — which auto-reassigns to a caretaker each time the owner leaves — this only
-     * changes on a deliberate handover, so the original creator can `/claim` the
+     * changes on a deliberate handover, so the original creator can `/reclaim` the
      * channel back from a caretaker even while the caretaker is still present.
      */
     originalCreator: text('original_creator'),

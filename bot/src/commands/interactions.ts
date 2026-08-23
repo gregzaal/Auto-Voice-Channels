@@ -305,10 +305,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
             deps.privacy.makePublic(guildId, channelId, userId),
           ),
         );
-      case 'claim':
+      case 'reclaim':
         return replyResult(
           interaction,
-          await run(guildId, 'cmd:claim', () =>
+          await run(guildId, 'cmd:reclaim', () =>
             deps.voiceCommands.claim(guildId, channelId, userId),
           ),
         );

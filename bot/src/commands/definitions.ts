@@ -72,8 +72,8 @@ export function buildCommandDefinitions(
     ),
     guildOnly(
       new SlashCommandBuilder()
-        .setName('claim')
-        .setDescription('Claim your voice channel when its owner has left.'),
+        .setName('reclaim')
+        .setDescription('Reclaim your channel from a caretaker, or claim one whose owner left.'),
     ),
     guildOnly(
       new SlashCommandBuilder()

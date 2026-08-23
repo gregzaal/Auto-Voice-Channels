@@ -195,7 +195,7 @@ describe('VoiceCommands (integration)', () => {
     expect((await secondaries.get(SEC))!.originalCreator).toBe('bob');
 
     // Alice is still present but no longer the original creator, and bob (the
-    // owner) is here — so she can't wrestle it back with /claim.
+    // owner) is here — so she can't wrestle it back with /reclaim.
     const reclaim = await commands.claim(GUILD, SEC, 'alice');
     expect(reclaim.ok).toBe(false);
     expect(reclaim.message).toMatch(/still here/i);

@@ -113,7 +113,7 @@ export class VoiceCommands {
     if ('error' in found) return found.error;
     const row = found.row;
     if (!opts.admin && row.ownerId && row.ownerId !== userId) {
-      return fail('Only the channel owner can change that. Use `/claim` if the owner has left.');
+      return fail('Only the channel owner can change that. Use `/reclaim` if the owner has left.');
     }
     const id = row.channelId;
     const stateKey = field === 'name' ? 'template' : 'statusTemplate';
@@ -158,7 +158,7 @@ export class VoiceCommands {
     if (!inChannel) return fail('That member isn’t in this channel.');
 
     // A deliberate handover: the target becomes the original creator too, so the
-    // giver can't `/claim` it back afterwards.
+    // giver can't `/reclaim` it back afterwards.
     await this.deps.secondaries.setOwnerAndCreator(id, targetId);
     await this.deps.feature.rerenderSecondary(guildId, id);
     return ok(`Transferred ownership to <@${targetId}>.`);
@@ -226,7 +226,7 @@ export class VoiceCommands {
     if ('error' in found) return found;
     if (found.row.ownerId && found.row.ownerId !== userId) {
       return {
-        error: fail('Only the channel owner can do that. Use `/claim` if the owner has left.'),
+        error: fail('Only the channel owner can do that. Use `/reclaim` if the owner has left.'),
       };
     }
     return { row: found.row };
