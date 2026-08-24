@@ -3,6 +3,8 @@ import { z } from 'zod';
 import type { Database } from '../db/client.js';
 import { memberPoolGuilds } from '../db/schema.js';
 import { GuildRepository } from './guilds.js';
+import { MemberPoolRepository } from './memberPools.js';
+import { SubscriptionRepository } from './subscriptions.js';
 import type { TierId } from '../domain/tiers.js';
 
 /**
@@ -153,4 +155,50 @@ export async function removeGuildFromAnyPoolAtomically(
     if (poolId) await new GuildRepository(tx).setPoolId(guildId, null, null);
     return poolId;
   });
+}
+
+/**
+ * Converts an ordinary GUILD subscription into a pool covering that guild
+ * plus one more, in a single transaction.
+ *
+ * The dashboard presents every subscription as a plain "subscription" a
+ * customer can add servers to, whether or not it already covers more than
+ * one (`plans/member-based-pricing.md` §7.4 addendum). A subscription that
+ * has never been added to is still guild-keyed under
+ * `subscriptions_guild_xor_pool`, so the first "add a server" against it has
+ * to create the pool it should have been from the start: a fresh
+ * `member_pools` row, the existing Paddle subscription re-keyed onto it
+ * (`repointToPool`), and both guilds recorded as live members with their
+ * `pool_id`/`tier` pointer set — all four writes or none, for the same
+ * stranding reason `addGuildToPoolAtomically`'s docblock gives.
+ */
+export async function promoteSubscriptionToPool(
+  db: Database,
+  input: {
+    subscriptionId: string;
+    ownerUserId: string;
+    existingGuildId: string;
+    newGuildId: string;
+    tier: TierId;
+    poolName: string;
+  },
+  at = new Date(),
+): Promise<string> {
+  const poolId = crypto.randomUUID();
+  await db.transaction(async (tx) => {
+    await new MemberPoolRepository(tx).create({
+      id: poolId,
+      ownerUserId: input.ownerUserId,
+      name: input.poolName,
+      billedTier: input.tier,
+    });
+    await new SubscriptionRepository(tx).repointToPool(input.subscriptionId, poolId);
+    const poolGuilds = new MemberPoolGuildRepository(tx);
+    await poolGuilds.add(poolId, input.existingGuildId, at);
+    await poolGuilds.add(poolId, input.newGuildId, at);
+    const guilds = new GuildRepository(tx);
+    await guilds.setPoolId(input.existingGuildId, poolId, input.tier);
+    await guilds.setPoolId(input.newGuildId, poolId, input.tier);
+  });
+  return poolId;
 }

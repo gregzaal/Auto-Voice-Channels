@@ -403,4 +403,21 @@ export class SubscriptionRepository {
   async remove(guildId: string): Promise<void> {
     await this.db.delete(subscriptions).where(eq(subscriptions.guildId, guildId));
   }
+
+  /**
+   * Re-keys an existing GUILD subscription onto a pool, in place: same Paddle
+   * subscription and customer, now billing a pool instead of one guild
+   * (`plans/member-based-pricing.md` §7.4 addendum, "add to subscription" from
+   * an ordinary server row). One statement setting both columns together,
+   * same reasoning `addGuildToPoolAtomically`'s docblock gives:
+   * `subscriptions_guild_xor_pool` is checked against the finished row, and
+   * clearing `guild_id` before setting `pool_id` in two statements would fail
+   * the constraint on the first one.
+   */
+  async repointToPool(subscriptionId: string, poolId: string): Promise<void> {
+    await this.db
+      .update(subscriptions)
+      .set({ guildId: null, poolId, updatedAt: new Date() })
+      .where(eq(subscriptions.id, subscriptionId));
+  }
 }
