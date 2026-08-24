@@ -22,7 +22,7 @@ import {
   type ManagedChannelRepository,
 } from '@avc/core';
 import type { GuildDispatcher } from '../runtime/dispatcher.js';
-import { expiredInteractionMessage } from '../features/billing/messages.js';
+import { expiredInteractionMessage, STATUS_PAGE_URL } from '../features/billing/messages.js';
 import {
   isPermissionError,
   JOIN_PREFIX,
@@ -1228,7 +1228,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     const sent = await interaction.fetchReply();
     const rtt = sent.createdTimestamp - interaction.createdTimestamp;
     await interaction.editReply(
-      `🏓 Pong! Round-trip ${rtt}ms · gateway ${ws < 0 ? '—' : `${ws}ms`}.`,
+      `🏓 Pong! Round-trip ${rtt}ms · gateway ${ws < 0 ? '—' : `${ws}ms`}. ` +
+        `Status page: ${STATUS_PAGE_URL}`,
     );
   }
 

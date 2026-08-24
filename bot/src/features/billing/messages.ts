@@ -21,6 +21,7 @@ import {
  */
 
 export const SITE_URL = 'https://auto-voice.io';
+export const STATUS_PAGE_URL = 'https://status.auto-voice.io/';
 
 /**
  * Deep link to the dashboard focused on ONE guild, so renewing is a single
