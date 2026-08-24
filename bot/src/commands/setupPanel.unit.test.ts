@@ -57,6 +57,47 @@ describe('formatPlan', () => {
     expect(formatPlan({ ...base, memberCount: 5_000, selfHosted: true })).toContain('Self-hosted');
   });
 
+  describe('pooled billing (member-based-pricing.md §7.4)', () => {
+    // Regression for the critical false alarm: a 200-member pooled server
+    // must never quote a price derived from its OWN member count.
+    it('quotes the billed tier, not one derived from this server alone', () => {
+      const line = formatPlan({
+        ...base,
+        memberCount: 200,
+        status: 'active',
+        pooled: { billedTier: 'l' },
+      });
+      expect(line).toContain('L tier');
+      expect(line).toContain('$399/yr');
+      expect(line).not.toContain('S tier');
+      expect(line).not.toContain('$19/yr');
+    });
+
+    it('says the server bills through a pool', () => {
+      const line = formatPlan({
+        ...base,
+        memberCount: 200,
+        status: 'active',
+        pooled: { billedTier: 'm' },
+      });
+      expect(line).toContain('pool');
+      expect(line).toContain(LINK.replace(`?guild=${GUILD}`, ''));
+    });
+
+    it('names the grace days left for a pooled server too', () => {
+      const graceUntil = new Date('2026-06-22T00:00:00.000Z'); // 5 days out
+      const line = formatPlan({
+        ...base,
+        memberCount: 200,
+        status: 'grace',
+        graceUntil,
+        pooled: { billedTier: 'm' },
+      });
+      expect(line).toContain('5 days');
+      expect(line).toContain('pool');
+    });
+  });
+
   /**
    * `/signup` has never existed on the site and returns 404. These assertions
    * previously REQUIRED that URL, so the tests were pinning a dead link into

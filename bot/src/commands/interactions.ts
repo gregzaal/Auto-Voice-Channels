@@ -1479,6 +1479,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       graceUntil: guildRow?.graceUntil ?? null,
       selfHosted: deps.selfHosted,
       now: new Date(),
+      pooled: guildRow?.poolId ? { billedTier: guildRow.tier } : null,
     });
     return buildSetupPanel({
       enabled: config.enabled,

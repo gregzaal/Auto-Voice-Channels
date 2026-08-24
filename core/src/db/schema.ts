@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
 import {
   bigint,
+  check,
   index,
   integer,
   jsonb,
@@ -101,6 +102,14 @@ export const guilds = pgTable('guilds', {
    * member count via `tierFor()` — never stored.
    */
   tier: text('tier'),
+  /**
+   * The member pool this guild bills through, or null for ordinary per-guild
+   * billing (`plans/member-based-pricing.md` §6.1). Denormalized pointer: the
+   * durable record with history is `member_pool_guilds`, and this column is
+   * what the reconciler and the entitlement gate read without a join. The two
+   * are written together, in the same statement, by every add/remove path.
+   */
+  poolId: text('pool_id'),
   /** Arbitrary per-guild settings, mirroring the old per-guild JSON shape. */
   settings: jsonb('settings')
     .notNull()
@@ -277,133 +286,252 @@ export const aliases = pgTable(
 // too but never populate the tables (SELF_HOSTED bypasses entitlement).
 // ---------------------------------------------------------------------------
 
-/** Billing source of truth per guild, synced from Paddle webhooks. */
-export const subscriptions = pgTable('subscriptions', {
-  guildId: text('guild_id').primaryKey(),
-  paddleSubscriptionId: text('paddle_subscription_id').notNull().unique(),
-  paddleCustomerId: text('paddle_customer_id').notNull(),
-  /**
-   * The Auth.js user id (our `users.id`, a UUID) of whoever completed
-   * checkout, captured from the transaction's custom data. NOT a Discord
-   * snowflake: it is `session.user.id`, which is what the dashboard compares
-   * against, so matching it to a Discord id will silently never match.
-   *
-   * Without it, a subscription is only reachable through the guild, so someone
-   * who leaves the server (or loses Manage Server) can no longer see or cancel
-   * a subscription they are still being charged for. Nullable because
-   * subscriptions created before this column existed have no purchaser.
-   */
-  purchaserUserId: text('purchaser_user_id'),
-  /**
-   * Server name at checkout time, denormalized from the transaction's custom
-   * data. Only used to render a subscription for a guild the viewer can no
-   * longer see (they left it), where there is no Discord guild object and no
-   * name anywhere else in our schema. A stale name beats a bare snowflake id.
-   */
-  guildName: text('guild_name'),
-  /** The tier this subscription pays for (`s`/`m`/`l`/`xl`/`xxl`). */
-  tier: text('tier').notNull(),
-  /** Paddle subscription status (e.g. active, past_due, canceled). */
-  status: text('status').notNull(),
-  currentPeriodEnd: timestamp('current_period_end', { withTimezone: true }),
-  /**
-   * Paddle's pending `scheduled_change`, if any: `cancel`, `pause` or `resume`.
-   *
-   * Load-bearing, and easy to miss. A subscription the customer has cancelled
-   * keeps `status: 'active'` right up to the end of the paid period, and the
-   * cancellation lives ONLY here. Reading status alone reports a cancelled
-   * subscription as renewing, which is both wrong and alarming to whoever just
-   * cancelled it.
-   */
-  scheduledChangeAction: text('scheduled_change_action'),
-  /** When that scheduled change takes effect. */
-  scheduledChangeAt: timestamp('scheduled_change_at', { withTimezone: true }),
-  /**
-   * The **list** unit price from the subscription item (minor units, e.g.
-   * '5900'). NOT what the customer pays: regional bands are applied per
-   * country via `unit_price_overrides`, and the subscription event only ever
-   * carries the baseline. A band-B customer on the M tier has `price = 5900`
-   * here and is charged 3900.
-   */
-  price: text('price'),
-  currency: text('currency'),
-  /**
-   * What the customer was actually charged, from `transaction.completed`
-   * (minor units, tax-inclusive). Null until the first transaction lands, and
-   * for subscriptions created before this column existed.
-   *
-   * The subscription event genuinely cannot supply this, so it has to come
-   * from the transaction. Without it, every report and support answer for a
-   * discounted region is wrong by the size of the discount.
-   */
-  chargedTotal: text('charged_total'),
-  /** Tax included within `chargedTotal` (prices are tax-inclusive). */
-  chargedTax: text('charged_tax'),
-  chargedCurrency: text('charged_currency'),
-  /**
-   * ISO 3166-1 alpha-2 country the customer is billed in, resolved from the
-   * transaction's `address_id` at `transaction.completed`.
-   *
-   * **The band cannot be recovered from the amount, and this is the column that
-   * makes regional revenue reportable at all.** Three independent reasons, each
-   * sufficient on its own:
-   *
-   *   1. Two USD cells collide exactly. Across all 280 (currency, amount, tier)
-   *      cells in the catalogue only two are ambiguous, but they are USD 8 at S
-   *      and USD 27 at M, each meaning either "band C standard" or "band B
-   *      legacy" -- and every USD-denominated banded country sits behind them,
-   *      50 of 108.
-   *   2. Countries we did not override are AUTO-CONVERTED by Paddle, so their
-   *      amount is not in our table at any rounding. Measured 2026-08-20:
-   *      Iceland and Romania pay EUR 50.50 at tier M where our own EUR override
-   *      is EUR 49.00. Nothing matches 5050, and it moves with the rate.
-   *   3. A band is a policy view of a country. Storing the country means
-   *      re-cutting the bands re-derives history correctly; storing the band
-   *      freezes today's policy into every past row.
-   *
-   * Null for the rows written before this column existed and for any
-   * transaction whose address lookup failed. Both are backfillable: the raw
-   * webhook body in `billing_events.payload` keeps `address_id` forever, and
-   * Paddle resolves it on demand. See `scripts/backfill-billing-origin.ts`.
-   */
-  billingCountryCode: text('billing_country_code'),
-  /**
-   * The Paddle price id actually charged, from the transaction's line item.
-   *
-   * Free (it is already in the payload) and it is what distinguishes a legacy
-   * purchase from a standard one: the two carry different price ids, tagged
-   * `custom_data.avc_legacy`. `legacy_customers.redeemed_at` cannot answer this
-   * -- it is keyed by Discord user, not by subscription, so it says the
-   * purchaser was ELIGIBLE, never that this particular subscription was sold at
-   * the discount.
-   */
-  billedPriceId: text('billed_price_id'),
-  /**
-   * Latest refund/credit adjustment on this subscription, from `adjustment.*`
-   * webhooks: `pending_approval`, `approved` or `rejected`.
-   *
-   * An **approved** refund revokes entitlement immediately, via
-   * `subscriptionInGoodStanding`. A refund does not cancel the Paddle
-   * subscription, so without reading this field the reconcile job would see a
-   * healthy `active` row an hour later and reactivate the guild.
-   *
-   * A refund that is only *requested* (`pending_approval`) changes nothing.
-   * Paddle reviews these, and cutting someone off while their request is still
-   * being judged would punish them for asking.
-   *
-   * This docblock said the exact opposite until 2026-08-18 ("deliberately does
-   * NOT affect entitlement... the only inputs to access"). It was written for a
-   * display-only design and falsified hours later the same day by the commit
-   * that made an approved refund revoke standing. Left uncorrected it went
-   * public, contradicting both the code below it and the live refund policy.
-   */
-  refundStatus: text('refund_status'),
-  /** Refunded amount (minor units) for that adjustment. */
-  refundTotal: text('refund_total'),
-  refundAt: timestamp('refund_at', { withTimezone: true }),
-  createdAt: createdAt(),
-  updatedAt: updatedAt(),
-});
+/**
+ * A member pool: one subscription covering any number of servers whose member
+ * counts sum to under the band ceiling (`plans/member-based-pricing.md` §6.1).
+ * Additive, phase 3, no reader until phase 4.
+ *
+ * **`status` is `active | grace | expired`, and NEVER `trial`** (§5.4). A pool
+ * comes into existence by completing checkout, so it always starts `active`;
+ * giving it its own trial would let a guild launder an expired or mid-trial
+ * state back to a full year by joining one.
+ *
+ * `billed_tier` is written only by the Paddle webhook and is what the
+ * subscription pays for. The *required* tier is always re-derived from
+ * `member_count` (a hint, refreshed by the reconciler's pool sampler) and is
+ * never stored here, for the same reason `guilds.tier` is never conflated with
+ * `tierFor()` (§5.1).
+ */
+export const memberPools = pgTable(
+  'member_pools',
+  {
+    id: text('id')
+      .primaryKey()
+      .$defaultFn(() => crypto.randomUUID()),
+    /** Auth.js `users.id` (a UUID), NOT a Discord snowflake. Who pays. */
+    ownerUserId: text('owner_user_id').notNull(),
+    /**
+     * Optional, defaulted, editable (`plans/member-based-pricing.md` §6.1).
+     * Never read by any backend rule; it exists only so an owner with more
+     * than one pool can tell them apart. Defaulted at creation to
+     * "Server pool N" and never renumbered afterward.
+     */
+    name: text('name'),
+    billedTier: text('billed_tier'),
+    status: text('status', { enum: ['active', 'grace', 'expired'] })
+      .notNull()
+      .default('active'),
+    graceUntil: timestamp('grace_until', { withTimezone: true }),
+    /** Last observed pooled member-count sum (a hint, never ground truth). */
+    memberCount: integer('member_count'),
+    memberCountUpdatedAt: timestamp('member_count_updated_at', { withTimezone: true }),
+    /**
+     * The pool's OWN daily samples and notification dedupe map, in the exact
+     * shape `domain/billing.ts`'s `BillingMeta` already validates
+     * (`{ billing: { samples, notifications, pendingAnomaly? } }`) — reused
+     * rather than re-invented, so the forward-only sampler and anti-flap
+     * counters are the same tested code as the per-guild path (§5.2a). Reset
+     * (samples cleared, notifications kept) on every membership change, so an
+     * add or a remove can never fabricate history for a breach/drop the pool
+     * did not actually sustain.
+     */
+    metadata: jsonb('metadata')
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index('member_pools_owner_idx').on(t.ownerUserId)],
+);
+
+/**
+ * Pool membership, with history. The durable record; `guilds.pool_id` is the
+ * denormalized pointer the hot paths read instead of joining here.
+ *
+ * The partial unique index is the load-bearing constraint: at most one LIVE
+ * pool per guild, enforced by the database rather than by application code
+ * racing a check-then-insert. A guild may appear in many historical rows
+ * (added, removed, re-added, possibly to a different pool) but never in two
+ * live ones at once.
+ */
+export const memberPoolGuilds = pgTable(
+  'member_pool_guilds',
+  {
+    poolId: text('pool_id').notNull(),
+    guildId: text('guild_id').notNull(),
+    addedAt: timestamp('added_at', { withTimezone: true }).notNull().defaultNow(),
+    removedAt: timestamp('removed_at', { withTimezone: true }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.poolId, t.guildId] }),
+    uniqueIndex('member_pool_guilds_live_guild_idx')
+      .on(t.guildId)
+      .where(sql`removed_at is null`),
+    index('member_pool_guilds_pool_idx').on(t.poolId, t.removedAt),
+  ],
+);
+
+/**
+ * Billing source of truth, synced from Paddle webhooks. One row per Paddle
+ * subscription, covering either one guild or one member pool (never both,
+ * never neither, enforced by `subscriptions_guild_xor_pool` below).
+ *
+ * `id` is the primary key (`plans/member-based-pricing.md` §6.2, phase 2 —
+ * the contract half of a two-release expand/contract: phase 1, migration
+ * 0024, added `id` and `pool_id` while `guild_id` was still the primary key).
+ * A pool subscription belongs to no single guild, so `guild_id` cannot stay
+ * the identity column once pool rows exist: the rejected alternative was a
+ * synthetic `guild_id` like `pool:<id>`, which leaks a dangling row into
+ * every `subscriptions -> guilds` join in `/admin` (§6.2).
+ */
+export const subscriptions = pgTable(
+  'subscriptions',
+  {
+    id: text('id')
+      .primaryKey()
+      .$defaultFn(() => crypto.randomUUID()),
+    /**
+     * Null for a pool subscription. Plain (non-partial) unique: Postgres does
+     * not enforce uniqueness among NULLs in a standard unique index, so this
+     * already allows any number of pool-only rows while still keying at most
+     * one live subscription per guild, and it works with the ordinary
+     * `ON CONFLICT (guild_id)` upsert form `SubscriptionRepository.upsert`
+     * already uses.
+     */
+    guildId: text('guild_id').unique(),
+    /** Null for a guild subscription. Same plain-unique reasoning as above. */
+    poolId: text('pool_id').unique(),
+    paddleSubscriptionId: text('paddle_subscription_id').notNull().unique(),
+    paddleCustomerId: text('paddle_customer_id').notNull(),
+    /**
+     * The Auth.js user id (our `users.id`, a UUID) of whoever completed
+     * checkout, captured from the transaction's custom data. NOT a Discord
+     * snowflake: it is `session.user.id`, which is what the dashboard compares
+     * against, so matching it to a Discord id will silently never match.
+     *
+     * Without it, a subscription is only reachable through the guild, so someone
+     * who leaves the server (or loses Manage Server) can no longer see or cancel
+     * a subscription they are still being charged for. Nullable because
+     * subscriptions created before this column existed have no purchaser.
+     */
+    purchaserUserId: text('purchaser_user_id'),
+    /**
+     * Server name at checkout time, denormalized from the transaction's custom
+     * data. Only used to render a subscription for a guild the viewer can no
+     * longer see (they left it), where there is no Discord guild object and no
+     * name anywhere else in our schema. A stale name beats a bare snowflake id.
+     */
+    guildName: text('guild_name'),
+    /** The tier this subscription pays for (`s`/`m`/`l`/`xl`/`xxl`). */
+    tier: text('tier').notNull(),
+    /** Paddle subscription status (e.g. active, past_due, canceled). */
+    status: text('status').notNull(),
+    currentPeriodEnd: timestamp('current_period_end', { withTimezone: true }),
+    /**
+     * Paddle's pending `scheduled_change`, if any: `cancel`, `pause` or `resume`.
+     *
+     * Load-bearing, and easy to miss. A subscription the customer has cancelled
+     * keeps `status: 'active'` right up to the end of the paid period, and the
+     * cancellation lives ONLY here. Reading status alone reports a cancelled
+     * subscription as renewing, which is both wrong and alarming to whoever just
+     * cancelled it.
+     */
+    scheduledChangeAction: text('scheduled_change_action'),
+    /** When that scheduled change takes effect. */
+    scheduledChangeAt: timestamp('scheduled_change_at', { withTimezone: true }),
+    /**
+     * The **list** unit price from the subscription item (minor units, e.g.
+     * '5900'). NOT what the customer pays: regional bands are applied per
+     * country via `unit_price_overrides`, and the subscription event only ever
+     * carries the baseline. A band-B customer on the M tier has `price = 5900`
+     * here and is charged 3900.
+     */
+    price: text('price'),
+    currency: text('currency'),
+    /**
+     * What the customer was actually charged, from `transaction.completed`
+     * (minor units, tax-inclusive). Null until the first transaction lands, and
+     * for subscriptions created before this column existed.
+     *
+     * The subscription event genuinely cannot supply this, so it has to come
+     * from the transaction. Without it, every report and support answer for a
+     * discounted region is wrong by the size of the discount.
+     */
+    chargedTotal: text('charged_total'),
+    /** Tax included within `chargedTotal` (prices are tax-inclusive). */
+    chargedTax: text('charged_tax'),
+    chargedCurrency: text('charged_currency'),
+    /**
+     * ISO 3166-1 alpha-2 country the customer is billed in, resolved from the
+     * transaction's `address_id` at `transaction.completed`.
+     *
+     * **The band cannot be recovered from the amount, and this is the column that
+     * makes regional revenue reportable at all.** Three independent reasons, each
+     * sufficient on its own:
+     *
+     *   1. Two USD cells collide exactly. Across all 280 (currency, amount, tier)
+     *      cells in the catalogue only two are ambiguous, but they are USD 8 at S
+     *      and USD 27 at M, each meaning either "band C standard" or "band B
+     *      legacy" -- and every USD-denominated banded country sits behind them,
+     *      50 of 108.
+     *   2. Countries we did not override are AUTO-CONVERTED by Paddle, so their
+     *      amount is not in our table at any rounding. Measured 2026-08-20:
+     *      Iceland and Romania pay EUR 50.50 at tier M where our own EUR override
+     *      is EUR 49.00. Nothing matches 5050, and it moves with the rate.
+     *   3. A band is a policy view of a country. Storing the country means
+     *      re-cutting the bands re-derives history correctly; storing the band
+     *      freezes today's policy into every past row.
+     *
+     * Null for the rows written before this column existed and for any
+     * transaction whose address lookup failed. Both are backfillable: the raw
+     * webhook body in `billing_events.payload` keeps `address_id` forever, and
+     * Paddle resolves it on demand. See `scripts/backfill-billing-origin.ts`.
+     */
+    billingCountryCode: text('billing_country_code'),
+    /**
+     * The Paddle price id actually charged, from the transaction's line item.
+     *
+     * Free (it is already in the payload) and it is what distinguishes a legacy
+     * purchase from a standard one: the two carry different price ids, tagged
+     * `custom_data.avc_legacy`. `legacy_customers.redeemed_at` cannot answer this
+     * -- it is keyed by Discord user, not by subscription, so it says the
+     * purchaser was ELIGIBLE, never that this particular subscription was sold at
+     * the discount.
+     */
+    billedPriceId: text('billed_price_id'),
+    /**
+     * Latest refund/credit adjustment on this subscription, from `adjustment.*`
+     * webhooks: `pending_approval`, `approved` or `rejected`.
+     *
+     * An **approved** refund revokes entitlement immediately, via
+     * `subscriptionInGoodStanding`. A refund does not cancel the Paddle
+     * subscription, so without reading this field the reconcile job would see a
+     * healthy `active` row an hour later and reactivate the guild.
+     *
+     * A refund that is only *requested* (`pending_approval`) changes nothing.
+     * Paddle reviews these, and cutting someone off while their request is still
+     * being judged would punish them for asking.
+     *
+     * This docblock said the exact opposite until 2026-08-18 ("deliberately does
+     * NOT affect entitlement... the only inputs to access"). It was written for a
+     * display-only design and falsified hours later the same day by the commit
+     * that made an approved refund revoke standing. Left uncorrected it went
+     * public, contradicting both the code below it and the live refund policy.
+     */
+    refundStatus: text('refund_status'),
+    /** Refunded amount (minor units) for that adjustment. */
+    refundTotal: text('refund_total'),
+    refundAt: timestamp('refund_at', { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    // Exactly one of guild_id / pool_id, never both, never neither
+    // (`plans/member-based-pricing.md` §6.2). `num_nonnulls` is the concise
+    // Postgres builtin for "count how many of these are not null".
+    check('subscriptions_guild_xor_pool', sql`num_nonnulls(${t.guildId}, ${t.poolId}) = 1`),
+  ],
+);
 
 /** Append-only Paddle webhook log; the unique event id makes processing idempotent. */
 export const billingEvents = pgTable(
@@ -547,7 +675,17 @@ export const billingNotifications = pgTable(
   'billing_notifications',
   {
     id: bigint('id', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
-    guildId: text('guild_id').notNull(),
+    /**
+     * Null for a pool-billing notification (`pool_id` set instead) — payment
+     * failed / over limit / renewal, addressed to the purchaser rather than a
+     * server (`plans/member-based-pricing.md` §6.6). Every notification still
+     * carries exactly one of the two: a hard-gate or reactivation notice is
+     * fanned out as one ordinary guild-scoped row per affected member, same as
+     * it always was, with `pool_id` stamped alongside for traceability.
+     */
+    guildId: text('guild_id'),
+    /** The pool this notification is about, when it is not guild-scoped. */
+    poolId: text('pool_id'),
     /** The leniency dedupe key (e.g. `trial_warning:7:m`). Repeats over time. */
     key: text('key').notNull(),
     kind: text('kind').notNull(),
@@ -615,6 +753,15 @@ export const billingNotifications = pgTable(
     uniqueIndex('billing_notifications_pending_key')
       .on(t.guildId, t.key)
       .where(sql`delivered_at IS NULL`),
+    /**
+     * The pool-scoped equivalent. A plain (non-partial) unique index already
+     * tolerates any number of `NULL`s in Postgres, so a guild-scoped row
+     * (`pool_id` null) never collides here — this index only ever constrains
+     * rows that actually have a `pool_id`.
+     */
+    uniqueIndex('billing_notifications_pool_pending_key')
+      .on(t.poolId, t.key)
+      .where(sql`delivered_at IS NULL`),
     // The drain's own query: undelivered, unclaimed, unexpired, oldest first.
     index('billing_notifications_pending_idx').on(
       t.deliveredAt,
@@ -623,6 +770,7 @@ export const billingNotifications = pgTable(
       t.enqueuedAt,
     ),
     index('billing_notifications_guild_idx').on(t.guildId, t.enqueuedAt),
+    index('billing_notifications_pool_idx').on(t.poolId, t.enqueuedAt),
   ],
 );
 

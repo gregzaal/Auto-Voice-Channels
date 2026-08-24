@@ -442,3 +442,86 @@ describe('evaluateLeniency — blocked', () => {
     expect(decision.notifications).toEqual([]);
   });
 });
+
+describe('pooledMemberCount (member-based-pricing.md §5.2)', () => {
+  it('requiredTierOf prefers pooledMemberCount over memberCount when present', () => {
+    // A tiny guild's own count (50, free) would never breach anything on its
+    // own — only the pool's aggregate should decide the required tier.
+    const decision = evaluateLeniency(
+      state({
+        authStatus: 'active',
+        billedTier: 's',
+        memberCount: 50,
+        pooledMemberCount: 12_000,
+        samples: samplesAt(12_000, 7),
+      }),
+      NOW,
+    );
+    expect(decision.transition).toMatchObject({ toStatus: 'grace', reason: 'over_limit' });
+    expect(decision.notifications[0]).toMatchObject({ requiredTier: 'l' });
+  });
+
+  it('over-limit still fires for a pool that grew, exactly like a guild would', () => {
+    // Regression for the first-draft defect (§5.1, §12 #1): if the pool pass
+    // ever collapsed required and billed tier onto the same source, this can
+    // never be true and a pool could grow unboundedly on its starting tier.
+    const decision = evaluateLeniency(
+      state({
+        authStatus: 'active',
+        billedTier: 'm',
+        pooledMemberCount: 15_000,
+        samples: samplesAt(15_000, 7),
+      }),
+      NOW,
+    );
+    expect(decision.transition).toBeDefined();
+    expect(decision.transition?.reason).toBe('over_limit');
+  });
+
+  it('falls back to memberCount when pooledMemberCount is null or absent (ordinary guilds unaffected)', () => {
+    const withNull = evaluateLeniency(
+      state({
+        authStatus: 'active',
+        billedTier: 's',
+        memberCount: 1_200,
+        pooledMemberCount: null,
+        samples: samplesAt(1_200, 7),
+      }),
+      NOW,
+    );
+    const withoutField = evaluateLeniency(
+      state({
+        authStatus: 'active',
+        billedTier: 's',
+        memberCount: 1_200,
+        samples: samplesAt(1_200, 7),
+      }),
+      NOW,
+    );
+    expect(withNull.transition).toEqual(withoutField.transition);
+    expect(withNull.transition).toMatchObject({ reason: 'over_limit' });
+  });
+
+  it('a pool-scoped state can reach grace, expired and reactivate through the same machine', () => {
+    // The pool pass builds one virtual LeniencyState per pool (member_pools has
+    // no trial, so it only ever visits active/grace/expired) — assert the
+    // machine it already trusted for guilds behaves identically for that shape.
+    const hardGated = evaluateLeniency(
+      {
+        authStatus: 'grace',
+        authExpiresAt: null,
+        graceUntil: new Date(NOW.getTime() - days(1)),
+        billedTier: 'm',
+        hasSubscription: true,
+        subscriptionOk: true,
+        memberCount: null,
+        pooledMemberCount: 15_000,
+        samples: [],
+        guildCreatedAt: null,
+        notifications: {},
+      },
+      NOW,
+    );
+    expect(hardGated.transition).toMatchObject({ toStatus: 'expired', reason: 'grace_elapsed' });
+  });
+});

@@ -2,8 +2,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   BillingNotificationRepository,
   BillingRunRepository,
+  DEFAULT_FLEET,
   GuildFleetPresenceRepository,
   GuildRepository,
+  MemberPoolGuildRepository,
+  MemberPoolRepository,
   OpsAuditRepository,
   parseBillingMeta,
   RuntimeFlagsRepository,
@@ -32,6 +35,13 @@ class RecordingNotifier implements BillingNotifier {
     _policy: TrialPolicy,
     _memberCount: number,
   ): Promise<boolean> {
+    return this.deliver;
+  }
+  async notifyPurchaser(
+    discordUserId: string,
+    notification: LeniencyNotification,
+  ): Promise<boolean> {
+    this.notifications.push({ guildId: discordUserId, notification });
     return this.deliver;
   }
   ofKind(kind: string): { guildId: string; notification: LeniencyNotification }[] {
@@ -114,6 +124,10 @@ describe('BillingReconciler (integration)', () => {
       runs: new BillingRunRepository(env.handle.db),
       notifications,
       flags,
+      clusterFlags: new RuntimeFlagsRepository(env.handle.db, DEFAULT_FLEET),
+      memberPools: new MemberPoolRepository(env.handle.db),
+      memberPoolGuilds: new MemberPoolGuildRepository(env.handle.db),
+      resolveDiscordUserId: async () => null,
       opsAudit: new OpsAuditRepository(env.handle.db),
       notifier,
       listCachedGuildCounts: () => opts.cached ?? [],

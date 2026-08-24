@@ -13,7 +13,7 @@ import {
   type InteractionReplyOptions,
   type InteractionUpdateOptions,
 } from 'discord.js';
-import { tierFor, type AuthStatus } from '@avc/core';
+import { tierById, tierFor, type AuthStatus, type TierId } from '@avc/core';
 import { SITE_URL, subscribeUrl } from '../features/billing/messages.js';
 import {
   permissionProblemSummary,
@@ -88,6 +88,16 @@ export interface PlanInput {
   graceUntil?: Date | null;
   selfHosted: boolean;
   now: Date;
+  /**
+   * Set when this server bills through a member pool rather than on its own
+   * (`plans/member-based-pricing.md` §7.4). Changes two things: the price
+   * quoted is the guild's *billed* tier (`guilds.tier`, kept current by the
+   * pool pass's fan-out) rather than one derived from this one server's own
+   * member count, and every status line says so explicitly — a 200-member
+   * pooled server reporting "Subscribed, S tier ($19/yr)" while its pool pays
+   * $399 was the critical false-alarm class this exists to close.
+   */
+  pooled?: { billedTier: TierId | null } | null;
 }
 
 /**
@@ -96,9 +106,37 @@ export interface PlanInput {
  * `isEntitled` machinery remains the source of truth for access.
  */
 export function formatPlan(opts: PlanInput): string {
-  const { guildId, memberCount, status, expiresAt, graceUntil, selfHosted, now } = opts;
+  const { guildId, memberCount, status, expiresAt, graceUntil, selfHosted, now, pooled } = opts;
   const link = subscribeUrl(guildId);
   if (selfHosted) return '🏠 **Self-hosted**, every feature unlocked, no subscription needed.';
+
+  if (pooled) {
+    const tier = pooled.billedTier ? tierById(pooled.billedTier) : tierFor(memberCount);
+    const priceLabel =
+      tier.pricePerYear === 0
+        ? 'free'
+        : tier.pricePerYear === null
+          ? 'contact us'
+          : `$${tier.pricePerYear}/yr`;
+    if (status === 'blocked') {
+      return '🚫 AVC is **blocked** on this server. Contact support if you think that is a mistake.';
+    }
+    if (status === 'expired') {
+      return `⏳ This server's pool subscription has **ended**. Reactivate from the dashboard at ${link} to switch automation back on.`;
+    }
+    if (status === 'grace') {
+      const graceDays = graceUntil ? daysUntil(now, graceUntil) : null;
+      return graceDays !== null && graceDays > 0
+        ? `🕊️ **Grace period**, ${graceDays} day${graceDays === 1 ? '' : 's'} left. This server bills ` +
+            `through a pool (${tier.label} tier). Manage it from the dashboard at ${link}`
+        : `🕊️ **Grace period.** This server bills through a pool (${tier.label} tier). Manage it ` +
+            `from the dashboard at ${link}`;
+    }
+    return (
+      `✅ **Subscribed through a server pool** · ${tier.label} tier (${priceLabel}), billed with ` +
+      `other servers on the same plan. Manage it from the dashboard at ${link}`
+    );
+  }
 
   const tier = tierFor(memberCount);
   const priceLabel =

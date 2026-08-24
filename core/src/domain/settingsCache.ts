@@ -1,6 +1,7 @@
 import { SETTINGS_INVALIDATE_CHANNEL } from '../db/notify.js';
 import type { PgNotifier } from '../db/notify.js';
 import type { GuildRepository, GuildRow, TransitionAuthInput } from '../repositories/guilds.js';
+import type { TierId } from './tiers.js';
 
 /**
  * Read seam for guild settings on the hot path. Both {@link SettingsCache} and a
@@ -19,6 +20,15 @@ export interface GuildSettingsReader {
 export interface GuildSettingsStore extends GuildSettingsReader {
   updateSettings(guildId: string, patch: Record<string, unknown>): Promise<GuildRow>;
   transitionAuth(input: TransitionAuthInput): Promise<GuildRow>;
+  /**
+   * Sets the billed-tier cache with invalidation, exactly like
+   * `transitionAuth`. Needed by the billing reconciler's pool pass, which
+   * fans a pool's `billed_tier` out to every member guild's `guilds.tier`
+   * (`plans/member-based-pricing.md` §5.1) — a plain `GuildRepository` write
+   * would leave every other instance's settings cache serving the old tier
+   * for up to its TTL.
+   */
+  setBilledTier(guildId: string, tier: TierId | null): Promise<GuildRow>;
 }
 
 interface Entry {
@@ -90,6 +100,13 @@ export class SettingsCache implements GuildSettingsStore {
   async transitionAuth(input: TransitionAuthInput): Promise<GuildRow> {
     const row = await this.repo.transitionAuth(input);
     await this.invalidate(input.guildId);
+    return row;
+  }
+
+  /** Sets the billed-tier cache through to the DB, then invalidates the cache. */
+  async setBilledTier(guildId: string, tier: TierId | null): Promise<GuildRow> {
+    const row = await this.repo.setBilledTier(guildId, tier);
+    await this.invalidate(guildId);
     return row;
   }
 

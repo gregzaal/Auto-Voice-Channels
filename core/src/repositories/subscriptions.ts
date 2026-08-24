@@ -4,8 +4,23 @@ import type { Database } from '../db/client.js';
 import { subscriptions } from '../db/schema.js';
 import { TIER_IDS } from '../domain/tiers.js';
 
-/** zod schema validating a subscription row read from the DB (boundary validation). */
+/**
+ * zod schema validating a GUILD subscription row read from the DB (boundary
+ * validation). Every query here that filters on `guild_id` (equality, `IN`,
+ * or matches a specific fetched row) only ever returns rows satisfying
+ * `subscriptions_guild_xor_pool`, so `guildId` stays a required string for
+ * that whole family of reads. Pool subscriptions (`guild_id` null) are a
+ * separate shape — see {@link poolSubscriptionRowSchema} — and never appear
+ * here because nothing below queries the table without a guild filter.
+ */
 export const subscriptionRowSchema = z.object({
+  /**
+   * Surrogate key (`plans/member-based-pricing.md` §6.2). Added alongside the
+   * primary-key change that made `guild_id` nullable; not used by any guild
+   * read path yet, kept for parity with the row shape and for callers that
+   * want a stable id independent of which axis (guild or pool) it bills.
+   */
+  id: z.string(),
   guildId: z.string(),
   paddleSubscriptionId: z.string(),
   paddleCustomerId: z.string(),
@@ -66,6 +81,41 @@ export interface UpsertSubscriptionInput {
   price?: string | null;
   currency?: string | null;
 }
+
+/**
+ * A POOL subscription row — the same table, the other axis of
+ * `subscriptions_guild_xor_pool`. `guildName` is dropped: a pool checkout
+ * never starts from one specific server's identity.
+ */
+export const poolSubscriptionRowSchema = subscriptionRowSchema
+  .omit({ guildId: true, guildName: true })
+  .extend({ poolId: z.string() });
+
+export type PoolSubscriptionRow = z.infer<typeof poolSubscriptionRowSchema>;
+
+export interface UpsertPoolSubscriptionInput {
+  poolId: string;
+  paddleSubscriptionId: string;
+  paddleCustomerId: string;
+  purchaserUserId?: string | null;
+  tier: SubscriptionRow['tier'];
+  status: string;
+  currentPeriodEnd?: Date | null;
+  scheduledChangeAction?: string | null;
+  scheduledChangeAt?: Date | null;
+  price?: string | null;
+  currency?: string | null;
+}
+
+/**
+ * Which axis a subscription row bills, without committing to either row
+ * shape. Used only where the caller has a Paddle subscription id and does not
+ * yet know whether it belongs to a guild or a pool (`applyRefund`) — everyone
+ * else already knows which one they are asking for.
+ */
+export type AnySubscriptionRef =
+  | { kind: 'guild'; id: string; guildId: string }
+  | { kind: 'pool'; id: string; poolId: string };
 
 /**
  * Paddle subscription statuses that count as "in good standing" for
@@ -144,19 +194,108 @@ export class SubscriptionRepository {
   }
 
   /**
-   * Every subscription bought by this user (Auth.js user id), regardless of
-   * whether they still manage, or are even in, the guild.
+   * Every GUILD subscription bought by this user (Auth.js user id), regardless
+   * of whether they still manage, or are even in, the guild.
    *
    * This is the only path to a subscription for someone who left the server:
    * the dashboard's normal query starts from the user's manageable guilds, so
    * without this they would keep being charged with no self-serve way to stop.
+   *
+   * `safeParse`, not `parse`: a purchaser who also owns a pool has pool rows
+   * in this same result set (`guild_id` null), which do not fit this schema
+   * and must be skipped rather than crash the whole query. Use
+   * {@link listPoolsByPurchaser} for those.
    */
   async listByPurchaser(purchaserUserId: string): Promise<SubscriptionRow[]> {
     const rows = await this.db
       .select()
       .from(subscriptions)
       .where(eq(subscriptions.purchaserUserId, purchaserUserId));
-    return rows.map((row) => subscriptionRowSchema.parse(row));
+    const out: SubscriptionRow[] = [];
+    for (const row of rows) {
+      const parsed = subscriptionRowSchema.safeParse(row);
+      if (parsed.success) out.push(parsed.data);
+    }
+    return out;
+  }
+
+  /** Every POOL subscription bought by this user. The pool-axis sibling of {@link listByPurchaser}. */
+  async listPoolsByPurchaser(purchaserUserId: string): Promise<PoolSubscriptionRow[]> {
+    const rows = await this.db
+      .select()
+      .from(subscriptions)
+      .where(eq(subscriptions.purchaserUserId, purchaserUserId));
+    const out: PoolSubscriptionRow[] = [];
+    for (const row of rows) {
+      const parsed = poolSubscriptionRowSchema.safeParse(row);
+      if (parsed.success) out.push(parsed.data);
+    }
+    return out;
+  }
+
+  /**
+   * Idempotent upsert keyed on `pool_id` — the pool-axis sibling of
+   * {@link upsert}. Same shape, same reasoning: a Paddle subscription for a
+   * pool converges on repeat webhook delivery exactly like a guild one does.
+   */
+  async upsertForPool(input: UpsertPoolSubscriptionInput): Promise<PoolSubscriptionRow> {
+    const values = {
+      poolId: input.poolId,
+      paddleSubscriptionId: input.paddleSubscriptionId,
+      paddleCustomerId: input.paddleCustomerId,
+      purchaserUserId: input.purchaserUserId ?? null,
+      tier: input.tier,
+      status: input.status,
+      currentPeriodEnd: input.currentPeriodEnd ?? null,
+      scheduledChangeAction: input.scheduledChangeAction ?? null,
+      scheduledChangeAt: input.scheduledChangeAt ?? null,
+      price: input.price ?? null,
+      currency: input.currency ?? null,
+    };
+    const [row] = await this.db
+      .insert(subscriptions)
+      .values(values)
+      .onConflictDoUpdate({
+        target: subscriptions.poolId,
+        set: {
+          ...values,
+          purchaserUserId: sql`coalesce(excluded.purchaser_user_id, ${subscriptions.purchaserUserId})`,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return poolSubscriptionRowSchema.parse(row);
+  }
+
+  async getByPoolId(poolId: string): Promise<PoolSubscriptionRow | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(subscriptions)
+      .where(eq(subscriptions.poolId, poolId))
+      .limit(1);
+    return row ? poolSubscriptionRowSchema.parse(row) : undefined;
+  }
+
+  /**
+   * Which axis a Paddle subscription id belongs to, without assuming either.
+   * `applyRefund` is the one caller that genuinely does not know: a refund
+   * event carries only the Paddle subscription id, which is equally valid on
+   * either axis.
+   */
+  async getByPaddleIdAny(paddleSubscriptionId: string): Promise<AnySubscriptionRef | undefined> {
+    const [row] = await this.db
+      .select({
+        id: subscriptions.id,
+        guildId: subscriptions.guildId,
+        poolId: subscriptions.poolId,
+      })
+      .from(subscriptions)
+      .where(eq(subscriptions.paddleSubscriptionId, paddleSubscriptionId))
+      .limit(1);
+    if (!row) return undefined;
+    if (row.guildId) return { kind: 'guild', id: row.id, guildId: row.guildId };
+    if (row.poolId) return { kind: 'pool', id: row.id, poolId: row.poolId };
+    return undefined;
   }
 
   /**

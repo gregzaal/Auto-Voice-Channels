@@ -42,6 +42,47 @@ export interface PendingNotification {
   attempts: number;
   /** When the advance pass queued it. The dedupe re-check compares against it. */
   enqueuedAt: Date;
+  /**
+   * Set when this guild-scoped row is one copy of a pool's fan-out notice
+   * (`plans/member-based-pricing.md` §6.6). Lets the deliverer stamp the
+   * POOL's own dedupe key once any one copy is confirmed delivered, rather
+   * than at enqueue time — a fan-out notice must keep re-emitting if every
+   * copy fails, exactly like a single guild's own notice does.
+   */
+  poolId: string | null;
+}
+
+/** The pool-axis sibling of {@link PendingNotification} — a purchaser-targeted row. */
+export interface PendingPoolNotification {
+  id: number;
+  poolId: string;
+  key: string;
+  notification: LeniencyNotification;
+  memberCount: number;
+  attempts: number;
+  enqueuedAt: Date;
+}
+
+/**
+ * Capped at the horizon the message itself quotes.
+ *
+ * A `trial_warning` carries `daysLeft`, computed here and rendered verbatim
+ * at delivery. Delivered late it does not read as stale, it reads as wrong:
+ * "1 day left" about a trial that ended yesterday, arriving after the
+ * hard-gate notice. The flat TTL alone does not prevent that, because a
+ * fleet re-added to a guild makes three days of backlog claimable at once.
+ */
+function ttlFor(notification: LeniencyNotification, options: { ttlMs?: number }): number {
+  const horizonMs =
+    typeof notification.daysLeft === 'number' && notification.daysLeft >= 0
+      ? // Floored, because `daysLeft` reaches 0 for a window that has just
+        // closed and a zero TTL expires the row before any drain sees it.
+        Math.max(MIN_TTL_MS, notification.daysLeft * 86_400_000)
+      : Number.POSITIVE_INFINITY;
+  // The floor applies to the derived horizon, never to an explicit `ttlMs`:
+  // that one is the caller being deliberate, and silently widening it would
+  // make the option a suggestion.
+  return Math.min(options.ttlMs ?? NOTIFICATION_TTL_MS, horizonMs);
 }
 
 export class BillingNotificationRepository {
@@ -59,33 +100,51 @@ export class BillingNotificationRepository {
     guildId: string,
     notification: LeniencyNotification,
     memberCount: number,
-    options: { at?: Date; ttlMs?: number } = {},
+    options: { at?: Date; ttlMs?: number; sourcePoolId?: string } = {},
   ): Promise<boolean> {
     const at = options.at ?? new Date();
-    /**
-     * Capped at the horizon the message itself quotes.
-     *
-     * A `trial_warning` carries `daysLeft`, computed here and rendered
-     * verbatim at delivery. Delivered late it does not read as stale, it reads
-     * as wrong: "1 day left" about a trial that ended yesterday, arriving
-     * after the hard-gate notice. The flat TTL alone does not prevent that,
-     * because a fleet re-added to a guild makes three days of backlog
-     * claimable at once.
-     */
-    const horizonMs =
-      typeof notification.daysLeft === 'number' && notification.daysLeft >= 0
-        ? // Floored, because `daysLeft` reaches 0 for a window that has just
-          // closed and a zero TTL expires the row before any drain sees it.
-          Math.max(MIN_TTL_MS, notification.daysLeft * 86_400_000)
-        : Number.POSITIVE_INFINITY;
-    // The floor applies to the derived horizon, never to an explicit `ttlMs`:
-    // that one is the caller being deliberate, and silently widening it would
-    // make the option a suggestion.
-    const ttl = Math.min(options.ttlMs ?? NOTIFICATION_TTL_MS, horizonMs);
+    const ttl = ttlFor(notification, options);
     const inserted = await this.db
       .insert(billingNotifications)
       .values({
         guildId,
+        // Traceability only (`plans/member-based-pricing.md` §6.6): this row
+        // is still keyed and delivered exactly like any other guild-scoped
+        // notification (`billing_notifications_pending_key` is on
+        // `(guild_id, key)`, unaffected by `pool_id`). The deliverer reads it
+        // back to know which pool's dedupe key to stamp on success.
+        poolId: options.sourcePoolId ?? null,
+        key: notification.key,
+        kind: notification.kind,
+        notification,
+        memberCount,
+        enqueuedAt: at,
+        expiresAt: new Date(at.getTime() + ttl),
+      })
+      .onConflictDoNothing()
+      .returning({ id: billingNotifications.id });
+    return inserted.length > 0;
+  }
+
+  /**
+   * The pool-axis sibling of {@link enqueue}, for a purchaser-targeted
+   * billing notification (`plans/member-based-pricing.md` §6.6). Idempotent
+   * against `billing_notifications_pool_pending_key`, same reasoning as the
+   * guild form: the pool pass re-derives the same pending notification every
+   * tick until delivery stamps the pool's own dedupe map.
+   */
+  async enqueueForPool(
+    poolId: string,
+    notification: LeniencyNotification,
+    memberCount: number,
+    options: { at?: Date; ttlMs?: number } = {},
+  ): Promise<boolean> {
+    const at = options.at ?? new Date();
+    const ttl = ttlFor(notification, options);
+    const inserted = await this.db
+      .insert(billingNotifications)
+      .values({
+        poolId,
         key: notification.key,
         kind: notification.kind,
         notification,
@@ -128,6 +187,7 @@ export class BillingNotificationRepository {
       const claimed = await tx.execute<{
         id: number;
         guild_id: string;
+        pool_id: string | null;
         key: string;
         notification: unknown;
         member_count: number;
@@ -154,13 +214,79 @@ export class BillingNotificationRepository {
                claimed_until = ${new Date(at.getTime() + leaseMs)}
           FROM claimed
          WHERE n.id = claimed.id
-        RETURNING n.id, n.guild_id, n.key, n.notification, n.member_count, n.attempts,
+        RETURNING n.id, n.guild_id, n.pool_id, n.key, n.notification, n.member_count, n.attempts,
                   n.enqueued_at
       `);
 
       return claimed.rows.map((row) => ({
         id: Number(row.id),
         guildId: row.guild_id,
+        poolId: row.pool_id,
+        key: row.key,
+        notification: row.notification as LeniencyNotification,
+        memberCount: Number(row.member_count),
+        attempts: Number(row.attempts),
+        enqueuedAt: new Date(row.enqueued_at),
+      }));
+    });
+  }
+
+  /**
+   * The pool-axis sibling of {@link claimForFleet}: deliverable means this
+   * fleet is present in at least one of the pool's LIVE member guilds — the
+   * bot must share a server with the purchaser to DM them at all, and under
+   * the single-fleet-only enforcement on adding a guild to a pool (§6.1 q4),
+   * every live member shares the same fleet, so any one of them suffices.
+   */
+  async claimPoolForFleet(
+    fleet: Fleet,
+    limit: number,
+    at = new Date(),
+    leaseMs = CLAIM_LEASE_MS,
+  ): Promise<PendingPoolNotification[]> {
+    return this.db.transaction(async (tx) => {
+      const claimed = await tx.execute<{
+        id: number;
+        pool_id: string;
+        key: string;
+        notification: unknown;
+        member_count: number;
+        attempts: number;
+        enqueued_at: string | Date;
+      }>(sql`
+        WITH claimed AS (
+          SELECT n.id
+          FROM ${billingNotifications} n
+          WHERE n.pool_id IS NOT NULL
+            AND n.delivered_at IS NULL
+            AND n.expires_at > ${at}
+            AND (n.claimed_until IS NULL OR n.claimed_until <= ${at})
+            AND EXISTS (
+              SELECT 1 FROM member_pool_guilds mpg
+              JOIN ${guildFleetPresence} p
+                ON p.guild_id = mpg.guild_id
+               AND p.fleet = ${fleet}
+               AND p.removed_at IS NULL
+              WHERE mpg.pool_id = n.pool_id
+                AND mpg.removed_at IS NULL
+            )
+          ORDER BY n.enqueued_at ASC
+          LIMIT ${limit}
+          FOR UPDATE OF n SKIP LOCKED
+        )
+        UPDATE ${billingNotifications} n
+           SET attempts = n.attempts + 1,
+               last_attempt_at = ${at},
+               claimed_until = ${new Date(at.getTime() + leaseMs)}
+          FROM claimed
+         WHERE n.id = claimed.id
+        RETURNING n.id, n.pool_id, n.key, n.notification, n.member_count, n.attempts,
+                  n.enqueued_at
+      `);
+
+      return claimed.rows.map((row) => ({
+        id: Number(row.id),
+        poolId: row.pool_id,
         key: row.key,
         notification: row.notification as LeniencyNotification,
         memberCount: Number(row.member_count),
@@ -216,7 +342,7 @@ export class BillingNotificationRepository {
   async expire(
     at = new Date(),
     limit = 500,
-  ): Promise<{ guildId: string; key: string; attempts: number }[]> {
+  ): Promise<{ guildId: string | null; poolId: string | null; key: string; attempts: number }[]> {
     /**
      * One statement, not select-then-delete.
      *
@@ -228,7 +354,8 @@ export class BillingNotificationRepository {
      * caller.
      */
     const deleted = await this.db.execute<{
-      guild_id: string;
+      guild_id: string | null;
+      pool_id: string | null;
       key: string;
       attempts: number;
     }>(sql`
@@ -247,10 +374,11 @@ export class BillingNotificationRepository {
           LIMIT ${limit}
           FOR UPDATE SKIP LOCKED
        )
-      RETURNING guild_id, key, attempts
+      RETURNING guild_id, pool_id, key, attempts
     `);
     return deleted.rows.map((row) => ({
       guildId: row.guild_id,
+      poolId: row.pool_id,
       key: row.key,
       attempts: Number(row.attempts),
     }));

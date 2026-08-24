@@ -1,6 +1,6 @@
 import type { LeniencyNotification, Logger } from '@avc/core';
 import type { Client } from 'discord.js';
-import { notificationMessage, onboardingMessage } from './messages.js';
+import { notificationMessage, onboardingMessage, SITE_URL } from './messages.js';
 import type { TrialPolicy } from '@avc/core';
 
 /**
@@ -16,6 +16,17 @@ export interface BillingNotifier {
     memberCount: number,
   ): Promise<boolean>;
   welcomeGuild(guildId: string, policy: TrialPolicy, memberCount: number): Promise<boolean>;
+  /**
+   * DMs a pool's purchaser directly, for a billing event that concerns the
+   * pool as a whole rather than any one server (`plans/member-based-pricing.md`
+   * §6.6). Unlike {@link notifyGuild} there is no system-channel fallback
+   * step: a pool has no one server whose channels would make sense here.
+   */
+  notifyPurchaser(
+    discordUserId: string,
+    notification: LeniencyNotification,
+    memberCount: number,
+  ): Promise<boolean>;
 }
 
 export interface DiscordBillingNotifierOptions {
@@ -41,6 +52,25 @@ export class DiscordBillingNotifier implements BillingNotifier {
 
   async welcomeGuild(guildId: string, policy: TrialPolicy, memberCount: number): Promise<boolean> {
     return this.deliver(guildId, onboardingMessage(policy, memberCount, guildId));
+  }
+
+  async notifyPurchaser(
+    discordUserId: string,
+    notification: LeniencyNotification,
+    memberCount: number,
+  ): Promise<boolean> {
+    // No single guild to deep-link to; the plain dashboard shows the pool panel.
+    const content = notificationMessage(notification, memberCount, '', `${SITE_URL}/dashboard`);
+    try {
+      // No guild to name it against, unlike `deliver`'s owner-DM fallback:
+      // this message is about the purchaser's pool, not one server.
+      const user = await this.opts.client.users.fetch(discordUserId, { cache: false });
+      await user.send({ content });
+      return true;
+    } catch (err) {
+      this.opts.logger.debug({ err, discordUserId }, 'pool purchaser notification delivery failed');
+      return false;
+    }
   }
 
   private async deliver(guildId: string, content: string): Promise<boolean> {

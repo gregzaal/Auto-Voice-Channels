@@ -14,6 +14,9 @@ export * from './repositories/billingEvents.js';
 export * from './repositories/billingRuns.js';
 export * from './repositories/billingNotifications.js';
 export * from './repositories/guildFleetPresence.js';
+export * from './repositories/memberPools.js';
+export * from './repositories/memberPoolGuilds.js'; // includes the atomic pool-membership helpers
+export * from './repositories/accounts.js';
 export * from './repositories/aiUsage.js';
 export * from './repositories/legacyCustomers.js';
 export * from './repositories/runtimeFlags.js';

@@ -82,11 +82,18 @@ export function onboardingMessage(
   }
 }
 
-/** Renders a leniency-ladder notification (the §4 grace ladder) as message text. */
+/**
+ * Renders a leniency-ladder notification (the §4 grace ladder) as message
+ * text. `guildId` deep-links to that server's dashboard card; a pool
+ * notification (`plans/member-based-pricing.md` §6.6) has no one server to
+ * deep-link to, so `notifyPurchaser` passes the plain dashboard URL instead,
+ * where the pool panel is what the purchaser actually needs to see.
+ */
 export function notificationMessage(
   n: LeniencyNotification,
   memberCount: number,
   guildId: string,
+  link: string = subscribeUrl(guildId),
 ): string {
   const tierLine = n.requiredTier ? tierById(n.requiredTier) : tierFor(memberCount);
   const price =
@@ -95,7 +102,6 @@ export function notificationMessage(
       : tierLine.pricePerYear === 0
         ? 'free'
         : `$${tierLine.pricePerYear}/yr`;
-  const link = subscribeUrl(guildId);
   switch (n.kind) {
     case 'trial_warning': {
       const days = n.daysLeft ?? 0;

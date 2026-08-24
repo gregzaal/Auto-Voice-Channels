@@ -5,6 +5,7 @@ import {
   parseBillingMeta,
   RUNTIME_FLAGS,
   subscriptionInGoodStanding,
+  tierFor,
   trialDurationMs,
   trialPolicyFor,
   utcDayKey,
@@ -16,14 +17,36 @@ import {
   type GuildSettingsStore,
   type LeniencyConfig,
   type LeniencyDecision,
+  type LeniencyNotification,
   type LeniencyState,
   type Logger,
+  type MemberPoolGuildRepository,
+  type MemberPoolRepository,
+  type MemberPoolRow,
   type OpsAuditRepository,
+  type PoolSubscriptionRow,
   type RuntimeFlagsRepository,
   NOTIFICATION_TTL_MS,
   type SubscriptionRepository,
 } from '@avc/core';
 import type { BillingNotifier } from './notifier.js';
+
+/**
+ * Leniency reasons whose notification stops service (or is the flip side of
+ * that: service resuming) rather than merely nudging the purchaser about
+ * money. These fan out to every live member guild, one row each, through the
+ * ordinary guild-scoped queue (`plans/member-based-pricing.md` §6.6) — every
+ * affected server must hear it, not one representative. Everything else
+ * (payment failed, over limit, renewal reminders) is a billing event and goes
+ * to the purchaser alone.
+ */
+const POOL_FAN_OUT_KINDS: ReadonlySet<LeniencyNotification['kind']> = new Set([
+  'hard_gate',
+  'reactivated',
+]);
+
+/** Leniency transition reasons that make things WORSE for the customer if the count is wrong. */
+const POOL_UPGRADE_REASONS: ReadonlySet<string> = new Set(['over_limit', 'grace_elapsed']);
 
 export interface BillingReconcilerDeps {
   guilds: GuildRepository;
@@ -34,6 +57,19 @@ export interface BillingReconcilerDeps {
   /** The durable hand-off between the advance pass and whoever can deliver. */
   notifications: BillingNotificationRepository;
   flags: RuntimeFlagsRepository;
+  /**
+   * Reads `pooling.disabled` under a FIXED fleet, never this instance's own
+   * (`plans/member-based-pricing.md` §6.5). The pool pass is a cluster
+   * singleton on shared rows, exactly like `billing.advance`'s advisory lock,
+   * so a per-fleet reading would let whichever fleet wins the reservation
+   * decide unilaterally whether pooling runs at all. Same instance class as
+   * `flags`, constructed with `DEFAULT_FLEET` instead of `config.fleet`.
+   */
+  clusterFlags: RuntimeFlagsRepository;
+  memberPools: MemberPoolRepository;
+  memberPoolGuilds: MemberPoolGuildRepository;
+  /** The Discord snowflake behind an Auth.js user id, for purchaser DMs (§6.6). */
+  resolveDiscordUserId: (authUserId: string) => Promise<string | null>;
   opsAudit: OpsAuditRepository;
   notifier: BillingNotifier;
   /** Member counts from this instance's gateway cache (the daily sampler). */
@@ -262,6 +298,18 @@ export class BillingReconciler {
   private async advancePhase(): Promise<void> {
     const config = await this.readConfig();
     this.stats.lastAdvanceAt = this.now().toISOString();
+
+    /**
+     * Pools first, and unconditionally-except-for-the-flag: pool aggregation
+     * is a prerequisite computation for the same walk, not a separate job, so
+     * it belongs inside this one reservation rather than racing it
+     * (`plans/member-based-pricing.md` §6.5). `clusterFlags` is pinned to a
+     * fixed fleet — see its doc comment — never this instance's own.
+     */
+    if (!(await this.deps.clusterFlags.getBool(RUNTIME_FLAGS.POOLING_DISABLED))) {
+      await this.advancePoolsPhase(config);
+    }
+
     let after: string | undefined;
     for (;;) {
       // Termination is on RAW-page exhaustion (lastGuildId), not parsed rows:
@@ -269,6 +317,11 @@ export class BillingReconciler {
       const { rows, lastGuildId } = await this.deps.guilds.listBatch(after, this.batchSize);
       for (const row of rows) {
         if (this.stopping) return;
+        // Pooled guilds are evaluated exactly once per tick, by the pool pass
+        // above, never by this walk too (§6.5). A guild whose OWN size is
+        // still free (§5.3) is excluded from that pass and stays here,
+        // because pooling never touches a free-forever guild's own state.
+        if (row.poolId && tierFor(row.memberCount ?? 0).id !== 'free') continue;
         try {
           await this.advanceGuild(row, config);
           this.stats.advanced += 1;
@@ -299,6 +352,261 @@ export class BillingReconciler {
       await this.deps.notifications.pruneDelivered(cutoff);
     } catch (err) {
       this.deps.logger.warn({ err }, 'billing notification prune failed');
+    }
+  }
+
+  /**
+   * Pool aggregation, walked before the per-guild loop
+   * (`plans/member-based-pricing.md` §6.5). Runs inside the SAME reservation
+   * as the per-guild walk — the pool pass is a prerequisite computation for
+   * that walk, not a separate job — and must therefore be idempotent under
+   * concurrent execution: the advisory lock only serializes the *reservation*
+   * (`billingRuns.ts`), not the work, so a pass exceeding the 55-minute
+   * spacing can overlap the next one.
+   */
+  private async advancePoolsPhase(config: LeniencyConfig): Promise<void> {
+    let after: string | undefined;
+    for (;;) {
+      const { rows: pools, lastPoolId } = await this.deps.memberPools.listBatch(
+        after,
+        this.batchSize,
+      );
+      for (const pool of pools) {
+        if (this.stopping) return;
+        try {
+          await this.advancePool(pool, config);
+          this.stats.advanced += 1;
+        } catch (err) {
+          this.stats.errors += 1;
+          this.deps.logger.error(
+            { err, poolId: pool.id },
+            'pool billing advance failed (isolated)',
+          );
+        }
+      }
+      if (!lastPoolId) break;
+      after = lastPoolId;
+    }
+  }
+
+  /**
+   * Evaluates and converges ONE pool: aggregate its live, billable members'
+   * counts, run the SAME pure leniency machine the per-guild walk uses (§5.2,
+   * treating the pool as a single virtual entity), then fan the result out to
+   * every member guild it actually changes something for.
+   */
+  private async advancePool(pool: MemberPoolRow, config: LeniencyConfig): Promise<void> {
+    const now = this.now();
+    const liveMemberships = await this.deps.memberPoolGuilds.listLive(pool.id);
+
+    const memberGuilds: GuildRow[] = [];
+    for (const membership of liveMemberships) {
+      const guild = await this.deps.guilds.get(membership.guildId);
+      if (guild) memberGuilds.push(guild);
+    }
+    /**
+     * §5.3: a guild whose OWN count is still free-forever is entitled
+     * regardless of the pool and contributes 0 to the pooled sum, whatever
+     * else happens. Excluded here rather than merely zero-valued, so it is
+     * never a fan-out target either — its own dormant trial state is untouched.
+     */
+    const billableGuilds = memberGuilds.filter((g) => tierFor(g.memberCount ?? 0).id !== 'free');
+    const pooledSum = billableGuilds.reduce((sum, g) => sum + (g.memberCount ?? 0), 0);
+
+    /**
+     * The pool's own forward-only sampler (§5.2a). `authoritative: true`
+     * always: this sum is freshly derived from every live member's own count
+     * on every tick, never a cached hint, so there is nothing for the anomaly
+     * clamps to protect against.
+     */
+    let { row: current } = await this.deps.memberPools.recordMemberCountSample(pool.id, pooledSum, {
+      at: now,
+      authoritative: true,
+    });
+
+    const subscription = await this.deps.subscriptions.getByPoolId(pool.id);
+    let state = this.poolLeniencyState(current, subscription, pooledSum);
+    let decision = evaluateLeniency(state, now, config);
+
+    if (decision.transition?.requiresCountValidation) {
+      /**
+       * The asymmetric resolution (§5.2b): capping the reads breaks the
+       * upgrade invariant, so an upgrade needs a fresh read for EVERY live
+       * member and defers the whole pool if any is unavailable. A downgrade
+       * or reactivation proceeds on the samples alone — it fails in the
+       * customer's favour either way.
+       */
+      if (POOL_UPGRADE_REASONS.has(decision.transition.reason)) {
+        let freshSum = 0;
+        for (const guild of billableGuilds) {
+          const authoritative = await this.deps.fetchAuthoritativeCount(guild.guildId);
+          if (authoritative === null) {
+            this.deps.logger.warn(
+              { poolId: pool.id, guildId: guild.guildId, transition: decision.transition.reason },
+              'authoritative member count unavailable for a pool member; deferring pool transition',
+            );
+            return;
+          }
+          freshSum += authoritative;
+          // Keep the guild's own recorded count current while we are here —
+          // it is what the dashboard and `/setup` quote for this one server.
+          await this.deps.guilds.recordMemberCountSample(guild.guildId, authoritative, {
+            at: now,
+            authoritative: true,
+          });
+        }
+        ({ row: current } = await this.deps.memberPools.recordMemberCountSample(pool.id, freshSum, {
+          at: now,
+          authoritative: true,
+        }));
+        state = this.poolLeniencyState(current, subscription, freshSum);
+        decision = evaluateLeniency(state, now, config);
+      }
+    }
+
+    if (decision.transition) {
+      // A pool never holds `trial` (§5.4) or `blocked`. `evaluateLeniency`'s
+      // free-forever reactivation path returns `trial`, which for a POOL
+      // (a paid construct that shrank to nothing billable) means "keep
+      // billing, nothing to gate" rather than a state the enum even has.
+      const toStatus =
+        decision.transition.toStatus === 'trial' ? 'active' : decision.transition.toStatus;
+      const nextGraceUntil = decision.transition.graceUntil;
+      if (toStatus !== current.status || nextGraceUntil !== current.graceUntil) {
+        current = await this.deps.memberPools.transitionStatus({
+          poolId: pool.id,
+          toStatus: toStatus as 'active' | 'grace' | 'expired',
+          reason: decision.transition.reason,
+          actor: 'billing-reconciler',
+          ...(nextGraceUntil !== undefined ? { graceUntil: nextGraceUntil } : {}),
+        });
+        this.stats.transitions += 1;
+      }
+    }
+
+    await this.fanOutToPoolMembers(pool.id, billableGuilds, current);
+    await this.queuePoolNotifications(
+      current,
+      decision.notifications,
+      state.pooledMemberCount ?? 0,
+    );
+  }
+
+  private poolLeniencyState(
+    pool: MemberPoolRow,
+    subscription: PoolSubscriptionRow | undefined,
+    pooledSum: number,
+  ): LeniencyState {
+    const meta = parseBillingMeta(pool.metadata);
+    return {
+      authStatus: pool.status,
+      authExpiresAt: null, // a pool has no trial window, ever (§5.4)
+      graceUntil: pool.graceUntil,
+      billedTier: pool.billedTier,
+      hasSubscription: subscription !== undefined,
+      subscriptionOk: subscription ? subscriptionInGoodStanding(subscription) : false,
+      memberCount: null,
+      pooledMemberCount: pooledSum,
+      samples: meta.samples,
+      guildCreatedAt: null,
+      notifications: meta.notifications,
+    };
+  }
+
+  /**
+   * Writes the pool's status and billed tier to every member it actually
+   * differs for. Diffed, not unconditional (§6.5): a 999-server pool writing
+   * every member's status every hour, unconditionally, is ~2,000 audit rows
+   * and 999 cache evictions an hour, forever.
+   *
+   * **This diff is read-then-write, not compare-and-swap, so two concurrent
+   * passes converging the SAME not-yet-converged guild can each decide a
+   * write is due and each call `transitionAuth`** (`guildAuthEvents` has no
+   * `fromStatus === toStatus` short circuit — see AGENTS.md and
+   * `billingRuns.ts`'s `lockSlot` docblock for the same pre-existing gap).
+   * Bounded to a one-time race at first convergence, verified in
+   * `poolReconciler.integration.test.ts`: final state is identical either
+   * way, and once converged a diff correctly reads as unchanged and stops
+   * writing, so this is not the steady-state "every hour, forever" cost the
+   * diff exists to prevent. Adding a same-status guard inside `transitionAuth`
+   * itself would close it, but that function is shared by callers (admin
+   * re-block with an updated reason, notably) that want a fresh audit row on
+   * a deliberate no-op transition, so it is a wider change than this pass
+   * should make unilaterally.
+   */
+  private async fanOutToPoolMembers(
+    poolId: string,
+    billableGuilds: readonly GuildRow[],
+    pool: MemberPoolRow,
+  ): Promise<void> {
+    for (const guild of billableGuilds) {
+      try {
+        if (guild.authStatus !== pool.status || datesDiffer(guild.graceUntil, pool.graceUntil)) {
+          await this.deps.store.transitionAuth({
+            guildId: guild.guildId,
+            toStatus: pool.status,
+            reason: `pool:${poolId}`,
+            actor: 'billing-reconciler',
+            graceUntil: pool.graceUntil,
+          });
+        }
+        if (guild.tier !== pool.billedTier) {
+          await this.deps.store.setBilledTier(guild.guildId, pool.billedTier);
+        }
+      } catch (err) {
+        // Per-guild isolation inside the pool pass too: one bad member must
+        // never stop the rest of the pool, or the whole pass, from converging.
+        this.stats.errors += 1;
+        this.deps.logger.error(
+          { err, poolId, guildId: guild.guildId },
+          'pool fan-out failed for one member (isolated)',
+        );
+      }
+    }
+  }
+
+  /**
+   * Splits the pool's due notifications by audience (§6.6): service-stopping
+   * kinds fan out to every live member guild through the ordinary per-guild
+   * queue (each gets its own dedupe/retry/expiry, and carries `sourcePoolId`
+   * so the deliverer knows which pool to stamp); everything else is a billing
+   * event, queued once for the purchaser alone.
+   *
+   * **The pool's own dedupe stamp for a fan-out notification is written at
+   * DELIVERY, not enqueue** — the first version of this stamped as soon as
+   * enqueueing succeeded, which is wrong: if every one of the N per-guild
+   * copies then failed to deliver within its TTL, the pool's dedupe map was
+   * already marked sent, so `evaluateExpired`'s "re-emit hard_gate until a
+   * delivery succeeds" guarantee (the exact promise that machine's own
+   * comment states) silently broke for the case that guarantee exists for.
+   * `deliverPhase` stamps it once any single copy is confirmed delivered.
+   */
+  private async queuePoolNotifications(
+    current: MemberPoolRow,
+    notifications: readonly LeniencyNotification[],
+    memberCount: number,
+  ): Promise<void> {
+    for (const notification of notifications) {
+      if (POOL_FAN_OUT_KINDS.has(notification.kind)) {
+        const targets = await this.deps.memberPoolGuilds.listLive(current.id);
+        for (const membership of targets) {
+          const queued = await this.deps.notifications.enqueue(
+            membership.guildId,
+            notification,
+            memberCount,
+            { at: this.now(), ttlMs: this.notificationTtlMs, sourcePoolId: current.id },
+          );
+          if (queued) this.stats.notificationsQueued += 1;
+        }
+      } else {
+        const queued = await this.deps.notifications.enqueueForPool(
+          current.id,
+          notification,
+          memberCount,
+          { at: this.now(), ttlMs: this.notificationTtlMs },
+        );
+        if (queued) this.stats.notificationsQueued += 1;
+      }
     }
   }
 
@@ -446,7 +754,7 @@ export class BillingReconciler {
         // heard it was about to be gated is the exact failure the queue exists
         // to prevent, so it must not also be the quiet one.
         this.deps.logger.warn(
-          { guildId: row.guildId, key: row.key, attempts: row.attempts },
+          { guildId: row.guildId, poolId: row.poolId, key: row.key, attempts: row.attempts },
           'billing notification expired undelivered',
         );
         /**
@@ -467,7 +775,7 @@ export class BillingReconciler {
           .record({
             actor: 'billing-reconciler',
             action: 'billing.notification.expired',
-            target: row.guildId,
+            target: row.guildId ?? row.poolId ?? '',
             details: { key: row.key, attempts: row.attempts },
           })
           .catch((err: unknown) => {
@@ -535,6 +843,19 @@ export class BillingReconciler {
          * before its hard gate is the failure this phase exists to prevent.
          */
         await this.deps.guilds.recordBillingNotification(row.guildId, row.key, now);
+        // This row is one copy of a pool's fan-out (§6.6). Stamp the POOL's
+        // own dedupe key on this, the first confirmed delivery — restamping
+        // on a later copy's delivery is harmless (same key, newer timestamp).
+        // Never stamped at enqueue time: a pool whose every copy fails must
+        // keep re-deriving the notification, exactly like a single guild's.
+        if (row.poolId) {
+          await this.deps.memberPools.recordNotification(row.poolId, row.key, now).catch((err) => {
+            this.deps.logger.warn(
+              { err, poolId: row.poolId, key: row.key },
+              'pool dedupe stamp failed after a fan-out delivery succeeded',
+            );
+          });
+        }
         await this.deps.notifications.markDelivered(row.id, this.deps.fleet, now);
         this.stats.notificationsSent += 1;
       } catch (err) {
@@ -556,11 +877,92 @@ export class BillingReconciler {
       }
     }
 
+    await this.deliverPoolNotifications(now);
+
     try {
       this.stats.notificationQueueDepth = await this.deps.notifications.pending(now);
     } catch (err) {
       this.deps.logger.debug({ err }, 'billing notification depth read failed');
     }
+  }
+
+  /**
+   * The pool-axis sibling of the delivery loop above: purchaser-targeted
+   * billing notifications (grace_started, grace_nudge — §6.6). Service-
+   * stopping notifications never reach here; `queuePoolNotifications` already
+   * fanned those out as ordinary guild-scoped rows, delivered by the loop
+   * above like any other guild notice.
+   */
+  private async deliverPoolNotifications(now: Date): Promise<void> {
+    let claimed;
+    try {
+      claimed = await this.deps.notifications.claimPoolForFleet(
+        this.deps.fleet,
+        this.deliverBatch,
+        now,
+      );
+    } catch (err) {
+      this.stats.errors += 1;
+      this.deps.logger.error({ err }, 'pool billing notification claim failed');
+      return;
+    }
+
+    for (const row of claimed) {
+      if (this.stopping) return;
+      try {
+        if (await this.alreadyDeliveredForPool(row.poolId, row.key, row.enqueuedAt)) {
+          await this.deps.notifications.markDelivered(row.id, this.deps.fleet, now);
+          continue;
+        }
+
+        const pool = await this.deps.memberPools.get(row.poolId);
+        if (!pool) {
+          // The pool was deleted from under a queued row. Nothing to deliver
+          // to and nothing to retry either.
+          await this.deps.notifications.markDelivered(row.id, this.deps.fleet, now);
+          continue;
+        }
+        const subscription = await this.deps.subscriptions.getByPoolId(row.poolId);
+        const purchaserUserId = subscription?.purchaserUserId;
+        const discordUserId = purchaserUserId
+          ? await this.deps.resolveDiscordUserId(purchaserUserId)
+          : null;
+        const delivered = discordUserId
+          ? await this.deps.notifier.notifyPurchaser(
+              discordUserId,
+              row.notification,
+              row.memberCount,
+            )
+          : false;
+        if (!delivered) {
+          await this.deps.notifications.markFailed(row.id, 'no reachable purchaser DM', now);
+          continue;
+        }
+        await this.deps.memberPools.recordNotification(row.poolId, row.key, now);
+        await this.deps.notifications.markDelivered(row.id, this.deps.fleet, now);
+        this.stats.notificationsSent += 1;
+      } catch (err) {
+        this.stats.errors += 1;
+        this.deps.logger.error(
+          { err, poolId: row.poolId, key: row.key },
+          'pool billing notification delivery failed (isolated)',
+        );
+      }
+    }
+  }
+
+  /** The pool-axis sibling of {@link alreadyDelivered}. */
+  private async alreadyDeliveredForPool(
+    poolId: string,
+    key: string,
+    enqueuedAt: Date,
+  ): Promise<boolean> {
+    const pool = await this.deps.memberPools.get(poolId);
+    if (!pool) return false;
+    const stampedAt = parseBillingMeta(pool.metadata).notifications[key];
+    if (stampedAt === undefined) return false;
+    const at = Date.parse(stampedAt);
+    return !Number.isNaN(at) && at >= enqueuedAt.getTime();
   }
 
   /**
@@ -605,4 +1007,10 @@ export class BillingReconciler {
     };
     return evaluateLeniency(state, now, config);
   }
+}
+
+/** Null-safe date equality, for the fan-out's diff-before-write check. */
+function datesDiffer(a: Date | null, b: Date | null): boolean {
+  if (a === null || b === null) return a !== b;
+  return a.getTime() !== b.getTime();
 }

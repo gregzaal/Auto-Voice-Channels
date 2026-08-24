@@ -12,11 +12,16 @@ import {
   JoinChannelRepository,
   loadConfig,
   ManagedChannelRepository,
+  MemberPoolGuildRepository,
+  MemberPoolRepository,
   METRICS,
   MetricsRepository,
   OpsAuditRepository,
   DEFAULT_FLEET,
+  poolExitTransition,
   probeForManifest,
+  removeGuildFromAnyPoolAtomically,
+  resolveDiscordUserId,
   PgNotifier,
   runMigrations,
   RUNTIME_FLAGS,
@@ -214,6 +219,8 @@ async function main(): Promise<void> {
   const joinChannelsRepo = new JoinChannelRepository(db, config.fleet);
   const guildsRepo = new GuildRepository(db);
   const presenceRepo = new GuildFleetPresenceRepository(db, config.fleet ?? DEFAULT_FLEET);
+  const memberPoolGuildsRepo = new MemberPoolGuildRepository(db);
+  const memberPoolsRepo = new MemberPoolRepository(db);
   const flags = new RuntimeFlagsRepository(db, config.fleet);
   const actions = new DiscordVoiceActions(client, logger);
   const voice = new DiscordVoiceView(client);
@@ -581,6 +588,12 @@ async function main(): Promise<void> {
         runs: new BillingRunRepository(db),
         notifications: new BillingNotificationRepository(db),
         flags,
+        // Pinned to a fixed fleet regardless of `config.fleet` — the pool
+        // pass is a cluster singleton on shared rows (see the deps doc).
+        clusterFlags: new RuntimeFlagsRepository(db, DEFAULT_FLEET),
+        memberPools: memberPoolsRepo,
+        memberPoolGuilds: memberPoolGuildsRepo,
+        resolveDiscordUserId: (userId) => resolveDiscordUserId(db, userId),
         opsAudit: new OpsAuditRepository(db, config.fleet),
         notifier: billingNotifier,
         listCachedGuildCounts: () =>
@@ -690,6 +703,40 @@ async function main(): Promise<void> {
     void presenceRepo.markRemoved(guild.id, removedAt).catch((err: unknown) => {
       logger.warn({ err, guildId: guild.id }, 'failed to record fleet removal');
     });
+    /**
+     * A pooled guild the bot is kicked from must not silently keep consuming
+     * the purchaser's budget forever, and it must never be left stranded
+     * (`plans/member-based-pricing.md` §5.6). Marks the membership removed
+     * from wherever it is (the dashboard's own remove action does this
+     * synchronously too; this is the path for a kick nobody clicked a button
+     * for), clears the denormalized pointer, and recomputes the guild's own
+     * entitlement as if it had never pooled — landing on `grace` with a fresh
+     * window rather than the `expired` the machine would otherwise strand it
+     * on, because under-charging is the acceptable failure direction here.
+     */
+    void (async () => {
+      try {
+        const row = await guildsRepo.get(guild.id);
+        const poolId = await removeGuildFromAnyPoolAtomically(db, guild.id, removedAt);
+        if (!poolId) return;
+        // Reset, not reinterpret (§5.2a): the pool's sample history was
+        // recorded under a membership this guild is no longer part of, and
+        // must not be allowed to decide a breach/drop verdict for the new
+        // one. The dashboard's own removeGuildFromPool does this too; this is
+        // the parallel path for a kick nobody clicked a button for (§5.6).
+        await memberPoolsRepo.resetSamples(poolId);
+        const exit = poolExitTransition(row?.memberCount ?? null, removedAt);
+        await settingsCache.transitionAuth({
+          guildId: guild.id,
+          toStatus: exit.toStatus,
+          reason: exit.reason,
+          actor: 'system',
+          graceUntil: exit.graceUntil,
+        });
+      } catch (err) {
+        logger.warn({ err, guildId: guild.id }, 'failed to exit pool on bot removal');
+      }
+    })();
     logger.info({ guildId: guild.id }, 'removed from guild');
   });
   client.once('clientReady', () => {

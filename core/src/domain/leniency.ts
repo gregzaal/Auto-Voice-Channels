@@ -67,6 +67,17 @@ export interface LeniencyState {
   subscriptionOk: boolean;
   /** Latest member-count sample (a hint — transitions re-validate via REST). */
   memberCount: number | null;
+  /**
+   * The pooled member-count sum, when this state represents a member pool
+   * rather than a single guild (`plans/member-based-pricing.md` §5.2). Takes
+   * priority over {@link memberCount} in {@link requiredTierOf} when present.
+   * Every other field on this interface keeps meaning exactly what it already
+   * means: a pool's own `authStatus`/`graceUntil`/`samples`/`notifications`,
+   * not any one member guild's. `evaluateLeniency` itself is unaware pools
+   * exist — this is the one seam through which the pool pass drives the same
+   * pure machine that already runs the per-guild ladder.
+   */
+  pooledMemberCount?: number | null;
   /** Rolling daily samples, oldest → newest. */
   samples: readonly MemberCountSample[];
   /** When the guild row was created (≈ when the bot was first added). */
@@ -174,7 +185,7 @@ export function evaluateLeniency(
 }
 
 function requiredTierOf(state: LeniencyState) {
-  return tierFor(state.memberCount ?? 0);
+  return tierFor(state.pooledMemberCount ?? state.memberCount ?? 0);
 }
 
 function alreadySent(state: LeniencyState, key: string): boolean {
@@ -528,4 +539,30 @@ function evaluateExpired(state: LeniencyState): LeniencyDecision {
 
 function utcDay(date: Date): string {
   return date.toISOString().slice(0, 10);
+}
+
+/**
+ * What a guild's own state should become on leaving a pool
+ * (`plans/member-based-pricing.md` §5.6): never a silent `expired`, and never
+ * merely an absence of a transition. `evaluateExpired`'s machine has no
+ * `expired -> trial`/`grace` edge except `shrunk_to_free`, so a guild removed
+ * from a lapsed (or simply left) pool with no explicit handling is stranded
+ * hard-gated forever.
+ *
+ * Free forever (§5.3) reactivates exactly like shrinking under the line
+ * always has. Everyone else lands on `grace` with a FRESH window — "where
+ * that is not derivable, it lands on grace", and under-charging (a longer
+ * runway than the guild might strictly be owed) is the acceptable failure
+ * direction, never the reverse.
+ */
+export function poolExitTransition(
+  memberCount: number | null,
+  now: Date,
+  config: LeniencyConfig = DEFAULT_LENIENCY_CONFIG,
+): { toStatus: AuthStatus; graceUntil: Date | null; reason: string } {
+  const required = tierFor(memberCount ?? 0);
+  if (required.id === 'free') {
+    return { toStatus: 'trial', graceUntil: null, reason: 'left_pool_free' };
+  }
+  return { toStatus: 'grace', graceUntil: addDays(now, config.graceDays), reason: 'left_pool' };
 }

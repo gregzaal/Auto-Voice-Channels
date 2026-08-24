@@ -53,6 +53,21 @@ export const RUNTIME_FLAGS = {
   /** Kill-switch for the assistant, independent of whether a key is configured. */
   AI_DISABLED: 'ai.disabled',
 
+  // -- Member pools (plans/member-based-pricing.md §6.5) ---------------------
+  /**
+   * Skips pool aggregation in the billing reconcile job.
+   *
+   * **Deliberately read under a fixed fleet, never the caller's own** — the
+   * pool pass is a cluster singleton on shared rows, exactly like
+   * `billing.advance`'s advisory lock, so a per-fleet reading of this flag
+   * would let whichever fleet wins the reservation decide unilaterally
+   * whether pooling runs at all. See `RuntimeFlagsRepository`'s
+   * `DEFAULT_FLEET`-pinned use in the reconciler wiring, not the instance's
+   * own fleet-scoped `flags`. Pooled guilds keep their last entitlement while
+   * this is set, which is the safe direction. `global.pause` stops it too.
+   */
+  POOLING_DISABLED: 'pooling.disabled',
+
   // -- Backups (plans/backups.md section 8) ----------------------------------
   /** Kill-switch for scheduled backups. Sibling of `sweep.disabled`. */
   BACKUP_DISABLED: 'backup.disabled',

@@ -232,7 +232,9 @@ describe('BillingNotificationRepository (integration)', () => {
       ttlMs: 86_400_000,
     });
     const expired = await repo.expire();
-    expect(expired).toEqual([{ guildId: NO_FLEET, key: 'trial_warning:7:m', attempts: 0 }]);
+    expect(expired).toEqual([
+      { guildId: NO_FLEET, poolId: null, key: 'trial_warning:7:m', attempts: 0 },
+    ]);
     expect(await repo.pending()).toBe(0);
   });
 
@@ -286,7 +288,9 @@ describe('BillingNotificationRepository (integration)', () => {
       at: enqueuedAt,
       ttlMs: 86_400_000,
     });
-    expect(await repo.expire(at)).toEqual([{ guildId: NO_FLEET, key: 'hard_gate', attempts: 0 }]);
+    expect(await repo.expire(at)).toEqual([
+      { guildId: NO_FLEET, poolId: null, key: 'hard_gate', attempts: 0 },
+    ]);
   });
 
   /**

@@ -39,6 +39,13 @@ export const guildRowSchema = z.object({
   memberCount: z.number().int().nullable(),
   memberCountUpdatedAt: z.date().nullable(),
   tier: z.enum(TIER_IDS).nullable(),
+  /**
+   * The member pool this guild bills through, or null for ordinary per-guild
+   * billing. `.nullish()` for the usual reason: web and bot deploy
+   * independently, and a build carrying this field can read rows written
+   * before the migration that adds the column has run.
+   */
+  poolId: z.string().nullish(),
   settings: z.record(z.unknown()),
   metadata: z.record(z.unknown()),
   createdAt: z.date(),
@@ -523,6 +530,21 @@ export class GuildRepository {
     const [updated] = await this.db
       .update(guilds)
       .set({ tier, updatedAt: new Date() })
+      .where(eq(guilds.guildId, guildId))
+      .returning();
+    return guildRowSchema.parse(updated);
+  }
+
+  /**
+   * Sets or clears which pool this guild bills through, and the tier cache
+   * together, in one statement (`plans/member-based-pricing.md` §6.1: "the
+   * two are written together"). `poolId: null` is the leaving-a-pool case.
+   */
+  async setPoolId(guildId: string, poolId: string | null, tier: TierId | null): Promise<GuildRow> {
+    await this.ensure(guildId);
+    const [updated] = await this.db
+      .update(guilds)
+      .set({ poolId, tier, updatedAt: new Date() })
       .where(eq(guilds.guildId, guildId))
       .returning();
     return guildRowSchema.parse(updated);
