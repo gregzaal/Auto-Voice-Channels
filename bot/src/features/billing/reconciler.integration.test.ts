@@ -2,7 +2,6 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   BillingNotificationRepository,
   BillingRunRepository,
-  DEFAULT_FLEET,
   GuildFleetPresenceRepository,
   GuildRepository,
   MemberPoolGuildRepository,
@@ -124,7 +123,6 @@ describe('BillingReconciler (integration)', () => {
       runs: new BillingRunRepository(env.handle.db),
       notifications,
       flags,
-      clusterFlags: new RuntimeFlagsRepository(env.handle.db, DEFAULT_FLEET),
       memberPools: new MemberPoolRepository(env.handle.db),
       memberPoolGuilds: new MemberPoolGuildRepository(env.handle.db),
       resolveDiscordUserId: async () => null,

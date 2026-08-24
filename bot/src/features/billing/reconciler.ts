@@ -57,15 +57,6 @@ export interface BillingReconcilerDeps {
   /** The durable hand-off between the advance pass and whoever can deliver. */
   notifications: BillingNotificationRepository;
   flags: RuntimeFlagsRepository;
-  /**
-   * Reads `pooling.disabled` under a FIXED fleet, never this instance's own
-   * (`plans/member-based-pricing.md` §6.5). The pool pass is a cluster
-   * singleton on shared rows, exactly like `billing.advance`'s advisory lock,
-   * so a per-fleet reading would let whichever fleet wins the reservation
-   * decide unilaterally whether pooling runs at all. Same instance class as
-   * `flags`, constructed with `DEFAULT_FLEET` instead of `config.fleet`.
-   */
-  clusterFlags: RuntimeFlagsRepository;
   memberPools: MemberPoolRepository;
   memberPoolGuilds: MemberPoolGuildRepository;
   /** The Discord snowflake behind an Auth.js user id, for purchaser DMs (§6.6). */
@@ -300,15 +291,14 @@ export class BillingReconciler {
     this.stats.lastAdvanceAt = this.now().toISOString();
 
     /**
-     * Pools first, and unconditionally-except-for-the-flag: pool aggregation
-     * is a prerequisite computation for the same walk, not a separate job, so
-     * it belongs inside this one reservation rather than racing it
-     * (`plans/member-based-pricing.md` §6.5). `clusterFlags` is pinned to a
-     * fixed fleet — see its doc comment — never this instance's own.
+     * Pools first: pool aggregation is a prerequisite computation for the same
+     * walk, not a separate job, so it belongs inside this one reservation
+     * rather than racing it (`plans/member-based-pricing.md` §6.5). Standard,
+     * unconditional behaviour — `global.pause` and
+     * `billing.reconcile_disabled` already gate the whole job upstream of
+     * this, and pooling carries no kill-switch of its own.
      */
-    if (!(await this.deps.clusterFlags.getBool(RUNTIME_FLAGS.POOLING_DISABLED))) {
-      await this.advancePoolsPhase(config);
-    }
+    await this.advancePoolsPhase(config);
 
     let after: string | undefined;
     for (;;) {

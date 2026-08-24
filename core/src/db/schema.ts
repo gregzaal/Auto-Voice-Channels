@@ -387,8 +387,18 @@ export const memberPoolGuilds = pgTable(
 export const subscriptions = pgTable(
   'subscriptions',
   {
+    /**
+     * `$defaultFn` covers every insert this codebase writes, but `subscriptions`
+     * is the one pool-schema table an OLD (pre-pool) binary can still write to
+     * during a rolling deploy: its INSERT has no idea `id` exists and omits it
+     * from the column list entirely. The SQL-level `.default()` below is what
+     * saves that write from a NOT NULL violation — `member_pools`/`users` don't
+     * need it because no pre-existing binary ever wrote to those tables without
+     * knowing their schema (migration 0029, found by adversarial review).
+     */
     id: text('id')
       .primaryKey()
+      .default(sql`gen_random_uuid()`)
       .$defaultFn(() => crypto.randomUUID()),
     /**
      * Null for a pool subscription. Plain (non-partial) unique: Postgres does

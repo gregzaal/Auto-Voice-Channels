@@ -2,7 +2,6 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   BillingNotificationRepository,
   BillingRunRepository,
-  DEFAULT_FLEET,
   GuildAlreadyPooledError,
   GuildRepository,
   MemberPoolGuildRepository,
@@ -55,11 +54,6 @@ describe('BillingReconciler pool pass (integration)', () => {
     subscriptions = new SubscriptionRepository(env.handle.db);
     flags = new RuntimeFlagsRepository(env.handle.db);
     await flags.set('billing.reconcile_disabled', false, { actor: 'test' });
-    // Migration 0027 seeds this `true` (rolling-deploy safety), under
-    // `fleet = 'prod'` - the same fleet `clusterFlags` in `makeReconciler`
-    // reads. Without re-enabling it here, every pool pass in this suite is a
-    // silent no-op and every guild stays exactly as `ensure()` left it.
-    await flags.set('pooling.disabled', false, { actor: 'test' });
   });
 
   afterAll(async () => {
@@ -74,7 +68,6 @@ describe('BillingReconciler pool pass (integration)', () => {
       runs: new BillingRunRepository(env.handle.db),
       notifications: new BillingNotificationRepository(env.handle.db),
       flags,
-      clusterFlags: new RuntimeFlagsRepository(env.handle.db, DEFAULT_FLEET),
       memberPools: pools,
       memberPoolGuilds: poolGuilds,
       resolveDiscordUserId: async () => null,

@@ -1,0 +1,16 @@
+-- Member pools ship standard rather than behind a rollout gate
+-- (plans/member-based-pricing.md phase 9): there is no production customer
+-- on the feature yet (only the one test payment), so there is no prior
+-- "per server" state for any real subscriber to notice a change from, and
+-- the announcement step phase 9 called for does not apply. `pooling.disabled`
+-- is removed from RUNTIME_FLAGS and the reconciler no longer reads it -- the
+-- pool pass now runs unconditionally, gated only by the same
+-- `global.pause` / `billing.reconcile_disabled` switches every other part of
+-- the billing job already answers to.
+--
+-- Deletes rather than sets `false`, because the flag itself is gone: nothing
+-- in the code reads this key any more, and a stale row would only confuse a
+-- future `SELECT * FROM runtime_flags`. Scoped to fleet = 'prod' to match
+-- exactly where 0027 seeded it (see that file's own note on why 'prod' and
+-- not the reading instance's fleet).
+DELETE FROM runtime_flags WHERE fleet = 'prod' AND key = 'pooling.disabled';

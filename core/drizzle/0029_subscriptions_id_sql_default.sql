@@ -1,0 +1,18 @@
+-- Found by the pooling.disabled removal's adversarial review: subscriptions.id
+-- (added by migration 0024, made NOT NULL by 0025) has only a client-side
+-- Drizzle $defaultFn, never a SQL-level DEFAULT. A pre-pool binary's INSERT
+-- has no idea the column exists and omits it from the column list entirely,
+-- which is a NOT NULL violation with no default to fall back on. That binary
+-- is exactly what is still running on avc-web in the gap between the bot
+-- deploying this schema and avc-web itself being redeployed with pool-aware
+-- code (this repo's own documented "bot first, then web" order creates that
+-- gap on purpose). A Paddle webhook landing in that window - a retry, a
+-- renewal on the one real test payment, anything - would 500 until avc-web
+-- catches up. Paddle retries non-2xx responses, so nothing is lost, only
+-- delayed, and there are zero live paying customers today, but there is no
+-- reason to carry the gap when the fix is a plain additive DEFAULT.
+--
+-- member_pools.id and users.id use the same $defaultFn-only pattern and do
+-- NOT need this: both are new-or-adapter-owned tables with no pre-existing
+-- binary that ever wrote to them without knowing their schema.
+ALTER TABLE "subscriptions" ALTER COLUMN "id" SET DEFAULT gen_random_uuid();

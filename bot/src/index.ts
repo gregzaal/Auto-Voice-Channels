@@ -588,9 +588,6 @@ async function main(): Promise<void> {
         runs: new BillingRunRepository(db),
         notifications: new BillingNotificationRepository(db),
         flags,
-        // Pinned to a fixed fleet regardless of `config.fleet` — the pool
-        // pass is a cluster singleton on shared rows (see the deps doc).
-        clusterFlags: new RuntimeFlagsRepository(db, DEFAULT_FLEET),
         memberPools: memberPoolsRepo,
         memberPoolGuilds: memberPoolGuildsRepo,
         resolveDiscordUserId: (userId) => resolveDiscordUserId(db, userId),
