@@ -19,6 +19,7 @@ import { readFileSync } from 'node:fs';
 import { REST, Routes } from 'discord.js';
 import { readContact } from '../features/voice/guildSettings.js';
 import {
+  AnnouncementDeliveryRepository,
   GuildFleetPresenceRepository,
   GuildRepository,
   createDatabase,
@@ -26,6 +27,25 @@ import {
   trialPolicyFor,
   type TrialPolicy,
 } from '@avc/core';
+
+/**
+ * A per-guild, pre-targeted invite link (`plans/marketing.md` §5.1 item 4).
+ *
+ * `&guild_id=` pre-selects the server in Discord's authorize screen and
+ * `&disable_guild_select=true` removes the picker entirely, so an admin
+ * clicking this from their own guild's message cannot authorize into the
+ * wrong one - the most common self-inflicted failure this item exists to
+ * remove. Same permission set the bot has invited with since 2018
+ * (`handleInvite` in `commands/interactions.ts`), which is also what makes
+ * re-inviting a safe permissions fix rather than a fresh install.
+ */
+export function reinviteUrlFor(clientId: string, guildId: string): string {
+  return (
+    `https://discord.com/oauth2/authorize?client_id=${clientId}` +
+    `&permissions=286280784&scope=bot%20applications.commands` +
+    `&guild_id=${guildId}&disable_guild_select=true`
+  );
+}
 
 /** Discord's hard limit for a plain message. */
 const MAX_MESSAGE = 2000;
@@ -88,6 +108,11 @@ export function parseCopy(raw: string): Sections {
   if (!body.includes('{{PRICING}}')) {
     throw new Error('The body has no {{PRICING}} placeholder, so no pricing would ever be shown.');
   }
+  if (!body.includes('{{INVITE_LINK}}')) {
+    throw new Error(
+      'The body has no {{INVITE_LINK}} placeholder, so the reinvite fix-it link would never be shown.',
+    );
+  }
 
   const pricing: Record<string, string> = {};
   for (const [name, text] of sections) {
@@ -127,7 +152,13 @@ export function checkCopyRules(label: string, text: string): string[] {
  */
 type Variant = Exclude<TrialPolicy, 'hard_gate'> | 'active';
 
-function renderFor(sections: Sections, policy: Variant, expiresAt: Date | null): string {
+/** Exported for `announce.unit.test.ts` — pure, no Discord or DB dependency. */
+export function renderFor(
+  sections: Sections,
+  policy: Variant,
+  expiresAt: Date | null,
+  inviteUrl: string,
+): string {
   let pricing = sections.pricing[policy]!;
   if (pricing.includes('{{EXPIRY}}')) {
     if (!expiresAt) {
@@ -141,7 +172,7 @@ function renderFor(sections: Sections, policy: Variant, expiresAt: Date | null):
     });
     pricing = pricing.replaceAll('{{EXPIRY}}', when);
   }
-  return sections.body.replace('{{PRICING}}', pricing);
+  return sections.body.replace('{{PRICING}}', pricing).replace('{{INVITE_LINK}}', inviteUrl);
 }
 
 interface Target {
@@ -350,20 +381,25 @@ export async function main(rawArgv: string[]): Promise<number> {
   const limit = Number(arg(argv, 'limit') ?? '0') || 0;
   /** Idempotency key. Change it only for a genuinely different announcement. */
   const key = arg(argv, 'key') ?? 'rewrite_2026_08';
+  /** Which staged touch of this announcement (`plans/marketing.md` §5.2), e.g. `heads_up`, `announcement`. */
+  const touch = arg(argv, 'touch') ?? 'default';
   const resend = argv.includes('--resend');
 
   const sections = parseCopy(readFileSync(file, 'utf8'));
+  const config = loadConfig();
 
   const problems = [
     ...checkCopyRules('body', sections.body),
     ...Object.entries(sections.pricing).flatMap(([p, t]) => checkCopyRules(`pricing:${p}`, t)),
   ];
   // Length is checked per rendered variant, not on the body, because the
-  // pricing paragraph is what pushes it over.
+  // pricing paragraph is what pushes it over. The invite link's length barely
+  // varies with the guild id (17-19 digits), so a placeholder id is fine here.
+  const sampleInviteUrl = reinviteUrlFor(config.clientId, '000000000000000000');
   for (const policy of ['dormant', 'year', 'short', 'active'] as const) {
     // The longest month name and a two-digit day, so the preflight stays
     // conservative against every real expiry it will render.
-    const sample = renderFor(sections, policy, new Date('2027-09-30T00:00:00Z'));
+    const sample = renderFor(sections, policy, new Date('2027-09-30T00:00:00Z'), sampleInviteUrl);
     if (sample.length + DELIVERY_PREFIX_RESERVE > MAX_MESSAGE) {
       problems.push(
         `pricing:${policy}: rendered message is ${sample.length} chars and a delivery prefix can ` +
@@ -377,13 +413,13 @@ export async function main(rawArgv: string[]): Promise<number> {
     return 1;
   }
 
-  const config = loadConfig();
   const handle = createDatabase({ connectionString: config.databaseUrl, max: 4 });
   // `guilds` is a SHARED table across fleets, so the walk below has to be
   // intersected with the guilds THIS fleet is actually in. Without that, a
   // second fleet's guilds would be messaged by a bot that is not in them.
   const guilds = new GuildRepository(handle.db);
   const presence = new GuildFleetPresenceRepository(handle.db, config.fleet);
+  const deliveries = new AnnouncementDeliveryRepository(handle.db);
   const rest = new REST({ version: '10' }).setToken(config.discordToken);
 
   try {
@@ -412,6 +448,7 @@ export async function main(rawArgv: string[]): Promise<number> {
     const skipped = {
       notEntitled: 0,
       alreadySent: 0,
+      optedOut: 0,
       noMemberCount: 0,
       otherFleet: 0,
       hardGate: [] as string[],
@@ -429,6 +466,14 @@ export async function main(rawArgv: string[]): Promise<number> {
       if (!lastGuildId || rows.length === 0) break;
       cursor = lastGuildId;
     }
+
+    // Bulk pre-check, not one query per guild: `alreadyDelivered` is what
+    // stops a redeploy mid-broadcast re-sending a touch that already landed,
+    // and `optedOut` is checked separately because it must hold even under
+    // `--resend`, unlike an ordinary already-sent skip.
+    const allGuildIds = all.map((g) => g.guildId);
+    const delivered = await deliveries.alreadyDelivered(key, touch, allGuildIds);
+    const optedOutGuilds = await deliveries.optedOut(key, allGuildIds);
 
     for (const g of all) {
       if (onlyGuild && g.guildId !== onlyGuild) continue;
@@ -448,7 +493,11 @@ export async function main(rawArgv: string[]): Promise<number> {
         skipped.notEntitled++;
         continue;
       }
-      if (!resend && announcedAlready(g.metadata, key)) {
+      if (optedOutGuilds.has(g.guildId)) {
+        skipped.optedOut++;
+        continue;
+      }
+      if (!resend && delivered.has(g.guildId)) {
         skipped.alreadySent++;
         continue;
       }
@@ -470,7 +519,12 @@ export async function main(rawArgv: string[]): Promise<number> {
         guildId: g.guildId,
         policy,
         expiresAt: g.authExpiresAt ?? null,
-        content: renderFor(sections, policy, g.authExpiresAt ?? null),
+        content: renderFor(
+          sections,
+          policy,
+          g.authExpiresAt ?? null,
+          reinviteUrlFor(config.clientId, g.guildId),
+        ),
         contactId: readContact(g.settings),
       });
       if (limit && targets.length >= limit) break;
@@ -484,11 +538,12 @@ export async function main(rawArgv: string[]): Promise<number> {
     console.log(`copy       ${file}`);
     console.log(`fleet      ${config.fleet}`);
     console.log(`key        ${key}`);
+    console.log(`touch      ${touch}`);
     console.log(`targets    ${targets.length}  ${JSON.stringify(byPolicy)}`);
     console.log(
-      `skipped    ${skipped.alreadySent} already sent, ${skipped.otherFleet} not this fleet, ` +
-        `${skipped.notEntitled} blocked, ${skipped.noMemberCount} no member count, ` +
-        `${skipped.hardGate.length} XXL`,
+      `skipped    ${skipped.alreadySent} already sent, ${skipped.optedOut} opted out, ` +
+        `${skipped.otherFleet} not this fleet, ${skipped.notEntitled} blocked, ` +
+        `${skipped.noMemberCount} no member count, ${skipped.hardGate.length} XXL`,
     );
     if (skipped.hardGate.length) {
       console.log(`\nXXL guilds, handle these by hand:\n  ${skipped.hardGate.join('\n  ')}`);
@@ -564,10 +619,13 @@ export async function main(rawArgv: string[]): Promise<number> {
         counts[outcome]++;
         if (outcome === 'failed') {
           failures.push(`${target.guildId}: ${error ?? 'unknown'}`);
+          await deliveries
+            .recordFailed(target.guildId, key, touch, error ?? 'unknown')
+            .catch(() => {});
         } else {
           // Stamped only on success, so a re-run retries exactly the guilds
           // that did not get it rather than skipping them forever.
-          await guilds.markAnnounced(target.guildId, key).catch(() => {});
+          await deliveries.recordDelivered(target.guildId, key, touch, outcome).catch(() => {});
         }
         done++;
         if (done % 50 === 0) console.log(`  ${done}/${targets.length}`);
@@ -589,13 +647,6 @@ export async function main(rawArgv: string[]): Promise<number> {
   } finally {
     await handle.close().catch(() => {});
   }
-}
-
-function announcedAlready(metadata: unknown, key: string): boolean {
-  const meta = (metadata ?? {}) as Record<string, unknown>;
-  const announcements = meta.announcements;
-  if (!announcements || typeof announcements !== 'object') return false;
-  return Boolean((announcements as Record<string, unknown>)[key]);
 }
 
 const invokedDirectly = process.argv[1]?.replace(/\\/g, '/').endsWith('ops/announce.js');

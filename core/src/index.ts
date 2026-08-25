@@ -13,6 +13,7 @@ export * from './repositories/subscriptions.js';
 export * from './repositories/billingEvents.js';
 export * from './repositories/billingRuns.js';
 export * from './repositories/billingNotifications.js';
+export * from './repositories/announcementDeliveries.js';
 export * from './repositories/guildFleetPresence.js';
 export * from './repositories/memberPools.js';
 export * from './repositories/memberPoolGuilds.js'; // includes the atomic pool-membership helpers

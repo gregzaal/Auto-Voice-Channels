@@ -119,6 +119,22 @@ export const RUNTIME_FLAGS = {
    * definition, switched off the report. `global.pause` stops it too.
    */
   ALERTS_DISABLED: 'alerts.disabled',
+
+  // -- Marketing (plans/marketing.md §5.1 item 5) ----------------------------
+  /**
+   * Suppresses automated marketing posts (release notes, social/top.gg
+   * announcements) around a cutover window, so a routine auto-post cannot
+   * step on the one message that must not be stepped on: at cutover the
+   * install count shows a cliff and uninstall alerts fire continuously, and
+   * an auto-posted release note landing in the middle of that reads very
+   * differently than it would on an ordinary day.
+   *
+   * Not wired to anything yet: no automated marketing poster exists in this
+   * codebase as of this flag's addition (`plans/roadmap.html`'s top.gg /
+   * discordbotlist and content-generator items are both unbuilt). Whichever
+   * poster is built first must check it before posting.
+   */
+  MARKETING_PAUSED: 'marketing.paused',
 } as const;
 
 /** Defaults for the AI levers, kept next to the keys so bot + tooling agree. */

@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
 import {
   bigint,
+  boolean,
   check,
   index,
   integer,
@@ -1088,5 +1089,52 @@ export const metricsDaily = pgTable(
   (t) => [
     primaryKey({ columns: [t.bucket, t.metric, t.fleet, t.instance, t.key] }),
     index('metrics_daily_metric_idx').on(t.metric, t.bucket),
+  ],
+);
+
+/**
+ * Per-guild delivery record for a one-shot broadcast sent via
+ * `bot/src/ops/announce.ts` (`plans/marketing.md` §5.1 item 6).
+ *
+ * Distinct from `billing_notifications`: a broadcast has no ladder
+ * re-deriving it every tick, so this row is the only record of what a guild
+ * was sent, by which delivery method, and whether it landed. Before this
+ * table, "did this guild get the cutover announcement" lived only in
+ * `guilds.metadata.announcements`, a JSONB blob with no delivery method and
+ * no opt-out - enough to stop a redeploy re-broadcasting, but not enough to
+ * report on or to honour an opt-out.
+ */
+export const announcementDeliveries = pgTable(
+  'announcement_deliveries',
+  {
+    id: bigint('id', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
+    guildId: text('guild_id').notNull(),
+    /** Which announcement, e.g. `rewrite_2026_08`. Stable across every touch. */
+    key: text('key').notNull(),
+    /** Which staged touch of that announcement, e.g. `heads_up`, `announcement`. */
+    touch: text('touch').notNull(),
+    /** Where it landed: `system_channel` | `owner_dm` | `creator_channel` | `failed`. */
+    target: text('target'),
+    /** Set only on a successful send. Null means not yet delivered. */
+    deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+    lastError: text('last_error'),
+    /**
+     * Set once, on any row for this `(guildId, key)`, once an opt-out
+     * mechanism exists to write it. Read across every touch of the same
+     * `key` rather than scoped to one touch: opting out of an announcement
+     * should skip every remaining touch of it, not just the one that
+     * offered the opt-out.
+     */
+    optedOut: boolean('opted_out').notNull().default(false),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    // One row per guild per touch per announcement, ever. A retried send
+    // updates this row rather than inserting a duplicate, which is what
+    // stops a redeploy mid-broadcast from re-sending a touch that already
+    // landed.
+    uniqueIndex('announcement_deliveries_guild_key_touch').on(t.guildId, t.key, t.touch),
+    index('announcement_deliveries_key_idx').on(t.key, t.touch),
   ],
 );
