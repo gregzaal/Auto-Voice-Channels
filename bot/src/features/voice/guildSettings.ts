@@ -49,12 +49,10 @@ export function readContact(settings: Record<string, unknown>): string | null {
  * Validates a snowflake, at both the read and the write end.
  *
  * The length check is explicit rather than leaning on the regex's `$`, which
- * without the `m` flag also matches before a trailing newline: `/^\d{17,20}$/`
- * happily accepts `"123...
-"`. That would render as an inert `<@123...
->` and
- * put a newline inside `allowed_mentions.users`, which Discord rejects, failing
- * the whole send.
+ * without the `m` flag also matches before a trailing newline, so
+ * `/^\d{17,20}$/` happily accepts a string like `"123...\n"`. That would
+ * render as an inert `<@123...\n>` and put a newline inside
+ * `allowed_mentions.users`, which Discord rejects, failing the whole send.
  */
 export function isSnowflake(value: unknown): value is string {
   return (

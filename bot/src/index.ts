@@ -135,12 +135,11 @@ async function main(): Promise<void> {
   // reuse the graceful-drain path. Until then a lease-loss falls back to exit(1).
   const shutdown: { request?: (reason: string, exitCode: number) => void } = {};
   /**
-   * The lease manager's alert sink, filled in once the Discord client exists.
-   *
-   * Same late-binding shape as `countError` below, and for the same reason: the
-   * reporter needs a client to post with, and the client needs the lease manager
-   * to know which shards to connect. A condition raised before the reporter is
-   * built is logged and not reported, which only covers the boot-time claim.
+   * The lease manager's alert sink, filled in once the Discord client exists:
+   * the reporter needs a client to post with, and the client needs the lease
+   * manager to know which shards to connect. A condition raised before the
+   * reporter is built is logged and not reported, which only covers the
+   * boot-time claim.
    */
   const opsReport: {
     report?: (kind: string, message: string, context: Record<string, unknown>) => void;
@@ -167,12 +166,10 @@ async function main(): Promise<void> {
 
   /**
    * The dispatcher's error sink, filled in once the metrics collector exists.
-   *
-   * Late-bound rather than reordered because the two genuinely point at each
-   * other: the dispatcher reports its failures to the collector, and the
-   * collector samples the dispatcher's queue depth. Same shape as `shutdown`
-   * above, and the optional call means a failure raised before the collector is
-   * built is simply not counted rather than a crash on the error path.
+   * Late-bound rather than reordered because the two point at each other: the
+   * dispatcher reports failures to the collector, which samples the
+   * dispatcher's queue depth. A failure raised before the collector is built
+   * is simply not counted, not a crash.
    */
   const countError: { record?: (err: unknown) => void } = {};
   const dispatcher = new GuildDispatcher({
@@ -228,33 +225,23 @@ async function main(): Promise<void> {
   // for a Sentry-style sink later. No admin channel (self-host default) → no-op.
   /**
    * Hosted gets both: a persisted row AND a Discord message. Neither replaces
-   * the other -- a row nobody sees wakes nobody, and a Discord message is not
-   * queryable next month.
-   *
-   * Self-host gets the channel alone. The `alerts` table exists there too (one
-   * codebase, one set of migrations) and simply stays empty, matching how the
-   * billing tables already behave. Persisting for an audience with no console
-   * to read it would be storage with no reader.
+   * the other, a row nobody sees wakes nobody, and a Discord message is not
+   * queryable next month. Self-host gets the channel alone: the `alerts`
+   * table exists there too (one set of migrations) and just stays empty,
+   * same as the billing tables, since persisting for no reader is pointless.
    */
   const adminChannel = config.adminChannelId
     ? new AdminChannelReporter({ client, channelId: config.adminChannelId, logger })
     : undefined;
   const channelReporter: ErrorReporter = adminChannel ?? new NullErrorReporter();
-  /**
-   * One repository, shared with the watcher below.
-   *
-   * Undefined on self-host: the table exists there (one set of migrations) and
-   * stays empty, exactly as the billing tables already do. Persisting for an
-   * audience with no console to read it would be storage with no reader.
-   */
+  /** One repository, shared with the watcher below. Undefined (unused) on self-host. */
   const alertRepo = config.selfHosted ? undefined : new AlertRepository(db, config.fleet);
   /**
-   * Hosted posts AND records, correlated, so the row knows what happened to the
-   * post (`plans/agentic_management.md` step 4b). Without that correlation every
-   * row was permanently undelivered and a failed Discord post was simply lost.
-   *
-   * The `Tee` shape it replaces is still right when there is no channel to
-   * correlate with: a persisted row alone is better than nothing.
+   * Hosted posts AND records, correlated, so the row knows what happened to
+   * the post (`plans/agentic_management.md` step 4b) instead of every row
+   * reading permanently undelivered. A plain `Tee` (fire both, no
+   * correlation) is still right when there's no channel to correlate with: a
+   * persisted row alone beats nothing.
    */
   const errorReporter: ErrorReporter = !alertRepo
     ? channelReporter
@@ -292,13 +279,11 @@ async function main(): Promise<void> {
   // Tracks "I lost access to this channel" incidents, surfaced in /setup + /logging.
   const permissionProblems = new PermissionProblemTracker();
   /**
-   * ...and pushed to the guild, which /setup and /logging between them were not
-   * doing: the log channel is opt-in and 5 of 1008 guilds have one, so the most
-   * actionable message the bot produces was reaching almost nobody.
-   *
-   * Runs on self-host too. A self-hoster hits the same 50013 for the same
-   * reasons, and the ladder degrades to "post in the system channel", which
-   * needs nothing configured. Gated per fleet by `problems.notify_disabled`.
+   * ...and pushed to the guild. `/setup` and `/logging` together reach almost
+   * nobody, since the log channel is opt-in and rarely configured, so this is
+   * the surface that actually reaches an admin. Runs on self-host too (the
+   * same 50013 happens there), degrading to "post in the system channel",
+   * which needs nothing configured. Gated per fleet by `problems.notify_disabled`.
    */
   const problemNotifier = new PermissionProblemNotifier({
     client,
@@ -529,18 +514,15 @@ async function main(): Promise<void> {
     : undefined;
   /**
    * The metric store's collector (`plans/admin-dashboard.md` §3.4).
+   * Unconditional, like the backup scheduler and unlike the billing job: what
+   * it counts is deleted-with-the-row or leaves no trace at all, so an
+   * uncounted event is unrecoverable, on self-host too. `metrics.disabled` is
+   * the off switch.
    *
-   * Unconditional, like the backup scheduler and unlike the billing job: the
-   * things it counts (rooms created, commands invoked, errors by category) are
-   * deleted-with-the-row or leave no trace at all, so they are unrecoverable
-   * rather than merely un-charted if nobody counts them, and that is as true on a
-   * self-host as it is here. `metrics.disabled` is the off switch.
-   *
-   * The `countRoom` and `countCommand` closures wired further up resolve this
-   * name at call time, which is always after the `client.login` at the end of
-   * this function, so they cannot observe it uninitialized. `countError` is the
-   * one that could - the dispatcher exists long before this line - which is why
-   * that one goes through a holder instead of closing over the binding.
+   * `countRoom`/`countCommand` close over this binding safely because they're
+   * only called after `client.login`, well after this exists. `countError`
+   * can fire earlier (the dispatcher exists long before this line), which is
+   * why it alone goes through a holder instead.
    */
   const metricsCollector = new MetricsCollector({
     metrics: new MetricsRepository(db),
@@ -555,27 +537,22 @@ async function main(): Promise<void> {
     }),
     report: (kind, message, context) => errorReporter.report(kind, message, context),
     /**
-     * Polled on the flush tick (5 minutes), not the sample tick (30 seconds).
-     *
-     * These numbers change on the order of hours, so 288 calls a day per
-     * instance is already generous and 2,880 would be waste. Uses the client's
-     * own REST handler, which means the existing token and the existing global
-     * rate-limit bucket, and therefore no second credential anywhere.
+     * Polled on the flush tick (5 minutes), not the sample tick (30 seconds):
+     * these numbers change on the order of hours, so more frequent polling
+     * would be waste. Uses the client's own REST handler (existing token,
+     * existing rate-limit bucket), so no second credential anywhere.
      */
     pollGateway: () => fetchGatewayLimits(client, logger),
   });
   countError.record = (err) => metricsCollector.increment(METRICS.ERRORS, categorizeError(err));
   /**
-   * Resumed here, before the gateway connects, and that ordering is the whole
-   * correctness argument.
-   *
-   * `hydrate` reloads this instance's already-flushed counters for the current
-   * bucket, and the accumulator holds running totals rather than deltas - so if a
-   * room were created between `client.login` and this resolving, the stored total
-   * and the live count would be disjoint numbers with no way to combine them
-   * safely. Awaiting it before login means the accumulator is provably empty, which
-   * makes the resume exact instead of approximate. The timers still start later,
-   * with the drain handler installed.
+   * Called here, before the gateway connects, and that ordering is the whole
+   * correctness argument: `hydrate` reloads this instance's already-flushed
+   * counters, and the accumulator holds running totals, not deltas. A room
+   * created between `client.login` and this resolving would leave the stored
+   * total and the live count as disjoint numbers with no way to combine them.
+   * Awaiting it before login keeps the accumulator provably empty. Timers
+   * still start later, once the drain handler is installed.
    */
   await metricsCollector.hydrate();
 
@@ -619,16 +596,14 @@ async function main(): Promise<void> {
 
   /**
    * The in-process watcher (`plans/agentic_management.md` step 4).
+   * Unconditional, like the metrics collector: its conditions are as true on
+   * self-host as here, and the watchdog ping is the only down-detection a
+   * self-hoster has. `alerts.disabled` is the off switch, `global.pause`
+   * stops it too.
    *
-   * Unconditional, like the metrics collector: the conditions it evaluates are
-   * as true on a self-host as here, and the watchdog ping is the only
-   * down-detection a self-hoster can have at all. `alerts.disabled` is the off
-   * switch and `global.pause` stops it too.
-   *
-   * It notifies through the CHANNEL reporter rather than the tee'd one, because
-   * it writes its own rows with a real severity and audience. Routing it
-   * through the tee would persist the same condition twice per tick, once
-   * labelled `warn` by a reporter that has no idea what it is looking at.
+   * Notifies through the CHANNEL reporter, not the tee'd one: it writes its
+   * own rows with a real severity and audience, so routing through the tee
+   * would persist the same condition twice per tick, once mislabelled `warn`.
    */
   const alertScheduler = new AlertScheduler({
     alerts: alertRepo,
@@ -679,17 +654,12 @@ async function main(): Promise<void> {
     });
   });
   /**
-   * The bot was removed from a guild (kicked, banned, or the guild was deleted).
-   *
-   * We record it and delete NOTHING. A removed guild can still have a live paid
-   * subscription, and the row is what the dashboard resolves a plan from, so
-   * dropping it would hide the cancel button from someone who is still being
-   * charged. Marking instead lets the dashboard say "AVC is not in this server,
-   * and you are still paying for it".
-   *
-   * `guildDelete` also fires on an outage-driven unavailability, so ignore
-   * those: `guild.available === false` means Discord lost the guild, not that
-   * we were removed.
+   * The bot was removed from a guild (kicked, banned, or the guild deleted).
+   * Record it, delete NOTHING: a removed guild can still have a live paid
+   * subscription, and dropping the row would hide the cancel button from
+   * someone still being charged. `guildDelete` also fires on an
+   * outage-driven unavailability, so ignore those - `guild.available ===
+   * false` means Discord lost the guild, not that we were removed.
    */
   client.on('guildDelete', (guild) => {
     if (guild.available === false) return;
@@ -749,18 +719,6 @@ async function main(): Promise<void> {
      * (`plans/fleets.md` §6.1).
      *
      * `guildCreate`/`guildDelete` are missable: a kick while the process is
-     * down is never replayed, so the periodic truth has to be what the bot can
-     * actually see. Narrowing (marking guilds removed) is only correct when
-     * this instance holds every shard, because a partial-shard instance sees a
-     * partial guild list and "not in my cache" would read as "not in the
-     * guild". Widening is always safe, so a sharded fleet still self-heals on
-     * the add side and relies on `guildDelete` for removals.
-     */
-    /**
-     * Presence, from the guild list rather than from the event stream
-     * (`plans/fleets.md` §6.1).
-     *
-     * `guildCreate`/`guildDelete` are missable: a kick while the process is
      * down is never replayed, and neither is one that lands during a gateway
      * outage, because a re-IDENTIFY does not diff the new guild list against
      * the old cache. So this repeats on a timer rather than running once at
@@ -785,13 +743,11 @@ async function main(): Promise<void> {
 
       /**
        * The shared column too, while it still exists (expand/contract).
-       *
-       * `guildCreate` clears it, but that event is guarded on `isReady()` and
-       * discord.js never fires it for the initial batch, so a guild re-added
-       * while this fleet was down would keep the marker forever and the
-       * dashboard would tell a paying owner they are paying for a server the
-       * bot is not in. Clearing only, never setting: removal stays with
-       * `guildDelete`, which is unambiguous per guild.
+       * `guildCreate` clears it, but that's guarded on `isReady()` and never
+       * fires for the initial batch, so a guild re-added while this fleet was
+       * down would keep the marker forever and the dashboard would wrongly
+       * tell a paying owner they're paying for a server the bot isn't in.
+       * Clearing only, never setting: removal stays with `guildDelete`.
        */
       const cleared = await guildsRepo.clearBotRemovedFor(guildIds);
       if (cleared > 0) logger.info({ cleared }, 'cleared stale bot-removed markers');
@@ -812,29 +768,19 @@ async function main(): Promise<void> {
         if (recorded > 0) logger.info({ recorded }, 'guild identities backfilled');
       })
       .catch((err: unknown) => logger.error({ err }, 'guild identity backfill failed'));
-    /**
-     * Billing job only makes sense once the guild cache is populated (its
-     * sampling phase reads it). Hourly ticks + one immediate pass.
-     *
-     * Sequenced after the presence write, not merely after READY. The deliver
-     * phase claims by joining `guild_fleet_presence`, so a first pass that
-     * raced it would find no rows for any guild joined since the 0017 backfill
-     * and quietly deliver nothing. Harmless (the queue is durable and the next
-     * tick catches up) but it would make the first hour after every deploy
-     * look broken, which is worse than an ordering nobody has to explain.
-     */
+    // Billing job only makes sense once the guild cache is populated. Hourly
+    // ticks + one immediate pass.
     if (billingReconciler) {
       /**
-       * The timer starts now; only the FIRST pass waits on presence.
-       *
-       * The deliver phase claims by joining `guild_fleet_presence`, so a first
-       * pass that raced the presence write would find no rows for any guild
-       * joined since the 0017 backfill and quietly deliver nothing. But making
-       * `start()` itself wait would mean a presence write that hangs (a slow
-       * pool, a stuck connection) silently leaves the billing job with no timer
-       * at all, forever, with nothing but a null `lastRunAt` to say so. That is
-       * this codebase's signature failure mode, so the ordering is applied
-       * where it is needed and nowhere else.
+       * The timer starts now; only the FIRST pass waits on the presence
+       * write. The deliver phase claims by joining `guild_fleet_presence`, so
+       * a first pass that raced it would find no rows for guilds joined since
+       * the 0017 backfill and quietly deliver nothing (harmless, since the
+       * queue is durable and the next tick catches up, but it makes the
+       * first hour after every deploy look broken). Making `start()` itself
+       * wait would risk a hung presence write silently leaving the job with
+       * no timer at all, forever, so only the first pass is gated, not the
+       * timer.
        */
       billingReconciler.start();
       void presenceReady.then(() =>
@@ -888,14 +834,13 @@ async function main(): Promise<void> {
         totalShards: config.totalShards,
         expectedInstances: config.expectedInstances,
         /**
-         * Heartbeat round trip to the gateway node actually serving us.
-         *
-         * The one latency number that cannot be measured from outside the
+         * Heartbeat round trip to the gateway node actually serving us: the
+         * one latency number that can't be measured from outside the
          * process, and the one that decides whether this app belongs in its
-         * current region. Everything else is probeable over SSH: Discord's
-         * REST and gateway edges are Cloudflare anycast and answer in about
-         * the same time from anywhere, so they say nothing about where
-         * Discord's own servers are. `-1` means no shard is connected yet.
+         * current region. Discord's REST and gateway edges are both
+         * Cloudflare anycast and answer equally fast from anywhere, so they
+         * say nothing about where Discord itself is. `-1` means no shard is
+         * connected yet.
          */
         gatewayPingMs: Math.round(client.ws.ping),
         queueDepth: dispatcher.totalDepth(),
@@ -928,11 +873,10 @@ async function main(): Promise<void> {
         dbStatus = 'down';
         logger.warn({ err }, 'db health ping failed');
         /**
-         * This is the alert that would have caught the 2026-08-20 outage, and
-         * before this line it was a terminal log on a fleet running
-         * LOG_LEVEL=info. The database going away takes everything with it,
-         * because the entitlement gate reads it before any voice event or
-         * interaction is handled.
+         * The database going away takes everything with it, because the
+         * entitlement gate reads it before any voice event or interaction is
+         * handled, so this failure must reach the admin channel, not just a
+         * log line nobody is tailing.
          */
         errorReporter.report('db.ping', 'Database health ping failed', {
           error: err instanceof Error ? err.message : String(err),
@@ -1017,11 +961,6 @@ async function main(): Promise<void> {
 }
 
 /**
- * Reads Discord's identify `max_concurrency` (how many shards may identify in
- * parallel per 5s window) from `GET /gateway/bot`. Falls back to 1 — the safe,
- * universal floor — if the call fails, so the throttler still serializes.
- */
-/**
  * This application's gateway limits, for the metric store.
  *
  * Separate from {@link fetchIdentifyConcurrency} rather than a widening of it,
@@ -1059,6 +998,11 @@ async function fetchGatewayLimits(
   }
 }
 
+/**
+ * Reads Discord's identify `max_concurrency` (how many shards may identify in
+ * parallel per 5s window) from `GET /gateway/bot`. Falls back to 1 — the safe,
+ * universal floor — if the call fails, so the throttler still serializes.
+ */
 async function fetchIdentifyConcurrency(token: string, logger: Logger): Promise<number> {
   try {
     const rest = new REST({ version: '10' }).setToken(token);

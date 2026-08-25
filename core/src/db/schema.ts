@@ -73,21 +73,14 @@ export const guilds = pgTable('guilds', {
    */
   botRemovedAt: timestamp('bot_removed_at', { withTimezone: true }),
   /**
-   * Guild display name, icon hash and owner, denormalized from the gateway's
-   * `GUILD_CREATE`/`GUILD_UPDATE` payloads.
+   * Guild display name, icon hash and owner, denormalized from `GUILD_CREATE`/
+   * `GUILD_UPDATE`. Nothing else in this schema can name a guild across users:
+   * the dashboard only resolves names from the signed-in user's own OAuth
+   * token, and `subscriptions.guild_name` exists only for guilds that paid.
    *
-   * Denormalizing public Discord metadata looks redundant until you try to
-   * operate the service: nothing else in this schema can name a guild. The
-   * customer dashboard resolves names from the *signed-in user's* OAuth token,
-   * which only ever covers guilds that user is in, so any operator-side or
-   * cross-guild view built the same way is a list of bare snowflakes. The one
-   * other name we hold, `subscriptions.guild_name`, is captured at checkout and
-   * therefore exists only for guilds that have paid.
-   *
-   * A hint, not ground truth — same standing as `member_count`. It is refreshed
-   * on gateway events, so it goes stale for a guild the bot has been removed
-   * from, and a stale name is exactly what we want there (it is the only name
-   * that will ever exist for it again).
+   * A hint, not ground truth (same standing as `member_count`). Goes stale
+   * once the bot is removed, which is correct: it becomes the last name that
+   * will ever exist for that guild.
    */
   name: text('name'),
   /** Icon hash only; the CDN URL is derived, so a CDN move is not a migration. */
@@ -289,7 +282,6 @@ export const aliases = pgTable(
 /**
  * A member pool: one subscription covering any number of servers whose member
  * counts sum to under the band ceiling (`plans/member-based-pricing.md` §6.1).
- * Additive, phase 3, no reader until phase 4.
  *
  * **`status` is `active | grace | expired`, and NEVER `trial`** (§5.4). A pool
  * comes into existence by completing checkout, so it always starts `active`;
@@ -388,13 +380,12 @@ export const subscriptions = pgTable(
   'subscriptions',
   {
     /**
-     * `$defaultFn` covers every insert this codebase writes, but `subscriptions`
-     * is the one pool-schema table an OLD (pre-pool) binary can still write to
-     * during a rolling deploy: its INSERT has no idea `id` exists and omits it
-     * from the column list entirely. The SQL-level `.default()` below is what
-     * saves that write from a NOT NULL violation — `member_pools`/`users` don't
-     * need it because no pre-existing binary ever wrote to those tables without
-     * knowing their schema (migration 0029, found by adversarial review).
+     * `$defaultFn` alone is not enough: `subscriptions` is the one pool-schema
+     * table an OLD (pre-pool) binary can still write to during a rolling
+     * deploy, and its INSERT omits `id` from the column list entirely. The
+     * SQL-level `.default()` below saves that write from a NOT NULL violation.
+     * `member_pools`/`users` don't need it: no pre-existing binary ever wrote
+     * to those tables without knowing their schema (migration 0029).
      */
     id: text('id')
       .primaryKey()
@@ -475,27 +466,22 @@ export const subscriptions = pgTable(
      * ISO 3166-1 alpha-2 country the customer is billed in, resolved from the
      * transaction's `address_id` at `transaction.completed`.
      *
-     * **The band cannot be recovered from the amount, and this is the column that
-     * makes regional revenue reportable at all.** Three independent reasons, each
-     * sufficient on its own:
+     * **The band cannot be recovered from the amount** - this column is what
+     * makes regional revenue reportable at all:
+     *   1. Two USD cells collide exactly (USD 8 at S, USD 27 at M), each
+     *      meaning either "band C standard" or "band B legacy", and every
+     *      USD-denominated banded country (50 of 108) sits behind them.
+     *   2. A country with no override is AUTO-CONVERTED by Paddle, so its
+     *      amount is not in our table at any rounding (e.g. Iceland/Romania
+     *      pay EUR 50.50 at M against our own EUR 49.00 override, and it
+     *      moves with the rate).
+     *   3. A band is a policy view of a country: storing the country lets
+     *      re-cutting the bands re-derive history correctly, where storing
+     *      the band would freeze today's policy into every past row.
      *
-     *   1. Two USD cells collide exactly. Across all 280 (currency, amount, tier)
-     *      cells in the catalogue only two are ambiguous, but they are USD 8 at S
-     *      and USD 27 at M, each meaning either "band C standard" or "band B
-     *      legacy" -- and every USD-denominated banded country sits behind them,
-     *      50 of 108.
-     *   2. Countries we did not override are AUTO-CONVERTED by Paddle, so their
-     *      amount is not in our table at any rounding. Measured 2026-08-20:
-     *      Iceland and Romania pay EUR 50.50 at tier M where our own EUR override
-     *      is EUR 49.00. Nothing matches 5050, and it moves with the rate.
-     *   3. A band is a policy view of a country. Storing the country means
-     *      re-cutting the bands re-derives history correctly; storing the band
-     *      freezes today's policy into every past row.
-     *
-     * Null for the rows written before this column existed and for any
-     * transaction whose address lookup failed. Both are backfillable: the raw
-     * webhook body in `billing_events.payload` keeps `address_id` forever, and
-     * Paddle resolves it on demand. See `scripts/backfill-billing-origin.ts`.
+     * Null for rows written before this column existed and for a failed
+     * address lookup. Both are backfillable from `billing_events.payload`,
+     * which keeps `address_id` forever. See `scripts/backfill-billing-origin.ts`.
      */
     billingCountryCode: text('billing_country_code'),
     /**
@@ -518,15 +504,9 @@ export const subscriptions = pgTable(
      * subscription, so without reading this field the reconcile job would see a
      * healthy `active` row an hour later and reactivate the guild.
      *
-     * A refund that is only *requested* (`pending_approval`) changes nothing.
-     * Paddle reviews these, and cutting someone off while their request is still
-     * being judged would punish them for asking.
-     *
-     * This docblock said the exact opposite until 2026-08-18 ("deliberately does
-     * NOT affect entitlement... the only inputs to access"). It was written for a
-     * display-only design and falsified hours later the same day by the commit
-     * that made an approved refund revoke standing. Left uncorrected it went
-     * public, contradicting both the code below it and the live refund policy.
+     * `pending_approval` changes nothing: Paddle is still reviewing it, and
+     * cutting someone off while their request is judged would punish them for
+     * asking.
      */
     refundStatus: text('refund_status'),
     /** Refunded amount (minor units) for that adjustment. */
@@ -562,40 +542,16 @@ export const billingEvents = pgTable(
 );
 
 /**
- * Billing notifications waiting to be delivered (`plans/fleets.md` §4).
- *
- * **The queue exists because advancing the ladder and delivering its message
- * are done by different bots.** Advancement is fleet-wide work on shared rows,
- * so exactly one instance across the whole cluster does it
- * (`BILLING_ADVISORY_LOCK`, deliberately not fleet-scoped). Delivery needs a
- * bot that is actually in the guild, and the fleet that won the lock may not
- * be. Before this table the two were one loop, which worked only because there
- * has never been more than one fleet: the moment beta and prod are both up, a
- * guild transitioned by the fleet that cannot see it is a guild that is never
- * told anything, silently, forever.
- *
- * Rows are the *intent* to notify. The dedupe stamp that stops the ladder
- * re-deciding lives where it always did, in `guilds.metadata.billing
- * .notifications`, and is written only once a delivery actually lands. So an
- * undelivered row keeps being re-derived by every advance pass, which is why
- * enqueue has to be idempotent rather than merely cheap.
- */
-/**
- * Operational alerts, as rows.
- *
- * The load-bearing decision from `plans/agentic_management.md`: an alert is a
- * persisted row first and delivery is a renderer over it. Before this table the
- * only alerting was fire-and-forget into a Discord channel, so a delivery
- * failure was indistinguishable from quiet, "what fired last month" was a
- * scroll rather than a query, and every dedupe was in-process memory that a
+ * Operational alerts, as rows: a persisted row first, delivery a renderer
+ * over it (`plans/agentic_management.md`). Before this table, alerting was
+ * fire-and-forget into a Discord channel, so a delivery failure was
+ * indistinguishable from quiet and every dedupe was in-process memory a
  * restart re-armed.
  *
- * Shape copied from `billing_notifications`, which is the reviewed precedent
- * for this pattern here, including the part that matters most: the unique index
- * is PARTIAL, on unresolved rows only. A total constraint on `(fleet, key,
- * target)` would let the first occurrence of a repeating condition silence
- * every later one forever, which is the exact bug the partial form exists to
- * prevent.
+ * Shape copied from `billing_notifications`, including the part that matters
+ * most: the unique index is PARTIAL, on unresolved rows only. A total
+ * constraint on `(fleet, key, target)` would let the first occurrence of a
+ * repeating condition silence every later one forever.
  */
 export const alerts = pgTable(
   'alerts',
@@ -681,6 +637,22 @@ export const alerts = pgTable(
   ],
 );
 
+/**
+ * Billing notifications waiting to be delivered (`plans/fleets.md` §4).
+ *
+ * **Exists because advancing the ladder and delivering its message are done
+ * by different bots.** Advancement is fleet-wide work on shared rows, so
+ * exactly one instance across the cluster does it (`BILLING_ADVISORY_LOCK`,
+ * deliberately not fleet-scoped); delivery needs a bot actually in the guild,
+ * which the lock winner may not be. Without the split, a guild transitioned
+ * by a fleet that cannot see it would never be told anything.
+ *
+ * Rows are the *intent* to notify. The dedupe stamp that stops the ladder
+ * re-deciding lives in `guilds.metadata.billing.notifications` and is written
+ * only once delivery actually lands, so an undelivered row keeps being
+ * re-derived by every advance pass - which is why enqueue must be idempotent,
+ * not merely cheap.
+ */
 export const billingNotifications = pgTable(
   'billing_notifications',
   {
@@ -736,14 +708,12 @@ export const billingNotifications = pgTable(
     /**
      * A claim lease: this row is spoken for until then.
      *
-     * `FOR UPDATE ... SKIP LOCKED` alone is not enough here, and the difference
-     * is easy to miss. The row lock lives exactly as long as the claiming
-     * transaction, and delivery deliberately happens *after* it commits (a
-     * Discord round-trip inside the transaction would serialize the whole drain
-     * on the slowest HTTP call). So SKIP LOCKED only separates two claims that
-     * overlap in time. Two instances of one fleet ticking a second apart would
-     * each claim the same row and each send the message. This column is what
-     * makes the claim outlive its transaction.
+     * `FOR UPDATE ... SKIP LOCKED` alone is not enough: the row lock lives
+     * only as long as the claiming transaction, and delivery deliberately
+     * happens *after* it commits (a Discord round-trip inside the transaction
+     * would serialize the whole drain on the slowest HTTP call). Two
+     * instances ticking a second apart would each claim the row and each
+     * send. This column is what makes the claim outlive its transaction.
      */
     claimedUntil: timestamp('claimed_until', { withTimezone: true }),
     lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true }),
@@ -751,14 +721,11 @@ export const billingNotifications = pgTable(
   },
   (t) => [
     /**
-     * Idempotent enqueue, and **partial on purpose**.
-     *
-     * Every advance pass re-derives the same pending notification until it is
-     * delivered, so a plain unique key is what makes re-enqueue a no-op rather
-     * than a duplicate message. It has to be scoped to undelivered rows though:
-     * `grace_nudge` is deliberately re-sent weekly, and a total unique
-     * constraint on (guild, key) would let the first nudge silence every one
-     * after it.
+     * Idempotent enqueue, and **partial on purpose**: every advance pass
+     * re-derives the same pending notification, so the unique key makes
+     * re-enqueue a no-op. It must be scoped to undelivered rows because
+     * `grace_nudge` is re-sent weekly, and a total constraint on (guild, key)
+     * would let the first nudge silence every one after it.
      */
     uniqueIndex('billing_notifications_pending_key')
       .on(t.guildId, t.key)
@@ -825,18 +792,15 @@ export const aiUsage = pgTable(
  * reference data for support, never the eligibility test.
  *
  * The id here is a **Discord snowflake**, not our Auth.js `users.id`. Checkout
- * has to resolve it via `accounts.provider_account_id` for the signed-in user;
+ * resolves it via `accounts.provider_account_id` for the signed-in user;
  * comparing it to `users.id` will silently never match (the same trap
  * documented on `subscriptions.purchaser_user_id`, from the other direction).
  *
- * Rows are permanent. A legacy customer who lapses, resubscribes, cancels and
- * returns is still a legacy customer, so nothing in the billing machinery ever
- * deletes or expires one. Eligibility is never recomputed from Patreon: that
- * campaign is being retired, and the evidence columns below are a snapshot of
- * why each row exists rather than a live source.
- *
- * Self-host runs this migration and never populates it, like the other billing
- * tables.
+ * Rows are permanent and never recomputed from Patreon (that campaign is
+ * retired): a legacy customer who lapses, resubscribes, cancels and returns
+ * is still a legacy customer, and the evidence columns are a snapshot of why
+ * the row exists rather than a live source. Self-host runs this migration and
+ * never populates it, like the other billing tables.
  */
 export const legacyCustomers = pgTable(
   'legacy_customers',

@@ -33,16 +33,13 @@ const MAX_MESSAGE = 2000;
 /**
  * Room reserved for the `<@id>` mention prefix added at delivery time.
  *
- * The preflight runs on the copy alone, before any guild is known, so without a
- * reserve a message could pass the check and then fail the send once a prefix is
- * prepended. There are TWO prefixes and the DM one is much larger:
- *
- *   system channel  `<@` + 20-digit id + `>` + newline                     = 24
- *   owner DM        `**` + guild name (Discord caps it at 100) + `**
-
-`  = 106
- *
- * Reserve the larger, since the preflight cannot know which path a guild takes.
+ * The preflight runs on the copy alone, before any guild is known, so without
+ * a reserve a message could pass the check and then fail the send once a
+ * prefix is prepended. There are TWO prefixes and the DM one is much larger:
+ * a system-channel mention is `<@` + 20-digit id + `>` + newline (24 chars);
+ * an owner DM is `**` + guild name (capped at 100 by Discord) + `**` + two
+ * newlines (106 chars). Reserve the larger, since the preflight cannot know
+ * which path a guild takes.
  */
 const DELIVERY_PREFIX_RESERVE = 106;
 
@@ -186,7 +183,7 @@ async function deliver(
    * have some other text channel the bot could post in. **Do not post in an
    * arbitrary one.** Picking "the first channel we can write to" is precisely
    * what spam bots do, and servers defend against it with honeypot channels
-   * that auto-ban anything posting there. Owner's call, 2026-08-19.
+   * that auto-ban anything posting there.
    *
    * A CREATOR channel is a different thing and is allowed, at the very end:
    * an admin deliberately configured it for this bot and we hold a row for it.

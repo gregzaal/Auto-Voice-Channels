@@ -307,11 +307,9 @@ export function buildWatchChecks(deps: WatchCheckDeps): WatchCheck[] {
          * Two different failures, and only one of them throws.
          *
          * `consecutiveFailures` counts beats that REJECTED. A beat that never
-         * settles at all -- pool exhaustion, or a socket the network
-         * blackholed, which is exactly the 2026-08-20 shape -- increments
-         * nothing, so the counter sits at zero while the lease quietly expires.
-         * Age is the only thing that sees that, and it was already being
-         * collected and thrown away.
+         * settles at all (pool exhaustion, or a socket the network
+         * blackholed) increments nothing, so the counter sits at zero while
+         * the lease quietly expires. Age is the only thing that sees that.
          */
         const staleMs = lastOkAt === null ? 0 : now() - lastOkAt;
         const hung = staleMs > HEARTBEAT_STALE_MS;

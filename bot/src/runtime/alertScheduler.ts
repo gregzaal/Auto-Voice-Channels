@@ -8,27 +8,23 @@ import {
 } from '@avc/core';
 
 /**
- * The in-process watcher (`plans/agentic_management.md` step 4).
- *
- * The companion to `/api/watch`, and deliberately not a duplicate of it. They
- * see different things, and the split is the design:
- *
- * - `/api/watch` runs in `avc-web` and reads Postgres. It survives this process
- *   being dead, which is the whole reason it exists, and it is therefore blind
- *   to everything that never reaches a table: which guild's breaker is open,
- *   how deep a queue is, whether this instance's gateway is actually connected.
- * - This runs here, sees all of that, and cannot report its own death.
+ * The in-process watcher (`plans/agentic_management.md` step 4). The
+ * companion to `/api/watch`, deliberately not a duplicate: `/api/watch` runs
+ * in `avc-web`, reads Postgres, and survives this process being dead, which
+ * makes it blind to anything that never reaches a table (a tripped breaker,
+ * a queue depth, whether this instance's gateway is actually connected).
+ * This runs here, sees all of that, and cannot report its own death.
  *
  * Hence the third leg: a dead-man's switch. Every healthy tick POSTs
- * `WATCHDOG_PING_URL`, and something outside notices when the POSTs stop. That
- * is also the **only** down-detection available to a self-hoster, who has no
- * `avc-web` and no second machine, which is why it is a plain optional URL
- * rather than anything of ours.
+ * `WATCHDOG_PING_URL`, and something outside notices when the POSTs stop.
+ * That is also the **only** down-detection available to a self-hoster, who
+ * has no `avc-web` and no second machine, which is why it is a plain
+ * optional URL rather than anything of ours.
  *
- * **Raising is the easy half. Resolving is the half that makes it usable.** An
- * alerting system whose conditions never come back down is a system everyone
- * learns to ignore, so every polled condition here is reconciled against
- * reality on each tick, and event-driven ones age out.
+ * **Raising is the easy half. Resolving is the half that makes it usable.**
+ * An alerting system whose conditions never come back down is a system
+ * everyone learns to ignore, so every polled condition here is reconciled
+ * against reality on each tick, and event-driven ones age out.
  */
 
 export interface WatchProblem {

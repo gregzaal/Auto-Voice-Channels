@@ -293,13 +293,6 @@ function uwu(s: string): string {
 }
 
 /**
- * Applies one legacy transform mode to `s`. Unrecognised modes return `s`
- * unchanged (matching the legacy "mode not in ops" path). The full set:
- * `caps`/`upper`, `lower`, `title`, `swap`, `scaps`, `spaces`, `acro`,
- * `remshort`, `uwu`, `usd`, `rand`, the 13 math-font styles in
- * {@link FONT_MAPS}, and `<N>w` (first N words).
- */
-/**
  * The named modes {@link applyMode} acts on. Kept beside the switch so the two
  * can't drift (a unit test asserts every entry actually transforms), and read by
  * the template assistant's validator — an unknown mode is silently a no-op, so
@@ -331,6 +324,13 @@ export function isKnownStyleMode(mode: string): boolean {
   return false;
 }
 
+/**
+ * Applies one legacy transform mode to `s`. Unrecognised modes return `s`
+ * unchanged (matching the legacy "mode not in ops" path). The full set:
+ * `caps`/`upper`, `lower`, `title`, `swap`, `scaps`, `spaces`, `acro`,
+ * `remshort`, `uwu`, `usd`, `rand`, the 13 math-font styles in
+ * {@link FONT_MAPS}, and `<N>w` (first N words).
+ */
 export function applyMode(mode: string, s: string): string {
   switch (mode) {
     case 'caps':

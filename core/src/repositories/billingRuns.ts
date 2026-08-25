@@ -46,12 +46,15 @@ export class BillingRunRepository {
      * Which sub-key of the namespace to serialize on. Default 0 is the billing
      * advance.
      *
-     * Distinct jobs need distinct slots, and not merely for tidiness: the
-     * advance pass walks the whole install base and holds its lock until it
-     * commits, so a second job sharing slot 0 would block behind it for the
-     * length of a fleet sweep and miss its own window. The durable spacing in
-     * `billing_runs` is already per `job`, so the slot is the only part that has
-     * to be chosen.
+     * The lock is held only for the length of THIS reservation, not for the
+     * length of the work: `pg_advisory_xact_lock` is taken inside the
+     * transaction below, which commits before `reserveRun` returns, and callers
+     * then do the work unlocked. So two jobs sharing a slot serialize only
+     * while reserving, and the thing actually preventing two concurrent passes
+     * of the same job is the durable spacing in `billing_runs`, which is per
+     * `job`. A pass that outlives its own spacing window overlaps the next one.
+     * Distinct jobs still take distinct slots so a slow reservation cannot
+     * delay an unrelated job's.
      */
     lockSlot = 0,
   ): Promise<{ ok: boolean; waitMs: number }> {

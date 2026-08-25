@@ -214,8 +214,8 @@ export interface SetupPanelInput {
    *
    * The operation is load-bearing: "I could not create a room here" and "I have
    * lost access to this channel" are both Discord `50013` and have completely
-   * different fixes. Reporting them with one message sent an admin chasing four
-   * permissions the bot already held (2026-08-19).
+   * different fixes. Reporting them with one message sends an admin chasing
+   * permissions the bot already holds.
    */
   problems?: ProblemLike[];
   /**

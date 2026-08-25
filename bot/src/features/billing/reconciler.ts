@@ -75,12 +75,10 @@ export interface BillingReconcilerDeps {
   /** Which fleet this instance belongs to. Decides what it may deliver. */
   fleet: Fleet;
   /**
-   * Reports a significant condition to the operational alert channel.
-   *
-   * A tick that throws stops the ladder for this instance until the next hour,
-   * and everything it would have done -- sampling, advancing, delivering -- is
-   * silently not done. There is no user-visible symptom until somebody's
-   * expiry notice never arrives, which is weeks later and untraceable.
+   * Reports a significant condition to the operational alert channel. A tick
+   * that throws silently stops sampling, advancing and delivering for this
+   * instance until the next hour, with no user-visible symptom until
+   * somebody's expiry notice never arrives, weeks later and untraceable.
    */
   report?: (kind: string, message: string, context: Record<string, unknown>) => void;
   /** How often the job ticks. Default 60 min. */
@@ -141,9 +139,9 @@ const JOB_KEY = 'billing.advance';
  * (`plans/fleets.md` §4). Advancement is fleet-wide work on shared rows, so
  * exactly one instance in the whole cluster may do it, across both fleets.
  * Delivery needs a bot that is in the guild, and the winner of that lock may
- * not be. They were one loop until 2026-08-19, which worked only for as long as
- * there was one fleet: with beta and prod both up, a guild advanced by the
- * fleet that cannot see it would never be told, silently and permanently.
+ * not be: a single loop would mean a guild advanced by a fleet that cannot
+ * see it is never told, silently and permanently, whenever more than one
+ * fleet is running.
  *
  * Every step is idempotent and per-guild fault-isolated; the whole job is a
  * no-op under `global.pause` or `billing.reconcile_disabled`.
@@ -203,7 +201,7 @@ export class BillingReconciler {
 
   /**
    * Stops the timer AND awaits any in-flight pass (checked per guild via the
-   * stopping flag, so a long fleet sweep bails within one guild's work) —
+   * stopping flag, so a long fleet sweep bails within one guild's work):
    * graceful drain must not close the DB pool under a running pass.
    */
   async stop(): Promise<void> {

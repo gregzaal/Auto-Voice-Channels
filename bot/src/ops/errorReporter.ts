@@ -53,9 +53,8 @@ export interface AdminChannelReporterOptions {
  * throttle in any useful sense. Every alert source here is a repeating check:
  * the db health ping runs every 15s, the metrics flush every 5 minutes, the
  * watcher every minute. A sustained outage under the old default would have
- * posted a message every fifteen seconds for as long as it lasted -- roughly
- * two thousand of them across the 2026-08-20 outage -- which is not alerting,
- * it is a denial of service against the person on call.
+ * posted a message every fifteen seconds for as long as it lasted, which is
+ * not alerting, it is a denial of service against the person on call.
  *
  * A distinct condition is never delayed by this, because the window is per
  * kind. What it costs is a repeat: a problem that is still true is restated

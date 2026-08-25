@@ -132,20 +132,15 @@ export class PermissionProblemTracker {
  *
  * **Creating and losing access are different failures and must not share
  * wording.** Both surface as Discord's `50013`, but the fixes have nothing in
- * common, and for months every one of them was reported as "I lost access to
- * this channel, grant me View Channel, Connect, Manage Channels and Move
- * Members". On 2026-08-19 that sent an admin to check four permissions the bot
- * already held, on the channel and on its category, while the real cause was
- * an overwrite the bot is not allowed to copy. Advice that names the wrong fix
- * is worse than no advice: it burns the admin's trust in the panel.
+ * common: sharing one wording sends an admin to check permissions the bot
+ * already holds while the real cause is an overwrite it isn't allowed to
+ * copy. Advice that names the wrong fix is worse than no advice, since it
+ * burns the admin's trust in the panel.
  *
- * **Corrected 2026-08-20.** The create branch used to say a copied override
- * granting something the bot lacks "will stop me". That stopped being true when
- * `maskOverwrites` shipped: it masks every overwrite down to the bot's own bits
- * before the create, and sends none at all when the bot has no Manage Roles, so
- * no override can refuse a create any more. The wording outlived the bug by a
- * day and sent admins hunting a cause that no longer exists, which is the exact
- * failure the paragraph above is about.
+ * The create branch's wording must also track `maskOverwrites`: since that
+ * masks every overwrite down to the bot's own bits before the create (and
+ * sends none at all without Manage Roles), no copied override can refuse a
+ * create any more, so this message must not blame one.
  */
 export function permissionProblemMessage(
   channelId: string,

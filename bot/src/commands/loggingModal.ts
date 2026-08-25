@@ -123,10 +123,9 @@ export function parseLoggingModal(fields: ModalSubmitFields): ParsedLogging {
   const level = fields.getStringSelectValues('level')[0] ?? '1';
   const raw = fields.getStringSelectValues('alerts')[0];
   const alerts: ProblemAlertMode = raw === 'off' || raw === 'quiet' ? raw : 'contact';
-  // Note the early return still carries `alerts`. It used to be a plain
-  // `{ disable: true, level: 1 }`, and adding a field above it without adding
-  // it here would silently reset problem alerts for anyone turning event
-  // logging off.
+  // The early return still carries `alerts`, deliberately: a future field
+  // added above without also being added here would silently reset problem
+  // alerts for anyone turning event logging off.
   if (level === 'off') return { disable: true, level: 1, alerts };
   const channelId = fields.getSelectedChannels('channel', false)?.first()?.id;
   return {

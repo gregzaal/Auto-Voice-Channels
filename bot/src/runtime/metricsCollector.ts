@@ -16,30 +16,27 @@ import {
 } from '@avc/core';
 
 /**
- * The metrics collector (`plans/admin-dashboard.md` §3.4).
+ * The metrics collector (`plans/admin-dashboard.md` §3.4). Two jobs in one
+ * timer, split by the nature of what they measure:
  *
- * Two jobs in one timer, split by the nature of what they measure:
+ * 1. **Flush** (every instance): counters and peaks accumulated in memory on
+ *    the hot path, written under this instance's own key. Nothing here is
+ *    derivable from SQL after the fact (a room's row is deleted with the
+ *    room, a command invocation leaves no trace at all), so an uncounted
+ *    event is unanswerable forever.
+ * 2. **Rollup** (cluster singleton): every gauge that *is* derivable,
+ *    computed in SQL, plus the hourly-to-daily rollup and retention prune.
+ *    Reserved through `billing_runs` with its own advisory slot, like the
+ *    billing advance, so it runs once across the whole cluster.
  *
- * 1. **Flush** (every instance): counters and peaks accumulated in memory on the
- *    hot path, written under this instance's own key. Nothing here is derivable
- *    from SQL after the fact - a room's row is deleted with the room, and a
- *    command invocation leaves no trace at all - so if it is not counted as it
- *    happens it is unanswerable forever.
- * 2. **Rollup** (cluster singleton): every gauge that *is* derivable, computed in
- *    SQL, plus the hourly-to-daily rollup and the retention prune. Reserved
- *    through `billing_runs` with its own advisory slot, exactly like the billing
- *    advance, so it happens once across the whole cluster however many fleets and
- *    instances are up.
+ * **Runs on self-host too**, like the backup scheduler and unlike the
+ * billing job: counting your own rooms costs a few dozen rows an hour, and a
+ * self-hoster asking "when did rooms stop being created here" deserves an
+ * answer. `metrics.disabled` is the off switch.
  *
- * **Runs on self-host too**, with no `selfHosted` branch, like the backup
- * scheduler and unlike the billing job: there is nothing hosted-specific about
- * counting your own rooms, it costs a few dozen rows an hour, and a self-hoster
- * asking "when did rooms stop being created here" deserves an answer. The
- * `metrics.disabled` flag is the off switch.
- *
- * The hot path never touches the database and never awaits: {@link increment} and
- * {@link observePeak} mutate a Map and return. Telemetry that can block a voice
- * event, or throw into one, is worse than no telemetry.
+ * The hot path never touches the database and never awaits: {@link increment}
+ * and {@link observePeak} mutate a Map and return. Telemetry that can block a
+ * voice event, or throw into one, is worse than no telemetry.
  */
 
 /**
@@ -287,24 +284,16 @@ export class MetricsCollector {
 
   /**
    * Reloads this instance's already-written counters for the current bucket.
-   *
-   * Without it a restart mid-hour starts every accumulator at zero, and although
-   * `greatest` on write means that cannot walk a counter backwards, the counter
-   * would sit frozen until the fresh accumulator overtook the pre-restart total -
-   * most of a busy hour. One query on boot buys an exact resume.
+   * Must be called before the gateway connects (`index.ts` does). The
+   * accumulator holds running totals, not deltas, so the stored value and a
+   * live in-memory count are disjoint numbers with no safe way to combine:
+   * adding double-counts what's already flushed, and taking the larger
+   * silently drops whichever side is smaller. Starting from an empty
+   * accumulator is what makes the resume exact rather than a guess; the
+   * `max` below is a belt-and-braces no-op in that ordering, guarding only
+   * against a stray second call.
    */
   async hydrate(): Promise<void> {
-    /**
-     * Call this **before the gateway connects**, which `index.ts` does.
-     *
-     * The accumulator holds running totals, not deltas, so the stored value and a
-     * live in-memory count are disjoint numbers with no safe way to combine them:
-     * adding them double-counts everything already flushed, and taking the larger
-     * silently drops whichever side is smaller. Running with an empty accumulator is
-     * what makes the resume exact rather than a guess. The `max` below is a
-     * belt-and-braces no-op in that ordering, and keeps a stray second call from
-     * walking a counter backwards.
-     */
     try {
       const bucket = hourBucket(this.now());
       const rows = await this.deps.metrics.readInstanceBucket(
@@ -433,13 +422,11 @@ export class MetricsCollector {
       this.observePeak(METRICS.QUEUE_DEPTH_PEAK, queueDepth);
       this.observePeak(METRICS.CIRCUITS_TRIPPED_PEAK, trippedCircuits);
       /**
-       * Sampled here rather than pushed, on the same 30s tick, because a peak
-       * is a property of a moment nobody else is watching.
-       *
-       * Keyed by instance. Until this existed the memory alerts could only
-       * *project* from `guilds.member_reach` times the measured 1.28 KB per
-       * cached member, which is a model of expected use and by construction
-       * cannot see a leak or a discord.js regression. This is the measurement.
+       * Keyed by instance, unlike the peaks above. Until this existed, memory
+       * alerts could only *project* from `guilds.member_reach` times the
+       * measured 1.28 KB per cached member - a model of expected use that by
+       * construction cannot see a leak or a discord.js regression. This is
+       * the actual measurement.
        */
       this.observePeak(METRICS.PROCESS_RSS_PEAK, this.readRss(), this.deps.instanceId);
     } catch (err) {
@@ -616,12 +603,12 @@ export class MetricsCollector {
   /**
    * The cluster-singleton half: derived gauges, the daily rollup, the prune.
    *
-   * **Three separate try blocks, not one.** They were one, and it made the daily
-   * rollup collateral damage of any gauge failure: a `collectGauges` that threw for
-   * three days (a lock timeout, a permissions change on `subscriptions`) also
-   * skipped `rollupDaily`, and the forever-table is the only thing the charts read,
-   * so the outage left permanent holes rather than a recoverable gap. They fail for
-   * unrelated reasons and each is independently useful, so each gets to run.
+   * **Three separate try blocks, not one.** Merged into one, a `collectGauges`
+   * failure (a lock timeout, a permissions change) would also skip
+   * `rollupDaily` - and the daily table is the only thing the charts read, so
+   * that outage leaves permanent holes rather than a recoverable gap. Each
+   * fails for unrelated reasons and each is independently useful, so each
+   * gets to run.
    */
   private async rollup(): Promise<void> {
     const at = this.now();

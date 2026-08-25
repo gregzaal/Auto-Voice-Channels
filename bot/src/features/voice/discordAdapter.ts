@@ -72,13 +72,10 @@ export function maskOverwrites(
    * Discord states two rules for overwrites on Create Guild Channel, and the
    * mask above only implemented the first: "only permissions your bot has in
    * the guild can be allowed/denied. **Setting MANAGE_ROLES permission in
-   * channels is only possible for guild administrators.**"
-   *
-   * AVC holds Manage Roles, so `allow & botPerms` happily kept the bit and
-   * Discord rejected the ENTIRE create with a bare 403 — on any role, in allow
-   * or deny, regardless of role position. One ordinary moderator overwrite
-   * carrying "Manage Permissions" silently broke every room creation in a real
-   * guild on 2026-08-19, while `/setup` reported the permissions looked fine.
+   * channels is only possible for guild administrators.**" AVC normally holds
+   * Manage Roles but not Administrator, so `allow & botPerms` kept the bit and
+   * Discord rejected the ENTIRE create with a bare 403 - on any role, in allow
+   * or deny, regardless of role position.
    *
    * Conditioned on ADMINISTRATOR rather than stripped outright: a server that
    * has given AVC admin *can* set the bit, and dropping it there would quietly
@@ -86,11 +83,11 @@ export function maskOverwrites(
    *
    * **Where this diverges from what the admin asked for**, in the far commoner
    * non-admin case: a role allowed Manage Permissions on the source does not
-   * get it on the new room (fails safe), and a role explicitly *denied* it does
-   * not carry that denial (fails open, so a role holding it guild-wide keeps it
-   * here). Neither is a regression, because before this the channel was not
-   * created at all, but the second one is a real, if narrow, divergence from
-   * intent and is the reason this is documented rather than just fixed.
+   * get it on the new room (fails safe), and a role explicitly *denied* it
+   * does not carry that denial (fails open, so a role holding it guild-wide
+   * keeps it here). Neither is a regression, since before this the channel
+   * was not created at all, but the second is a real, narrow divergence from
+   * intent, which is why it's documented rather than just fixed.
    */
   const canSetManageRoles = (botPerms & PermissionFlagsBits.Administrator) !== 0n;
   const settable = canSetManageRoles ? botPerms : botPerms & ~PermissionFlagsBits.ManageRoles;
@@ -175,11 +172,6 @@ function toVoiceMember(member: GuildMember): VoiceMember {
 }
 
 /**
- * Real discord.js implementation of the voice side-effect seam. All mutating
- * calls tolerate already-applied state (deleted channel / absent member) so the
- * dispatcher can replay events idempotently.
- */
-/**
  * How long to wait for a channel rename to apply before treating it as deferred
  * by a rate limit. A normal rename resolves well under this; Discord's per-channel
  * edit limit (2 / 10 min) makes a throttled one queue for far longer.
@@ -190,6 +182,11 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Real discord.js implementation of the voice side-effect seam. All mutating
+ * calls tolerate already-applied state (deleted channel / absent member) so the
+ * dispatcher can replay events idempotently.
+ */
 export class DiscordVoiceActions implements VoiceActions {
   constructor(
     private readonly client: Client,

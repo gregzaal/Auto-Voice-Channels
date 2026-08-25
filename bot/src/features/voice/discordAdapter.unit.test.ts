@@ -270,9 +270,9 @@ describe('DiscordVoiceActions.createVoiceChannel', () => {
      * Not "only if you hold Manage Roles" - only if you are an administrator,
      * which AVC is not and should not be. Copying an overwrite that carries
      * the bit makes Discord reject the ENTIRE create with a bare 403, so one
-     * ordinary moderator overwrite silently broke every room creation in a
-     * real guild on 2026-08-19. Dropping the bit degrades one permission on
-     * the new room; keeping it means no room at all.
+     * ordinary moderator overwrite silently breaks every room creation in the
+     * guild. Dropping the bit degrades one permission on the new room;
+     * keeping it means no room at all.
      */
     it('drops Manage Roles from a copied allow, and still creates the channel', async () => {
       const { client, guild } = clientWithSource({

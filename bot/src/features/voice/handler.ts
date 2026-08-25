@@ -117,41 +117,32 @@ export interface VoiceFeatureDeps {
    */
   serverLog?: (guildId: string, level: 1 | 2 | 3, message: string) => void;
   /**
-   * Records "I cannot act on this channel" incidents.
-   *
-   * Feeds three different things, and they are deliberately not collapsed into
-   * one. `/setup` reads it on demand. The paired `serverLog` line above each
-   * `record` call is the event log, per incident and contemporaneous, for the
-   * guilds that configured `/logging`. Its `onRecord` hook drives
-   * `PermissionProblemNotifier`, which is the only one of the three that
-   * reaches a guild that has configured nothing, and is therefore throttled
-   * and aggregated in a way a log must not be.
+   * Records "I cannot act on this channel" incidents, feeding three
+   * deliberately separate surfaces: `/setup` (on demand), the paired
+   * `serverLog` call (contemporaneous, `/logging` guilds only), and
+   * `onRecord` -> `PermissionProblemNotifier` (the only one that reaches a
+   * guild with nothing configured, so it alone is throttled/aggregated).
    */
   permissionProblems?: PermissionProblemTracker;
   /**
-   * Counts a room's birth or death, for the metric store. Fire-and-forget, and
-   * optional so tests need not supply one.
+   * Counts a room's birth or death, for the metric store. Fire-and-forget and
+   * optional. Counted here because `secondary_channels` rows are deleted with
+   * the channel they describe, so an uncounted room is unrecoverable, not
+   * merely un-charted.
    *
-   * Counted here because `secondary_channels` rows are deleted with the channels
-   * they describe: the table holds a live count and no history whatsoever, so a
-   * room that is not counted as it happens is unrecoverable, not merely
-   * un-charted.
-   *
-   * `deleted` means **the bot cleaned a room up**, not "a room stopped existing".
-   * A channel a human deletes by hand, and a stale row reconcile drops, are
-   * deliberately not counted: they are different events, and folding them in
-   * would make the number useless for the question it exists to answer, which is
-   * whether cleanup is working.
+   * `deleted` means **the bot cleaned a room up**, not "a room stopped
+   * existing" - a human deleting it, or reconcile dropping a stale row, are
+   * deliberately not counted, or the number would stop answering whether
+   * cleanup is working.
    */
   countRoom?: (event: 'created' | 'deleted') => void;
   /**
-   * Defense in depth for the two "cache says gone, delete the row" branches
-   * below. `reconcileGuild` is meant to run only for a guild whose shard this
-   * instance holds (a gateway event, or the sweep's own scoping), but nothing
-   * stops a direct call for the wrong guild - and on that call, the local
-   * discord.js cache has no data for it at all, so `channelExists` reads
-   * false for every real, live channel. Omitted → the cache is trusted as-is
-   * (tests, self-host, single-instance fleets, where this is always correct).
+   * Defense in depth for the "cache says gone, delete the row" branches below.
+   * `reconcileGuild` should only run for a guild whose shard this instance
+   * holds, but nothing enforces that - and for an unowned guild, the local
+   * discord.js cache has no data at all, so `channelExists` reads false for
+   * every real, live channel. Omitted → the cache is trusted as-is (tests,
+   * self-host, single-instance fleets, where this is always correct).
    */
   ownsGuild?: (guildId: string) => boolean;
 }
@@ -161,16 +152,13 @@ export interface ReconcileOptions {
   dryRun?: boolean;
   /**
    * What to do when the bot turns out to have *lost access* to the channel.
-   *
-   * Background callers (the re-render scheduler, reconcile) pass `abandon`: the
-   * row has to go, or every sweep retries the same impossible edit forever.
-   *
-   * Interactive callers keep the default `report`, which rethrows and leaves the
-   * row alone — an admin who just wrote a template must never have it binned
-   * underneath them for a problem they can fix by granting a permission.
-   *
-   * A channel confirmed *deleted* is dropped either way: that is objective and
-   * unrecoverable, and no template can outlive the channel it names.
+   * Background callers (the re-render scheduler, reconcile) pass `abandon`:
+   * the row has to go or every sweep retries the same impossible edit
+   * forever. Interactive callers keep the default `report`, which rethrows
+   * and leaves the row alone, since an admin who just wrote a template must
+   * never have it binned for a problem they can fix by granting a permission.
+   * A confirmed *deleted* channel is dropped either way, since no template
+   * can outlive the channel it names.
    */
   onUnmanageable?: 'abandon' | 'report';
 }
@@ -360,17 +348,11 @@ export class VoiceFeature {
     opts: ReconcileOptions = {},
   ): Promise<CreateOutcome> {
     /**
-     * One read, not two. This is the first thing a voice join does.
-     *
-     * `isPrimary(guildId, channelId)` and `get(channelId)` fetch the SAME ROW,
-     * and this method called both, sequentially, a few lines apart. Two round
-     * trips for one lookup is free when the database is next door and it is
-     * not free here: the bot runs in `iad` and the cluster in `ams`, measured
-     * at 91ms per round trip on 2026-08-19, so the duplicate alone cost every
-     * room creation about a tenth of a second.
-     *
-     * `get` is fleet-scoped by the repository, so the guild check that
-     * `isPrimary` added on top is preserved explicitly below rather than lost.
+     * One read, not two: `isPrimary` and `get` fetch the SAME ROW, and this is
+     * the first thing a voice join does, so a duplicate round trip here costs
+     * real time on every room creation. `get` is fleet-scoped by the
+     * repository, so the guild check `isPrimary` added on top is preserved
+     * explicitly below rather than lost.
      */
     const primary = await this.deps.autoChannels.get(channelId);
     if (!primary || primary.guildId !== guildId) return { action: 'skip' };
@@ -415,8 +397,6 @@ export class VoiceFeature {
       'creating secondary: creator presence',
     );
 
-    // `primary` was read once at the top of this method; re-reading it here is
-    // the duplicate round trip that used to be on this path.
     // When the primary's category is grouped, number group-wide (across all the
     // category's primaries) and append at the bottom; otherwise number per-primary.
     const categoryKey = groupKeyFor(this.deps.voice.categoryOf?.(channelId));
@@ -500,15 +480,10 @@ export class VoiceFeature {
       await this.deps.onSecondaryRemoved?.(guildId, newChannelId);
       await this.deps.actions.deleteChannel(guildId, newChannelId).catch(() => undefined);
       /**
-       * Recorded against the PRIMARY, not the secondary we just deleted.
-       *
-       * The incident is rendered as a `<#id>` mention for an admin to go and
-       * inspect, and the secondary is gone by this line in the common case
-       * (only Move Members was missing, so the delete succeeded). That would
-       * render as a dead channel mention naming a room the admin never saw.
-       * The creator channel is the thing they configured and can actually
-       * open. The secondary id stays in the log context, where it is useful
-       * and is not being handed to a human as somewhere to click.
+       * Recorded against the PRIMARY, not the secondary we just deleted: the
+       * secondary is gone by this line in the common case, so a `<#id>`
+       * mention naming it would be a dead link. The secondary id stays in the
+       * log context, just not in the human-facing mention.
        */
       this.deps.permissionProblems?.record(guildId, {
         channelId,
@@ -524,19 +499,11 @@ export class VoiceFeature {
     }
 
     /**
-     * The creator channel worked end to end, so whatever was blocking it is gone.
-     *
-     * Mirrors the clear after a successful cleanup below. Nothing cleared the
-     * CREATE incident before this, and unlike a secondary (whose row and
-     * incident die together) a creator channel lives on, so the incident sat in
-     * `/setup` for the life of the process after the admin had fixed it.
-     *
-     * **After the move, not after the create.** Both failures record against
-     * this same primary, so clearing on a bare create meant a guild missing
-     * only Move Members cleared and re-recorded on every single join. That
-     * looks harmless and is not: clearing the guild's last incident resets the
-     * notifier's escalating backoff, so the notice would have gone out every
-     * time somebody joined instead of four times in total.
+     * Cleared after the MOVE succeeds, not the create, even though both
+     * failures record against this same primary. Clearing on a bare create
+     * would mean a guild missing only Move Members clears and re-records the
+     * incident on every join, which resets the notifier's escalating backoff
+     * and turns four total notices into one per join.
      */
     this.deps.permissionProblems?.clear(guildId, channelId);
 
@@ -848,13 +815,10 @@ export class VoiceFeature {
 
   /**
    * Gives up on an adopted channel the bot can no longer act on, and tells the
-   * admin how to restore access. Mirrors the secondary-side give-up in
-   * {@link maybeCleanup}: the row has to go, or every reconcile retries the same
-   * impossible edit forever.
-   *
-   * Distinct from {@link stopManaging}, which is the admin *choosing* to un-adopt
-   * a channel — that is a success with a friendly reply, this is a failure the
-   * admin needs told about.
+   * admin how to restore access (mirrors the secondary-side give-up in
+   * {@link maybeCleanup}: the row has to go or every reconcile retries the
+   * same impossible edit forever). Distinct from {@link stopManaging}, which
+   * is the admin *choosing* to un-adopt a channel, a success, not a failure.
    */
   private async abandonManaged(
     guildId: string,
@@ -872,12 +836,10 @@ export class VoiceFeature {
   }
 
   /**
-   * Drops tracking for a channel Discord reports as deleted.
-   *
-   * This is the cheap, immediate path — it stops a stale row ever existing. The
-   * confirm-on-rename fallback in {@link rerenderManaged} covers the deletions
-   * this never sees: those that happen while the shard is disconnected, where the
-   * event is simply never delivered.
+   * Drops tracking for a channel Discord reports as deleted. This is the
+   * cheap, immediate path; the confirm-on-rename fallback in
+   * {@link rerenderManaged} covers deletions that happen while the shard is
+   * disconnected, where this event is never delivered.
    */
   async handleChannelDeleted(guildId: string, channelId: string): Promise<void> {
     const secondary = await this.deps.secondaries.get(channelId);
@@ -1216,11 +1178,6 @@ export class VoiceFeature {
     return block;
   }
 
-  /**
-   * The primaries (by category) and their secondaries (ordered by creation time)
-   * making up one grouping category. The category is resolved live from each
-   * primary's parent, so it reflects channels having been moved between categories.
-   */
   /** The primary (creator) channel ids that resolve to `categoryKey` right now. */
   async categoryPrimaryIds(guildId: string, categoryKey: string): Promise<string[]> {
     const primaries = await this.deps.autoChannels.listByGuild(guildId);
@@ -1229,6 +1186,11 @@ export class VoiceFeature {
       .map((p) => p.channelId);
   }
 
+  /**
+   * The primaries and their secondaries (ordered by creation time) making up
+   * one grouping category, resolved live so it reflects channels moved
+   * between categories since.
+   */
   private async groupMembers(
     guildId: string,
     categoryKey: string,

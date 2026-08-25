@@ -111,11 +111,11 @@ export class Reconciler {
     /**
      * Collected rather than reported per guild.
      *
-     * A sweep over the whole install base can fail for every guild at once when
-     * the cause is shared -- the database being unreachable, say -- and one
+     * A sweep over the whole install base can fail for every guild at once
+     * when the cause is shared (the database being unreachable, say), and one
      * alert per guild would be a thousand messages describing one fault. The
-     * summary below reports the shape instead: how many failed out of how many,
-     * with a sample. On 2026-08-20 this path failed silently for hours.
+     * summary below reports the shape instead: how many failed out of how
+     * many, with a sample.
      */
     const failures: string[] = [];
     const worker = async (): Promise<void> => {

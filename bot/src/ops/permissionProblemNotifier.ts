@@ -64,16 +64,16 @@ const HOUR = 60 * MINUTE;
  * How long to wait before saying it again, indexed by how many times it has
  * already been said in this run of the condition. Past the end, stop.
  *
- * A permission problem is a STATE, not an event: the safety-net sweep re-tests
- * every guild every five minutes, and the create path is not self-limiting on
- * failure, so a guild with one member parked in a broken creator channel
- * regenerates the same incident twelve times an hour indefinitely. A flat 6h
- * cooldown is therefore not a cooldown, it is a subscription: four messages a
- * day, forever, to a guild that has been ignoring them since the first one.
+ * A permission problem is a STATE, not an event: the safety-net sweep
+ * re-tests every guild every five minutes, and the create path is not
+ * self-limiting on failure, so a guild with one member parked in a broken
+ * creator channel regenerates the same incident many times an hour
+ * indefinitely. A flat cooldown is therefore not a cooldown, it's a
+ * subscription.
  *
- * Four notices spread over five days is enough for anyone who intends to act.
- * After that the silence is the message, and `/setup` is still there for
- * whoever comes back to it.
+ * Four notices spread over five days is enough for anyone who intends to
+ * act. After that the silence is the message, and `/setup` is still there
+ * for whoever comes back to it.
  */
 const BACKOFF_MS = [6 * HOUR, 24 * HOUR, 72 * HOUR] as const;
 
@@ -117,40 +117,33 @@ interface NoticeState {
  * Tells a guild's admins that the bot has stopped being able to do the thing
  * they installed it for.
  *
- * **The problem here was delivery, not wording.** These incidents were reported
- * only through `serverLog`, which posts to the `/logging` channel and nowhere
- * else. That is opt-in and 5 of 1008 guilds have one configured, so the single
- * most actionable message the bot produces reached effectively nobody, and
- * everyone else found out when a member complained that joining the creator
- * channel did nothing.
- *
- * `serverLog` is untouched and still fires per incident. A log is a log:
- * contemporaneous, unabridged, and in a channel its guild asked for. This is a
- * different object with a different audience, so it does not use that channel
- * as a rung and does not replace those lines.
+ * **The problem here was delivery, not wording.** These incidents were only
+ * reported through `serverLog`, which posts to the `/logging` channel: opt-in
+ * and rarely configured, so the single most actionable message the bot
+ * produces reached effectively nobody. `serverLog` is untouched and still
+ * fires per incident (contemporaneous, unabridged, in a channel the guild
+ * asked for); this is a different object with a different audience, and does
+ * not replace those lines.
  *
  * ## Why this is not a durable queue
  *
- * `billing_notifications` exists because the fleet that DECIDES a guild is owed
- * a message may not be in that guild, so the decision has to outlive the
- * process that made it. None of that applies here. Detection is
- * {@link PermissionProblemTracker}, which is in-memory and per instance
- * precisely because a guild lives on exactly one instance, so the process that
- * detects the problem is by construction a process that can deliver it. And the
- * message describes a level, not an edge: if this process dies with a notice
- * undelivered, the sweep re-detects the same still-true condition within five
- * minutes and the replacement sends it. A durable queue would add a table, a
- * migration, a claim query and a drain tick to solve a handoff that does not
- * exist, and to make an at-least-once guarantee out of something that
- * regenerates itself.
+ * `billing_notifications` exists because the fleet that DECIDES a guild is
+ * owed a message may not be in that guild. None of that applies here:
+ * detection ({@link PermissionProblemTracker}) is in-memory and per instance
+ * because a guild lives on exactly one instance, so the process that detects
+ * the problem can always deliver it. The message also describes a level, not
+ * an edge - if this process dies with a notice undelivered, the sweep
+ * re-detects the same still-true condition within five minutes. A durable
+ * queue would add a table, a migration, a claim query and a drain tick to
+ * solve a handoff that does not exist.
  *
  * ## Why this is not the `alerts` table
  *
  * `AlertAudience` is `hosted | self_host | both`: every value names whoever
- * OPERATES the deployment. A customer's channel overwrite is not our incident,
- * and putting a thousand guilds' misconfigurations in the operator's alert feed
- * would bury the alerts that are ours. The one thing here that IS operator
- * business is the aggregate, and that goes out through {@link report}.
+ * OPERATES the deployment. A customer's channel overwrite is not our
+ * incident, and a thousand guilds' misconfigurations would bury the alerts
+ * that are ours. The one thing here that IS operator business is the
+ * aggregate, sent through {@link report}.
  */
 export class PermissionProblemNotifier {
   private readonly state = new Map<string, NoticeState>();
@@ -264,10 +257,10 @@ export class PermissionProblemNotifier {
   async send(guildId: string): Promise<ProblemNoticeOutcome> {
     if (this.stopped || this.inFlight.has(guildId)) return 'skipped';
     /**
-     * A notice fired during a graceful drain would post against a client that
-     * is being torn down, fail, and still have burned the guild's window, on
-     * every deploy. The notifier is not in `gracefulDrain`'s ordered sequence
-     * (that file belongs to another change in flight), so it checks for itself.
+     * A notice fired during a graceful drain would post against a client
+     * being torn down, fail, and still have burned the guild's window, on
+     * every deploy. The notifier is not part of the shutdown sequence, so it
+     * checks readiness for itself.
      */
     if (!this.opts.client.isReady()) return 'skipped';
 
@@ -357,13 +350,11 @@ export class PermissionProblemNotifier {
       }
       if (outcome === 'undeliverable') {
         /**
-         * Warn, not debug, and reported to the operator.
-         *
-         * This codebase has already been bitten by containing a failure into
-         * silence: swallowing a system-channel error "made every notification
-         * look like it was DM-by-design". A fleet-wide inability to deliver and
-         * a fleet with nothing broken look identical in the logs and completely
-         * different in these counters.
+         * Warn, not debug, and reported to the operator: a fleet-wide
+         * inability to deliver and a fleet with nothing broken look
+         * identical in the logs and completely different in these counters.
+         * Swallowing this silently would make every notification look like
+         * it succeeded DM-by-design.
          */
         this.opts.logger.warn(
           { guildId, problems: fresh.length },
@@ -421,16 +412,7 @@ export class PermissionProblemNotifier {
     }
 
     if (contactId.recipient) {
-      /**
-       * The DM rung books its own, much slower slot on top of the general one.
-       *
-       * It cannot be folded into {@link takeSlot}, which has to reserve before
-       * it knows which rung will answer: reserving the DM rate for everything
-       * would pace channel posts twelve times slower than they need to be, and
-       * reserving the channel rate for everything would let a burst of guilds
-       * with no system channel fire their DMs 250ms apart. Two gates, each
-       * priced for what passes through it.
-       */
+      // The DM rung books its own, much slower slot; see {@link takeDmSlot}.
       await this.takeDmSlot();
       if (await this.dm(guild, contactId.recipient, body)) return 'contact_dm';
     }
@@ -446,9 +428,9 @@ export class PermissionProblemNotifier {
      *
      * An arbitrary text channel is NOT tried, at any point. Picking the first
      * channel we can write to is what spam bots do, and servers defend with
-     * honeypot channels that auto-ban anything posting in them (owner's call,
-     * 2026-08-19). A creator channel is different: an admin configured it for
-     * this bot specifically and we hold a row for it.
+     * honeypot channels that auto-ban anything posting in them. A creator
+     * channel is different: an admin configured it for this bot specifically
+     * and we hold a row for it.
      */
     const broken = new Set(problems.map((p) => p.channelId));
     const creators = await this.opts.autoChannels.listByGuild(guildId).catch(() => []);
@@ -566,18 +548,17 @@ export class PermissionProblemNotifier {
   }
 
   /**
-   * Loads a guild's notice history from `metadata.problems` the first time this
-   * process considers it, so a deploy does not reset every guild's backoff.
+   * Loads a guild's notice history from `metadata.problems` the first time
+   * this process considers it, so a deploy does not reset every guild's
+   * backoff.
    *
-   * Read once per guild per process rather than per notice, because the row is
-   * served from a cache that metadata writes do not invalidate: this process
-   * would read back its own pre-write value for up to the 60s TTL. The
-   * in-memory map is authoritative from the first send onwards and the stored
-   * value only has to answer the question the map cannot, which is what
-   * happened before this process existed.
+   * Read once per guild per process, not per notice: the row is served from
+   * a cache that metadata writes do not invalidate, so this process would
+   * read back its own pre-write value for up to the 60s TTL. The in-memory
+   * map is authoritative from the first send onwards.
    *
-   * It also dedupes across fleets for free: `guilds` is not fleet-scoped, so
-   * two fleets in one guild during a transition see each other's history rather
+   * Also dedupes across fleets for free: `guilds` is not fleet-scoped, so two
+   * fleets in one guild during a transition see each other's history rather
    * than each telling the guild separately.
    */
   private hydrate(guildId: string, metadata: Record<string, unknown>): NoticeState | undefined {
@@ -615,17 +596,16 @@ export class PermissionProblemNotifier {
   /**
    * Waits for this instance's next send slot.
    *
-   * The per-guild backoff bounds how often ONE guild hears from us and says
+   * The per-guild backoff bounds how often ONE guild hears from us, and says
    * nothing about how many guilds hear from us at once. Reconcile-on-READY
    * walks every guild, so a deploy makes every broken guild in the fleet
-   * eligible within seconds, and a few hundred messages leaving in the same
+   * eligible within seconds - a few hundred messages leaving in the same
    * second is both a rate-limit problem and the exact shape Discord's
    * anti-spam heuristics exist to catch.
    *
-   * Per instance, not per fleet, which is the same assumption the tracker
-   * makes for a different reason. At more than one instance the fleet-wide rate
-   * is multiplied by the instance count, which is acceptable because the guild
-   * population is divided by it too.
+   * Per instance, not per fleet: at more than one instance the fleet-wide
+   * rate is multiplied by the instance count, which is acceptable because the
+   * guild population is divided by it too.
    */
   private async takeSlot(): Promise<void> {
     const now = this.now();
@@ -644,16 +624,14 @@ export class PermissionProblemNotifier {
   }
 
   /**
-   * The DM rung's own, much slower gate.
-   *
-   * It cannot be folded into {@link takeSlot}, which has to reserve before it
-   * knows which rung will answer. Reserving the DM rate for every notice would
-   * pace channel posts twelve times slower than they need to be, and reserving
-   * the channel rate for everything would let a burst of guilds that all lack a
-   * system channel fire their DMs 250ms apart. Two gates, each priced for what
-   * passes through it, and this is the rate `announce.ts` chose for the same
-   * act: a few hundred quick unsolicited DMs is the exact shape of a spam
-   * report.
+   * The DM rung's own, much slower gate. Can't be folded into
+   * {@link takeSlot}, which has to reserve before it knows which rung will
+   * answer: reserving the DM rate for every notice would pace channel posts
+   * twelve times slower than they need to be, and reserving the channel rate
+   * for everything would let a burst of guilds with no system channel fire
+   * their DMs 250ms apart. This is the same rate `announce.ts` chose for the
+   * same act: a few hundred quick unsolicited DMs is the exact shape of a
+   * spam report.
    */
   private async takeDmSlot(): Promise<void> {
     const now = this.now();
