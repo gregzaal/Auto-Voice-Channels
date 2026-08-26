@@ -68,6 +68,29 @@ export interface TransitionAuthInput {
   expiresAtIfNull?: Date;
   /** New grace-window end. Omit to leave unchanged; null clears it. */
   graceUntil?: Date | null;
+  /**
+   * Return the row untouched when this transition would change nothing.
+   *
+   * **Opt-in, and it has to be.** Callers like an admin re-blocking an
+   * already-blocked guild with an updated reason WANT a fresh audit row for a
+   * deliberate no-op, so a short circuit here cannot be unconditional.
+   *
+   * The one caller that needs it is the pool fan-out, whose diff-before-write
+   * is a read followed by a write and so is not atomic: two concurrent advance
+   * passes converging the same guild could each decide a write was due and each
+   * insert a `guild_auth_events` and an `ops_audit` row
+   * (`plans/member-based-pricing.md` §6.5). Setting this closes that, because
+   * the check runs inside this method's own transaction, after its
+   * `SELECT ... FOR UPDATE`: the second pass blocks on the row lock, then reads
+   * the state the first one committed and returns without writing.
+   */
+  skipIfUnchanged?: boolean;
+}
+
+/** Whether two nullable instants differ. `null` and a date always differ. */
+function instantsDiffer(a: Date | null, b: Date | null): boolean {
+  if (a === null || b === null) return a !== b;
+  return a.getTime() !== b.getTime();
 }
 
 export interface RecordSampleResult {
@@ -260,6 +283,27 @@ export class GuildRepository {
           : input.expiresAtIfNull !== undefined && current.authExpiresAt === null
             ? { authExpiresAt: input.expiresAtIfNull }
             : {};
+
+      /**
+       * Nothing to do. Checked here rather than at the call site so the
+       * comparison happens under the row lock taken above, which is what makes
+       * it a real guard against a concurrent writer instead of another
+       * read-then-write.
+       *
+       * Conservative on the expiry axis: an explicit `expiresAt` equal to what
+       * is already stored still counts as a change and still writes. Erring
+       * toward an extra audit row is the safe direction, and no caller passing
+       * `skipIfUnchanged` passes an expiry at all.
+       */
+      if (input.skipIfUnchanged) {
+        const graceSame =
+          input.graceUntil === undefined ||
+          !instantsDiffer(current.graceUntil, input.graceUntil);
+        const expiresSame = Object.keys(setExpiresAt).length === 0;
+        if (fromStatus === input.toStatus && graceSame && expiresSame) {
+          return guildRowSchema.parse(current);
+        }
+      }
 
       const [updated] = await tx
         .update(guilds)

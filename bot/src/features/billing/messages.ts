@@ -84,6 +84,38 @@ export function onboardingMessage(
 }
 
 /**
+ * The welcome for a server that is already covered by a subscription.
+ *
+ * Needed because {@link onboardingMessage} announces a trial and quotes a
+ * per-server price, and a customer can reach `GUILD_CREATE` after paying:
+ * checkout can name servers the bot is not in yet, and the webhook sets
+ * `pool_id` without fanning entitlement out (§6.4), so there is a real window
+ * where a paid server joins and still reads `trial`. Telling someone who just
+ * paid that their free trial has started, and then quoting them a second
+ * price, is the worst thing this surface can say.
+ */
+export function coveredWelcomeMessage(guildId: string): string {
+  return (
+    `👋 **Thanks for adding Auto Voice Channels!** Run \`/setup\` to create your first ` +
+    `creator channel.\n\nThis server is already covered by your subscription, so there is ` +
+    `nothing else to sort out. Manage it anytime at ${subscribeUrl(guildId)}`
+  );
+}
+
+/**
+ * Who a ladder notification is being read by, which changes what is true in it.
+ *
+ * `guild` is the ordinary case: this server's own subscription or trial, read
+ * by its own admins. `purchaser` is a billing message about a subscription
+ * covering several servers, DM'd to the one person who can pay it. Both of
+ * those were already handled. `shared_member` is the one that was not, and it
+ * is the awkward one: a service-stopping notice fanned out into every server on
+ * a shared subscription (§6.6), read by admins who may have bought nothing and
+ * who never received the warnings that came before it.
+ */
+export type NotificationAudience = 'guild' | 'purchaser' | 'shared_member';
+
+/**
  * Renders a leniency-ladder notification (the §4 grace ladder) as message
  * text. `guildId` deep-links to that server's dashboard card; a pool
  * notification (`plans/member-based-pricing.md` §6.6) has no one server to
@@ -95,6 +127,7 @@ export function notificationMessage(
   memberCount: number,
   guildId: string,
   link: string = subscribeUrl(guildId),
+  audience: NotificationAudience = 'guild',
 ): string {
   const tierLine = n.requiredTier ? tierById(n.requiredTier) : tierFor(memberCount);
   const price =
@@ -103,6 +136,30 @@ export function notificationMessage(
       : tierLine.pricePerYear === 0
         ? 'free'
         : `$${tierLine.pricePerYear}/yr`;
+
+  /**
+   * A fan-out copy landing in a server whose admins are not the buyer.
+   *
+   * Two things have to change, and neither is cosmetic. The message cannot
+   * refer back to a grace period these readers were never told about, because
+   * `grace_started` and `grace_nudge` go to the purchaser alone. And it cannot
+   * instruct them to reactivate, because they cannot: it has to name who can.
+   */
+  if (audience === 'shared_member') {
+    switch (n.kind) {
+      case 'hard_gate':
+        return (
+          `🌙 **AVC is paused on this server.** The subscription covering it has lapsed, so ` +
+          `voice automation has stopped. Nothing was deleted, and your settings are safe. ` +
+          `Whoever manages that subscription can switch it back on at ${link}`
+        );
+      case 'reactivated':
+        return `💜 **AVC is back on!** The subscription covering this server is current again, and voice automation has resumed.`;
+      default:
+        break;
+    }
+  }
+
   switch (n.kind) {
     case 'trial_warning': {
       const days = n.daysLeft ?? 0;
@@ -115,6 +172,21 @@ export function notificationMessage(
     case 'grace_started': {
       const days = n.daysLeft ?? 60;
       if (n.reason === 'over_limit') {
+        /**
+         * A shared subscription's sum can cross a band because one server
+         * grew, because several grew a little, or because a server was added.
+         * "Your server has grown" gives a purchaser with eight servers nothing
+         * to look at, and §7.3 says the band step has to be said out loud, so
+         * name the number that actually moved.
+         */
+        if (audience === 'purchaser') {
+          return (
+            `🎉 **Your servers have grown.** Their members now add up to ${memberCount}, more ` +
+            `than your plan covers, so you're in AVC's ${tierLine.label} tier (${price}). ` +
+            `Nothing changes for ${days} days, everything keeps working while you upgrade at ` +
+            `${link}\n\nCongrats on the growth!`
+          );
+        }
         return (
           `🎉 **Your server has grown!** You're now in AVC's ${tierLine.label} tier (${price}). ` +
           `Nothing changes for ${days} days, everything keeps working while you upgrade at ` +
@@ -160,16 +232,43 @@ export function notificationMessage(
   }
 }
 
-/** Ephemeral reply for any command in a hard-gated (expired) guild (§6). */
-export function expiredInteractionMessage(guildId: string): string {
+/**
+ * Ephemeral reply for any command in a hard-gated (expired) guild (§6).
+ *
+ * `shared` when the server is covered by a subscription spanning several
+ * servers: the admin running the command is then quite likely not the person
+ * who can pay, and telling them to reactivate is a dead end.
+ */
+export function expiredInteractionMessage(guildId: string, shared = false): string {
+  if (shared) {
+    return (
+      `🌙 AVC is paused on this server, because the subscription covering it has lapsed. ` +
+      `Nothing was deleted. Whoever manages that subscription can switch it back on at ` +
+      `${subscribeUrl(guildId)}`
+    );
+  }
   return (
     `🌙 AVC is paused on this server, the trial or subscription has ended. ` +
     `Nothing was deleted. Reactivate at ${subscribeUrl(guildId)} and everything resumes instantly.`
   );
 }
 
-/** Posted (throttled) into a creator channel someone joined while hard-gated. */
-export function gatedCreatorChannelNotice(guildId: string): string {
+/**
+ * Posted (throttled) into a creator channel someone joined while hard-gated.
+ *
+ * This one is **public**, in the channel's own text chat, so it is read by
+ * ordinary members as well as admins. For a shared subscription it must not
+ * invite "an admin" to reactivate, because the admins of this server may have
+ * no standing over the subscription at all.
+ */
+export function gatedCreatorChannelNotice(guildId: string, shared = false): string {
+  if (shared) {
+    return (
+      `🌙 AVC is paused on this server, because the subscription covering it has lapsed, so ` +
+      `this creator channel isn't spawning voice channels right now. Whoever manages that ` +
+      `subscription can switch it back on at ${subscribeUrl(guildId)}`
+    );
+  }
   return (
     `🌙 AVC is paused on this server, its trial or subscription has ended, so this creator ` +
     `channel isn't spawning voice channels right now. An admin can reactivate at ` +

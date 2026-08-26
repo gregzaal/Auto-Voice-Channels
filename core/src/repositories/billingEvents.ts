@@ -7,6 +7,12 @@ export interface RecordBillingEventInput {
   paddleEventId: string;
   eventType: string;
   guildId?: string | null;
+  /**
+   * The pool the event concerns. Set for a pool subscription's events, which
+   * carry no `guild_id` at all, and which pooling being the default billing
+   * unit makes the ordinary case rather than the exception.
+   */
+  poolId?: string | null;
   payload: Record<string, unknown>;
 }
 
@@ -27,6 +33,7 @@ export class BillingEventRepository {
         paddleEventId: input.paddleEventId,
         eventType: input.eventType,
         guildId: input.guildId ?? null,
+        poolId: input.poolId ?? null,
         payload: input.payload as never,
       })
       .onConflictDoNothing({ target: billingEvents.paddleEventId })

@@ -21,6 +21,11 @@ export interface OnboardingDecision {
   hardGate: boolean;
   /** Send the one-time welcome message. */
   welcome: boolean;
+  /**
+   * A subscription already covers this server, so the welcome must not
+   * announce a trial and no trial clock may start.
+   */
+  covered: boolean;
 }
 
 const STALE_WELCOME_MS = 7 * 86_400_000;
@@ -53,16 +58,34 @@ export function decideOnboarding(
    * Anything that is not `trial` (active, grace, expired, blocked) is a
    * returning guild whose story we would get wrong, so we say nothing.
    */
+  /**
+   * Already paid for, via a subscription covering this server.
+   *
+   * Pooling being the default billing unit reopened the exact hole the
+   * `authStatus === 'trial'` guard above was added to close, because checkout
+   * can name servers the bot is not in yet and the webhook deliberately does
+   * NOT fan entitlement out (§6.4). So a customer pays, invites the bot, and
+   * arrives here with `pool_id` set and `auth_status` still `trial` until the
+   * next hourly pass. Without this the bot then tells them their free trial
+   * just started, quotes a second per-server price for a server they have
+   * already bought, and stamps a trial expiry onto a paid row.
+   */
+  const covered = row.poolId != null;
+  const fresh = now.getTime() - row.createdAt.getTime() < STALE_WELCOME_MS;
   const welcome =
     !meta.onboardedAt &&
-    row.authStatus === 'trial' &&
-    now.getTime() - row.createdAt.getTime() < STALE_WELCOME_MS;
+    fresh &&
+    (covered
+      ? row.authStatus === 'trial' || row.authStatus === 'active'
+      : row.authStatus === 'trial');
 
-  const decision: OnboardingDecision = { policy, hardGate: false, welcome };
+  const decision: OnboardingDecision = { policy, hardGate: false, welcome, covered };
   if (row.authStatus === 'trial' && row.authExpiresAt === null) {
     if (policy === 'hard_gate') {
+      // Still gated even if a subscription somehow covers it: XXL has never
+      // been a self-serve price, so this needs a conversation either way.
       decision.hardGate = true;
-    } else {
+    } else if (!covered) {
       const duration = trialDurationMs(policy);
       // Anchor on the ROW's creation, not "now" (§3: the clock starts at
       // first add) — identical for fresh joins, and it keeps this writer in
@@ -140,7 +163,9 @@ async function onboardGuild(deps: OnboardingDeps, guild: Guild, at: Date): Promi
   }
 
   if (decision.welcome) {
-    const delivered = await deps.notifier.welcomeGuild(guild.id, decision.policy, memberCount);
+    const delivered = decision.covered
+      ? await deps.notifier.welcomeCoveredGuild(guild.id)
+      : await deps.notifier.welcomeGuild(guild.id, decision.policy, memberCount);
     if (delivered) await deps.guilds.markOnboarded(guild.id, at);
   }
 }

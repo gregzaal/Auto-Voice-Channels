@@ -67,10 +67,13 @@ export const guilds = pgTable('guilds', {
    * When the bot was last removed from this guild (null = it is in the guild).
    * Set by the `guildDelete` handler and cleared on re-add.
    *
-   * Rows are never deleted on removal: a guild can still have a live paid
-   * subscription, and the dashboard must keep showing it so the owner can
-   * cancel. Without this marker the dashboard cannot tell "subscribed and
-   * working" from "subscribed and paying for nothing".
+   * Rows are never deleted on removal: a guild can still be covered by a live
+   * subscription, and the dashboard has to keep showing it.
+   *
+   * **Nothing reads this column, and nothing new should.** It is a per-fleet
+   * fact wearing a shared one: a single boolean written by whichever fleet's
+   * bot acted, so two fleets race over it. Ask `guild_fleet_presence` whether
+   * ANY fleet is present instead.
    */
   botRemovedAt: timestamp('bot_removed_at', { withTimezone: true }),
   /**
@@ -91,14 +94,21 @@ export const guilds = pgTable('guilds', {
   memberCount: integer('member_count'),
   memberCountUpdatedAt: timestamp('member_count_updated_at', { withTimezone: true }),
   /**
-   * Billed tier cache (what the guild's subscription covers), for the dashboard
-   * and the over-limit check. The *required* tier is always re-derived from the
-   * member count via `tierFor()` — never stored.
+   * Billed tier cache: what the subscription covering this guild pays for,
+   * whether that subscription is keyed to this guild or to its pool. For the
+   * dashboard and the over-limit check. The *required* tier is always
+   * re-derived from the member count via `tierFor()` — never stored.
+   *
+   * Not cleared when a subscription lapses, deliberately: every use of it in
+   * the leniency machine is gated on the subscription being healthy, and
+   * keeping it is what lets the bot name the plan that ended.
    */
   tier: text('tier'),
   /**
-   * The member pool this guild bills through, or null for ordinary per-guild
-   * billing (`plans/member-based-pricing.md` §6.1). Denormalized pointer: the
+   * The member pool this guild bills through, or null for a legacy guild-keyed
+   * subscription (promoted into a pool on the first server added to it) or a
+   * guild with no subscription at all
+   * (`plans/member-based-pricing.md` §6.1). Denormalized pointer: the
    * durable record with history is `member_pool_guilds`, and this column is
    * what the reconciler and the entitlement gate read without a join. The two
    * are written together, in the same statement, by every add/remove path.
@@ -532,14 +542,34 @@ export const billingEvents = pgTable(
     /** Paddle's event id — UNIQUE, so a redelivered webhook is a no-op. */
     paddleEventId: text('paddle_event_id').notNull().unique(),
     eventType: text('event_type').notNull(),
+    /**
+     * Null for a pool event, which is now the ordinary case: pooling is the
+     * default billing unit, so a pool checkout's custom data carries `pool_id`
+     * and no `guild_id` at all. `pool_id` below is what answers "what happened
+     * to this customer's billing" for those, and the two are read together.
+     */
     guildId: text('guild_id'),
+    /**
+     * The pool an event concerns, for the events `guild_id` cannot describe.
+     *
+     * Not a foreign key and deliberately unvalidated: this table is an
+     * append-only archive of what Paddle said, and an event referring to a
+     * pool row that was never written (a webhook arriving before its own
+     * checkout committed, a pool later deleted) is exactly the case worth
+     * keeping rather than rejecting. Backfillable from `payload`, which holds
+     * the verbatim wire body forever — see `scripts/backfill-billing-pool.ts`.
+     */
+    poolId: text('pool_id'),
     payload: jsonb('payload')
       .notNull()
       .default(sql`'{}'::jsonb`),
     processedAt: timestamp('processed_at', { withTimezone: true }),
     createdAt: createdAt(),
   },
-  (t) => [index('billing_events_guild_idx').on(t.guildId, t.createdAt)],
+  (t) => [
+    index('billing_events_guild_idx').on(t.guildId, t.createdAt),
+    index('billing_events_pool_idx').on(t.poolId, t.createdAt),
+  ],
 );
 
 /**

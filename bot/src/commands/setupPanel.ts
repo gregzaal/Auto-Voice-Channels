@@ -13,7 +13,7 @@ import {
   type InteractionReplyOptions,
   type InteractionUpdateOptions,
 } from 'discord.js';
-import { tierById, tierFor, type AuthStatus, type TierId } from '@avc/core';
+import { TIER_IDS, tierById, tierFor, type AuthStatus, type TierId } from '@avc/core';
 import { SITE_URL, subscribeUrl } from '../features/billing/messages.js';
 import {
   permissionProblemSummary,
@@ -89,15 +89,30 @@ export interface PlanInput {
   selfHosted: boolean;
   now: Date;
   /**
-   * Set when this server bills through a member pool rather than on its own
-   * (`plans/member-based-pricing.md` §7.4). Changes two things: the price
-   * quoted is the guild's *billed* tier (`guilds.tier`, kept current by the
-   * pool pass's fan-out) rather than one derived from this one server's own
-   * member count, and every status line says so explicitly — a 200-member
-   * pooled server reporting "Subscribed, S tier ($19/yr)" while its pool pays
-   * $399 was the critical false-alarm class this exists to close.
+   * `guilds.tier`: what the subscription covering this server actually pays
+   * for, whichever axis it bills on.
+   *
+   * **Unconditional, not only for a shared subscription.** Deriving the price
+   * from this one server's live member count misreported every subscriber who
+   * had grown since paying: a guild that went from 900 to 1,500 members on an S
+   * subscription was told "Subscribed, M tier ($59/yr)" while paying $19, right
+   * as it entered over-limit grace. Billed tier and required tier are separate
+   * values everywhere else for exactly this reason (§5.1) and this surface has
+   * to keep them separate too.
    */
-  pooled?: { billedTier: TierId | null } | null;
+  billedTier?: TierId | null;
+  /**
+   * Whether the subscription covering this server also covers others, so the
+   * copy can say so and can avoid quoting a per-server price for something
+   * billed on a sum this surface cannot see.
+   */
+  shared?: boolean;
+}
+
+function priceOf(tier: { pricePerYear: number | null }): string {
+  if (tier.pricePerYear === 0) return 'free';
+  if (tier.pricePerYear === null) return 'contact us';
+  return `$${tier.pricePerYear}/yr`;
 }
 
 /**
@@ -106,45 +121,14 @@ export interface PlanInput {
  * `isEntitled` machinery remains the source of truth for access.
  */
 export function formatPlan(opts: PlanInput): string {
-  const { guildId, memberCount, status, expiresAt, graceUntil, selfHosted, now, pooled } = opts;
+  const { guildId, memberCount, status, expiresAt, graceUntil, selfHosted, now } = opts;
   const link = subscribeUrl(guildId);
   if (selfHosted) return '🏠 **Self-hosted**, every feature unlocked, no subscription needed.';
 
-  if (pooled) {
-    const tier = pooled.billedTier ? tierById(pooled.billedTier) : tierFor(memberCount);
-    const priceLabel =
-      tier.pricePerYear === 0
-        ? 'free'
-        : tier.pricePerYear === null
-          ? 'contact us'
-          : `$${tier.pricePerYear}/yr`;
-    if (status === 'blocked') {
-      return '🚫 AVC is **blocked** on this server. Contact support if you think that is a mistake.';
-    }
-    if (status === 'expired') {
-      return `⏳ This server's pool subscription has **ended**. Reactivate from the dashboard at ${link} to switch automation back on.`;
-    }
-    if (status === 'grace') {
-      const graceDays = graceUntil ? daysUntil(now, graceUntil) : null;
-      return graceDays !== null && graceDays > 0
-        ? `🕊️ **Grace period**, ${graceDays} day${graceDays === 1 ? '' : 's'} left. This server bills ` +
-            `through a pool (${tier.label} tier). Manage it from the dashboard at ${link}`
-        : `🕊️ **Grace period.** This server bills through a pool (${tier.label} tier). Manage it ` +
-            `from the dashboard at ${link}`;
-    }
-    return (
-      `✅ **Subscribed through a server pool** · ${tier.label} tier (${priceLabel}), billed with ` +
-      `other servers on the same plan. Manage it from the dashboard at ${link}`
-    );
-  }
-
-  const tier = tierFor(memberCount);
-  const priceLabel =
-    tier.pricePerYear === 0
-      ? 'free'
-      : tier.pricePerYear === null
-        ? 'contact us'
-        : `$${tier.pricePerYear}/yr`;
+  const shared = opts.shared === true;
+  const billed = opts.billedTier ? tierById(opts.billedTier) : null;
+  /** What this server's own size would require, ignoring any subscription. */
+  const own = tierFor(memberCount);
 
   /**
    * Order matters, and it is status-first for a reason.
@@ -159,25 +143,94 @@ export function formatPlan(opts: PlanInput): string {
   if (status === 'blocked') {
     return '🚫 AVC is **blocked** on this server. Contact support if you think that is a mistake.';
   }
+
+  /**
+   * A free-sized server on a shared subscription, checked before any status.
+   *
+   * Under 100 members contributes nothing to that subscription's sum (§5.5)
+   * and stays entitled whatever happens to it (§5.3), so the subscription's
+   * tier is never this server's price. Before this branch, a 40-member server
+   * inside an L subscription read "Subscribed through a server pool, L tier
+   * ($399/yr)": `guilds.tier` is stamped at add time while the reconciler
+   * deliberately leaves free guilds out of the fan-out, so its status stayed
+   * `trial` and fell straight through to the shared line.
+   *
+   * Deliberately NOT generalised to the unshared case, where status-first
+   * ordering is still right: an `expired` or `blocked` server has automation
+   * actually stopped, and "free forever, enjoy" would be a cheerful lie about
+   * a bot that is not running.
+   */
+  if (shared && own.id === 'free') {
+    return '🆓 **Free forever**, under 100 members, so AVC is free on this server and it does not count toward your subscription.';
+  }
+
   if (status === 'active') {
-    return `✅ **Subscribed** · ${tier.label} tier (${priceLabel}). Thanks for supporting AVC!`;
+    if (shared) {
+      const tierLine = billed ? `${billed.label} tier (${priceOf(billed)})` : 'your plan';
+      return (
+        `✅ **Subscribed** · ${tierLine}, covering this server along with the others on the ` +
+        `same subscription. Manage it from the dashboard at ${link}`
+      );
+    }
+    const tier = billed ?? own;
+    return `✅ **Subscribed** · ${tier.label} tier (${priceOf(tier)}). Thanks for supporting AVC!`;
   }
   if (status === 'grace') {
     const graceDays = graceUntil ? daysUntil(now, graceUntil) : null;
-    return graceDays !== null && graceDays > 0
-      ? `🕊️ **Grace period**, ${graceDays} day${graceDays === 1 ? '' : 's'} left. Everything still ` +
-          `works. Keep AVC on the ${tier.label} tier (${priceLabel}) at ${link}`
-      : `🕊️ **Grace period.** Everything still works. Keep AVC on the ${tier.label} tier ` +
-          `(${priceLabel}) at ${link}`;
+    const left =
+      graceDays !== null && graceDays > 0
+        ? `**Grace period**, ${graceDays} day${graceDays === 1 ? '' : 's'} left.`
+        : '**Grace period.**';
+    if (shared) {
+      /**
+       * No tier and no price here on purpose. A shared subscription is billed
+       * on a sum this surface cannot see, and the reason for the grace window
+       * (a failed payment, or the sum outgrowing the plan) decides which
+       * number is the relevant one. The dashboard knows both.
+       */
+      return (
+        `🕊️ ${left} This server is covered by a subscription that also covers your other ` +
+        `servers. Sort it out from the dashboard at ${link}`
+      );
+    }
+    /**
+     * The HIGHER of billed and required, because grace has two causes and they
+     * want opposite numbers: a lapsed payment needs the tier they already pay
+     * for, an outgrown plan needs the one they now need. Quoting the lower of
+     * the two would tell someone over their limit to buy what they already have.
+     */
+    const tier = billed && TIER_IDS.indexOf(billed.id) > TIER_IDS.indexOf(own.id) ? billed : own;
+    return `🕊️ ${left} Everything still works. Keep AVC on the ${tier.label} tier (${priceOf(tier)}) at ${link}`;
   }
   if (status === 'expired') {
-    return `⏳ Your AVC trial or subscription has **ended**. Reactivate at ${link} to switch automation back on.`;
+    return shared
+      ? `⏳ The subscription covering this server has **ended**, so automation has stopped. Whoever manages it can switch it back on from the dashboard at ${link}`
+      : `⏳ Your AVC trial or subscription has **ended**. Reactivate at ${link} to switch automation back on.`;
   }
-  // Only reachable on `trial` now, which is what "free forever" actually means:
-  // a server too small to ever be billed.
+
+  const tier = own;
+  const priceLabel = priceOf(tier);
+  // Only reachable on `trial` now, which is what "free forever" actually means
+  // for a server billed on its own: too small to ever be billed.
   if (tier.id === 'free') {
     return '🆓 **Free forever**, under 100 members, so AVC is free on this server. Enjoy!';
   }
+
+  /**
+   * Still `trial` while a subscription already covers it. Reachable in the gap
+   * between the webhook writing `pool_id` and the next hourly pass fanning
+   * entitlement out (§6.4 keeps the webhook from fanning out deliberately), so
+   * it is a real state a customer can open `/setup` in, and quoting a
+   * per-server trial price to someone who has just paid is the last thing it
+   * should say.
+   */
+  if (shared) {
+    return (
+      '✅ This server is covered by a subscription that also covers your other servers. ' +
+      `Manage it from the dashboard at ${link}`
+    );
+  }
+
   if (tier.id === 'xxl') {
     return (
       '🏛️ This server is **very large**, and we run servers this size on dedicated ' +

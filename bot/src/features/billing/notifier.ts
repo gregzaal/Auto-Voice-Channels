@@ -1,6 +1,13 @@
 import type { LeniencyNotification, Logger } from '@avc/core';
 import type { Client } from 'discord.js';
-import { notificationMessage, onboardingMessage, SITE_URL } from './messages.js';
+import {
+  coveredWelcomeMessage,
+  notificationMessage,
+  onboardingMessage,
+  SITE_URL,
+  subscribeUrl,
+  type NotificationAudience,
+} from './messages.js';
 import type { TrialPolicy } from '@avc/core';
 
 /**
@@ -14,8 +21,20 @@ export interface BillingNotifier {
     guildId: string,
     notification: LeniencyNotification,
     memberCount: number,
+    /**
+     * Set when this is one copy of a fan-out into a server on a shared
+     * subscription. Changes the copy, not the delivery: these readers were
+     * never sent the warnings that came first, and cannot act on the
+     * subscription themselves (§6.6).
+     */
+    audience?: NotificationAudience,
   ): Promise<boolean>;
   welcomeGuild(guildId: string, policy: TrialPolicy, memberCount: number): Promise<boolean>;
+  /**
+   * The welcome for a server a subscription already covers, which must not
+   * announce a trial or quote a second price.
+   */
+  welcomeCoveredGuild(guildId: string): Promise<boolean>;
   /**
    * DMs a pool's purchaser directly, for a billing event that concerns the
    * pool as a whole rather than any one server (`plans/member-based-pricing.md`
@@ -46,12 +65,20 @@ export class DiscordBillingNotifier implements BillingNotifier {
     guildId: string,
     notification: LeniencyNotification,
     memberCount: number,
+    audience: NotificationAudience = 'guild',
   ): Promise<boolean> {
-    return this.deliver(guildId, notificationMessage(notification, memberCount, guildId));
+    return this.deliver(
+      guildId,
+      notificationMessage(notification, memberCount, guildId, subscribeUrl(guildId), audience),
+    );
   }
 
   async welcomeGuild(guildId: string, policy: TrialPolicy, memberCount: number): Promise<boolean> {
     return this.deliver(guildId, onboardingMessage(policy, memberCount, guildId));
+  }
+
+  async welcomeCoveredGuild(guildId: string): Promise<boolean> {
+    return this.deliver(guildId, coveredWelcomeMessage(guildId));
   }
 
   async notifyPurchaser(
@@ -60,7 +87,13 @@ export class DiscordBillingNotifier implements BillingNotifier {
     memberCount: number,
   ): Promise<boolean> {
     // No single guild to deep-link to; the plain dashboard shows the pool panel.
-    const content = notificationMessage(notification, memberCount, '', `${SITE_URL}/dashboard`);
+    const content = notificationMessage(
+      notification,
+      memberCount,
+      '',
+      `${SITE_URL}/dashboard`,
+      'purchaser',
+    );
     try {
       // No guild to name it against, unlike `deliver`'s owner-DM fallback:
       // this message is about the purchaser's pool, not one server.

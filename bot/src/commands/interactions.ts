@@ -22,7 +22,11 @@ import {
   type ManagedChannelRepository,
 } from '@avc/core';
 import type { GuildDispatcher } from '../runtime/dispatcher.js';
-import { expiredInteractionMessage, STATUS_PAGE_URL } from '../features/billing/messages.js';
+import {
+  expiredInteractionMessage,
+  SITE_URL,
+  STATUS_PAGE_URL,
+} from '../features/billing/messages.js';
 import {
   isPermissionError,
   JOIN_PREFIX,
@@ -221,7 +225,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     });
     if (!entitled && !allowedWhileExpired(interaction)) {
       if (interaction.isRepliable()) {
-        await interaction.reply({ content: expiredInteractionMessage(guildId), ephemeral: true });
+        await interaction.reply({
+          content: expiredInteractionMessage(guildId, guildRow?.poolId != null),
+          ephemeral: true,
+        });
       }
       return;
     }
@@ -1067,9 +1074,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       });
       return;
     }
-    if (!(await deps.guilds.isEntitled(guildId, deps.selfHosted))) {
+    const adoptGate = await gateCheck(guildId);
+    if (!adoptGate.entitled) {
       await interaction.update({
-        content: expiredInteractionMessage(guildId),
+        content: adoptGate.reply,
         embeds: [],
         components: [],
       });
@@ -1240,7 +1248,16 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       `https://discord.com/oauth2/authorize?client_id=${deps.clientId}` +
       `&permissions=286280784&scope=bot%20applications.commands`;
     await interaction.reply({
-      content: `📫 [Invite me to another server!](${url})`,
+      /**
+       * The second line matters under member-based billing: a new server
+       * otherwise starts its own trial and eventually meets its own gate,
+       * when the customer already has a subscription that could cover it.
+       */
+      content:
+        `📫 [Invite me to another server!](${url})
+
+Already subscribed? Add the new server ` +
+        `to your subscription at ${SITE_URL}/dashboard so it is covered from day one.`,
       ephemeral: true,
     });
   }
@@ -1290,9 +1307,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     interaction: ChatInputCommandInteraction | ButtonInteraction,
   ): Promise<void> {
     const guildId = interaction.guildId!;
-    if (!(await deps.guilds.isEntitled(guildId, deps.selfHosted))) {
+    const gate = await gateCheck(guildId);
+    if (!gate.entitled) {
       await interaction.reply({
-        content: expiredInteractionMessage(guildId),
+        content: gate.reply,
         ephemeral: true,
       });
       return;
@@ -1416,9 +1434,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   /** "Retry" after a failed `/create`: re-open the modal with the saved selections. */
   async function handleCreateRetry(interaction: ButtonInteraction): Promise<void> {
     const guildId = interaction.guildId!;
-    if (!(await deps.guilds.isEntitled(guildId, deps.selfHosted))) {
+    const gate = await gateCheck(guildId);
+    if (!gate.entitled) {
       await interaction.reply({
-        content: expiredInteractionMessage(guildId),
+        content: gate.reply,
         ephemeral: true,
       });
       return;
@@ -1441,12 +1460,32 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     }
   }
 
+  /**
+   * Entitlement plus the wording its refusal needs, from ONE row read.
+   *
+   * `GuildRepository.isEntitled` throws the row away, and the refusal has to
+   * know whether this server is covered by a subscription spanning several
+   * servers: its admins are then very often not the person who can pay, so
+   * "reactivate at ..." is a dead end for them (§6.6).
+   */
+  async function gateCheck(guildId: string): Promise<{ entitled: boolean; reply: string }> {
+    const row = await deps.guilds.get(guildId);
+    return {
+      entitled: isEntitled({
+        status: row?.authStatus ?? 'trial',
+        selfHosted: deps.selfHosted,
+      }),
+      reply: expiredInteractionMessage(guildId, row?.poolId != null),
+    };
+  }
+
   async function isEntitledOrReject(
     interaction: ModalSubmitInteraction,
     guildId: string,
   ): Promise<boolean> {
-    if (await deps.guilds.isEntitled(guildId, deps.selfHosted)) return true;
-    await interaction.reply({ content: expiredInteractionMessage(guildId), ephemeral: true });
+    const gate = await gateCheck(guildId);
+    if (gate.entitled) return true;
+    await interaction.reply({ content: gate.reply, ephemeral: true });
     return false;
   }
 
@@ -1480,7 +1519,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       graceUntil: guildRow?.graceUntil ?? null,
       selfHosted: deps.selfHosted,
       now: new Date(),
-      pooled: guildRow?.poolId ? { billedTier: guildRow.tier } : null,
+      // Both unconditional: the billed tier is what any subscriber pays for,
+      // pooled or not, and `shared` only changes the wording.
+      billedTier: guildRow?.tier ?? null,
+      shared: guildRow?.poolId != null,
     });
     return buildSetupPanel({
       enabled: config.enabled,

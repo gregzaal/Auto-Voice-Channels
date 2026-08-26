@@ -39,6 +39,14 @@ import type { BillingNotifier } from './notifier.js';
  * affected server must hear it, not one representative. Everything else
  * (payment failed, over limit, renewal reminders) is a billing event and goes
  * to the purchaser alone.
+ *
+ * **Adding a kind here needs `shared_member` copy for it in `messages.ts`.**
+ * A fan-out row is guild-scoped but carries the POOL's member sum in
+ * `memberCount`, and `notificationMessage` falls back to
+ * `tierFor(memberCount)` whenever a notification has no explicit
+ * `requiredTier`. Both kinds below are safe: the `shared_member` branch renders
+ * no tier for either. A new kind without that branch would quote the whole
+ * subscription's tier as if it were this one server's.
  */
 const POOL_FAN_OUT_KINDS: ReadonlySet<LeniencyNotification['kind']> = new Set([
   'hard_gate',
@@ -507,20 +515,14 @@ export class BillingReconciler {
    * every member's status every hour, unconditionally, is ~2,000 audit rows
    * and 999 cache evictions an hour, forever.
    *
-   * **This diff is read-then-write, not compare-and-swap, so two concurrent
-   * passes converging the SAME not-yet-converged guild can each decide a
-   * write is due and each call `transitionAuth`** (`guildAuthEvents` has no
-   * `fromStatus === toStatus` short circuit — see AGENTS.md and
-   * `billingRuns.ts`'s `lockSlot` docblock for the same pre-existing gap).
-   * Bounded to a one-time race at first convergence, verified in
-   * `poolReconciler.integration.test.ts`: final state is identical either
-   * way, and once converged a diff correctly reads as unchanged and stops
-   * writing, so this is not the steady-state "every hour, forever" cost the
-   * diff exists to prevent. Adding a same-status guard inside `transitionAuth`
-   * itself would close it, but that function is shared by callers (admin
-   * re-block with an updated reason, notably) that want a fresh audit row on
-   * a deliberate no-op transition, so it is a wider change than this pass
-   * should make unilaterally.
+   * **The diff here is read-then-write, so it is backed by
+   * `skipIfUnchanged`.** Two concurrent advance passes converging the same
+   * not-yet-converged guild would otherwise each decide a write was due and
+   * each insert a `guild_auth_events` and an `ops_audit` row. The flag makes
+   * `transitionAuth` re-check under its own `SELECT ... FOR UPDATE`, so the
+   * second pass blocks on the row lock and then returns without writing. The
+   * diff below stays because it saves the round trip in the steady state,
+   * where nothing has changed for any member; the flag is what makes it exact.
    */
   private async fanOutToPoolMembers(
     poolId: string,
@@ -536,6 +538,7 @@ export class BillingReconciler {
             reason: `pool:${poolId}`,
             actor: 'billing-reconciler',
             graceUntil: pool.graceUntil,
+            skipIfUnchanged: true,
           });
         }
         if (guild.tier !== pool.billedTier) {
@@ -814,6 +817,10 @@ export class BillingReconciler {
           row.guildId,
           row.notification,
           row.memberCount,
+          // A row carrying a source pool is one copy of a fan-out, read by a
+          // server whose admins may not be the buyer and who never saw the
+          // warnings that came before it.
+          row.poolId ? 'shared_member' : 'guild',
         );
         if (!delivered) {
           // Left pending on purpose. Presence said this fleet is in the guild,

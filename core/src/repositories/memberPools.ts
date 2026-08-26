@@ -66,7 +66,7 @@ export class MemberPoolRepository {
 
   async getOrThrow(poolId: string): Promise<MemberPoolRow> {
     const row = await this.get(poolId);
-    if (!row) throw new Error(`Member pool ${poolId} not found`);
+    if (!row) throw new Error('That subscription could not be found.');
     return row;
   }
 
@@ -179,7 +179,7 @@ export class MemberPoolRepository {
         .from(memberPools)
         .where(eq(memberPools.id, input.poolId))
         .for('update');
-      if (!current) throw new Error(`Member pool ${input.poolId} not found`);
+      if (!current) throw new Error('That subscription could not be found.');
       const fromStatus = current.status as PoolStatus;
 
       const [updated] = await tx
@@ -228,7 +228,7 @@ export class MemberPoolRepository {
         .from(memberPools)
         .where(eq(memberPools.id, poolId))
         .for('update');
-      if (!current) throw new Error(`Member pool ${poolId} not found`);
+      if (!current) throw new Error('That subscription could not be found.');
 
       const metadata = (current.metadata ?? {}) as Record<string, unknown>;
       const billing = parseBillingMeta(metadata);

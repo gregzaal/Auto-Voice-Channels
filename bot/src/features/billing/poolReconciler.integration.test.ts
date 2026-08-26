@@ -150,18 +150,23 @@ describe('BillingReconciler pool pass (integration)', () => {
 
     const before = await guildAuthEventCount(guildId);
 
-    // Two independent reconciler instances, same tick, run concurrently -
-    // exactly the overlap §6.5 warns the 55-minute spacing alone cannot
-    // prevent once a pass runs long. Both read the guild's PRE-convergence
-    // status and both decide a write is due: a bounded, one-time race at the
-    // moment of first convergence (at most one extra row per racer), not the
-    // steady-state "every hour, forever" waste diff-before-write exists to
-    // prevent — final state is still correct and stable either way.
+    /**
+     * Two independent reconciler instances, same tick, run concurrently -
+     * exactly the overlap §6.5 warns the 55-minute spacing alone cannot
+     * prevent once a pass runs long. Both read the guild's PRE-convergence
+     * status and both decide a write is due.
+     *
+     * **Exactly one row, not "at most two".** This used to accept a bounded
+     * one-time duplicate, because the diff was a read followed by a write. The
+     * fan-out now passes `skipIfUnchanged`, so the loser blocks on
+     * `transitionAuth`'s own `SELECT ... FOR UPDATE`, reads what the winner
+     * committed, and returns without writing.
+     */
     const { reconciler: a } = makeReconciler(() => now);
     const { reconciler: b } = makeReconciler(() => now);
     await Promise.all([a.runOnce(), b.runOnce()]);
     const afterRace = await guildAuthEventCount(guildId);
-    expect(afterRace - before).toBeLessThanOrEqual(2);
+    expect(afterRace - before).toBe(1);
 
     // The steady-state guarantee: once converged, a THIRD pass (sequential,
     // reading the now-converged state) must add nothing further.

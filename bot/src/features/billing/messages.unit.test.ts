@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { LeniencyNotification } from '@avc/core';
 import {
+  coveredWelcomeMessage,
   expiredInteractionMessage,
   gatedCreatorChannelNotice,
   notificationMessage,
@@ -149,8 +150,11 @@ describe('copy rules', () => {
       onboardingMessage('year', 500, GUILD),
       onboardingMessage('short', 20_000, GUILD),
       onboardingMessage('hard_gate', 2_000_000, GUILD),
+      coveredWelcomeMessage(GUILD),
       expiredInteractionMessage(GUILD),
+      expiredInteractionMessage(GUILD, true),
       gatedCreatorChannelNotice(GUILD),
+      gatedCreatorChannelNotice(GUILD, true),
     ];
     const notifications: LeniencyNotification[] = [
       { key: 'a', kind: 'trial_warning', daysLeft: 1, requiredTier: 's' },
@@ -162,7 +166,13 @@ describe('copy rules', () => {
       { key: 'g', kind: 'reactivated' },
       { key: 'h', kind: 'grew_into_xxl' },
     ];
-    for (const n of notifications) out.push(notificationMessage(n, 5_000, GUILD));
+    // Every audience, not just the default one: the shared-subscription copy is
+    // a separate set of strings and is exactly as user-facing.
+    for (const n of notifications) {
+      for (const audience of ['guild', 'purchaser', 'shared_member'] as const) {
+        out.push(notificationMessage(n, 5_000, GUILD, subscribeUrl(GUILD), audience));
+      }
+    }
     return out;
   };
 
@@ -176,5 +186,15 @@ describe('copy rules', () => {
 
   it('uses no prose semicolons', () => {
     for (const msg of everyMessage()) expect(msg).not.toContain(';');
+  });
+
+  /**
+   * "pool" is an internal word for the billing unit. The customer-facing word
+   * is "subscription", and this is enforced mechanically because it had already
+   * leaked into four `/setup` strings and eight server-action error messages
+   * before anyone noticed.
+   */
+  it('never says "pool" to a user', () => {
+    for (const msg of everyMessage()) expect(msg).not.toMatch(/pool/i);
   });
 });

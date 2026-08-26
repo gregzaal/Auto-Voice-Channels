@@ -1,4 +1,4 @@
-import { eq, sql } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Database } from '../db/client.js';
 import { subscriptions } from '../db/schema.js';
@@ -147,8 +147,16 @@ export function subscriptionInGoodStanding(sub: {
 }
 
 /**
- * Billing source of truth per guild, synced from Paddle webhooks (one
- * subscription per guild). Same boundary-validation style as GuildRepository.
+ * Billing source of truth, synced from Paddle webhooks. One row per Paddle
+ * subscription, covering either **one pool of servers (the default)** or a
+ * single guild (legacy, promoted into a pool on the first server added to it).
+ * Exactly one of the two, enforced by `subscriptions_guild_xor_pool`.
+ *
+ * The two axes are not interchangeable at the call site: `upsert` conflicts on
+ * `guildId` and `upsertForPool` on `poolId`, and pointing a pool row at "the
+ * guild checkout started from" would clobber that guild's own subscription
+ * (`plans/member-based-pricing.md` §6.2). Same boundary-validation style as
+ * GuildRepository.
  */
 export class SubscriptionRepository {
   constructor(private readonly db: Database) {}
@@ -274,6 +282,28 @@ export class SubscriptionRepository {
       .where(eq(subscriptions.poolId, poolId))
       .limit(1);
     return row ? poolSubscriptionRowSchema.parse(row) : undefined;
+  }
+
+  /**
+   * Every pool subscription in a set of pools, in one query.
+   *
+   * The batch form exists so a page rendering many guilds can resolve their
+   * shared subscriptions without one round trip per guild. Rows that fail
+   * validation are dropped rather than thrown, the same boundary rule the rest
+   * of this repository follows: one corrupt row must not blank a whole page.
+   */
+  async listByPoolIds(poolIds: readonly string[]): Promise<PoolSubscriptionRow[]> {
+    if (poolIds.length === 0) return [];
+    const rows = await this.db
+      .select()
+      .from(subscriptions)
+      .where(inArray(subscriptions.poolId, [...poolIds]));
+    const parsed: PoolSubscriptionRow[] = [];
+    for (const row of rows) {
+      const result = poolSubscriptionRowSchema.safeParse(row);
+      if (result.success) parsed.push(result.data);
+    }
+    return parsed;
   }
 
   /**

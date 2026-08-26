@@ -1,11 +1,15 @@
 /**
- * Per-server pricing tiers, derived from member count (see
+ * Pricing tiers, derived from the member count a subscription covers (see
  * `plans/monetization.md` §2), plus the trial policy applied at bot-add (§3).
  *
- * `tierFor()` derives the **required** tier from the current member count; the
- * **billed** tier (what a subscription covers) is cached on `guilds.tier` and
- * synced from Paddle. Tier is never an authoritative stored value — it is
- * always re-derived from the current member count.
+ * That count is a sum across the servers on the subscription, not one server's
+ * size: pooling is the default billing unit
+ * (`plans/member-based-pricing.md`). `tierFor()` derives the **required**
+ * tier from it; the **billed** tier (what the subscription actually covers) is
+ * cached on `guilds.tier`, written from Paddle for a guild-keyed subscription
+ * and fanned out from `member_pools.billed_tier` by the reconciler for a
+ * pooled one. Keeping the two apart is load-bearing: computing one from the
+ * other disables over-limit detection permanently (§5.1).
  */
 export const TIER_IDS = ['free', 's', 'm', 'l', 'xl', 'xxl'] as const;
 export type TierId = (typeof TIER_IDS)[number];

@@ -57,15 +57,16 @@ describe('formatPlan', () => {
     expect(formatPlan({ ...base, memberCount: 5_000, selfHosted: true })).toContain('Self-hosted');
   });
 
-  describe('pooled billing (member-based-pricing.md §7.4)', () => {
-    // Regression for the critical false alarm: a 200-member pooled server
-    // must never quote a price derived from its OWN member count.
+  describe('a subscription covering several servers (member-based-pricing.md §7.4)', () => {
+    // Regression for the critical false alarm: a 200-member server on a
+    // shared subscription must never quote a price derived from its OWN size.
     it('quotes the billed tier, not one derived from this server alone', () => {
       const line = formatPlan({
         ...base,
         memberCount: 200,
         status: 'active',
-        pooled: { billedTier: 'l' },
+        billedTier: 'l',
+        shared: true,
       });
       expect(line).toContain('L tier');
       expect(line).toContain('$399/yr');
@@ -73,29 +74,104 @@ describe('formatPlan', () => {
       expect(line).not.toContain('$19/yr');
     });
 
-    it('says the server bills through a pool', () => {
+    it('says the subscription also covers other servers, without saying "pool"', () => {
       const line = formatPlan({
         ...base,
         memberCount: 200,
         status: 'active',
-        pooled: { billedTier: 'm' },
+        billedTier: 'm',
+        shared: true,
       });
-      expect(line).toContain('pool');
+      expect(line).toContain('other');
       expect(line).toContain(LINK.replace(`?guild=${GUILD}`, ''));
+      // "pool" is an internal word. It reached four user-visible strings here.
+      expect(line).not.toMatch(/pool/i);
     });
 
-    it('names the grace days left for a pooled server too', () => {
+    it('names the grace days left for a shared subscription too', () => {
       const graceUntil = new Date('2026-06-22T00:00:00.000Z'); // 5 days out
       const line = formatPlan({
         ...base,
         memberCount: 200,
         status: 'grace',
         graceUntil,
-        pooled: { billedTier: 'm' },
+        billedTier: 'm',
+        shared: true,
       });
       expect(line).toContain('5 days');
-      expect(line).toContain('pool');
+      expect(line).not.toMatch(/pool/i);
     });
+
+    /**
+     * The free-forever promise must survive being on someone's subscription.
+     * `guilds.tier` is stamped at add time, but the reconciler leaves free
+     * guilds out of the fan-out, so this used to read "L tier ($399/yr)".
+     */
+    it('never quotes a paid tier for a server under 100 members', () => {
+      const line = formatPlan({
+        ...base,
+        memberCount: 40,
+        status: 'trial',
+        billedTier: 'l',
+        shared: true,
+      });
+      expect(line).toContain('Free forever');
+      expect(line).not.toContain('$399');
+    });
+
+    /**
+     * Reachable between the webhook writing `pool_id` and the next hourly pass
+     * fanning entitlement out (§6.4), so a customer who has just paid can open
+     * `/setup` here. It must not announce a trial or quote a second price.
+     */
+    it('does not offer a trial to a server a subscription already covers', () => {
+      const line = formatPlan({
+        ...base,
+        memberCount: 6_605,
+        status: 'trial',
+        expiresAt: new Date('2027-06-17T00:00:00.000Z'),
+        billedTier: 'm',
+        shared: true,
+      });
+      expect(line).not.toContain('trial');
+      expect(line).toContain('covered by a subscription');
+    });
+  });
+
+  /**
+   * The other half of the §5.1 separation, on a surface that had it backwards:
+   * a guild that grew since paying was quoted the tier its size now REQUIRES
+   * rather than the one it is billed for, so an S subscriber at 1,500 members
+   * read "Subscribed, M tier ($59/yr)" while paying $19.
+   */
+  it('quotes the billed tier for a subscriber who has outgrown it', () => {
+    const line = formatPlan({ ...base, memberCount: 1_500, status: 'active', billedTier: 's' });
+    expect(line).toContain('S tier');
+    expect(line).toContain('$19/yr');
+    expect(line).not.toContain('$59/yr');
+  });
+
+  /**
+   * Grace has two causes wanting opposite numbers. Over-limit grace must name
+   * what they now need, not what they already have and which would not fix it.
+   */
+  it('names the higher of billed and required tier in grace', () => {
+    const overLimit = formatPlan({
+      ...base,
+      memberCount: 1_500,
+      status: 'grace',
+      graceUntil: new Date('2026-06-22T00:00:00.000Z'),
+      billedTier: 's',
+    });
+    expect(overLimit).toContain('M tier');
+    const lapsed = formatPlan({
+      ...base,
+      memberCount: 200,
+      status: 'grace',
+      graceUntil: new Date('2026-06-22T00:00:00.000Z'),
+      billedTier: 'l',
+    });
+    expect(lapsed).toContain('L tier');
   });
 
   /**

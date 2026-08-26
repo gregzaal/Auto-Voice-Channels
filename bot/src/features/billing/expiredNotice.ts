@@ -61,7 +61,12 @@ export class ExpiredJoinNotifier {
     this.lastNotice.set(guildId, this.now());
     const channel = await this.opts.client.channels.fetch(channelId).catch(() => null);
     if (channel?.isTextBased() && 'send' in channel) {
-      await channel.send(gatedCreatorChannelNotice(guildId)).catch(() => undefined);
+      // This notice is public, so for a server covered by someone else's
+      // subscription it must name who can fix it rather than telling the
+      // room's admins to reactivate something they have no standing over.
+      await channel
+        .send(gatedCreatorChannelNotice(guildId, row.poolId != null))
+        .catch(() => undefined);
     }
   }
 }
