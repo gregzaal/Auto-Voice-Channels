@@ -61,7 +61,7 @@ export class VoiceCommands {
     }
     await this.deps.actions.setUserLimit(guildId, secondary.row.channelId, limit);
     return ok(
-      limit === 0 ? 'Removed this channel’s user limit.' : `Set the user limit to ${limit}.`,
+      limit === 0 ? "Removed this channel's user limit." : `Set the user limit to ${limit}.`,
     );
   }
 
@@ -136,10 +136,10 @@ export class VoiceCommands {
     const note = rateLimitNote(r.rateLimited ? 1 : 0);
     return ok(
       isReset
-        ? `Reset this channel’s ${field} to the inherited template.${note}`
+        ? `Reset this channel's ${field} to the inherited template.${note}`
         : clearedStatus
           ? `Cleared this channel's status, it will stay blank.${note}`
-          : `Updated this channel’s ${field}.${note}`,
+          : `Updated this channel's ${field}.${note}`,
     );
   }
 
@@ -155,7 +155,7 @@ export class VoiceCommands {
     const id = secondary.row.channelId;
     if (targetId === userId) return fail('You already own this channel.');
     const inChannel = this.deps.voice.membersInChannel(id).some((m) => m.id === targetId);
-    if (!inChannel) return fail('That member isn’t in this channel.');
+    if (!inChannel) return fail("That member isn't in this channel.");
 
     // A deliberate handover: the target becomes the original creator too, so the
     // giver can't `/reclaim` it back afterwards.
@@ -196,7 +196,7 @@ export class VoiceCommands {
     await this.deps.feature.rerenderSecondary(guildId, row.channelId);
     return ok(
       isOriginalCreator
-        ? 'You’ve reclaimed your channel.'
+        ? "You've reclaimed your channel."
         : 'You are now the owner of this channel.',
     );
   }
@@ -208,11 +208,11 @@ export class VoiceCommands {
     channelId: string | undefined,
   ): Promise<{ row: SecondaryChannelRow } | { error: CommandResult }> {
     if (!channelId) {
-      return { error: fail('You need to be in one of this server’s voice channels.') };
+      return { error: fail("You need to be in one of this server's voice channels.") };
     }
     const row = await this.deps.secondaries.get(channelId);
     if (!row || row.guildId !== guildId) {
-      return { error: fail('This isn’t a bot-managed voice channel.') };
+      return { error: fail("This isn't a bot-managed voice channel.") };
     }
     return { row };
   }

@@ -138,7 +138,7 @@ export class GuildSettingsService {
     const value = word.trim();
     if (!value) return fail('Provide a word to use when no game is detected.');
     await this.deps.guilds.updateSettings(guildId, { general: value });
-    return ok(`The “no game” label is now **${value}**.`);
+    return ok(`The "no game" label is now **${value}**.`);
   }
 
   async addAlias(guildId: string, game: string, alias: string): Promise<CommandResult> {
@@ -214,7 +214,7 @@ export class GuildSettingsService {
     if (isReset) {
       delete next[field];
       await this.deps.autoChannels.upsert(guildId, primary.channelId, next);
-      return ok(`Reset this creator channel’s ${field} template to the default.`);
+      return ok(`Reset this creator channel's ${field} template to the default.`);
     }
     next[field] = value;
     await this.deps.autoChannels.upsert(guildId, primary.channelId, next);

@@ -43,10 +43,10 @@ export class PrivacyService {
     channelId: string | undefined,
     userId: string,
   ): Promise<CommandResult> {
-    if (!channelId) return fail('You need to be in one of this server’s voice channels.');
+    if (!channelId) return fail("You need to be in one of this server's voice channels.");
     const secondary = await this.deps.secondaries.get(channelId);
     if (!secondary || secondary.guildId !== guildId) {
-      return fail('This isn’t a bot-managed voice channel.');
+      return fail("This isn't a bot-managed voice channel.");
     }
     if (secondary.ownerId && secondary.ownerId !== userId) {
       return fail('Only the channel owner can make it private.');
@@ -121,10 +121,10 @@ export class PrivacyService {
     channelId: string | undefined,
     userId: string,
   ): Promise<CommandResult> {
-    if (!channelId) return fail('You need to be in one of this server’s voice channels.');
+    if (!channelId) return fail("You need to be in one of this server's voice channels.");
     const secondary = await this.deps.secondaries.get(channelId);
     if (!secondary || secondary.guildId !== guildId) {
-      return fail('This isn’t a bot-managed voice channel.');
+      return fail("This isn't a bot-managed voice channel.");
     }
     if (secondary.ownerId && secondary.ownerId !== userId) {
       return fail('Only the channel owner can make it public.');

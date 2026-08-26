@@ -47,7 +47,7 @@ export function buildGroupEnablePanel(
 ): InteractionReplyOptions {
   const where = categoryLabel(categoryName);
   const embed: APIEmbed = new EmbedBuilder()
-    .setTitle('🧩 Group this category’s channels?')
+    .setTitle("🧩 Group this category's channels?")
     .setColor(0x5865f2)
     .setDescription(
       `Right now, new voice channels in ${where} sit next to their own creator channel ` +

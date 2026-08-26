@@ -483,6 +483,6 @@ export function buildGeneralModal(current?: string): ModalBuilder {
   if (current) input.setValue(current.slice(0, 80));
   return new ModalBuilder()
     .setCustomId(GENERAL_MODAL_ID)
-    .setTitle('Set the “no game” label')
+    .setTitle('Set the "no game" label')
     .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
 }

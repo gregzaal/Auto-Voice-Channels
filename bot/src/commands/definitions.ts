@@ -100,17 +100,17 @@ export function buildCommandDefinitions(
     guildOnly(
       new SlashCommandBuilder()
         .setName('nick')
-        .setDescription('Set the name shown for you in @@creator@@ channels (or “reset”).')
+        .setDescription('Set the name shown for you in @@creator@@ channels (or "reset").')
         .addStringOption((o) =>
           o
             .setName('name')
-            .setDescription('Your custom name, or “reset”.')
+            .setDescription('Your custom name, or "reset".')
             .setRequired(true)
             .setMaxLength(80),
         ) as SlashCommandBuilder,
     ),
     guildOnly(
-      new SlashCommandBuilder().setName('ping').setDescription('Check the bot’s responsiveness.'),
+      new SlashCommandBuilder().setName('ping').setDescription("Check the bot's responsiveness."),
     ),
     guildOnly(
       new SlashCommandBuilder()
@@ -125,7 +125,7 @@ export function buildCommandDefinitions(
     adminOnly(
       new SlashCommandBuilder()
         .setName('create')
-        .setDescription('Create a new “creator” voice channel members can join to spawn channels.'),
+        .setDescription('Create a new "creator" voice channel members can join to spawn channels.'),
     ),
     adminOnly(
       new SlashCommandBuilder()
@@ -135,7 +135,7 @@ export function buildCommandDefinitions(
     adminOnly(
       new SlashCommandBuilder()
         .setName('template')
-        .setDescription('Open a panel to set the name template for the creator channel you’re in.'),
+        .setDescription("Open a panel to set the name template for the creator channel you're in."),
     ),
     adminOnly(
       new SlashCommandBuilder()
@@ -165,7 +165,7 @@ export function buildCommandDefinitions(
     adminOnly(
       new SlashCommandBuilder()
         .setName('group')
-        .setDescription('Group this category’s channels into one numbered block (or turn it off).'),
+        .setDescription("Group this category's channels into one numbered block (or turn it off)."),
     ),
     adminOnly(
       new SlashCommandBuilder()
@@ -196,7 +196,7 @@ export function buildCommandDefinitions(
       adminOnly(
         new SlashCommandBuilder()
           .setName('debug')
-          .setDescription('Dev: dump a channel’s name/template/presence/permission data.')
+          .setDescription("Dev: dump a channel's name/template/presence/permission data.")
           .addChannelOption((o) =>
             o
               .setName('channel')

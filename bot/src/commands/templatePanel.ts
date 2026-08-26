@@ -60,13 +60,13 @@ export function parseAdoptId(
  */
 export function buildAdoptPrompt(channelId: string, originalName: string): InteractionReplyOptions {
   const embed: APIEmbed = new EmbedBuilder()
-    .setTitle('🏷️ Let AVC manage this channel’s name?')
+    .setTitle("🏷️ Let AVC manage this channel's name?")
     .setColor(0xfaa61a)
     .setDescription(
-      `<#${channelId}> isn’t managed by AVC yet. Turn this on and AVC will rename it ` +
+      `<#${channelId}> isn't managed by AVC yet. Turn this on and AVC will rename it ` +
         'automatically: a resting name while empty, and an in-use name while people are in it.\n\n' +
         `**Default:** empty → **${truncate(originalName, 60) || 'its name'}**, in use → ` +
-        '**“{owner}’s room”**. You can edit both templates next.',
+        `**"{owner}'s room"**. You can edit both templates next.`,
     )
     .toJSON();
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -120,7 +120,7 @@ export function renderEditorPanel(
             'when occupied (the `__empty/occupied__` token).'
         : isChannel
           ? `Editing <#${channelId}>, just this channel.`
-          : `Editing the templates for **all** channels of <#${channelId}>’s creator channel.`,
+          : `Editing the templates for **all** channels of <#${channelId}>'s creator channel.`,
     )
     .addFields(
       {

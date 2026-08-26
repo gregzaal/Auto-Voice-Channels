@@ -731,7 +731,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     );
     if (!pos.found) {
       return respond(interaction, {
-        content: 'This isn’t a bot-managed voice channel.',
+        content: "This isn't a bot-managed voice channel.",
         ephemeral: true,
       });
     }
@@ -762,7 +762,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       });
       await interaction.reply({
         content:
-          `✅ This category’s channels are now grouped **${above ? 'above' : 'below'}** the ` +
+          `✅ This category's channels are now grouped **${above ? 'above' : 'below'}** the ` +
           `creator channels.${rateLimitNote(summary.rateLimited)}`,
         ephemeral: true,
       });
@@ -901,7 +901,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     });
     const note = rateLimitNote(summary.rateLimited);
     const message = enabling
-      ? `✅ Grouped this category’s channels **${above ? 'above' : 'below'}** the creator ` +
+      ? `✅ Grouped this category's channels **${above ? 'above' : 'below'}** the creator ` +
         `channels${summary.considered ? ` (${summary.considered} channel${summary.considered === 1 ? '' : 's'})` : ''}.${note}`
       : `✅ Turned grouping off. Each creator channel goes back to its own numbering and ` +
         `placement.${note}`;
@@ -926,7 +926,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     );
     if (!pos.found) {
       return respond(interaction, {
-        content: 'This isn’t a bot-managed voice channel.',
+        content: "This isn't a bot-managed voice channel.",
         ephemeral: true,
       });
     }
@@ -1007,14 +1007,14 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     );
     if (!state.found) {
       return respond(interaction, {
-        content: 'That isn’t a bot-managed voice channel.',
+        content: "That isn't a bot-managed voice channel.",
         ephemeral: true,
       });
     }
     // Anyone may edit their own channel; editing another's needs admin.
     if (!hasManageChannels(interaction) && state.ownerId && state.ownerId !== userId) {
       return respond(interaction, {
-        content: 'Only the channel’s owner or a server admin can edit it.',
+        content: "Only the channel's owner or a server admin can edit it.",
         ephemeral: true,
       });
     }
@@ -1400,9 +1400,9 @@ Already subscribed? Add the new server ` +
     const held = ALL_REQUIRED_PERMISSION_LABELS.filter((l) => !missing.includes(l));
     const where = category ? ` in **${category.name}**` : '';
 
-    const lines = [`⚠️ I couldn’t create the creator channel${where}.`];
+    const lines = [`⚠️ I couldn't create the creator channel${where}.`];
     if (missing.length) {
-      lines.push(`I’m missing these permissions: **${missing.join('**, **')}**.`);
+      lines.push(`I'm missing these permissions: **${missing.join('**, **')}**.`);
       if (held.length) lines.push(`Permissions I already have: ${held.join(', ')}.`);
       lines.push(
         category

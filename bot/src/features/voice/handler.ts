@@ -904,7 +904,7 @@ export class VoiceFeature {
     channelId: string,
     originalName: string,
   ): Promise<CommandResult> {
-    if (!this.deps.managed) return { ok: false, message: 'Managed channels aren’t available.' };
+    if (!this.deps.managed) return { ok: false, message: "Managed channels aren't available." };
     if (await this.deps.managed.isManaged(guildId, channelId)) {
       return { ok: false, message: 'AVC already manages this channel.' };
     }
@@ -915,7 +915,7 @@ export class VoiceFeature {
       };
     }
     if (await this.deps.secondaries.isSecondary(guildId, channelId)) {
-      return { ok: false, message: 'That’s already a bot-created channel.' };
+      return { ok: false, message: "That's already a bot-created channel." };
     }
     const roster = this.deps.voice
       .membersInChannel(channelId)
@@ -930,21 +930,21 @@ export class VoiceFeature {
     });
     await this.rerenderManaged(guildId, channelId);
     this.deps.logger.info({ guildId, channelId }, 'adopted channel for name management');
-    return { ok: true, message: 'AVC now manages this channel’s name.' };
+    return { ok: true, message: "AVC now manages this channel's name." };
   }
 
   /** Sets an adopted channel's name template and re-renders it. Name can't be blank. */
   async setManagedName(guildId: string, channelId: string, value: string): Promise<CommandResult> {
-    if (!this.deps.managed) return { ok: false, message: 'Managed channels aren’t available.' };
+    if (!this.deps.managed) return { ok: false, message: "Managed channels aren't available." };
     const row = await this.deps.managed.get(channelId);
     if (!row || row.guildId !== guildId) {
-      return { ok: false, message: 'AVC doesn’t manage this channel.' };
+      return { ok: false, message: "AVC doesn't manage this channel." };
     }
     const trimmed = value.trim().replace(/[\r\n]+/g, ' ');
-    if (trimmed === '') return { ok: false, message: 'The name template can’t be empty.' };
+    if (trimmed === '') return { ok: false, message: "The name template can't be empty." };
     await this.deps.managed.setTemplate(channelId, { ...row.template, name: trimmed });
     await this.rerenderManaged(guildId, channelId);
-    return { ok: true, message: 'Updated this channel’s name template.' };
+    return { ok: true, message: "Updated this channel's name template." };
   }
 
   /**
@@ -956,10 +956,10 @@ export class VoiceFeature {
     channelId: string,
     value: string,
   ): Promise<CommandResult> {
-    if (!this.deps.managed) return { ok: false, message: 'Managed channels aren’t available.' };
+    if (!this.deps.managed) return { ok: false, message: "Managed channels aren't available." };
     const row = await this.deps.managed.get(channelId);
     if (!row || row.guildId !== guildId) {
-      return { ok: false, message: 'AVC doesn’t manage this channel.' };
+      return { ok: false, message: "AVC doesn't manage this channel." };
     }
     const trimmed = value.trim();
     const cleared = trimmed === '' || trimmed.toLowerCase() === 'reset';
@@ -972,16 +972,16 @@ export class VoiceFeature {
       ok: true,
       message: cleared
         ? "Cleared this channel's status, it will stay blank."
-        : 'Updated this channel’s status template.',
+        : "Updated this channel's status template.",
     };
   }
 
   /** Stops managing an adopted channel (its current name stays as-is). */
   async stopManaging(guildId: string, channelId: string): Promise<CommandResult> {
-    if (!this.deps.managed) return { ok: false, message: 'Managed channels aren’t available.' };
+    if (!this.deps.managed) return { ok: false, message: "Managed channels aren't available." };
     const row = await this.deps.managed.get(channelId);
     if (!row || row.guildId !== guildId) {
-      return { ok: false, message: 'AVC doesn’t manage this channel.' };
+      return { ok: false, message: "AVC doesn't manage this channel." };
     }
     await this.deps.managed.remove(channelId);
     this.deps.logger.info({ guildId, channelId }, 'stopped managing channel');

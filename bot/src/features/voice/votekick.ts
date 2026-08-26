@@ -71,22 +71,22 @@ export class VoteKickManager {
     if (!channelId) return { ok: false, message: 'You need to be in the channel to start a vote.' };
     const secondary = await this.deps.secondaries.get(channelId);
     if (!secondary || secondary.guildId !== guildId) {
-      return { ok: false, message: 'This isn’t a bot-managed voice channel.' };
+      return { ok: false, message: "This isn't a bot-managed voice channel." };
     }
     if (this.sessions.has(channelId)) {
       return { ok: false, message: 'A votekick is already in progress in this channel.' };
     }
-    if (targetId === initiatorId) return { ok: false, message: 'You can’t votekick yourself.' };
+    if (targetId === initiatorId) return { ok: false, message: "You can't votekick yourself." };
 
     const present = this.deps.voice.membersInChannel(channelId).filter((m) => !m.bot);
     if (!present.some((m) => m.id === initiatorId)) {
       return { ok: false, message: 'You need to be in the channel to start a vote.' };
     }
     if (!present.some((m) => m.id === targetId)) {
-      return { ok: false, message: 'That member isn’t in this channel.' };
+      return { ok: false, message: "That member isn't in this channel." };
     }
     if (secondary.ownerId === targetId) {
-      return { ok: false, message: 'You can’t votekick the channel owner.' };
+      return { ok: false, message: "You can't votekick the channel owner." };
     }
 
     const eligible = new Set(present.map((m) => m.id).filter((id) => id !== targetId));
@@ -117,14 +117,14 @@ export class VoteKickManager {
   async vote(channelId: string, voterId: string): Promise<VoteResult> {
     const session = this.sessions.get(channelId);
     if (!session) {
-      return { ok: false, resolved: false, kicked: false, message: 'There’s no active vote here.' };
+      return { ok: false, resolved: false, kicked: false, message: "There's no active vote here." };
     }
     if (voterId === session.targetId || !session.eligible.has(voterId)) {
       return {
         ok: false,
         resolved: false,
         kicked: false,
-        message: 'You’re not eligible to vote in this channel.',
+        message: "You're not eligible to vote in this channel.",
       };
     }
     session.votes.add(voterId);

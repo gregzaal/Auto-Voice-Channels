@@ -195,11 +195,30 @@ describe.skipIf(!hasPgTools())('runDrill (integration)', () => {
     it('wipes the scratch database as a role that does not own schema public', async () => {
       const role = 'drill_nonowner';
       const pw = 'drill-nonowner-pw';
+      const url = new URL(scratch.connectionString);
+      const database = url.pathname.replace(/^\//, '');
       await scratch.handle.db.execute(sql.raw(`DROP ROLE IF EXISTS ${role}`)).catch(() => {});
       await scratch.handle.db.execute(sql.raw(`CREATE ROLE ${role} LOGIN PASSWORD '${pw}'`));
       await scratch.handle.db.execute(sql.raw(`GRANT CREATE, USAGE ON SCHEMA public TO ${role}`));
+      /**
+       * `CREATE ON DATABASE` too, and leaving it out is what made this test fail
+       * on every CI run from the day it was written.
+       *
+       * The dump contains `CREATE SCHEMA drizzle` (drizzle's own migration
+       * bookkeeping), and creating a schema needs CREATE on the DATABASE, not on
+       * `public`. Without it the restore died on its first statement with
+       * "permission denied for database", every later statement failed on the
+       * missing schema, and the drill correctly reported a problem, so the
+       * assertion below never had a chance to mean anything.
+       *
+       * Granting it is what makes the fixture match the privilege shape it
+       * claims to reproduce rather than a stricter one: on Fly MPG the app role
+       * creates schemas routinely, which is how `runMigrations` works there at
+       * all, and simply does not OWN `public`. That single missing ownership is
+       * the whole point of this test.
+       */
+      await scratch.handle.db.execute(sql.raw(`GRANT CREATE ON DATABASE "${database}" TO ${role}`));
 
-      const url = new URL(scratch.connectionString);
       url.username = role;
       url.password = pw;
 

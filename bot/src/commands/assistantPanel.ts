@@ -46,7 +46,7 @@ export function buildAssistantModal(sessionId: string, refining: boolean): Modal
     .setPlaceholder(
       refining
         ? 'e.g. make the emoji a controller, and drop the number'
-        : 'e.g. show the game in caps with a number, and the owner’s name',
+        : "e.g. show the game in caps with a number, and the owner's name",
     );
   return new ModalBuilder()
     .setCustomId(assistantId(refining ? 'refine' : 'ask', sessionId))
