@@ -297,8 +297,7 @@ export class GuildRepository {
        */
       if (input.skipIfUnchanged) {
         const graceSame =
-          input.graceUntil === undefined ||
-          !instantsDiffer(current.graceUntil, input.graceUntil);
+          input.graceUntil === undefined || !instantsDiffer(current.graceUntil, input.graceUntil);
         const expiresSame = Object.keys(setExpiresAt).length === 0;
         if (fromStatus === input.toStatus && graceSame && expiresSame) {
           return guildRowSchema.parse(current);
