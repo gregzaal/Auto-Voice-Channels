@@ -1,8 +1,8 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { and, inArray, ne } from 'drizzle-orm';
+import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
-import { autoChannels, joinChannels, secondaryChannels } from '../db/schema.js';
+import { autoChannels, guildFleetPresence, joinChannels, secondaryChannels } from '../db/schema.js';
 import type { Fleet } from '../domain/fleets.js';
 import { AutoChannelRepository } from '../repositories/autoChannels.js';
 import { GuildRepository } from '../repositories/guilds.js';
@@ -101,6 +101,12 @@ export interface ImportSummary {
   /** Guilds skipped because `onlyGuildIds` was given and did not name them. */
   skippedNotSelected: number;
   /**
+   * Guilds this fleet's gateway reports being in that `liveGuildIds` omits, so
+   * the import would silently skip them (`presenceNotInList`). Empty before a
+   * fleet has ever booted, which is the cutover's own case.
+   */
+  presentButNotListed: string[];
+  /**
    * Channel rows another fleet already owns, so this run cannot write them
    * (`foreignFleetChannels`). Skipped with a warning naming each one.
    */
@@ -174,6 +180,33 @@ async function foreignFleetChannels(
   return out;
 }
 
+/**
+ * Guilds this fleet's gateway says it is in that the supplied live list omits.
+ *
+ * **The gateway knows the install base and `GET /users/@me/guilds` does not.**
+ * That endpoint returns short pages mid-stream, so the obvious "paginate until a
+ * short page" loop stops early. At the production cutover it returned 4,999
+ * against a real 5,556, and the 557 guilds it missed were silently skipped: the
+ * bot was in them, so the runtime gave them `guilds` rows and the billing
+ * sampler picked them up, and nothing anywhere looked wrong. They just had no
+ * creator channels, which is indistinguishable from "never set up".
+ *
+ * A shortfall is reported, never fatal: `guild_fleet_presence` is empty before a
+ * fleet has ever booted (the cutover's own case), and a guild the bot legitimately
+ * left between the list being made and the import running is not an error either.
+ */
+async function presenceNotInList(
+  db: Database,
+  fleet: Fleet,
+  liveGuildIds: ReadonlySet<string>,
+): Promise<string[]> {
+  const rows = await db
+    .select({ guildId: guildFleetPresence.guildId })
+    .from(guildFleetPresence)
+    .where(and(eq(guildFleetPresence.fleet, fleet), isNull(guildFleetPresence.removedAt)));
+  return rows.map((r) => r.guildId).filter((g) => !liveGuildIds.has(g));
+}
+
 /** Reads and plans every file in the dump. No database access. */
 export function planDump(opts: { dir: string; liveGuildIds?: ReadonlySet<string> }): {
   plans: GuildPlan[];
@@ -238,6 +271,7 @@ export async function importDump(opts: ImportOptions): Promise<ImportSummary> {
     droppedFieldCounts: {},
     failures: [],
     skippedNotSelected: 0,
+    presentButNotListed: [],
     foreignFleetChannels: [],
     merge: { existed: 0, keptStatus: {}, keptSettingKeys: {} },
   };
@@ -255,6 +289,23 @@ export async function importDump(opts: ImportOptions): Promise<ImportSummary> {
   const selected = plans.filter(
     (p) => p.importable && (!opts.onlyGuildIds || opts.onlyGuildIds.has(p.guildId)),
   );
+
+  /**
+   * Does the supplied live list actually match the install base? Only asked on a
+   * whole-dump run: a deliberate `--only-guilds` subset omits nearly everything
+   * by design, and reporting that as a shortfall would be noise.
+   */
+  if (inspect && !opts.onlyGuildIds) {
+    summary.presentButNotListed = await presenceNotInList(opts.db, opts.fleet, opts.liveGuildIds);
+    if (summary.presentButNotListed.length > 0) {
+      log(
+        `WARNING: ${summary.presentButNotListed.length} guilds this fleet is in are absent from ` +
+          `--live-guilds, so they will be skipped and left with no configuration. The gateway ` +
+          `knows the install base; GET /users/@me/guilds returns short pages mid-stream and is ` +
+          `routinely wrong. Rebuild the list before applying.`,
+      );
+    }
+  }
 
   /**
    * One query up front rather than a surprise per guild. Runs on a dry run too,

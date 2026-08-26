@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eq } from 'drizzle-orm';
+import { eq, sql as raw } from 'drizzle-orm';
 import { startPostgres, type PgTestEnv } from '../test/pgContainer.js';
 import { autoChannels, guilds, joinChannels, secondaryChannels } from '../db/schema.js';
 import { AutoChannelRepository } from '../repositories/autoChannels.js';
@@ -492,6 +492,73 @@ describe('importDump (integration)', () => {
     /** Whole-dump overwrite would discard whatever the other fleets are serving. */
     it('refuses overwriteSettings without a named subset', async () => {
       await expect(runDelta({ overwriteSettings: true })).rejects.toThrow(/requires onlyGuildIds/);
+    }, 300_000);
+  });
+
+  /**
+   * The live-list shortfall guard.
+   *
+   * `GET /users/@me/guilds` returns short pages MID-STREAM, so the obvious
+   * "paginate until a short page" loop stops early. At the production cutover on
+   * 2026-08-26 it reported 4,999 against a real 5,556 and 557 guilds were
+   * silently skipped: the bot was in them, so the runtime gave them rows and the
+   * billing sampler picked them up, and the only visible symptom was that they
+   * had no creator channels, which looks exactly like never having set one up.
+   *
+   * The gateway knows the install base. This asserts the importer says so.
+   */
+  describe('live list vs what the gateway is in', () => {
+    const L_LISTED = '121212121212121212';
+    const L_UNLISTED = '131313131313131313';
+    let listDir: string;
+
+    beforeAll(async () => {
+      listDir = mkdtempSync(join(tmpdir(), 'avc-import-list-'));
+      for (const id of [L_LISTED, L_UNLISTED]) {
+        writeFileSync(
+          join(listDir, `${id}.json`),
+          `{ "general": "General", "left": false, "auto_channels": {} }`,
+        );
+      }
+      // The fleet's gateway reports being in BOTH.
+      await pg.handle.db.execute(
+        raw`insert into guild_fleet_presence (guild_id, fleet) values
+              (${L_LISTED}, 'prod'), (${L_UNLISTED}, 'prod')
+            on conflict (guild_id, fleet) do update set removed_at = null`,
+      );
+    }, 300_000);
+
+    it('reports a guild it is in that the live list omits', async () => {
+      const summary = await importDump({
+        db: pg.handle.db,
+        fleet: 'prod',
+        dir: listDir,
+        // Deliberately short, the way a stop-at-the-first-short-page loop is.
+        liveGuildIds: new Set([L_LISTED]),
+        apply: false,
+        inspectExisting: true,
+        importedAt: IMPORTED_AT,
+      });
+      expect(summary.presentButNotListed).toContain(L_UNLISTED);
+      expect(summary.presentButNotListed).not.toContain(L_LISTED);
+    }, 300_000);
+
+    /**
+     * A `--only-guilds` subset omits nearly the whole base on purpose, so the
+     * same check there would cry wolf on every delta pass.
+     */
+    it('stays quiet for a deliberate subset run', async () => {
+      const summary = await importDump({
+        db: pg.handle.db,
+        fleet: 'prod',
+        dir: listDir,
+        liveGuildIds: new Set([L_LISTED, L_UNLISTED]),
+        onlyGuildIds: new Set([L_LISTED]),
+        apply: false,
+        inspectExisting: true,
+        importedAt: IMPORTED_AT,
+      });
+      expect(summary.presentButNotListed).toEqual([]);
     }, 300_000);
   });
 

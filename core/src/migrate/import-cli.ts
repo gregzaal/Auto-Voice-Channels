@@ -21,12 +21,23 @@
  * it is opt-in: the plain dry run stays runnable with no configuration at all.
  *
  * **DB-only, no Discord token**, as §5.1 requires. The live guild list is a
- * file, produced separately by whoever does hold a token:
+ * file, produced separately by whoever does hold a token, by paginating
+ * `GET /users/@me/guilds?limit=200` with `after=<last id>`.
  *
- *   curl -H "Authorization: Bot $TOKEN" \
- *     'https://discord.com/api/v10/users/@me/guilds?limit=200' | jq -r '.[].id'
- *
- * (paginating with `after=<last id>` until a short page comes back)
+ * > **Paginate until an EMPTY page, never until a SHORT one.** An earlier
+ * > version of this comment said "until a short page comes back" and that is
+ * > wrong: Discord returns short pages MID-STREAM. Measured against the
+ * > production application on 2026-08-26, the page sizes were
+ * > `200 x24, 199, 199, 199, 159, 0` for a real total of 5,556. Stopping at the
+ * > first short page yields exactly 4,999, and that is what happened at the
+ * > cutover: 557 guilds, 10% of the install base, silently got no config. The
+ * > bot was in them, so they had rows and trial clocks from the runtime, and
+ * > nothing looked wrong anywhere.
+ * >
+ * > Cross-check the count against `guild_fleet_presence` whenever the fleet is
+ * > already running -- the gateway knows exactly which guilds it is in, and
+ * > this endpoint evidently does not. `--check-existing` does that for you and
+ * > refuses to be quiet about a shortfall.
  */
 import { readFileSync } from 'node:fs';
 import { loadConfig } from '../config.js';
@@ -89,6 +100,17 @@ function reportMerge(summary: ImportSummary): void {
     console.log("  settings kept from the stored row (this dump's value not written):");
     for (const [key, n] of keys.sort((a, b) => b[1] - a[1])) {
       console.log(`    ${key.padEnd(24)} ${n}`);
+    }
+  }
+  if (summary.presentButNotListed.length > 0) {
+    console.log(
+      `\n  *** ${summary.presentButNotListed.length} GUILDS THIS FLEET IS IN ARE MISSING FROM --live-guilds ***`,
+    );
+    console.log('  They will be skipped and left with no configuration. Rebuild the list:');
+    console.log('  paginate GET /users/@me/guilds until an EMPTY page, not a short one.');
+    for (const g of summary.presentButNotListed.slice(0, 10)) console.log(`    ${g}`);
+    if (summary.presentButNotListed.length > 10) {
+      console.log(`    ... and ${summary.presentButNotListed.length - 10} more`);
     }
   }
   if (summary.foreignFleetChannels.length > 0) {

@@ -1,0 +1,99 @@
+# Fly.io deployment config for the PRODUCTION fleet.
+#
+# The sibling of `fly.toml` (which is `avc-beta`). Everything that is not one of
+# the four values below is deliberately identical to beta's file, because beta's
+# is the configuration that has been validated against a real userbase since
+# 2026-08-19. Read that file for the reasoning behind the region, the VM class,
+# the memory, and the DATABASE_URL rule -- all of it applies here unchanged and
+# is not repeated.
+#
+# What differs from beta, and only this:
+#   app                = "avc-prod"   (beta: "avc-beta")
+#   FLEET              = "prod"       (beta: "beta")
+#   TOTAL_SHARDS       = "4"          (beta: "2")
+#   EXPECTED_INSTANCES = "4"          (beta: "2")
+#
+# Secrets (`fly secrets set -a avc-prod ...`), same set beta carries:
+#   DISCORD_TOKEN, CLIENT_ID  -> application 479393422705426432
+#   DATABASE_URL              -> the shared cluster, `direct.`, never `pgbouncer.`
+#   DIAGNOSTICS_TOKEN         -> its OWN, not beta's
+#   ADMIN_CHANNEL_ID          -> the same #admin in the support guild
+#   AVC_AI_API_KEY            -> shared with beta (plans/fleets.md decision 2)
+#   WATCHDOG_PING_URL         -> its OWN monitor. A shared one would let a
+#                                healthy beta mask a dead prod, which is the
+#                                dead-man's switch failing silently.
+#   BACKUP_S3_* + BACKUP_ENCRYPTION_KEY + BACKUP_PREFIX + BACKUP_DRILL_DATABASE_URL
+#                             -> prod owns backups from the cutover on, and
+#                                beta's are switched off once prod has taken one
+#                                successfully. `withBackupLock` uses
+#                                `fleetAdvisoryKey`, so leader election is PER
+#                                FLEET: both fleets configured means both back up
+#                                the same database, doubling B2 cost and running
+#                                two drills into one scratch database.
+#
+# This app takes over the legacy Python bot's identity, so the two can never run
+# at once (one token, one gateway session). See plans/migration.md 6.
+app = "avc-prod"
+primary_region = "iad"
+
+[build]
+  dockerfile = "../../Dockerfile"
+
+[env]
+  SELF_HOSTED = "false"
+  FLEET = "prod"
+  HTTP_PORT = "8080"
+  LOG_LEVEL = "info"
+  NODE_ENV = "production"
+  # 4 shards over 4 machines, one each (cap = ceil(4/4) = 1).
+  #
+  # Sized in plans/scaling.md 9 from beta's measured constants against the
+  # production identity's real guild count (4,999 confirmed at the cutover, from
+  # the Discord API): ~4.2GB projected need against 8GB of fleet memory.
+  #
+  # Discord's own floor is one shard per 2500 guilds, so 2 would technically
+  # serve 4,999. Four is for the memory, not the shard limit, and a shard-count
+  # change later is a full stop-and-start of the fleet rather than a rolling
+  # deploy (scaling.md 2.2) -- which is why it is settled here, before the
+  # fleet ever boots, rather than raised when it hurts.
+  TOTAL_SHARDS = "4"
+  EXPECTED_INSTANCES = "4"
+  # Keep V8 the thing that reports a memory problem, rather than the kernel.
+  # See beta's fly.toml for the measurement behind this number.
+  NODE_OPTIONS = "--max-old-space-size=1700"
+  AVC_AI_BASE_URL = "https://api.openai.com/v1"
+  AVC_AI_MODEL = "gpt-5.4-mini"
+  AVC_AI_PRICE_INPUT_PER_MTOK = "0.75"
+  AVC_AI_PRICE_OUTPUT_PER_MTOK = "4.50"
+
+[deploy]
+  strategy = "rolling"
+
+[[restart]]
+  policy = "on-failure"
+  max_retries = 10
+
+# INSTANCE_ID is deliberately unset: config falls back to Fly's per-machine
+# FLY_MACHINE_ID, which is unique and stable, and is the shard-lease identity.
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/health"
+    interval = "10s"
+    timeout = "2s"
+    grace_period = "30s"
+
+[[vm]]
+  # A DEDICATED core. Not a cost optimisation to revisit: beta's fleet-wide
+  # outage on 2026-08-20 was a shared-cpu burst balance hitting zero, and the
+  # dominant consumer is the gateway presence firehose, which is per MEMBER and
+  # which no runtime flag controls. Prod carries five times beta's population.
+  size = "performance-1x"
+  memory = "2gb"
