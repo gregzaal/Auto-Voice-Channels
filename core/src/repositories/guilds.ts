@@ -362,6 +362,71 @@ export class GuildRepository {
   }
 
   /**
+   * Read-modify-write on `settings`, under the row lock, with the decision
+   * supplied by the caller.
+   *
+   * `updateSettings` above merges DB-side precisely so concurrent writers cannot
+   * clobber each other. The legacy importer's merge (`migrate/merge.ts`) cannot
+   * use that: it needs to see what is already stored in order to decide what to
+   * write, and it merges `aliases` / `custom_nicks` one level deeper than a
+   * top-level `||` reaches. So the read and the write go in one transaction with
+   * `FOR UPDATE`, the same shape `recordMemberCountSample` uses below and for the
+   * same reason.
+   *
+   * This stopped being theoretical when `plans/migration.md` §6 moved the bulk
+   * import ahead of the freeze: it now runs for minutes against guilds a live
+   * fleet is serving, so an `/alias` landing mid-pass is a real sequence rather
+   * than an imagined one.
+   *
+   * `decide` receives `undefined` when the guild had no row, which is how the
+   * caller tells "nobody has imported this guild" from "a row exists with empty
+   * settings". The row is created either way, since the channel rows that follow
+   * need it.
+   */
+  async mergeSettings<T>(
+    guildId: string,
+    decide: (
+      existing: { authStatus: AuthStatus; settings: Record<string, unknown> } | undefined,
+    ) => { patch: Record<string, unknown>; result: T },
+  ): Promise<T> {
+    return this.db.transaction(async (tx) => {
+      const [inserted] = await tx
+        .insert(guilds)
+        .values({ guildId })
+        .onConflictDoNothing({ target: guilds.guildId })
+        .returning();
+      const [current] = await tx
+        .select()
+        .from(guilds)
+        .where(eq(guilds.guildId, guildId))
+        .for('update');
+      if (!current) throw new Error(`Guild ${guildId} not found`);
+
+      const { patch, result } = decide(
+        // A row this statement just inserted is not a pre-existing one, however
+        // much it looks like one by the time the SELECT reads it.
+        inserted
+          ? undefined
+          : {
+              authStatus: current.authStatus as AuthStatus,
+              settings: (current.settings ?? {}) as Record<string, unknown>,
+            },
+      );
+
+      if (Object.keys(patch).length > 0) {
+        await tx
+          .update(guilds)
+          .set({
+            settings: sql`${guilds.settings} || ${JSON.stringify(patch)}::jsonb`,
+            updatedAt: new Date(),
+          })
+          .where(eq(guilds.guildId, guildId));
+      }
+      return result;
+    });
+  }
+
+  /**
    * Records a member-count sample: updates `member_count` (+timestamp) and
    * appends/replaces the day's entry in the rolling daily history kept in
    * `metadata.billing.samples`. The §12 anomaly clamps run inside — a lone

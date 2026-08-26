@@ -416,11 +416,18 @@ export function planGuild(guildId: string, raw: unknown, options: PlanOptions = 
 }
 
 /**
- * A guild's trial start, jittered forward 10 to 30 days (owner, 2026-08-18).
+ * A guild's trial start, jittered forward 60 to 90 days (owner, 2026-08-26).
  *
- * Two jobs. It buys every imported guild at least 10 extra free days, and it
- * spreads the expiry wave across 20 days so the T-30, T-7 and T-1 notification
+ * Two jobs. It buys every imported guild at least 60 extra free days, and it
+ * spreads the expiry wave across 31 days so the T-30, T-7 and T-1 notification
  * runs are not a single fleet-wide event a year out (`migration.md` §5.1).
+ *
+ * **Widened from 10-30 for the production cutover.** Beta's 1004 guilds were
+ * imported under the narrower window, which put ~48 expiries on the busiest
+ * day. Prod is five times the population, where the same 21-day spread would
+ * have been ~190 a day. Beta's own clocks are untouched: `expiresAtIfNull` is a
+ * set-exactly-once invariant, so a clock already ticking is never moved by a
+ * re-run or by a change here.
  *
  * **Derived from the guild id, not random.** The importer is idempotent and
  * meant to be re-runnable, and a random jitter would reshuffle every guild's
@@ -434,6 +441,6 @@ export function trialStartFor(guildId: string, importedAt: Date): Date {
     hash ^= guildId.charCodeAt(i);
     hash = Math.imul(hash, 0x01000193) >>> 0;
   }
-  const days = 10 + (hash % 21); // 10..30 inclusive
+  const days = 60 + (hash % 31); // 60..90 inclusive
   return new Date(importedAt.getTime() + days * 86_400_000);
 }

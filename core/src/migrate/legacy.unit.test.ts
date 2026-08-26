@@ -299,11 +299,11 @@ describe('trialStartFor', () => {
   const days = (guildId: string): number =>
     (trialStartFor(guildId, importedAt).getTime() - importedAt.getTime()) / 86_400_000;
 
-  it('always adds at least 10 days and never more than 30', () => {
+  it('always adds at least 60 days and never more than 90', () => {
     for (let i = 0; i < 3000; i++) {
       const d = days(`10000000000000${i}`);
-      expect(d).toBeGreaterThanOrEqual(10);
-      expect(d).toBeLessThanOrEqual(30);
+      expect(d).toBeGreaterThanOrEqual(60);
+      expect(d).toBeLessThanOrEqual(90);
     }
   });
 
@@ -321,8 +321,8 @@ describe('trialStartFor', () => {
   it('spreads guilds across the window rather than clumping', () => {
     const buckets = new Set<number>();
     for (let i = 0; i < 500; i++) buckets.add(days(`20000000000000${i}`));
-    // 21 possible values; a bad hash would collapse to a handful.
-    expect(buckets.size).toBeGreaterThan(15);
+    // 31 possible values; a bad hash would collapse to a handful.
+    expect(buckets.size).toBeGreaterThan(25);
   });
 
   it('produces whole days, so starts land at the same time of day', () => {

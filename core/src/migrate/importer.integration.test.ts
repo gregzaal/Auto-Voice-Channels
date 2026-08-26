@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { startPostgres, type PgTestEnv } from '../test/pgContainer.js';
 import { autoChannels, guilds, joinChannels, secondaryChannels } from '../db/schema.js';
+import { AutoChannelRepository } from '../repositories/autoChannels.js';
 import { GuildRepository } from '../repositories/guilds.js';
 import { parseBillingMeta } from '../domain/billing.js';
 import { importDump } from './importer.js';
@@ -173,9 +174,9 @@ describe('importDump (integration)', () => {
     );
     expect(row!.authExpiresAt?.getTime()).toBe(expected.getTime());
 
-    // At least 10 days later than an unjittered clock would have been.
+    // At least 60 days later than an unjittered clock would have been.
     const unjittered = IMPORTED_AT.getTime() + TRIAL_YEAR_DAYS * 86_400_000;
-    expect(row!.authExpiresAt!.getTime() - unjittered).toBeGreaterThanOrEqual(10 * 86_400_000);
+    expect(row!.authExpiresAt!.getTime() - unjittered).toBeGreaterThanOrEqual(60 * 86_400_000);
   }, 300_000);
 
   /**
@@ -268,4 +269,302 @@ describe('importDump (integration)', () => {
     const after = parseBillingMeta((await repo.getOrThrow(LIVE)).metadata).onboardedAt;
     expect(after).toBe(before);
   }, 300_000);
+
+  /**
+   * The first-writer-wins merge (`plans/migration.md` §3.6).
+   *
+   * `guilds.settings` and `guilds.auth_status` are shared columns, and this
+   * importer runs once per bot identity: beta 2026-08-19, prod at the cutover,
+   * Gold days later. Every case here is a guild that appears in more than one
+   * dump, and every one of them was silent before the merge existed - the write
+   * succeeded, the row validated, and the guild was reconfigured or re-entitled
+   * by whichever dump ran last.
+   *
+   * Its own dump directory, so the counts the tests above assert on stay
+   * describing the three-file fixture they were written for.
+   */
+  describe('first-writer-wins merge', () => {
+    const M_TRIAL = '444444444444444444';
+    const M_ACTIVE = '555555555555555555';
+    const M_BLOCKED = '666666666666666666';
+    const M_FRESH = '777777777777777777';
+    const all = new Set([M_TRIAL, M_ACTIVE, M_BLOCKED, M_FRESH]);
+    let mergeDir: string;
+
+    const runMerge = (
+      apply: boolean,
+      extra: { onlyGuildIds?: ReadonlySet<string> } = {},
+    ): ReturnType<typeof importDump> =>
+      importDump({
+        db: pg.handle.db,
+        fleet: 'prod',
+        dir: mergeDir,
+        liveGuildIds: all,
+        apply,
+        inspectExisting: true,
+        importedAt: IMPORTED_AT,
+        ...extra,
+      });
+
+    beforeAll(async () => {
+      mergeDir = mkdtempSync(join(tmpdir(), 'avc-import-merge-'));
+      for (const id of all) {
+        writeFileSync(
+          join(mergeDir, `${id}.json`),
+          `{
+            "enabled": true,
+            "general": "From the dump",
+            "channel_name_template": "dump template",
+            "aliases": { "apex": "Apex Legends" },
+            "left": false,
+            "auto_channels": {}
+          }`,
+        );
+      }
+
+      // Three guilds another fleet's dump already landed. M_FRESH is left
+      // absent, which is what the ~4000 guilds only prod has look like.
+      const repo = new GuildRepository(pg.handle.db);
+      await repo.updateSettings(M_TRIAL, {
+        general: 'Already here',
+        aliases: { valorant: 'Valorant' },
+      });
+      await repo.transitionAuth({
+        guildId: M_TRIAL,
+        toStatus: 'trial',
+        expiresAt: new Date('2027-06-01T00:00:00Z'),
+      });
+      await repo.transitionAuth({ guildId: M_ACTIVE, toStatus: 'active' });
+      await repo.transitionAuth({ guildId: M_BLOCKED, toStatus: 'blocked', reason: 'abuse' });
+    }, 300_000);
+
+    it('reports the merge on a dry run without writing anything', async () => {
+      const summary = await runMerge(false);
+      expect(summary.merge.existed).toBe(3);
+      expect(summary.merge.keptStatus).toEqual({ active: 1, blocked: 1 });
+      expect(summary.merge.keptSettingKeys.general).toBe(1);
+
+      const repo = new GuildRepository(pg.handle.db);
+      expect(await repo.get(M_FRESH)).toBeUndefined();
+    }, 300_000);
+
+    /**
+     * The one that costs money. `expiresAtIfNull` guards the date, not the
+     * status, so before this guard a paying customer in prod's dump was
+     * downgraded to `trial` by the import, with a tidy audit row saying so.
+     */
+    it('never downgrades a paying guild to trial', async () => {
+      await runMerge(true);
+      const repo = new GuildRepository(pg.handle.db);
+      expect((await repo.get(M_ACTIVE))!.authStatus).toBe('active');
+    }, 300_000);
+
+    /** The per-guild kill-switch is not something an import gets to turn off. */
+    it('never un-blocks a blocked guild', async () => {
+      const repo = new GuildRepository(pg.handle.db);
+      expect((await repo.get(M_BLOCKED))!.authStatus).toBe('blocked');
+    }, 300_000);
+
+    it('leaves a clock alone for a guild it does not transition', async () => {
+      const repo = new GuildRepository(pg.handle.db);
+      // Set by the pre-seed above, and not by any jitter this run computes.
+      expect((await repo.get(M_TRIAL))!.authExpiresAt?.toISOString()).toBe(
+        '2027-06-01T00:00:00.000Z',
+      );
+    }, 300_000);
+
+    it('keeps a setting the guild already had and fills in the ones it did not', async () => {
+      const repo = new GuildRepository(pg.handle.db);
+      const settings = (await repo.get(M_TRIAL))!.settings;
+      expect(settings.general).toBe('Already here');
+      expect(settings.channel_name_template).toBe('dump template');
+    }, 300_000);
+
+    /**
+     * `updateSettings` merges only at the top level, so a scalar-style write
+     * would replace the whole alias map and silently lose whichever dump got
+     * here second. Both are real configuration a real admin typed.
+     */
+    it('unions the alias maps rather than replacing one with the other', async () => {
+      const repo = new GuildRepository(pg.handle.db);
+      expect((await repo.get(M_TRIAL))!.settings.aliases).toEqual({
+        valorant: 'Valorant',
+        apex: 'Apex Legends',
+      });
+    }, 300_000);
+
+    it('imports a guild no other dump has reached, normally', async () => {
+      const repo = new GuildRepository(pg.handle.db);
+      const row = await repo.get(M_FRESH);
+      expect(row!.authStatus).toBe('trial');
+      expect(row!.settings.general).toBe('From the dump');
+      // The full jittered clock, since nothing was here to protect.
+      expect(row!.authExpiresAt?.getTime()).toBe(
+        trialStartFor(M_FRESH, IMPORTED_AT).getTime() + TRIAL_YEAR_DAYS * 86_400_000,
+      );
+    }, 300_000);
+
+    /**
+     * The delta pass (§6 step 3). The bulk import runs for as long as it takes
+     * while the old bot is still serving; only the guilds whose config moved in
+     * that window are re-imported during the dark minutes.
+     */
+    it('processes only the named guilds when given a subset', async () => {
+      const summary = await runMerge(false, { onlyGuildIds: new Set([M_TRIAL]) });
+      expect(summary.imported).toBe(1);
+      expect(summary.skippedNotSelected).toBe(3);
+      expect(summary.merge.existed).toBe(1);
+    }, 300_000);
+  });
+
+  /**
+   * The delta pass (`plans/migration.md` §6 step 3).
+   *
+   * §6 moved the bulk import ahead of the freeze, which makes the bulk pass its
+   * own first writer: gap-filling then declines to apply exactly the settings the
+   * delta pass exists for, while the per-primary templates DO update (same fleet,
+   * wholesale upsert), leaving two halves of one guild's config disagreeing.
+   */
+  describe('the delta pass', () => {
+    const D_GUILD = '888888888888888888';
+    const D_PRIMARY = '888000000000000001';
+    let deltaDir: string;
+
+    const write = (general: string, template: string): void =>
+      writeFileSync(
+        join(deltaDir, `${D_GUILD}.json`),
+        `{
+          "general": "${general}",
+          "left": false,
+          "auto_channels": { "${D_PRIMARY}": { "template": "${template}" } }
+        }`,
+      );
+
+    const runDelta = (extra: Record<string, unknown> = {}): ReturnType<typeof importDump> =>
+      importDump({
+        db: pg.handle.db,
+        fleet: 'prod',
+        dir: deltaDir,
+        liveGuildIds: new Set([D_GUILD]),
+        apply: true,
+        importedAt: IMPORTED_AT,
+        ...extra,
+      });
+
+    beforeAll(() => {
+      deltaDir = mkdtempSync(join(tmpdir(), 'avc-import-delta-'));
+    }, 300_000);
+
+    it('cannot apply a changed setting without being told to, and that is the trap', async () => {
+      write('bulk', 'bulk template');
+      await runDelta();
+      write('delta', 'delta template');
+      await runDelta({ onlyGuildIds: new Set([D_GUILD]) });
+
+      const repo = new GuildRepository(pg.handle.db);
+      const [primary] = await pg.handle.db
+        .select()
+        .from(autoChannels)
+        .where(eq(autoChannels.channelId, D_PRIMARY));
+
+      // The template moved (same fleet, wholesale upsert) and the setting did not.
+      expect((primary!.template as Record<string, unknown>).name).toBe('delta template');
+      expect((await repo.get(D_GUILD))!.settings.general).toBe('bulk');
+    }, 300_000);
+
+    it('applies it with overwriteSettings, which is what the delta pass passes', async () => {
+      await runDelta({ onlyGuildIds: new Set([D_GUILD]), overwriteSettings: true });
+      const repo = new GuildRepository(pg.handle.db);
+      expect((await repo.get(D_GUILD))!.settings.general).toBe('delta');
+    }, 300_000);
+
+    /**
+     * Authoritative about configuration is not authoritative about money, and
+     * the flag must not become a way to reach the status guard.
+     */
+    it('still refuses to reset a paying guild, even with overwriteSettings', async () => {
+      const repo = new GuildRepository(pg.handle.db);
+      await repo.transitionAuth({ guildId: D_GUILD, toStatus: 'active' });
+      await runDelta({ onlyGuildIds: new Set([D_GUILD]), overwriteSettings: true });
+      expect((await repo.get(D_GUILD))!.authStatus).toBe('active');
+    }, 300_000);
+
+    /** Whole-dump overwrite would discard whatever the other fleets are serving. */
+    it('refuses overwriteSettings without a named subset', async () => {
+      await expect(runDelta({ overwriteSettings: true })).rejects.toThrow(/requires onlyGuildIds/);
+    }, 300_000);
+  });
+
+  /**
+   * Channel ids another fleet already owns (`plans/migration.md` §3.6).
+   *
+   * `channel_id` is the SOLE primary key on all four channel tables and `fleet`
+   * is an ordinary column, so two dumps naming one channel collide rather than
+   * getting a row each, and the repositories' cross-fleet guards throw. Landing
+   * that throw mid-guild left the guild half imported -- settings written, no
+   * trial clock, no onboarded stamp -- and a dry run could not see it coming.
+   */
+  describe('channels owned by another fleet', () => {
+    const F_GUILD = '999999999999999999';
+    const F_PRIMARY = '999000000000000001';
+    let foreignDir: string;
+
+    const runForeign = (apply: boolean): ReturnType<typeof importDump> =>
+      importDump({
+        db: pg.handle.db,
+        fleet: 'prod',
+        dir: foreignDir,
+        liveGuildIds: new Set([F_GUILD]),
+        apply,
+        inspectExisting: true,
+        importedAt: IMPORTED_AT,
+      });
+
+    beforeAll(async () => {
+      foreignDir = mkdtempSync(join(tmpdir(), 'avc-import-foreign-'));
+      writeFileSync(
+        join(foreignDir, `${F_GUILD}.json`),
+        `{
+          "general": "General",
+          "left": false,
+          "auto_channels": { "${F_PRIMARY}": { "template": "prod wants this" } }
+        }`,
+      );
+      // The same channel, already a creator channel on the beta fleet.
+      await new AutoChannelRepository(pg.handle.db, 'beta').upsert(F_GUILD, F_PRIMARY, {
+        name: 'beta owns this',
+      });
+    }, 300_000);
+
+    it('reports the collision on a dry run, before anything is written', async () => {
+      const summary = await runForeign(false);
+      expect(summary.foreignFleetChannels).toEqual([
+        { channelId: F_PRIMARY, fleet: 'beta', guildId: F_GUILD },
+      ]);
+    }, 300_000);
+
+    /**
+     * The whole point of catching it: the guild imports completely apart from the
+     * one row that cannot be shared, instead of throwing between the settings
+     * write and the trial clock.
+     */
+    it('skips the row and still imports the rest of the guild', async () => {
+      const summary = await runForeign(true);
+      expect(summary.failures).toEqual([]);
+
+      const repo = new GuildRepository(pg.handle.db);
+      const row = await repo.get(F_GUILD);
+      expect(row!.settings.general).toBe('General');
+      expect(row!.authExpiresAt).not.toBeNull();
+      expect(parseBillingMeta(row!.metadata).onboardedAt).toBeDefined();
+
+      // And beta's row is untouched, not rewritten to prod's template.
+      const [primary] = await pg.handle.db
+        .select()
+        .from(autoChannels)
+        .where(eq(autoChannels.channelId, F_PRIMARY));
+      expect(primary!.fleet).toBe('beta');
+      expect((primary!.template as Record<string, unknown>).name).toBe('beta owns this');
+    }, 300_000);
+  });
 });
