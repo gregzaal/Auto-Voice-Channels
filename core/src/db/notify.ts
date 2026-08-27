@@ -4,6 +4,21 @@ import type { Logger } from '../logger.js';
 /** Postgres channel used to broadcast guild settings-cache invalidations. */
 export const SETTINGS_INVALIDATE_CHANNEL = 'avc_settings_invalidate';
 
+/**
+ * Postgres channel carrying one **Discord snowflake** whose supporter roles in
+ * the support guild may have changed.
+ *
+ * The snowflake, not the Auth.js user id, deliberately: the listener is a
+ * Discord-side actor and would otherwise have to resolve `users.id` ->
+ * `accounts.provider_account_id` before it could do anything, which is the
+ * exact comparison that silently never matches when someone gets it wrong.
+ * Web already deals in Auth.js ids, so the translation happens there.
+ *
+ * Best-effort like every other broadcast here: the support-guild reconcile on
+ * reconnect, and the daily sweep, both converge on their own from the database.
+ */
+export const SUPPORTER_SYNC_CHANNEL = 'avc_supporter_sync';
+
 export type NotifyListener = (payload: string) => void;
 
 /**

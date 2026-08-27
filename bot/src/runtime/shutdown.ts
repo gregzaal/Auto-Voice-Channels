@@ -8,6 +8,7 @@ import type { BillingReconciler, EntitlementGate } from '../features/billing/ind
 import type { AlertScheduler } from './alertScheduler.js';
 import type { BackupScheduler } from './backupScheduler.js';
 import type { MetricsCollector } from './metricsCollector.js';
+import type { SupporterRoles } from '../features/support/supporterRoles.js';
 
 export interface ShutdownDeps {
   logger: Logger;
@@ -28,6 +29,10 @@ export interface ShutdownDeps {
   /** Undefined when SELF_HOSTED (the job never exists there). */
   billingReconciler: BillingReconciler | undefined;
   backupScheduler: BackupScheduler | undefined;
+  /** Undefined unless the supporter-role group is configured (hosted only). */
+  supporterRoles: SupporterRoles | undefined;
+  /** Unsubscribes the supporter NOTIFY listener. Undefined when unconfigured. */
+  disposeSupporterSync: (() => void) | undefined;
   /** Always present: the watcher runs on self-host too. */
   alertScheduler: AlertScheduler;
   /** Always present: the collector runs on self-host too. */
@@ -66,11 +71,18 @@ export async function gracefulDrain(deps: ShutdownDeps): Promise<void> {
   // Awaited, not aborted: a half-uploaded object with no manifest is worse than
   // a slower deploy, and the next boot could not tell it from a good one.
   await deps.backupScheduler?.stop();
+  /**
+   * Awaited for the same reason as the two above: a reconcile is a sequence of
+   * independent role writes, so stopping between two of them is consistent and
+   * abandoning one mid-write is not.
+   */
+  await deps.supporterRoles?.stop();
   deps.disposeInteractions();
   deps.disposeJoinRequests();
   deps.disposeVoiceGateway();
   deps.disposeOnboarding();
   deps.disposeGuildIdentity();
+  deps.disposeSupporterSync?.();
   deps.client.removeAllListeners();
   await deps.dispatcher.drainAll();
   /**

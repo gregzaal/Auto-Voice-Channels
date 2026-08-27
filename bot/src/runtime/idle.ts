@@ -83,6 +83,7 @@ export async function runIdle(deps: {
       problems: {},
       metrics: null,
       alerts: null,
+      supporterRoles: { enabled: false },
     }),
   });
   await health.start();

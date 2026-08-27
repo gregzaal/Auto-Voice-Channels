@@ -1,8 +1,8 @@
-import { eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Database } from '../db/client.js';
-import { subscriptions } from '../db/schema.js';
-import { TIER_IDS } from '../domain/tiers.js';
+import { accounts, subscriptions } from '../db/schema.js';
+import { TIER_IDS, compareTiers, type TierId } from '../domain/tiers.js';
 
 /**
  * zod schema validating a GUILD subscription row read from the DB (boundary
@@ -147,6 +147,42 @@ export function subscriptionInGoodStanding(sub: {
 }
 
 /**
+ * Paddle statuses where the money has not arrived but the customer has not gone
+ * anywhere either: the charge failed and Paddle is retrying it.
+ */
+export const SUBSCRIPTION_DUNNING_STATUSES: ReadonlySet<string> = new Set(['past_due']);
+
+/**
+ * Whether a subscription earns its purchaser public recognition, as distinct
+ * from whether it is paying its way right now.
+ *
+ * **Deliberately NOT an entitlement check, and nothing may ever use it as one.**
+ * The only caller is the supporter-role sync. Access is decided by
+ * {@link subscriptionInGoodStanding} and the leniency ladder, and this being
+ * looser must never leak into that.
+ *
+ * The difference is dunning. `subscriptionInGoodStanding` excludes `past_due`
+ * on the first failed retry, while the ladder deliberately keeps that customer's
+ * servers running for another 60 days. Applying the strict rule to a badge meant
+ * a role visibly disappearing from a public member list on day one of a 60-day
+ * window, which is a bad way to learn your card expired, and a worse one for
+ * everyone else in the server to watch happen.
+ *
+ * Expressed in terms of the strict predicate rather than restating it, so the
+ * two cannot drift: a refund still revokes recognition immediately, because a
+ * refunded customer is not a supporter. `paused` and `canceled` are absent on
+ * purpose, in both. Owner's call, 2026-08-27.
+ */
+export function subscriptionEarnsRecognition(sub: {
+  status: string;
+  refundStatus?: string | null | undefined;
+}): boolean {
+  if (subscriptionInGoodStanding(sub)) return true;
+  if (sub.refundStatus === 'approved') return false;
+  return SUBSCRIPTION_DUNNING_STATUSES.has(sub.status);
+}
+
+/**
  * Billing source of truth, synced from Paddle webhooks. One row per Paddle
  * subscription, covering either **one pool of servers (the default)** or a
  * single guild (legacy, promoted into a pool on the first server added to it).
@@ -225,6 +261,81 @@ export class SubscriptionRepository {
       if (parsed.success) out.push(parsed.data);
     }
     return out;
+  }
+
+  /**
+   * The best tier each of these **Discord snowflakes** is currently paying for,
+   * across both billing axes, for whoever has more than one subscription.
+   *
+   * Takes the ids it should answer for rather than returning every paying
+   * customer, and that is the whole scaling argument: the only caller is the
+   * support guild's role sync, so the result is bounded by that one guild's
+   * membership and never by the size of the customer base. Chunked so a large
+   * member list cannot build a parameter array Postgres refuses.
+   *
+   * Standing here is {@link subscriptionEarnsRecognition}, which is
+   * {@link subscriptionInGoodStanding} plus dunning: a customer whose card just
+   * failed keeps the badge, because the leniency ladder keeps their servers
+   * running for 60 more days and a role vanishing on day one is a bad way to
+   * learn about it. A refund still revokes it immediately, since a refund does
+   * not cancel a Paddle subscription and `status` alone would keep badging
+   * someone whose money went back. A cancelled-but-still-paid subscription keeps
+   * its badge until the period ends, which is what `active` already means here.
+   *
+   * Snowflakes with nothing in good standing are simply absent from the map.
+   * That is a real answer, not a missing one, and the caller depends on it to
+   * know whose badge to remove.
+   */
+  async listSupporterTiersFor(discordUserIds: readonly string[]): Promise<Map<string, TierId>> {
+    const best = new Map<string, TierId>();
+    const chunkSize = 2_000;
+    for (let i = 0; i < discordUserIds.length; i += chunkSize) {
+      const chunk = discordUserIds.slice(i, i + chunkSize);
+      if (chunk.length === 0) continue;
+      const rows = await this.db
+        .select({
+          discordUserId: accounts.providerAccountId,
+          tier: subscriptions.tier,
+          status: subscriptions.status,
+          refundStatus: subscriptions.refundStatus,
+        })
+        .from(subscriptions)
+        .innerJoin(accounts, eq(accounts.userId, subscriptions.purchaserUserId))
+        .where(
+          and(
+            eq(accounts.provider, 'discord'),
+            inArray(accounts.providerAccountId, [...chunk]),
+            isNotNull(subscriptions.purchaserUserId),
+          ),
+        );
+      for (const row of rows) {
+        if (!subscriptionEarnsRecognition(row)) continue;
+        const tier = TIER_IDS.find((t) => t === row.tier);
+        // A tier the running build does not know is skipped rather than
+        // guessed at: expand/contract means an older instance can legitimately
+        // read a row a newer one wrote.
+        if (!tier || tier === 'free') continue;
+        const current = best.get(row.discordUserId);
+        if (!current || compareTiers(tier, current) > 0) best.set(row.discordUserId, tier);
+      }
+    }
+    return best;
+  }
+
+  /**
+   * The Auth.js user id that bought a Paddle subscription, on either axis.
+   *
+   * Exists for the refund path, which holds a Paddle subscription id and
+   * nothing else: `getByPaddleIdAny` answers which axis it bills, not who is
+   * paying for it, and a refund has to reach the purchaser to un-badge them.
+   */
+  async getPurchaserByPaddleId(paddleSubscriptionId: string): Promise<string | null> {
+    const [row] = await this.db
+      .select({ purchaserUserId: subscriptions.purchaserUserId })
+      .from(subscriptions)
+      .where(eq(subscriptions.paddleSubscriptionId, paddleSubscriptionId))
+      .limit(1);
+    return row?.purchaserUserId ?? null;
   }
 
   /** Every POOL subscription bought by this user. The pool-axis sibling of {@link listByPurchaser}. */

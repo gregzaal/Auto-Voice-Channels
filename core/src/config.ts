@@ -14,6 +14,14 @@ const booleanish = z
     typeof v === 'boolean' ? v : ['1', 'true', 'yes', 'on'].includes(v.toLowerCase()),
   );
 
+/**
+ * A Discord snowflake, as a string. Validated rather than taken on trust
+ * because every consumer of one is a REST call: a typo'd role id is a 404 from
+ * Discord at write time, per member, forever, instead of a boot failure naming
+ * the variable.
+ */
+const snowflake = z.string().regex(/^\d{17,20}$/, 'must be a Discord snowflake (17-20 digits)');
+
 export const configSchema = z
   .object({
     /** Discord bot token. Never commit this; supply via env / secrets. */
@@ -204,6 +212,59 @@ export const configSchema = z
       })
       .optional(),
 
+    /**
+     * Supporter roles in the support guild, optional and hosted-only in
+     * practice (`plans/monetization.md` §13).
+     *
+     * Recognition, not entitlement: nothing anywhere reads a supporter role to
+     * decide what a guild may do, and it must stay that way. Every feature is
+     * on every plan, so the moment a role gates something the pricing promise
+     * is gone.
+     *
+     * Absent unless `SUPPORT_GUILD_ID` and at least one `SUPPORT_ROLE_*` are
+     * set, so a self-hoster never meets it. All-or-nothing by *shape* like the
+     * backup group: a half-set group fails to boot rather than badging nobody
+     * and saying nothing about why.
+     */
+    supporterRoles: z
+      .object({
+        guildId: snowflake,
+        /**
+         * Billed tier -> role id, and partial on purpose: an unmapped tier is
+         * simply not badged, which is what lets the set of badged tiers change
+         * without a migration or a code edit.
+         *
+         * `free` has no entry by construction. It is not a purchase, and a
+         * "supporter" role on it would be the one badge that means nothing.
+         */
+        byTier: z
+          .object({
+            s: snowflake.optional(),
+            m: snowflake.optional(),
+            l: snowflake.optional(),
+            xl: snowflake.optional(),
+            xxl: snowflake.optional(),
+          })
+          .refine((r) => Object.values(r).some((id) => id !== undefined), {
+            message:
+              'SUPPORT_GUILD_ID is set but no SUPPORT_ROLE_<TIER> is. Set at least one of ' +
+              'SUPPORT_ROLE_S / _M / _L / _XL / _XXL, or unset SUPPORT_GUILD_ID.',
+          }),
+        /**
+         * Delay between role writes during a full reconcile.
+         *
+         * The steady state is a handful of changes a day arriving one NOTIFY at
+         * a time, where this never applies. It exists for the other case: a
+         * reconcile after a long gap has thousands of changes queued at once,
+         * all against one guild's role rate limit, and an unpaced burst would
+         * park every other REST call in the fleet behind it.
+         */
+        writeSpacingMs: z.coerce.number().int().nonnegative().default(250),
+        /** How often the safety-net reconcile runs. Daily; the events do the real work. */
+        reconcileIntervalHours: z.coerce.number().int().positive().default(24),
+      })
+      .optional(),
+
     /** Log level for pino. */
     logLevel: z
       .enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'])
@@ -364,6 +425,41 @@ function envToInput(env: NodeJS.ProcessEnv): Record<string, unknown> {
     logLevel: e.LOG_LEVEL,
     nodeEnv: e.NODE_ENV,
     backup: backupInput(e),
+    supporterRoles: supporterRolesInput(e),
+  };
+}
+
+/**
+ * The supporter-role group, or `undefined` when nobody has configured one.
+ *
+ * Same shape-driven all-or-nothing as {@link backupInput}: if any key is set we
+ * hand zod a partial object and let its own required fields name the missing
+ * one. A typo'd `SUPPORT_GUILD_ID` must fail the boot, not silently badge
+ * nobody, because nothing about a missing badge looks like a fault.
+ */
+function supporterRolesInput(e: NodeJS.ProcessEnv): Record<string, unknown> | undefined {
+  const keys = [
+    'SUPPORT_GUILD_ID',
+    'SUPPORT_ROLE_S',
+    'SUPPORT_ROLE_M',
+    'SUPPORT_ROLE_L',
+    'SUPPORT_ROLE_XL',
+    'SUPPORT_ROLE_XXL',
+    'SUPPORT_ROLE_WRITE_SPACING_MS',
+    'SUPPORT_ROLE_RECONCILE_INTERVAL_HOURS',
+  ] as const;
+  if (!keys.some((k) => e[k] !== undefined)) return undefined;
+  return {
+    guildId: e.SUPPORT_GUILD_ID,
+    byTier: {
+      s: e.SUPPORT_ROLE_S,
+      m: e.SUPPORT_ROLE_M,
+      l: e.SUPPORT_ROLE_L,
+      xl: e.SUPPORT_ROLE_XL,
+      xxl: e.SUPPORT_ROLE_XXL,
+    },
+    writeSpacingMs: e.SUPPORT_ROLE_WRITE_SPACING_MS,
+    reconcileIntervalHours: e.SUPPORT_ROLE_RECONCILE_INTERVAL_HOURS,
   };
 }
 

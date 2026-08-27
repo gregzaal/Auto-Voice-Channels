@@ -76,6 +76,18 @@ export interface DiagnosticsReport {
    * `attempted` is a fleet-wide delivery problem, not a quiet week.
    */
   problems: Record<string, unknown>;
+  /**
+   * Supporter-role assignment in the support guild. `{ enabled: false }` when
+   * no support guild is configured, which is every self-host and the fleet that
+   * is not given the env.
+   *
+   * `owned` is the field to read first: it is false on every instance except
+   * the one whose shard serves the support guild, so a fleet-wide sweep of
+   * `/diagnostics` shows exactly one machine doing this work. `unusableRoles`
+   * answers the failure that otherwise looks identical to the feature being
+   * switched off.
+   */
+  supporterRoles: Record<string, unknown>;
 }
 
 export interface HealthServerOptions {

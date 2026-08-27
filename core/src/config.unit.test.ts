@@ -235,3 +235,46 @@ describe('empty env vars are treated as absent', () => {
     );
   });
 });
+
+describe('supporter roles', () => {
+  const GUILD = '601015720200896512';
+  const ROLE = '1542450265217695834';
+
+  /** The whole feature is off unless somebody asks for it. Self-host never does. */
+  it('is undefined when nothing is set', () => {
+    expect(loadConfig(baseEnv).supporterRoles).toBeUndefined();
+  });
+
+  it('parses a configured group', () => {
+    const config = loadConfig({ ...baseEnv, SUPPORT_GUILD_ID: GUILD, SUPPORT_ROLE_M: ROLE });
+    expect(config.supporterRoles?.guildId).toBe(GUILD);
+    expect(config.supporterRoles?.byTier.m).toBe(ROLE);
+    expect(config.supporterRoles?.byTier.xl).toBeUndefined();
+    expect(config.supporterRoles?.writeSpacingMs).toBe(250);
+    expect(config.supporterRoles?.reconcileIntervalHours).toBe(24);
+  });
+
+  /**
+   * All-or-nothing by shape, like the backup group. A half-set group badging
+   * nobody looks exactly like a quiet week, so it has to fail the boot instead.
+   */
+  it('rejects roles with no guild', () => {
+    expect(() => loadConfig({ ...baseEnv, SUPPORT_ROLE_M: ROLE })).toThrow(ConfigError);
+  });
+
+  it('rejects a guild with no roles', () => {
+    expect(() => loadConfig({ ...baseEnv, SUPPORT_GUILD_ID: GUILD })).toThrow(
+      /SUPPORT_ROLE_<TIER>/,
+    );
+  });
+
+  /**
+   * A typo'd id is a 404 from Discord on every write, per member, forever. That
+   * is a worse way to find out than a boot failure naming the variable.
+   */
+  it('rejects an id that is not a snowflake', () => {
+    expect(() =>
+      loadConfig({ ...baseEnv, SUPPORT_GUILD_ID: GUILD, SUPPORT_ROLE_M: 'not-a-snowflake' }),
+    ).toThrow(/snowflake/);
+  });
+});

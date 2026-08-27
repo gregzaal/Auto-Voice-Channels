@@ -65,6 +65,26 @@ primary_region = "iad"
   AVC_AI_MODEL = "gpt-5.4-mini"
   AVC_AI_PRICE_INPUT_PER_MTOK = "0.75"
   AVC_AI_PRICE_OUTPUT_PER_MTOK = "4.50"
+  # Supporter roles in the support guild. Recognition only: nothing reads these
+  # to decide what anyone may do, and nothing may start.
+  #
+  # In [env] rather than as secrets because none of it is one -- every id here
+  # is visible to anyone in the server -- and because this is the file that
+  # answers "which fleet does this". Beta must NOT carry the same group: both
+  # bots are in the support guild, and two writers would fight over one member's
+  # roles. Config is the whole election.
+  SUPPORT_GUILD_ID = "601015720200896512"
+  SUPPORT_ROLE_S = "1542449852992987146"
+  SUPPORT_ROLE_M = "1542450265217695834"
+  SUPPORT_ROLE_L = "1542450335056928788"
+  SUPPORT_ROLE_XL = "1542450395371020320"
+  # XXL is mapped and currently unreachable, deliberately rather than by
+  # oversight. It is not a checkout tier (`CHECKOUT_TIERS` is s/m/l/xl), so no
+  # Paddle price resolves to it and no `subscriptions` row can carry
+  # `tier = 'xxl'`. A bespoke XXL customer is entitled by agreement with no
+  # Paddle row at all, so they have to be badged by hand. Kept mapped so the
+  # config is already right if that ever changes.
+  SUPPORT_ROLE_XXL = "1542450467349594163"
 
 [deploy]
   strategy = "rolling"

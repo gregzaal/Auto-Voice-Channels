@@ -31,6 +31,7 @@ import {
   shardCapFor,
   ShardLeaseRepository,
   SubscriptionRepository,
+  SUPPORTER_SYNC_CHANNEL,
   type Logger,
 } from '@avc/core';
 import { REST, Routes, type Client } from 'discord.js';
@@ -42,6 +43,7 @@ import { PgIdentifyThrottler } from './runtime/identifyThrottler.js';
 import { installShutdown } from './runtime/shutdown.js';
 import { AlertScheduler } from './runtime/alertScheduler.js';
 import { BackupScheduler } from './runtime/backupScheduler.js';
+import { SupporterRoles } from './features/support/supporterRoles.js';
 import { buildWatchChecks } from './runtime/watchChecks.js';
 import { MetricsCollector, type GatewayLimits } from './runtime/metricsCollector.js';
 import { categorizeError } from './ops/describeError.js';
@@ -595,6 +597,60 @@ async function main(): Promise<void> {
       });
 
   /**
+   * Supporter roles in the support guild.
+   *
+   * Hosted-only by configuration, not by a `selfHosted` branch: the group is
+   * undefined unless somebody set `SUPPORT_GUILD_ID`, and a self-hoster never
+   * does. Also fleet-scoped by the same means -- both bots are in the support
+   * guild, so exactly one fleet is given the env and the other never writes.
+   */
+  const supporterRoles = config.supporterRoles
+    ? new SupporterRoles({
+        client,
+        guildId: config.supporterRoles.guildId,
+        byTier: config.supporterRoles.byTier,
+        writeSpacingMs: config.supporterRoles.writeSpacingMs,
+        reconcileIntervalHours: config.supporterRoles.reconcileIntervalHours,
+        lookup: (ids) => subscriptionsRepo.listSupporterTiersFor(ids),
+        flags,
+        logger,
+        report: (kind, message, context) => errorReporter.report(kind, message, context),
+      })
+    : undefined;
+
+  /**
+   * The live path: one Paddle webhook, one snowflake, one role write. The
+   * reconcile below exists for the deliveries this misses, not for this.
+   */
+  const disposeSupporterSync = supporterRoles
+    ? await notifier.listen(SUPPORTER_SYNC_CHANNEL, (discordUserId) => {
+        if (!discordUserId) return;
+        void supporterRoles.syncMember(discordUserId).catch((err: unknown) => {
+          supporterRoles.noteFailure(err, 'supporter role sync failed', { discordUserId });
+        });
+      })
+    : undefined;
+
+  /**
+   * The safety net that matches the live path's actual failure mode.
+   *
+   * `PgNotifier.notify` drops a publish outright while disconnected, and this
+   * connection reconnects often enough to matter (28 cycles in 4.5 hours on
+   * beta). Neither `clientReady` (bound with `once`) nor `guildCreate`
+   * (discord.js emits `guildAvailable` for an already-cached guild) fires again
+   * on a reconnect, so without this the daily timer was the only thing that
+   * would ever notice. Floored internally so a flapping connection cannot turn
+   * the net into the load.
+   */
+  if (supporterRoles) {
+    notifier.onReconnect(() => {
+      void supporterRoles.reconcileAfterReconnect().catch((err: unknown) => {
+        supporterRoles.noteFailure(err, 'supporter role reconcile-on-reconnect failed');
+      });
+    });
+  }
+
+  /**
    * The in-process watcher (`plans/agentic_management.md` step 4).
    * Unconditional, like the metrics collector: its conditions are as true on
    * self-host as here, and the watchdog ping is the only down-detection a
@@ -652,6 +708,17 @@ async function main(): Promise<void> {
     void reconciler.reconcileGuild(guild.id).catch((err: unknown) => {
       logger.error({ err, guildId: guild.id }, 'reconcile-on-guildCreate failed');
     });
+    /**
+     * The bot being ADDED to the support guild. Not the reconnect case, despite
+     * the name: discord.js emits `guildAvailable`, not `guildCreate`, for a
+     * guild already in cache, which a re-IDENTIFY always leaves it. The
+     * notifier's `onReconnect` covers that.
+     */
+    if (guild.id === config.supporterRoles?.guildId) {
+      void supporterRoles?.reconcile().catch((err: unknown) => {
+        supporterRoles.noteFailure(err, 'supporter role reconcile-on-guildCreate failed');
+      });
+    }
   });
   /**
    * The bot was removed from a guild (kicked, banned, or the guild deleted).
@@ -714,6 +781,15 @@ async function main(): Promise<void> {
       .reconcileGuilds(client.guilds.cache.keys())
       .catch((err: unknown) => logger.error({ err }, 'initial reconcile failed'));
     reconciler.startSweep();
+    /**
+     * The supporter-role safety net, on the same trigger as every other
+     * reconcile here: whatever a NOTIFY missed while this process was down or
+     * mid-reconnect converges now. A no-op on every instance except the one
+     * whose shard owns the support guild.
+     */
+    void supporterRoles
+      ?.reconcile()
+      .catch((err: unknown) => supporterRoles.noteFailure(err, 'supporter role reconcile failed'));
     /**
      * Presence, from the guild list rather than from the event stream
      * (`plans/fleets.md` §6.1).
@@ -856,6 +932,7 @@ async function main(): Promise<void> {
         problems: problemNotifier.snapshot(),
         metrics: { ...metricsCollector.stats },
         alerts: { ...alertScheduler.stats },
+        supporterRoles: supporterRoles ? { ...supporterRoles.stats } : { enabled: false },
       };
     },
   });
@@ -930,6 +1007,8 @@ async function main(): Promise<void> {
     disposeGuildIdentity,
     billingReconciler,
     backupScheduler,
+    supporterRoles,
+    disposeSupporterSync,
     metricsCollector,
     alertScheduler,
     entitlementGate,
@@ -943,6 +1022,13 @@ async function main(): Promise<void> {
     await backupScheduler.hydrate();
     backupScheduler.start();
   }
+  /**
+   * Arms the daily timer and the `guildMemberAdd` listener. The boot reconcile
+   * on `clientReady` is deliberately NOT gated on this: it has to run whether
+   * or not the guild is already available, and it is short enough that the
+   * drain awaiting it is not a risk worth reordering boot for.
+   */
+  supporterRoles?.start();
   /**
    * Started after the drain handler for the same reason as the backup scheduler:
    * the drain performs a final flush, and a collector ticking before that handler

@@ -135,6 +135,20 @@ export const RUNTIME_FLAGS = {
    * poster is built first must check it before posting.
    */
   MARKETING_PAUSED: 'marketing.paused',
+
+  // -- Supporter roles (plans/monetization.md section 13) ---------------------
+  /**
+   * Kill-switch for supporter-role assignment in the support guild, on THIS
+   * fleet.
+   *
+   * Worth having as a flag rather than a redeploy for the same reason
+   * `problems.notify_disabled` is: this writes something other people can see,
+   * in a server full of customers, and "it is badging the wrong people" is not
+   * visible from inside the fleet. Set it and the roles freeze exactly as they
+   * are -- nothing is stripped, because a mass unbadging is a louder event than
+   * whatever prompted the switch. `global.pause` stops it too.
+   */
+  SUPPORT_ROLES_DISABLED: 'support.roles_disabled',
 } as const;
 
 /** Defaults for the AI levers, kept next to the keys so bot + tooling agree. */
