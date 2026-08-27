@@ -129,10 +129,14 @@ export const RUNTIME_FLAGS = {
    * an auto-posted release note landing in the middle of that reads very
    * differently than it would on an ordinary day.
    *
-   * Not wired to anything yet: no automated marketing poster exists in this
-   * codebase as of this flag's addition (`plans/roadmap.html`'s top.gg /
-   * discordbotlist and content-generator items are both unbuilt). Whichever
-   * poster is built first must check it before posting.
+   * **Live, and read by `TopggScheduler`**, which publishes the listing's
+   * server count and command list. Setting this freezes the published count,
+   * which is stale rather than wrong, so leaving it set is the failure mode to
+   * watch for: `/diagnostics` reports it as its own field for that reason.
+   *
+   * Any future poster (release notes, a top.gg announcement, anything social)
+   * must check it too. A silent counter is the weakest case for honouring it
+   * and it honours it anyway, so there is no precedent here for skipping it.
    */
   MARKETING_PAUSED: 'marketing.paused',
   /**

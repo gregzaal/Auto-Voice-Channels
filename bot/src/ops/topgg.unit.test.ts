@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildCommandDefinitions } from '../commands/definitions.js';
-import { TopggClient, toTopggCommands, type TopggApiError } from './topgg.js';
+import { TopggClient, isPermanentTopggFailure, toTopggCommands } from './topgg.js';
 
 /** A Response stand-in. `fetch`'s own type is more than these tests need. */
 function reply(status: number, body = '', headers: Record<string, string> = {}): Response {
@@ -156,7 +156,9 @@ describe('toTopggCommands', () => {
     const source = buildCommandDefinitions({ includeAssistant: true, includeDebug: true });
     const mapped = toTopggCommands(source);
     expect(mapped).toHaveLength(source.length);
-    expect(mapped.length).toBeGreaterThan(20);
+    // A floor close to the real count, so deleting a couple of commands fails
+    // here instead of quietly shrinking the published list.
+    expect(mapped.length).toBeGreaterThanOrEqual(22);
 
     const allowedCommandKeys = new Set([
       'type',
@@ -189,6 +191,18 @@ describe('toTopggCommands', () => {
       expect(command.name).toMatch(/^[\w-]+$/);
       expect(command.description.length).toBeGreaterThan(0);
       walk(command.options);
+    }
+  });
+});
+
+describe('isPermanentTopggFailure', () => {
+  it('names the statuses a retry cannot fix', () => {
+    for (const status of [401, 403, 404]) expect(isPermanentTopggFailure(status)).toBe(true);
+  });
+
+  it('leaves transient and success statuses alone', () => {
+    for (const status of [0, 204, 400, 422, 429, 500, 502]) {
+      expect(isPermanentTopggFailure(status)).toBe(false);
     }
   });
 });
@@ -242,23 +256,69 @@ describe('TopggClient', () => {
       token: 'tok',
       fetchFn: (() => Promise.resolve(reply(422, 'x'.repeat(1000)))) as unknown as typeof fetch,
     });
-    await expect(client.postMetrics({ serverCount: 1, shardCount: 1 })).rejects.toMatchObject({
-      status: 422,
-      retryAfterMs: null,
-    });
-    await client.postMetrics({ serverCount: 1, shardCount: 1 }).catch((err: TopggApiError) => {
-      expect(err.message.length).toBeLessThan(400);
-    });
+    // Asserted on the rejection value rather than inside a `.catch`, whose
+    // body would silently never run if the call ever resolved.
+    const err = await client.postMetrics({ serverCount: 1, shardCount: 1 }).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).toMatchObject({ status: 422, retryAfterMs: null });
+    expect((err as Error).message.length).toBeLessThan(400);
   });
 
-  it('reports a transport failure as status 0, not as an HTTP answer', async () => {
+  it('sends an explicit user-agent, since node defaults to the bare string node', async () => {
+    const calls: RequestInit[] = [];
     const client = new TopggClient({
       token: 'tok',
-      fetchFn: (() =>
-        Promise.reject(new Error('getaddrinfo ENOTFOUND'))) as unknown as typeof fetch,
+      fetchFn: ((_url: string, init: RequestInit) => {
+        calls.push(init);
+        return Promise.resolve(reply(204));
+      }) as unknown as typeof fetch,
     });
-    await expect(client.postMetrics({ serverCount: 1, shardCount: 1 })).rejects.toMatchObject({
-      status: 0,
+    await client.postMetrics({ serverCount: 1, shardCount: 1 });
+    expect((calls[0]?.headers as Record<string, string>)['user-agent']).toMatch(/auto-voice\.io/);
+  });
+
+  describe('a transport failure', () => {
+    it('is status 0, not an HTTP answer', async () => {
+      const client = new TopggClient({
+        token: 'tok',
+        fetchFn: (() => Promise.reject(new TypeError('fetch failed'))) as unknown as typeof fetch,
+      });
+      await expect(client.postMetrics({ serverCount: 1, shardCount: 1 })).rejects.toMatchObject({
+        status: 0,
+      });
+    });
+
+    /**
+     * The real shape, not a hand-made Error. Node's `fetch` rejects every
+     * transport failure as `TypeError: fetch failed` and hides the reason in
+     * `cause`, so a message built from `err.message` alone is the entire
+     * diagnostic content of a failure nobody can reproduce on demand.
+     */
+    it('carries the reason out of cause, where node hides it', async () => {
+      const real = new TypeError('fetch failed');
+      (real as { cause?: unknown }).cause = new Error('getaddrinfo ENOTFOUND top.gg');
+      const client = new TopggClient({
+        token: 'tok',
+        fetchFn: (() => Promise.reject(real)) as unknown as typeof fetch,
+      });
+      const err = await client
+        .postMetrics({ serverCount: 1, shardCount: 1 })
+        .catch((e: Error) => e);
+      expect((err as Error).message).toContain('fetch failed');
+      expect((err as Error).message).toContain('ENOTFOUND');
+    });
+
+    it('does not repeat a reason already present in the message', async () => {
+      const real = new TypeError('boom');
+      (real as { cause?: unknown }).cause = new Error('boom');
+      const client = new TopggClient({
+        token: 'tok',
+        fetchFn: (() => Promise.reject(real)) as unknown as typeof fetch,
+      });
+      const err = await client
+        .postMetrics({ serverCount: 1, shardCount: 1 })
+        .catch((e: Error) => e);
+      expect((err as Error).message).not.toMatch(/boom.*boom/);
     });
   });
 
@@ -288,6 +348,15 @@ describe('TopggClient', () => {
       await expect(
         rateLimited('{"retry-after": 3600}').postMetrics({ serverCount: 1, shardCount: 1 }),
       ).rejects.toMatchObject({ retryAfterMs: 3_600_000 });
+    });
+
+    it('clamps an absurd Retry-After rather than parking for a day', async () => {
+      await expect(
+        rateLimited('{}', { 'retry-after': '86400' }).postMetrics({
+          serverCount: 1,
+          shardCount: 1,
+        }),
+      ).rejects.toMatchObject({ retryAfterMs: 2 * 3_600_000 });
     });
 
     it('defaults to an hour rather than to zero when the body says nothing', async () => {

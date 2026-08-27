@@ -714,6 +714,12 @@ async function main(): Promise<void> {
          * guild and is not part of the product.
          */
         commands: () => buildCommandDefinitions({ includeAssistant: Boolean(assistant) }),
+        /**
+         * Only for a failure that will not fix itself. A stale listing is not
+         * worth a message; a rejected token retries forever and changes
+         * nothing, so it has to reach a human.
+         */
+        report: (kind, message, context) => errorReporter.report(kind, message, context),
       })
     : undefined;
 

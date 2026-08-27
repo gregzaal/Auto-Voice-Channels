@@ -143,11 +143,14 @@ function toOption(raw: unknown, path: string): TopggCommandOption {
  * Projects Discord's command JSON onto what top.gg documents.
  *
  * Two jobs. It rewrites the numeric enums as named ones (see above), and it
- * drops every field top.gg has no property for: `default_member_permissions`,
- * `dm_permission`, `contexts`, `integration_types`, `min_value`/`max_value`,
- * `channel_types`, `autocomplete`. Those are Discord's permission and
- * behaviour plumbing, meaningless on a listing page, and sending them means
- * relying on an undocumented `additionalProperties` staying permissive.
+ * keeps only the properties top.gg documents, so everything else is dropped by
+ * construction rather than by a list that has to be maintained. What that
+ * currently discards from the real command set: `default_member_permissions`,
+ * `default_permission`, `dm_permission`, `contexts`, `integration_types`,
+ * `min_value`/`max_value`, `min_length`/`max_length`, `channel_types` and
+ * `autocomplete`. Those are Discord's permission and behaviour plumbing,
+ * meaningless on a listing page, and sending them would mean relying on an
+ * undocumented `additionalProperties` staying permissive.
  *
  * `name_localizations` and `description_localizations` are carried through, so
  * a translated command surface reaches the listing the day we have one without
@@ -194,8 +197,11 @@ export function toTopggCommands(
  * A failed top.gg call, carrying the status so a caller can tell a rate limit
  * from a bad token.
  *
- * `status` is 0 for a transport failure (DNS, timeout, connection reset), which
- * is a different thing from any HTTP answer and must not be mistaken for one.
+ * `status` is 0 for a transport failure, which is a different thing from any
+ * HTTP answer and must not be mistaken for one. It does NOT tell you which
+ * transport failure: Node's `fetch` rejects every one of them as
+ * `TypeError: fetch failed` and puts the real reason in `cause`, so the message
+ * carries that (see {@link describeFetchFailure}) and the status does not.
  */
 export class TopggApiError extends Error {
   constructor(
@@ -228,6 +234,39 @@ const MAX_ERROR_BODY = 300;
  * long only costs a stale counter. An hour matches the documented penalty.
  */
 const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 3_600_000;
+
+/**
+ * The longest a `Retry-After` may park the publisher.
+ *
+ * The documented penalty is an hour, so anything beyond two is a proxy or a
+ * policy we did not expect, and honouring it verbatim would take the listing
+ * out for that long with a process restart as the only way back. Bounding the
+ * upside matters as much as defaulting the downside.
+ */
+const MAX_RATE_LIMIT_COOLDOWN_MS = 2 * 3_600_000;
+
+/**
+ * Identifies us to top.gg. Vague on purpose about the version, which is not
+ * worth a build-time injection here.
+ */
+const USER_AGENT = 'AutoVoiceChannels (+https://auto-voice.io)';
+
+/**
+ * What actually went wrong at the transport level.
+ *
+ * Node's `fetch` rejects every transport failure as `TypeError: fetch failed`
+ * and puts the reason in `cause`, so a message built from `err.message` alone
+ * says "fetch failed" and nothing else. That is the whole diagnostic content of
+ * a failure nobody can reproduce on demand.
+ */
+function describeFetchFailure(err: unknown): string {
+  const error = err as { message?: string; cause?: unknown };
+  const cause = error?.cause;
+  const causeMessage =
+    cause instanceof Error ? cause.message : typeof cause === 'string' ? cause : '';
+  const base = error?.message ?? String(err);
+  return causeMessage && !base.includes(causeMessage) ? `${base} (${causeMessage})` : base;
+}
 
 export class TopggClient {
   private readonly fetchFn: typeof fetch;
@@ -268,16 +307,24 @@ export class TopggClient {
         headers: {
           authorization: `Bearer ${this.deps.token}`,
           'content-type': 'application/json',
+          /**
+           * An explicit agent, because the default is the bare string `node`.
+           * A generic agent is the kind of thing an API behind a WAF refuses,
+           * and it would refuse it in production only: every test here injects
+           * `fetch`, so nothing local would ever see it.
+           */
+          'user-agent': USER_AGENT,
         },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (err) {
       /**
-       * The message names the method and path and nothing else. It reaches logs
-       * and `/diagnostics`, and the request itself carries the token.
+       * The message names the method and path, plus the transport reason. It
+       * reaches logs and `/diagnostics`, and never the request, which carries
+       * the token.
        */
-      throw new TopggApiError(0, `${method} ${path}: ${(err as Error).message}`);
+      throw new TopggApiError(0, `${method} ${path}: ${describeFetchFailure(err)}`);
     }
     if (res.ok) return;
 
@@ -306,14 +353,26 @@ export class TopggClient {
  * into an outage of this feature.
  */
 function retryAfter(res: Response, body: string): number {
+  const clamp = (ms: number): number => Math.min(ms, MAX_RATE_LIMIT_COOLDOWN_MS);
   const header = Number(res.headers.get('retry-after'));
-  if (Number.isFinite(header) && header > 0) return header * 1000;
+  if (Number.isFinite(header) && header > 0) return clamp(header * 1000);
   try {
     const parsed = JSON.parse(body) as Record<string, unknown>;
     const seconds = Number(parsed['retry-after'] ?? parsed.retry_after);
-    if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
+    if (Number.isFinite(seconds) && seconds > 0) return clamp(seconds * 1000);
   } catch {
     // Not JSON. The default below is the safe answer.
   }
   return DEFAULT_RATE_LIMIT_COOLDOWN_MS;
+}
+
+/**
+ * Is this a status that will keep failing until a human changes something?
+ *
+ * A bad or revoked token (401/403) and a project that no longer exists (404, a
+ * documented response here) are not transient, so retrying them on a timer for
+ * weeks is the shape of a feature that looks switched on and is not.
+ */
+export function isPermanentTopggFailure(status: number): boolean {
+  return status === 401 || status === 403 || status === 404;
 }

@@ -16,9 +16,12 @@ interface Harness {
   postMetrics: ReturnType<typeof vi.fn>;
   putCommands: ReturnType<typeof vi.fn>;
   countPresent: ReturnType<typeof vi.fn>;
+  report: ReturnType<typeof vi.fn>;
   flags: Record<string, unknown>;
   clock: { now: number };
   owns: { value: boolean };
+  timers: { handler: () => void; ms: number }[];
+  cleared: unknown[];
 }
 
 function harness(overrides: Partial<TopggSchedulerDeps> = {}): Harness {
@@ -28,6 +31,11 @@ function harness(overrides: Partial<TopggSchedulerDeps> = {}): Harness {
   const postMetrics = vi.fn(() => Promise.resolve());
   const putCommands = vi.fn(() => Promise.resolve());
   const countPresent = vi.fn(() => Promise.resolve(5556));
+  const report = vi.fn();
+  // Records what `start()` actually scheduled, so the timer wiring is testable
+  // rather than merely stubbed out.
+  const timers: { handler: () => void; ms: number }[] = [];
+  const cleared: unknown[] = [];
 
   const scheduler = new TopggScheduler({
     client: { postMetrics, putCommands } as unknown as TopggClient,
@@ -37,14 +45,32 @@ function harness(overrides: Partial<TopggSchedulerDeps> = {}): Harness {
     totalShards: 4,
     ownsListing: () => owns.value,
     commands: () => [{ name: 'ping', description: 'Pong.', type: 1 } as never],
-    // Never actually schedule: every test drives `tick()` directly.
-    setIntervalFn: (() => 0) as unknown as typeof setInterval,
-    clearIntervalFn: (() => undefined) as unknown as typeof clearInterval,
+    report,
+    setIntervalFn: ((handler: () => void, ms: number) => {
+      timers.push({ handler, ms });
+      // A deliberate 0, which is a legal handle and the one a truthiness check
+      // on `this.timer` would mistake for "not started".
+      return 0;
+    }) as unknown as typeof setInterval,
+    clearIntervalFn: ((handle: unknown) => {
+      cleared.push(handle);
+    }) as unknown as typeof clearInterval,
     now: () => clock.now,
     ...overrides,
   });
 
-  return { scheduler, postMetrics, putCommands, countPresent, flags, clock, owns };
+  return {
+    scheduler,
+    postMetrics,
+    putCommands,
+    countPresent,
+    report,
+    flags,
+    clock,
+    owns,
+    timers,
+    cleared,
+  };
 }
 
 describe('TopggScheduler', () => {
@@ -258,11 +284,153 @@ describe('TopggScheduler', () => {
     expect(h.countPresent).toHaveBeenCalledTimes(1);
   });
 
-  it('awaits an in-flight publish on stop and then stays quiet', async () => {
+  describe('start and stop', () => {
+    /**
+     * The behaviour finding 2 of the review turned on, so it gets a test rather
+     * than a comment. An immediate tick would read the presence table before
+     * this boot's `clientReady` had written it.
+     */
+    it('does not publish on start, only on the interval', async () => {
+      const h = harness();
+      h.scheduler.start();
+      expect(h.postMetrics).not.toHaveBeenCalled();
+      expect(h.countPresent).not.toHaveBeenCalled();
+      expect(h.timers).toHaveLength(1);
+      expect(h.timers[0]?.ms).toBe(15 * 60_000);
+      expect(h.scheduler.stats.running).toBe(true);
+
+      h.timers[0]?.handler();
+      await vi.waitFor(() => expect(h.postMetrics).toHaveBeenCalledTimes(1));
+    });
+
+    it('does not start twice, even though the handle is a falsy 0', () => {
+      const h = harness();
+      h.scheduler.start();
+      h.scheduler.start();
+      expect(h.timers).toHaveLength(1);
+    });
+
+    it('clears the timer on stop and reports itself stopped', async () => {
+      const h = harness();
+      h.scheduler.start();
+      await h.scheduler.stop();
+      expect(h.cleared).toEqual([0]);
+      expect(h.scheduler.stats.running).toBe(false);
+    });
+
+    it('can be restarted, rather than every later tick being a silent no-op', async () => {
+      const h = harness();
+      h.scheduler.start();
+      await h.scheduler.stop();
+      h.scheduler.start();
+      await h.scheduler.tick();
+      expect(h.postMetrics).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * Stop must NOT wait for the network. It sits ahead of the gateway teardown
+     * and the shard-lease release in the drain, and Fly's kill timeout is not
+     * generous.
+     */
+    it('abandons an in-flight publish instead of awaiting it', async () => {
+      const h = harness();
+      let release: (count: number) => void = () => {};
+      h.countPresent.mockImplementation(
+        () =>
+          new Promise<number>((resolve) => {
+            release = resolve;
+          }),
+      );
+      const tick = h.scheduler.tick();
+      await vi.waitFor(() => expect(h.countPresent).toHaveBeenCalledTimes(1));
+
+      let stopped = false;
+      await h.scheduler.stop().then(() => {
+        stopped = true;
+      });
+      expect(stopped).toBe(true);
+      expect(h.postMetrics).not.toHaveBeenCalled();
+
+      release(10);
+      await tick;
+    });
+
+    it('stays quiet after stop', async () => {
+      const h = harness();
+      await h.scheduler.stop();
+      await h.scheduler.tick();
+      expect(h.postMetrics).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('a failure that will not fix itself', () => {
+    for (const status of [401, 403, 404]) {
+      it(`reports HTTP ${status} to a human, once`, async () => {
+        const h = harness();
+        h.postMetrics.mockRejectedValue(new TopggApiError(status, `HTTP ${status}`));
+        await h.scheduler.tick();
+        h.clock.now += 20 * 60_000;
+        await h.scheduler.tick();
+
+        expect(h.postMetrics).toHaveBeenCalledTimes(2);
+        expect(h.report).toHaveBeenCalledTimes(1);
+        expect(String(h.report.mock.calls[0]?.[1])).toMatch(/TOPGG_TOKEN/);
+        expect(h.scheduler.stats.permanentFailure).toBe(true);
+      });
+    }
+
+    it('does not report an ordinary server error', async () => {
+      const h = harness();
+      h.postMetrics.mockRejectedValue(new TopggApiError(502, 'HTTP 502'));
+      await h.scheduler.tick();
+      expect(h.report).not.toHaveBeenCalled();
+      expect(h.scheduler.stats.permanentFailure).toBe(false);
+    });
+
+    it('clears the flag once a call succeeds', async () => {
+      const h = harness();
+      h.postMetrics.mockRejectedValueOnce(new TopggApiError(403, 'HTTP 403'));
+      await h.scheduler.tick();
+      expect(h.scheduler.stats.permanentFailure).toBe(true);
+      h.clock.now += 20 * 60_000;
+      await h.scheduler.tick();
+      expect(h.scheduler.stats.permanentFailure).toBe(false);
+    });
+
+    it('works with no reporter wired, which is the self-host shape', async () => {
+      const h = harness({ report: undefined });
+      h.postMetrics.mockRejectedValue(new TopggApiError(401, 'HTTP 401'));
+      await expect(h.scheduler.tick()).resolves.toBeUndefined();
+      expect(h.scheduler.stats.permanentFailure).toBe(true);
+    });
+  });
+
+  it('clears a stale rate-limit stand-down once a call succeeds', async () => {
     const h = harness();
-    await h.scheduler.stop();
+    h.postMetrics.mockRejectedValueOnce(new TopggApiError(429, 'rate limited', 60_000));
     await h.scheduler.tick();
-    expect(h.postMetrics).not.toHaveBeenCalled();
+    expect(h.scheduler.stats.blockedUntil).not.toBeNull();
+    h.clock.now += 2 * 60_000;
+    await h.scheduler.tick();
+    expect(h.scheduler.stats.blockedUntil).toBeNull();
+  });
+
+  /**
+   * `tick()` is called as `void this.tick()`, so it must never reject. And
+   * `stats` must never throw either: `/diagnostics` builds its whole report
+   * from these getters, so one throwing would take out every other subsystem's
+   * report along with this one.
+   */
+  it('neither tick nor stats throws when a dependency does', async () => {
+    const h = harness({
+      ownsListing: () => {
+        throw new Error('lease manager exploded');
+      },
+    });
+    await expect(h.scheduler.tick()).resolves.toBeUndefined();
+    expect(() => h.scheduler.stats).not.toThrow();
+    expect(h.scheduler.stats.ownsListing).toBe(false);
+    expect(h.scheduler.stats.lastError).toMatch(/exploded/);
   });
 
   it('reports itself as configured, since existing is the configuration', () => {

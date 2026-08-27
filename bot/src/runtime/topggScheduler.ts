@@ -5,7 +5,12 @@ import {
   type RuntimeFlagsRepository,
 } from '@avc/core';
 import type { RESTPostAPIApplicationCommandsJSONBody } from 'discord.js';
-import { TopggApiError, toTopggCommands, type TopggClient } from '../ops/topgg.js';
+import {
+  TopggApiError,
+  isPermanentTopggFailure,
+  toTopggCommands,
+  type TopggClient,
+} from '../ops/topgg.js';
 
 /**
  * Keeps the top.gg listing's server count and command list current
@@ -22,9 +27,18 @@ import { TopggApiError, toTopggCommands, type TopggClient } from '../ops/topgg.j
  * reservation advances its durable timestamp when it is GRANTED, so a failed
  * post consumes the window and cannot be retried until the next one. Shard 0 is
  * claimed first by construction (`ShardLeaseRepository.claimAvailable`), so it
- * names exactly one instance, needs no round trip, and lets a failure retry on
- * the next tick. It is also the same gate global command registration already
- * uses, so one instance owns every outward-facing publication.
+ * needs no round trip and lets a failure retry on the next tick. It is also the
+ * same gate global command registration already uses, so one instance owns
+ * every outward-facing publication.
+ *
+ * It is **one instance in the steady state, not exactly one always.** Shard 0
+ * moves between machines across a deploy, and an instance whose lease heartbeat
+ * is failing keeps its `ownedShards` while a booting peer legitimately claims
+ * the same shard (`plans/scaling.md` §6.1). So two machines can publish in the
+ * same window. That is harmless here and is why this gate is enough: both calls
+ * are idempotent, both read the same number from the same database, and two
+ * requests is nothing against a 100-per-second limit. Do not read the gate as a
+ * mutual exclusion guarantee for anything where it would matter.
  *
  * Enabled purely by `TOPGG_TOKEN` being configured, so self-host and any fleet
  * without the secret never post. That matters more than it looks: `@me`
@@ -42,9 +56,22 @@ export interface TopggSchedulerDeps {
    *
    * Prod is four shards over four machines, so this instance's gateway cache
    * holds roughly a quarter of the install base. Publishing that would replace
-   * "0 servers" with a plausible-looking number that is wrong by a factor of
-   * four, which is worse than the zero it replaced. The presence table is the
-   * fleet-wide truth and is what `/api/watch` and the metric store already use.
+   * "0 servers" with a plausible-looking number wrong by a factor of four,
+   * which is worse than the zero it replaced. This table is fleet-wide, and it
+   * is the same source the `guilds.present` metric is derived from
+   * (`MetricsRepository`'s derived-gauge sweep). It is NOT what `/api/watch`
+   * reads, and `guilds.installed` is a different number off the shared
+   * `guilds.bot_removed_at` column, which nothing new should read.
+   *
+   * **Known to over-count slightly, and there is no better source.** On a
+   * sharded fleet the hourly presence sync can only ever widen: narrowing needs
+   * an instance that holds every shard, because for a partial-shard instance
+   * "not in my cache" does not mean "not in the guild" (`syncPresence` in
+   * `index.ts`, and `reconcilePresence`'s own doc). So removals rely on the
+   * live `guildDelete`, and one missed while a process was down is never
+   * corrected. The error is small and one-directional. Every alternative is
+   * worse, so this publishes the best number available and does not pretend it
+   * is exact.
    */
   presence: GuildFleetPresenceRepository;
   logger: Logger;
@@ -65,6 +92,17 @@ export interface TopggSchedulerDeps {
    * gets.
    */
   commands: () => readonly RESTPostAPIApplicationCommandsJSONBody[];
+  /**
+   * Reports a failure that will not fix itself, ONCE.
+   *
+   * Everything else here is deliberately log-only: a listing a few hours stale
+   * is not worth a notification. A rejected token is a different thing wearing
+   * the same shape. It retries forever, changes nothing, has no alert condition
+   * and no `/api/watch` check, so the end state is exactly the abandoned-looking
+   * listing this exists to remove, discoverable only by someone opening
+   * `/diagnostics` for a feature nobody is watching.
+   */
+  report?: ((kind: string, message: string, context: Record<string, unknown>) => void) | undefined;
   intervalMs?: number;
   postIntervalMs?: number;
   setIntervalFn?: typeof setInterval;
@@ -90,6 +128,12 @@ export interface TopggSchedulerStats {
   lastError: string | null;
   /** Set by a 429. Nothing is attempted until it passes. */
   blockedUntil: string | null;
+  /**
+   * True once a status that will not fix itself has been seen (401/403/404).
+   * Read this before anything else when the listing is not updating: it means
+   * the token or the project is wrong, not that the job is unhealthy.
+   */
+  permanentFailure: boolean;
   commandsSyncedAt: string | null;
   commandCount: number | null;
   lastCommandError: string | null;
@@ -102,11 +146,12 @@ export interface TopggSchedulerStats {
 const DEFAULT_INTERVAL_MS = 15 * 60_000;
 
 /**
- * How stale the published count is allowed to get.
+ * The minimum gap between two published counts.
  *
- * Under an hour so the count moves visibly on the listing, and nowhere near any
- * documented limit: top.gg allows 100 requests a second, and this is 24 calls a
- * day from one instance.
+ * Slightly under an hour so that it lands on the hourly tick rather than
+ * skipping to the next one, which makes the real cadence about 60 minutes, and
+ * 75 if a tick is missed. Nowhere near any documented limit: top.gg allows 100
+ * requests a second, and this is roughly 24 calls a day from one instance.
  */
 const DEFAULT_POST_INTERVAL_MS = 55 * 60_000;
 
@@ -125,6 +170,9 @@ export class TopggScheduler {
   private commandsSyncedAt: Date | null = null;
   private commandCount: number | null = null;
   private lastCommandError: string | null = null;
+  private permanentFailure = false;
+  /** So a token nobody has fixed is reported once, not every quarter of an hour. */
+  private reportedPermanentFailure = false;
 
   private readonly intervalMs: number;
   private readonly postIntervalMs: number;
@@ -148,38 +196,77 @@ export class TopggScheduler {
     this.timer = this.setIntervalFn(() => void this.tick(), this.intervalMs);
     (this.timer as { unref?: () => void }).unref?.();
     /**
-     * One tick immediately, so a deploy that changed the command list publishes
-     * it now rather than up to a quarter of an hour later. Safe to do on every
-     * boot: the post interval is in-process, so the first tick after a restart
-     * does post, and four posts on a four-machine rolling deploy is still one
-     * post, because only shard 0's instance publishes.
+     * **Deliberately no immediate tick**, unlike `AlertScheduler`.
+     *
+     * `start()` runs after `client.login()` but the fleet's presence rows are
+     * written from the `clientReady` handler, which takes seconds on a
+     * thousand-guild shard while a tick takes one flag read and one count. So
+     * an immediate tick reads the presence table BEFORE this boot has touched
+     * it. On an established fleet that is harmless (the previous run's rows are
+     * complete and durable), but on a fleet whose rows are incomplete -- a
+     * first-ever boot, a new fleet, a machine crash-looping faster than the
+     * post interval it keeps in memory -- it would publish a fraction of the
+     * install base. A fraction is non-zero, so the zero-guard does not catch
+     * it, and it sits on a public listing for an hour.
+     *
+     * Waiting one interval costs a deploy's command-list change appearing up to
+     * a quarter of an hour late, on a page measured in days.
      */
-    void this.tick();
   }
 
-  async stop(): Promise<void> {
+  /**
+   * Synchronous in effect: the timer stops and an in-flight publish is
+   * ABANDONED rather than awaited.
+   *
+   * This sits near the front of the drain, ahead of the per-guild queues, the
+   * gateway teardown and `leaseManager.releaseAll()`. Awaiting would put up to
+   * two ten-second network waits there, and exactly when the timeout matters
+   * (top.gg hanging) the machine would be SIGKILLed before it released its
+   * leases, leaving its replacement to wait out the 30s lease TTL.
+   *
+   * Nothing is lost by abandoning it. Both calls are idempotent, the count is
+   * the same one the replacement will send, and no local state depends on the
+   * result. The rejection handler is attached, not awaited, so an abandoned
+   * request cannot surface as an unhandled rejection.
+   */
+  stop(): Promise<void> {
     this.stopping = true;
-    if (this.timer) this.clearIntervalFn(this.timer);
+    // `!== undefined` for the same reason `start()` uses it: a handle can
+    // legitimately be 0, and a truthiness check would then never clear it.
+    if (this.timer !== undefined) this.clearIntervalFn(this.timer);
     this.timer = undefined;
-    // No final publish on the way out. Draining means going away, and the count
-    // this instance would send is the same one its replacement will.
-    if (this.inFlight) await this.inFlight.catch(() => {});
+    this.inFlight?.catch(() => {});
+    return Promise.resolve();
   }
 
   get stats(): TopggSchedulerStats {
     const flags = this.cachedFlags ?? {};
+    /**
+     * Nothing in here may throw. `/diagnostics` builds its whole report from
+     * these getters, so one throwing turns a stale listing counter into a dead
+     * diagnostics endpoint for every other subsystem too, which is the
+     * escalation the per-feature isolation exists to prevent.
+     */
+    let owns = false;
+    try {
+      owns = this.deps.ownsListing();
+    } catch {
+      // Reported as not publishing, which is the truthful answer when we cannot
+      // find out. The tick logs the real error.
+    }
     return {
       configured: true,
       running: this.timer !== undefined,
       paused: flags[RUNTIME_FLAGS.GLOBAL_PAUSE] === true,
       disabled: flags[RUNTIME_FLAGS.TOPGG_DISABLED] === true,
       marketingPaused: flags[RUNTIME_FLAGS.MARKETING_PAUSED] === true,
-      ownsListing: this.deps.ownsListing(),
+      ownsListing: owns,
       lastTickAt: this.lastTickAt?.toISOString() ?? null,
       lastPostAt: this.lastPostAt?.toISOString() ?? null,
       lastServerCount: this.lastServerCount,
       lastError: this.lastError,
       blockedUntil: this.blockedUntil?.toISOString() ?? null,
+      permanentFailure: this.permanentFailure,
       commandsSyncedAt: this.commandsSyncedAt?.toISOString() ?? null,
       commandCount: this.commandCount,
       lastCommandError: this.lastCommandError,
@@ -189,11 +276,23 @@ export class TopggScheduler {
   async tick(): Promise<void> {
     if (this.stopping || this.ticking) return;
     this.ticking = true;
-    this.inFlight = this.runTick().finally(() => {
-      this.ticking = false;
-      this.inFlight = undefined;
-      this.lastTickAt = new Date(this.now());
-    });
+    this.inFlight = this.runTick()
+      /**
+       * Swallowed here, not by the caller. The timer calls this as
+       * `void this.tick()`, and `stop()` no longer awaits, so anything escaping
+       * `runTick` would become an unhandled rejection. Both publish paths catch
+       * their own failures, which makes this the backstop for the parts that
+       * are not supposed to throw at all.
+       */
+      .catch((err: unknown) => {
+        this.lastError = (err as Error).message;
+        this.deps.logger.error({ err }, 'top.gg: tick failed unexpectedly');
+      })
+      .finally(() => {
+        this.ticking = false;
+        this.inFlight = undefined;
+        this.lastTickAt = new Date(this.now());
+      });
     await this.inFlight;
   }
 
@@ -282,7 +381,7 @@ export class TopggScheduler {
       await this.deps.client.postMetrics({ serverCount, shardCount: this.deps.totalShards });
       this.lastPostAt = new Date(this.now());
       this.lastServerCount = serverCount;
-      this.lastError = null;
+      this.succeeded();
       this.deps.logger.info(
         { serverCount, shardCount: this.deps.totalShards },
         'top.gg: published metrics',
@@ -318,6 +417,7 @@ export class TopggScheduler {
       this.commandsSyncedAt = new Date(this.now());
       this.commandCount = body.length;
       this.lastCommandError = null;
+      this.blockedUntil = null;
       this.deps.logger.info({ count: body.length }, 'top.gg: published command list');
     } catch (err) {
       this.lastCommandError = (err as Error).message;
@@ -327,9 +427,21 @@ export class TopggScheduler {
   }
 
   /**
-   * Records a failed call. Never reported to the admin channel: a listing that
-   * is a few hours stale is not worth a notification, and this is visible on
-   * `/diagnostics` where somebody looking at the listing would check.
+   * A call went through. Clears the stand-down as well as the error.
+   *
+   * Without clearing `blockedUntil`, a rate limit that has since expired stays
+   * on `/diagnostics` looking like the current state forever.
+   */
+  private succeeded(): void {
+    this.lastError = null;
+    this.blockedUntil = null;
+    this.permanentFailure = false;
+  }
+
+  /**
+   * Records a failed call. A transient failure is log-only: a listing a few
+   * hours stale is not worth a notification, and it is on `/diagnostics` where
+   * anyone asking about the listing would look.
    */
   private record(err: unknown, what: string): void {
     this.lastError = (err as Error).message;
@@ -338,18 +450,32 @@ export class TopggScheduler {
   }
 
   /**
-   * Honours a 429 by standing down for as long as it asked.
+   * Honours a 429 by standing down for as long as it asked, and escalates a
+   * failure that will not fix itself.
    *
-   * top.gg answers a breach by blocking the token for an hour, so retrying on
-   * the normal interval would keep the block alive rather than wait it out.
+   * top.gg answers a rate-limit breach by blocking the token for an hour, so
+   * retrying on the normal interval would keep the block alive rather than wait
+   * it out. A 401/403/404 is the opposite problem: retrying is free and
+   * pointless, and the only thing that helps is somebody being told.
    */
   private recordBlock(err: unknown): void {
-    if (err instanceof TopggApiError && err.retryAfterMs !== null) {
+    if (!(err instanceof TopggApiError)) return;
+    if (err.retryAfterMs !== null) {
       this.blockedUntil = new Date(this.now() + err.retryAfterMs);
       this.deps.logger.warn(
         { until: this.blockedUntil.toISOString() },
         'top.gg: rate limited, standing down',
       );
     }
+    if (!isPermanentTopggFailure(err.status)) return;
+    this.permanentFailure = true;
+    if (this.reportedPermanentFailure) return;
+    this.reportedPermanentFailure = true;
+    this.deps.report?.(
+      'topgg.rejected',
+      `top.gg rejected the listing update with HTTP ${err.status}. The listing will stop updating ` +
+        'until TOPGG_TOKEN is fixed or cleared. Nothing else is affected.',
+      { status: err.status },
+    );
   }
 }

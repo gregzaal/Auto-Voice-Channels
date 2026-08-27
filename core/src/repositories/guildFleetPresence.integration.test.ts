@@ -96,10 +96,11 @@ describe('GuildFleetPresenceRepository (integration)', () => {
       await prod.markPresent(C);
       await prod.markRemoved(C);
       await beta.markPresent(A);
-      await beta.markPresent(B);
 
+      // Deliberately different totals. Equal ones would let an inverted fleet
+      // filter pass.
       expect(await prod.countPresent()).toBe(2);
-      expect(await beta.countPresent()).toBe(2);
+      expect(await beta.countPresent()).toBe(1);
     });
 
     it('is zero on an empty table rather than throwing or returning null', async () => {
@@ -109,7 +110,11 @@ describe('GuildFleetPresenceRepository (integration)', () => {
     it('agrees with presentGuildIds', async () => {
       await prod.markPresent(A);
       await prod.markPresent(B);
+      await prod.markPresent(C);
+      await prod.markRemoved(B);
+      await beta.markPresent(A);
       expect(await prod.countPresent()).toBe((await prod.presentGuildIds()).size);
+      expect(await prod.countPresent()).toBe(2);
     });
 
     /** `count(*)::int` must come back a number, not the string pg sends for bigint. */
