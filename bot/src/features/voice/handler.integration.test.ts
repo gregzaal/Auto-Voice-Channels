@@ -997,6 +997,27 @@ describe('VoiceFeature (integration)', () => {
       await expect(f.handleChannelDeleted(GUILD, ADOPTED)).resolves.toBeUndefined();
     });
 
+    /**
+     * The primaries branch. Without it a deleted creator channel left an
+     * `auto_channels` row that nothing anywhere removed, so `/setup` listed a
+     * channel that no longer existed for as long as the guild lived.
+     */
+    it('stops tracking a creator channel deleted on Discord', async () => {
+      expect(await autoChannels.get(PRIMARY)).toBeDefined();
+
+      await f.handleChannelDeleted(GUILD, PRIMARY);
+
+      expect(await autoChannels.get(PRIMARY)).toBeUndefined();
+      // Idempotent: a redelivered event must not throw.
+      await expect(f.handleChannelDeleted(GUILD, PRIMARY)).resolves.toBeUndefined();
+    });
+
+    it('ignores a deleted channel belonging to another guild', async () => {
+      await f.handleChannelDeleted('some-other-guild', PRIMARY);
+
+      expect(await autoChannels.get(PRIMARY)).toBeDefined();
+    });
+
     it('renames to the resting name when emptied — and never deletes the channel', async () => {
       const alice = member('alice');
       voice.put(ADOPTED, alice);

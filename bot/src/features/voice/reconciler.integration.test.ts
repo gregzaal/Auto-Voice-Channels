@@ -335,4 +335,72 @@ describe('Reconciler (integration)', () => {
     expect(actions.actions).toHaveLength(0);
     expect(await managedRepo.get('foreign-managed')).toBeDefined();
   });
+
+  /**
+   * A guild the gateway has not hydrated yet, which is a real and routine state
+   * rather than a hypothetical one.
+   *
+   * `READY` stubs every guild into `client.guilds.cache` as unavailable, and
+   * `WebSocketShard.checkReady` marks the shard ready once `waitGuildTimeout`
+   * (15s, never overridden here) expires even with guilds still outstanding.
+   * `index.ts` then reconciles `client.guilds.cache.keys()` wholesale, so an
+   * unhydrated guild reaches this code with an empty channel cache and every
+   * record it owns reading as vanished. `ownsGuild` cannot rule it out: shard
+   * ownership is arithmetic, independent of hydration.
+   *
+   * Deleting a secondary row there is survivable, it respawns. Deleting a
+   * `managed_channels` row loses that channel's template, owner and roster.
+   */
+  it('reconciles nothing at all for a guild the gateway has not hydrated', async () => {
+    await secondaries.create({
+      channelId: 'sec-unhydrated',
+      guildId: GUILD,
+      primaryChannelId: PRIMARY,
+      state: { name: '#1 [General]' },
+    });
+    await managedRepo.create({ channelId: 'managed-unhydrated', guildId: GUILD });
+    // Nothing is registered in `voice`, so every record reads as vanished --
+    // exactly what an unhydrated guild looks like.
+    voice.setGuildAvailable(false);
+
+    const featureWithManaged = new VoiceFeature({
+      autoChannels,
+      secondaries,
+      managed: managedRepo,
+      guilds,
+      actions,
+      voice,
+      selfHosted: true,
+      logger: fakeLogger(),
+    });
+
+    const drift = await featureWithManaged.reconcileGuild(GUILD);
+
+    expect(drift.orphanedRecords).toHaveLength(0);
+    expect(drift.deletedEmpty).toHaveLength(0);
+    expect(actions.actions).toHaveLength(0);
+    expect(await secondaries.get('sec-unhydrated')).toBeDefined();
+    expect(await managedRepo.get('managed-unhydrated')).toBeDefined();
+  });
+
+  it('resumes reconciling once the guild is hydrated', async () => {
+    await managedRepo.create({ channelId: 'managed-gone', guildId: GUILD });
+    voice.setGuildAvailable(true);
+
+    const featureWithManaged = new VoiceFeature({
+      autoChannels,
+      secondaries,
+      managed: managedRepo,
+      guilds,
+      actions,
+      voice,
+      selfHosted: true,
+      logger: fakeLogger(),
+    });
+
+    const drift = await featureWithManaged.reconcileGuild(GUILD);
+
+    expect(drift.orphanedRecords).toEqual(['managed-gone']);
+    expect(await managedRepo.get('managed-gone')).toBeUndefined();
+  });
 });

@@ -61,6 +61,24 @@ export interface GuildVoiceView {
    * (no grouping). Used by the `/group` feature to scope a category's channels.
    */
   categoryOf?(channelId: string): string | null | undefined;
+  /**
+   * Whether Discord has actually given us this guild's data, i.e. whether
+   * {@link channelExists} means anything for it.
+   *
+   * **Required, not optional, unlike `categoryOf`.** Reconcile deletes records
+   * for channels `channelExists` reports gone, and for a guild we hold no data
+   * for that is every channel. A permissive default on a delete guard is the
+   * wrong default, and there are only two implementers, so the interface can
+   * insist.
+   *
+   * The state this exists for is routine, not exotic: `READY` stubs every guild
+   * into the cache as unavailable, and `WebSocketShard.checkReady` marks the
+   * shard ready once `waitGuildTimeout` (15s) expires even with guilds still
+   * outstanding. The boot reconcile then walks the whole cache. `ownsGuild`
+   * cannot rule those out, because shard ownership is arithmetic and says
+   * nothing about hydration.
+   */
+  guildAvailable(guildId: string): boolean;
 }
 
 /** A normalized voice-state transition (a member moved between channels). */

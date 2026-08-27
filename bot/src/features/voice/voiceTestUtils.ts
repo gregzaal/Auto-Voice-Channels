@@ -10,6 +10,8 @@ export class FakeVoiceView implements GuildVoiceView {
   private readonly existing = new Set<string>();
   /** channelId → parent category id (or null = server root). Unset → undefined. */
   private readonly parents = new Map<string, string | null>();
+  /** Whether Discord has handed us this guild. True unless a test says otherwise. */
+  private available = true;
 
   membersInChannel(channelId: string): VoiceMember[] {
     return this.members.get(channelId) ?? [];
@@ -21,6 +23,15 @@ export class FakeVoiceView implements GuildVoiceView {
 
   categoryOf(channelId: string): string | null | undefined {
     return this.parents.get(channelId);
+  }
+
+  guildAvailable(): boolean {
+    return this.available;
+  }
+
+  /** Simulates a guild the gateway has not hydrated, so nothing is knowable. */
+  setGuildAvailable(available: boolean): void {
+    this.available = available;
   }
 
   /** Sets a channel's parent category (or `null` for the server root), for grouping tests. */

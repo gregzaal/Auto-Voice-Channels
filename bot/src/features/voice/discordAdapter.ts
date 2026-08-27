@@ -648,6 +648,17 @@ export class DiscordVoiceView implements GuildVoiceView {
     return this.client.channels.cache.has(channelId);
   }
 
+  /**
+   * discord.js's own `Guild#available`, which is stricter than it looks: it is
+   * false for an outage, false for a `READY` stub, and false for any payload
+   * that arrived without a `channels` array (`Guild.js`). An absent guild
+   * answers false too, so a guild on another instance's shard is never
+   * mistaken for one whose channels have all vanished.
+   */
+  guildAvailable(guildId: string): boolean {
+    return this.client.guilds.cache.get(guildId)?.available === true;
+  }
+
   categoryOf(channelId: string): string | null | undefined {
     const channel = this.client.channels.cache.get(channelId);
     if (!channel || !('parentId' in channel)) return undefined;

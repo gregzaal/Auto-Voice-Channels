@@ -30,6 +30,8 @@ interface FakeInteractionOpts {
   guildId?: string | null;
   commandName?: string;
   customId?: string;
+  /** Channel ids the guild's cache holds. Absent = an empty (unpopulated) cache. */
+  existingChannels?: string[];
   manageChannels?: boolean;
   values?: string[];
   /** The interaction id (the retry token is keyed off it). */
@@ -81,6 +83,10 @@ function fakeInteraction(opts: FakeInteractionOpts) {
                   permissionsFor: () => ({ has: (p: bigint) => holds(opts.category!.perms, p) }),
                 }
               : undefined,
+          // A real ChannelManager cache. `size` 0 (the default) is what an
+          // unpopulated cache looks like, which callers must fail open on.
+          has: (id: string) => (opts.existingChannels ?? []).includes(id),
+          size: (opts.existingChannels ?? []).length,
         },
       },
     },
@@ -336,6 +342,64 @@ describe('registerInteractionHandler (router)', () => {
     };
   }
 
+  /**
+   * A creator channel whose Discord channel is gone must not be named in the
+   * panel. The ROW is deliberately kept (owner, 2026-08-27): cache absence is
+   * not proof of deletion, so this hides, it never deletes.
+   */
+  it('hides a creator channel that no longer exists from the setup panel', async () => {
+    const settings = createSettings();
+    settings.getConfig.mockResolvedValue({
+      enabled: true,
+      primaries: [{ channelId: 'p-live' }, { channelId: 'p-gone' }],
+      defaultTemplate: 'T',
+      defaultStatus: 'S',
+    });
+    const env = setup({ settings: settings as never });
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'setup',
+      manageChannels: true,
+      existingChannels: ['p-live'],
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+
+    const panel = JSON.stringify(editReply.mock.calls[0]?.[0]);
+    expect(panel).toContain('p-live');
+    expect(panel).not.toContain('p-gone');
+    expect(panel).toContain('Creator channels (1)');
+  });
+
+  /**
+   * Fail open. An empty channel cache means we know nothing about this guild,
+   * not that it has no creator channels, and telling an admin their setup has
+   * vanished is worse than naming a channel that has.
+   */
+  it('shows every creator channel when the guild channel cache is empty', async () => {
+    const settings = createSettings();
+    settings.getConfig.mockResolvedValue({
+      enabled: true,
+      primaries: [{ channelId: 'p-live' }, { channelId: 'p-gone' }],
+      defaultTemplate: 'T',
+      defaultStatus: 'S',
+    });
+    const env = setup({ settings: settings as never });
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'setup',
+      manageChannels: true,
+      // No `existingChannels` → cache size 0.
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+
+    const panel = JSON.stringify(editReply.mock.calls[0]?.[0]);
+    expect(panel).toContain('Creator channels (2)');
+  });
+
   function submitFailingCreate(env: ReturnType<typeof setup>) {
     const { interaction, reply } = fakeInteraction({
       kind: 'modal',
@@ -404,6 +468,30 @@ describe('registerInteractionHandler (router)', () => {
     env.client.emit('interactionCreate', btn);
     await flush();
     expect(btn.showModal).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * `handleButton` used to be a chain of prefix tests that fell off the end, so
+   * an id no branch claimed produced no reply at all and Discord showed the
+   * member a bare "This interaction failed". Reachable during a rolling deploy,
+   * where commands register globally and instantly while machines are still
+   * cycling, so a button from a new build can land on an old one.
+   */
+  it('answers a button whose custom id no handler recognises', async () => {
+    const env = setup({ settings: createSettings() as never });
+    dispose = env.dispose;
+    const { interaction: btn } = fakeInteraction({
+      kind: 'button',
+      customId: 'avc:notathing:42',
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', btn);
+    await flush();
+
+    expect(btn.reply).toHaveBeenCalledTimes(1);
+    const reply = btn.reply.mock.calls[0]?.[0] as { content: string; ephemeral: boolean };
+    expect(reply.ephemeral).toBe(true);
+    expect(reply.content).toMatch(/out of date|no longer/i);
   });
 });
 

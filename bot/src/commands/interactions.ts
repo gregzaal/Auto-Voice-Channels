@@ -1656,12 +1656,33 @@ Already subscribed? Add the new server ` +
       billedTier: guildRow?.tier ?? null,
       shared: guildRow?.poolId != null,
     });
+    /**
+     * Creator channels whose Discord channel is gone are hidden from the panel,
+     * never deleted (owner, 2026-08-27, and see the note in `reconcileGuild`).
+     * Nothing anywhere removes an `auto_channels` row except a `channelDelete`
+     * dispatch, so a row can outlive its channel: an admin who deletes a creator
+     * channel while a shard is down leaves one behind. Keeping the row is
+     * deliberate, because cache absence is not proof of deletion. Naming a
+     * channel that is not there is the half a user could actually see, and
+     * Discord renders the stale mention as "#deleted-channel", which reads as a
+     * bug in AVC.
+     *
+     * Safe here in a way the background sweep is not: this interaction arrived
+     * through the guild, so its channel cache is populated. It still fails open
+     * on an empty cache rather than telling an admin their setup has vanished.
+     */
+    const channelCache = interaction.guild?.channels.cache;
+    const primaries =
+      channelCache && channelCache.size > 0
+        ? config.primaries.filter((p) => channelCache.has(p.channelId))
+        : config.primaries;
+
     return buildSetupPanel({
       enabled: config.enabled,
       isAdmin: hasManageChannels(interaction),
       plan,
       missingPermissions,
-      primaries: config.primaries,
+      primaries,
       managed: managedRows,
       problems: deps.permissionProblems?.recent(guildId) ?? [],
       assistant: Boolean(deps.assistant),
@@ -1845,6 +1866,26 @@ Already subscribed? Add the new server ` +
     if (interaction.customId.startsWith(ASSISTANT_PREFIX))
       return handleAssistantButton(interaction);
     if (interaction.customId.startsWith(SETUP_PREFIX)) return handleSetupButton(interaction);
+
+    /**
+     * Nothing claimed this id. Answering matters because falling off the end
+     * leaves the interaction unacknowledged, and Discord shows the member a
+     * bare "This interaction failed" with no hint of what to do.
+     *
+     * The reachable case is a rolling deploy: commands register globally and
+     * appear instantly, so a panel rendered by a new machine can be clicked
+     * while an older one still owns that guild's shard and has no branch for
+     * the prefix. Also covers a message left open across a release that
+     * retired a prefix. `handleCommand` has had this for the same reason.
+     */
+    deps.logger.debug(
+      { guildId: interaction.guildId, customId: interaction.customId },
+      'button with no handler',
+    );
+    await interaction.reply({
+      content: 'That button is out of date. Run the command again to get a fresh one.',
+      ephemeral: true,
+    });
   }
 
   /** Owner approves/denies/blocks a "⇩ Join" request via the message buttons. */

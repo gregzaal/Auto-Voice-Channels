@@ -257,7 +257,11 @@ export interface EditorState {
 export interface GuildDrift {
   guildId: string;
   dryRun: boolean;
-  /** Tracked secondaries whose Discord channel had vanished (record dropped). */
+  /**
+   * Records whose Discord channel had vanished, so the record was dropped:
+   * secondaries and adopted standalone channels. Never a Discord action, and
+   * never a creator channel (see the note in the primaries loop).
+   */
   orphanedRecords: string[];
   /** Empty secondaries deleted. */
   deletedEmpty: string[];
@@ -862,6 +866,26 @@ export class VoiceFeature {
         { guildId, managedId: channelId },
         'managed channel deleted on Discord; stopped managing it',
       );
+      return;
+    }
+
+    /**
+     * Creator channels. This branch did not exist, and neither did any other
+     * caller of `AutoChannelRepository.remove`, so an `auto_channels` row
+     * outlived its Discord channel forever: `/setup` listed a creator channel
+     * that was gone, and nothing an admin could do removed it.
+     *
+     * Last of the three because it is the rarest event. A secondary is deleted
+     * every time a room empties; a creator channel is deleted once, by an admin.
+     */
+    const primary = await this.deps.autoChannels.get(channelId);
+    if (primary && primary.guildId === guildId) {
+      await this.deps.autoChannels.remove(channelId);
+      this.deps.permissionProblems?.clear(guildId, channelId);
+      this.deps.logger.info(
+        { guildId, primaryChannelId: channelId },
+        'creator channel deleted on Discord; stopped tracking it',
+      );
     }
   }
 
@@ -1463,6 +1487,22 @@ export class VoiceFeature {
       renamed: [],
     };
 
+    /**
+     * A guild Discord has not handed us is one we know nothing about, so there
+     * is nothing to converge and everything to lose. Every branch below reads
+     * the channel cache, which for such a guild is empty, so each one would
+     * read every record it owns as vanished and delete it. See `guildAvailable`
+     * for how routine that state is (it is the ordinary shape of a boot that
+     * hit `waitGuildTimeout`, not an outage).
+     *
+     * Bails on a dry run too: reporting drift derived from an empty cache would
+     * describe a guild's whole configuration as garbage.
+     */
+    if (!this.deps.voice.guildAvailable(guildId)) {
+      this.deps.logger.debug({ guildId }, 'reconcile skipped: guild not available yet');
+      return drift;
+    }
+
     // First pass: drop vanished records, delete emptied channels, and collect the
     // survivors so we can renumber them by sibling order below.
     const survivors: SecondaryChannelRow[] = [];
@@ -1541,8 +1581,23 @@ export class VoiceFeature {
       }
     }
 
-    // Catch-up: members who joined a primary while we were disconnected are still
-    // sitting in it; each needs their own secondary.
+    /**
+     * Catch-up: members who joined a primary while we were disconnected are
+     * still sitting in it; each needs their own secondary.
+     *
+     * **A primary whose channel is absent from the cache is deliberately left
+     * alone, not pruned** (owner, 2026-08-27). Absence is not evidence: the
+     * sweep draws its guild list from Postgres, so it reaches guilds whose
+     * `GUILD_CREATE` has not landed, whose channel cache is empty, and every
+     * one of whose primaries therefore reads as vanished. `ownsGuild` does not
+     * rule that out, because a shard lease is held right through a resume. The
+     * standing rule for a persistent record is the one `rerenderManaged` states
+     * above: delete on a signal that is objective and unrecoverable (a
+     * `channelDelete` dispatch, or Unknown Channel from the API), never on an
+     * inference. A stale row costs a few bytes; a wrongly-deleted one is a dead
+     * creator channel until an admin runs `/create` again. `handleChannelDeleted`
+     * is the confident path.
+     */
     for (const primary of await this.deps.autoChannels.listByGuild(guildId)) {
       const members = this.deps.voice.membersInChannel(primary.channelId).filter((m) => !m.bot);
       for (const member of members) {
