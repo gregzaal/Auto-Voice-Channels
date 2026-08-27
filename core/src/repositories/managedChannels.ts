@@ -93,8 +93,12 @@ export class ManagedChannelRepository {
       .onConflictDoNothing({ target: managedChannels.channelId })
       .returning();
     if (row) return managedChannelRowSchema.parse(row);
+    // The insert conflicted, so a row for this channel id exists. If it's ours,
+    // that is a no-op adopt. If not, the channel already belongs to the other
+    // fleet - say so, rather than describing an ordinary cross-fleet conflict
+    // as something having vanished.
     const existing = await this.get(input.channelId);
-    if (!existing) throw new Error(`managed channel ${input.channelId} vanished during create`);
+    if (!existing) throw new Error(`managed channel ${input.channelId} belongs to another fleet`);
     return existing;
   }
 

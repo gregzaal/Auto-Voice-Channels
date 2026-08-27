@@ -151,4 +151,21 @@ describe('channel repositories: fleet isolation (integration)', () => {
     await betaJoin.removeBySecondary('sec-prod');
     expect(await prodJoin.getBySecondary('sec-prod')).toBeDefined();
   });
+
+  /**
+   * The same conflict `autoChannels.upsert` guards above, on the adopt path
+   * instead of the create-a-primary path: `create`'s conflict target is the
+   * channel id, so adopting a channel the other fleet already manages finds
+   * its row. It must say so, not throw a message that reads like the row
+   * disappeared mid-write.
+   */
+  it("refuses to adopt the other fleet's managed channel", async () => {
+    const prodManaged = new ManagedChannelRepository(env.handle.db, 'prod');
+    const betaManaged = new ManagedChannelRepository(env.handle.db, 'beta');
+    await prodManaged.create({ channelId: 'man-prod', guildId: GUILD });
+
+    await expect(betaManaged.create({ channelId: 'man-prod', guildId: GUILD })).rejects.toThrow(
+      /another fleet/,
+    );
+  });
 });
