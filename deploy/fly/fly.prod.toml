@@ -34,6 +34,27 @@
 # This app takes over the legacy Python bot's identity, so the two can never run
 # at once (one token, one gateway session). See plans/migration.md 6.
 app = "avc-prod"
+# How long Fly waits for a graceful drain before SIGKILL. **Fly's default is 5
+# seconds, and this drain needs more than that.**
+#
+# The drain releases shard leases LAST, after stopping the watcher, the billing
+# pass, the collectors and the per-guild queues (`bot/src/runtime/shutdown.ts`).
+# The watcher's stop alone can spend up to 10s on an in-flight watchdog ping, so
+# at 5s a machine was routinely killed before `leaseManager.releaseAll()` ran,
+# and its replacement then waited out the full 30s lease TTL before it could
+# claim those shards. That is a self-inflicted gap on every deploy.
+#
+# 30s, matching the lease TTL: enough for the realistic worst case, and if a
+# drain ever does exceed it the outcome is exactly what happens today, so the
+# ceiling costs nothing. Deliberately not longer -- an in-flight backup is
+# awaited by the drain and can run for minutes, and blocking a rolling deploy on
+# one is worse than killing it, since backups are idempotent and retried while a
+# stalled deploy is not.
+#
+# `kill_signal` is left at Fly's default (SIGINT). `installShutdown` handles
+# SIGINT and SIGTERM identically, so there is nothing to configure.
+kill_timeout = "30s"
+
 primary_region = "iad"
 
 [build]

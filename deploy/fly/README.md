@@ -44,6 +44,14 @@ in-flight per-guild queues, releases its shard leases, and exits (see
 throttler (respecting Discord `max_concurrency`), so simultaneous re-identifies on
 a deploy are safe — there is no manual staggering. Reconcile runs on `READY`.
 
+**`kill_timeout` is 30s, and Fly's default of 5s is not enough.** Leases are
+released at the very end of the drain, behind the watcher (whose stop can spend
+up to 10s finishing an in-flight watchdog ping), the billing pass and the
+per-guild queues. At the default the machine was killed before it got there, and
+its replacement then waited out the full 30s lease TTL before it could claim
+those shards. Matched to that TTL on purpose: overrunning it is no worse than the
+old behaviour. Anything added to the drain has to fit inside it.
+
 Failover is orchestrator-driven: a crashed or lease-lost machine restarts (the
 `[restart]` policy in `fly.toml`) and re-claims its shards on boot; survivors do
 not poach a dead peer's shards. Boot-time claiming retries across the lease-expiry
