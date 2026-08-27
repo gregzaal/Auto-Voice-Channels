@@ -77,6 +77,17 @@ export interface DiagnosticsReport {
    */
   problems: Record<string, unknown>;
   /**
+   * The top.gg listing publisher. `{ configured: false }` when no token is set,
+   * which is every self-host and every fleet but one.
+   *
+   * `ownsListing` is the field to read first: it is false on every instance
+   * except the one holding shard 0, so a fleet-wide sweep shows exactly one
+   * machine publishing. `paused`, `disabled` and `marketingPaused` are
+   * separate so a stale `lastServerCount` can be attributed to the switch
+   * causing it rather than guessed at.
+   */
+  topgg: Record<string, unknown>;
+  /**
    * Supporter-role assignment in the support guild. `{ enabled: false }` when
    * no support guild is configured, which is every self-host and the fleet that
    * is not given the env.

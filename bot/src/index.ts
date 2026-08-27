@@ -43,10 +43,12 @@ import { PgIdentifyThrottler } from './runtime/identifyThrottler.js';
 import { installShutdown } from './runtime/shutdown.js';
 import { AlertScheduler } from './runtime/alertScheduler.js';
 import { BackupScheduler } from './runtime/backupScheduler.js';
+import { TopggScheduler } from './runtime/topggScheduler.js';
 import { SupporterRoles } from './features/support/supporterRoles.js';
 import { buildWatchChecks } from './runtime/watchChecks.js';
 import { MetricsCollector, type GatewayLimits } from './runtime/metricsCollector.js';
 import { categorizeError } from './ops/describeError.js';
+import { TopggClient } from './ops/topgg.js';
 import { HealthServer, type HealthReport, type SubsystemStatus } from './ops/health.js';
 import {
   AdminChannelReporter,
@@ -71,7 +73,7 @@ import {
   VoiceFeature,
   VoteKickManager,
 } from './features/voice/index.js';
-import { registerCommands } from './commands/definitions.js';
+import { buildCommandDefinitions, registerCommands } from './commands/definitions.js';
 import { registerInteractionHandler } from './commands/interactions.js';
 import { OpenAiCompatClient, TemplateAssistant } from './features/templateAssistant/index.js';
 import {
@@ -689,6 +691,32 @@ async function main(): Promise<void> {
     watchdogPingUrl: config.watchdogPingUrl,
   });
 
+  /**
+   * The top.gg listing publisher. Absent unless a token is configured, which is
+   * every self-host and any fleet not given the secret.
+   */
+  const topggScheduler = config.topggToken
+    ? new TopggScheduler({
+        client: new TopggClient({ token: config.topggToken }),
+        flags,
+        presence: presenceRepo,
+        logger: logger.child({ component: 'topgg' }),
+        totalShards: config.totalShards,
+        /**
+         * Shard 0's instance owns every outward-facing publication, the same
+         * gate global command registration uses. Read at publish time rather
+         * than captured, because shard ownership changes while the process runs.
+         */
+        ownsListing: () => leaseManager.ownedShards.includes(0),
+        /**
+         * The GLOBAL command set, so the listing shows what a real server gets.
+         * `includeDebug` is deliberately absent: `/debug` exists only in a dev
+         * guild and is not part of the product.
+         */
+        commands: () => buildCommandDefinitions({ includeAssistant: Boolean(assistant) }),
+      })
+    : undefined;
+
   let gatewayStatus: SubsystemStatus = 'unknown';
   // After READY, a `guildCreate` means either a brand-new guild join or a guild
   // re-delivered on reconnect — reconcile it to catch up on missed events. The
@@ -932,6 +960,7 @@ async function main(): Promise<void> {
         problems: problemNotifier.snapshot(),
         metrics: { ...metricsCollector.stats },
         alerts: { ...alertScheduler.stats },
+        topgg: topggScheduler ? { ...topggScheduler.stats } : { configured: false },
         supporterRoles: supporterRoles ? { ...supporterRoles.stats } : { enabled: false },
       };
     },
@@ -1011,6 +1040,7 @@ async function main(): Promise<void> {
     disposeSupporterSync,
     metricsCollector,
     alertScheduler,
+    topggScheduler,
     entitlementGate,
     closeDb,
   });
@@ -1043,6 +1073,12 @@ async function main(): Promise<void> {
    * handler existed would leave a window where that guarantee does not hold.
    */
   alertScheduler.start();
+  /**
+   * Started with the others, after the drain handler. Nothing here is
+   * latency-critical and the first tick is deliberate: a deploy that changed the
+   * command list publishes it now rather than up to a quarter of an hour later.
+   */
+  topggScheduler?.start();
   leaseManager.startHeartbeat();
 }
 

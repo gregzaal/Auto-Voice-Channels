@@ -84,6 +84,12 @@ export async function runIdle(deps: {
       metrics: null,
       alerts: null,
       supporterRoles: { enabled: false },
+      /**
+       * An idling instance holds no shards, so it can never be the one that
+       * holds shard 0 and never publishes. Reported as unconfigured rather than
+       * as a stalled publisher.
+       */
+      topgg: { configured: false },
     }),
   });
   await health.start();

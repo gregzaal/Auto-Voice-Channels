@@ -131,6 +131,27 @@ export class GuildFleetPresenceRepository {
   }
 
   /**
+   * How many guilds this fleet is currently in.
+   *
+   * The count form of {@link presentGuildIds}, for anything that wants the
+   * number and not the set. It exists because the obvious source for a fleet's
+   * guild count is `client.guilds.cache.size`, which is this INSTANCE's share:
+   * on a four-shard fleet over four machines that is about a quarter of the
+   * real number, and it looks entirely plausible. Anything publishing a guild
+   * count outward (the top.gg listing) has to ask this instead.
+   *
+   * Served by `guild_fleet_presence_fleet_idx`, so it stays an index-only count
+   * as the install base grows.
+   */
+  async countPresent(): Promise<number> {
+    const [row] = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(guildFleetPresence)
+      .where(and(eq(guildFleetPresence.fleet, this.fleet), isNull(guildFleetPresence.removedAt)));
+    return row?.count ?? 0;
+  }
+
+  /**
    * Every fleet currently in the guild.
    *
    * The dashboard's question, per §6.1: "is *any* fleet here". Asking per fleet

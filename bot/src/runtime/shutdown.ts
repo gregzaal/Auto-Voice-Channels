@@ -6,6 +6,7 @@ import type { HealthServer } from '../ops/health.js';
 import type { Reconciler } from '../features/voice/index.js';
 import type { BillingReconciler, EntitlementGate } from '../features/billing/index.js';
 import type { AlertScheduler } from './alertScheduler.js';
+import type { TopggScheduler } from './topggScheduler.js';
 import type { BackupScheduler } from './backupScheduler.js';
 import type { MetricsCollector } from './metricsCollector.js';
 import type { SupporterRoles } from '../features/support/supporterRoles.js';
@@ -35,6 +36,8 @@ export interface ShutdownDeps {
   disposeSupporterSync: (() => void) | undefined;
   /** Always present: the watcher runs on self-host too. */
   alertScheduler: AlertScheduler;
+  /** Absent without a `TOPGG_TOKEN`. */
+  topggScheduler: TopggScheduler | undefined;
   /** Always present: the collector runs on self-host too. */
   metricsCollector: MetricsCollector;
   entitlementGate: EntitlementGate;
@@ -63,6 +66,9 @@ export async function gracefulDrain(deps: ShutdownDeps): Promise<void> {
    * designed.
    */
   await deps.alertScheduler.stop();
+  // Stopped alongside the watcher, and for the same reason: it talks to a third
+  // party, and a machine on its way out should stop doing that first.
+  await deps.topggScheduler?.stop();
   clearInterval(deps.dbPingTimer);
   deps.reconciler.stopSweep();
   // Awaited: an in-flight billing pass must finish (or bail at its next

@@ -135,6 +135,21 @@ export const RUNTIME_FLAGS = {
    * poster is built first must check it before posting.
    */
   MARKETING_PAUSED: 'marketing.paused',
+  /**
+   * Kill-switch for the top.gg listing publisher on THIS fleet: no server
+   * count, no command list.
+   *
+   * Its own lever rather than a redeploy, matching every other outbound
+   * integration here. The listing is public and the failure it guards against
+   * is publishing something wrong to it -- a count from the wrong fleet, a
+   * command list from a bad build -- which is exactly the kind of thing noticed
+   * from outside and needing to stop within the minute.
+   *
+   * `marketing.paused` and `global.pause` also stop it. The publisher reports
+   * each of the three separately on `/diagnostics`, because "the count is
+   * stale" has to be traceable to whichever switch is doing it.
+   */
+  TOPGG_DISABLED: 'topgg.disabled',
 
   // -- Supporter roles (plans/monetization.md section 13) ---------------------
   /**

@@ -86,6 +86,39 @@ describe('GuildFleetPresenceRepository (integration)', () => {
     expect(await beta.isPresent(A)).toBe(false);
   });
 
+  /**
+   * The number the top.gg listing publishes, so a wrong one is public.
+   */
+  describe('countPresent', () => {
+    it('counts only this fleet, and only guilds it has not been removed from', async () => {
+      await prod.markPresent(A);
+      await prod.markPresent(B);
+      await prod.markPresent(C);
+      await prod.markRemoved(C);
+      await beta.markPresent(A);
+      await beta.markPresent(B);
+
+      expect(await prod.countPresent()).toBe(2);
+      expect(await beta.countPresent()).toBe(2);
+    });
+
+    it('is zero on an empty table rather than throwing or returning null', async () => {
+      expect(await prod.countPresent()).toBe(0);
+    });
+
+    it('agrees with presentGuildIds', async () => {
+      await prod.markPresent(A);
+      await prod.markPresent(B);
+      expect(await prod.countPresent()).toBe((await prod.presentGuildIds()).size);
+    });
+
+    /** `count(*)::int` must come back a number, not the string pg sends for bigint. */
+    it('returns a number', async () => {
+      await prod.markPresent(A);
+      expect(typeof (await prod.countPresent())).toBe('number');
+    });
+  });
+
   describe('reconcilePresence', () => {
     it('adds guilds it can see and removes ones it cannot', async () => {
       await prod.markPresent(A);

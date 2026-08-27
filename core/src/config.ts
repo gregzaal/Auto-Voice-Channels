@@ -135,6 +135,20 @@ export const configSchema = z
      * without one rather than failing open.
      */
     diagnosticsToken: z.string().min(16).optional(),
+    /**
+     * top.gg API token for the listing publisher (server count + command list).
+     *
+     * Optional, and its presence is the whole switch: unset means the publisher
+     * is never constructed, which is the correct state for self-host and for
+     * any fleet that is not the one behind the public listing.
+     *
+     * **Set this on exactly one fleet.** `@me` resolves the project from the
+     * token and the count is read from this fleet's `guild_fleet_presence`
+     * rows, so the same secret on beta would publish beta's guild count to the
+     * production listing. No validation can catch that: the token is valid and
+     * the count is real.
+     */
+    topggToken: z.string().min(1).optional(),
 
     /**
      * AI-assisted templates (`/templateassistant`) — a single **OpenAI-compatible**
@@ -416,6 +430,7 @@ function envToInput(env: NodeJS.ProcessEnv): Record<string, unknown> {
     adminChannelId: e.ADMIN_CHANNEL_ID,
     watchdogPingUrl: e.WATCHDOG_PING_URL,
     diagnosticsToken: e.DIAGNOSTICS_TOKEN,
+    topggToken: e.TOPGG_TOKEN,
     aiBaseUrl: e.AVC_AI_BASE_URL,
     aiApiKey: e.AVC_AI_API_KEY,
     aiModel: e.AVC_AI_MODEL,
