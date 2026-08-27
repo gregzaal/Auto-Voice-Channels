@@ -53,6 +53,7 @@ import {
   channelPickerRow,
   formatPlan,
   GENERAL_MODAL_ID,
+  GITHUB_URL,
   missingBotPermissions,
   missingRenamePermissions,
   parseSetupPick,
@@ -247,7 +248,9 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
    */
   function allowedWhileExpired(interaction: Interaction): boolean {
     if (interaction.isChatInputCommand()) {
-      return ['setup', 'ping', 'invite', 'debug', 'logging'].includes(interaction.commandName);
+      return ['setup', 'ping', 'invite', 'source', 'debug', 'logging'].includes(
+        interaction.commandName,
+      );
     }
     if (interaction.isButton()) {
       // The assistant writes a template, so it is a write path like `/create`
@@ -367,6 +370,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return handlePing(interaction);
       case 'invite':
         return handleInvite(interaction);
+      case 'source':
+        return handleSource(interaction);
       case 'debug':
         return handleDebug(interaction);
       case 'create':
@@ -1258,6 +1263,13 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
 
 Already subscribed? Add the new server ` +
         `to your subscription at ${SITE_URL}/dashboard so it is covered from day one.`,
+      ephemeral: true,
+    });
+  }
+
+  async function handleSource(interaction: ChatInputCommandInteraction): Promise<void> {
+    await interaction.reply({
+      content: `📜 AVC is open source, licensed AGPL-3.0: ${GITHUB_URL}`,
       ephemeral: true,
     });
   }

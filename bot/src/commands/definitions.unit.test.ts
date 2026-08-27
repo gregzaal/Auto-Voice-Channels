@@ -27,6 +27,7 @@ describe('buildCommandDefinitions', () => {
         'public',
         'reclaim',
         'setup',
+        'source',
         'template',
         'transfer',
         'unlimit',
@@ -49,7 +50,7 @@ describe('buildCommandDefinitions', () => {
       expect(byName.get(name)!.default_member_permissions).toBe(manage);
     }
     // Per-channel + utility commands stay open (owner checks live in logic).
-    for (const name of ['limit', 'nick', 'ping', 'invite']) {
+    for (const name of ['limit', 'nick', 'ping', 'invite', 'source']) {
       expect(byName.get(name)!.default_member_permissions ?? null).toBeNull();
     }
   });

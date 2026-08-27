@@ -191,6 +191,20 @@ describe('registerInteractionHandler (router)', () => {
     expect(env.settings.getConfig).toHaveBeenCalled();
   });
 
+  it('an expired guild can still run /source (AGPL-3.0 network-use notice)', async () => {
+    const env = setup({
+      selfHosted: false,
+      guilds: { get: vi.fn().mockResolvedValue({ authStatus: 'expired' }) } as never,
+    });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({ kind: 'command', commandName: 'source' });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain(
+      'github.com/GregZaal/Auto-Voice-Channels',
+    );
+  });
+
   /**
    * `/setup` acknowledges before it works.
    *

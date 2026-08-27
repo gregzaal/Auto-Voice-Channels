@@ -55,6 +55,14 @@ export const DOCS_URL = 'https://auto-voice.io/docs';
 export const SUPPORT_URL = 'https://discord.gg/HT6GNhJ';
 
 /**
+ * The public source repo, for `/source` (AGPL-3.0 §13's network-use clause).
+ * Matches `GITHUB_URL` in `web/src/lib/env.ts` exactly -- the bot cannot import
+ * from `web/`, so this is a second literal by necessity, not a second source of
+ * truth. Check both if it ever changes.
+ */
+export const GITHUB_URL = 'https://github.com/GregZaal/Auto-Voice-Channels';
+
+/**
  * The bot permissions AVC needs to function. Surfaced as a quick health-check in
  * `/setup` (guild-level base perms; a channel override could still block one,
  * but a missing base permission is the common, fixable setup mistake).

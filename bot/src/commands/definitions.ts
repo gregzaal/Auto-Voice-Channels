@@ -119,6 +119,11 @@ export function buildCommandDefinitions(
     ),
     guildOnly(
       new SlashCommandBuilder()
+        .setName('source')
+        .setDescription("Get a link to this bot's source code."),
+    ),
+    guildOnly(
+      new SlashCommandBuilder()
         .setName('setup')
         .setDescription('Get started with Auto-Voice-Channels: status, setup, and quick actions.'),
     ),
