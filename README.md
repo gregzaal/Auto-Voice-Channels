@@ -1,90 +1,85 @@
-# Auto-Voice-Channels
+# Auto Voice Channels
 
-> **Looking for the Python bot?** It is still here, on the
-> [`master`](https://github.com/GregZaal/Auto-Voice-Channels/tree/master) branch:
-> MIT licensed, still clonable, still runnable. It is no longer maintained. This
-> branch is the TypeScript rewrite that replaces it.
+A Discord bot that creates a voice channel the moment someone joins your creator
+channel, and deletes it when the last person leaves. Room names, user limits,
+permissions and privacy are all configurable, per server and per room.
 
-A single Discord bot that automatically creates and cleans up voice channels on
-demand. One codebase serves both the **scaled hosted service** (many shards
-across multiple instances) and a **private self-hosted instance** (one container
-+ Postgres) — differentiated only by configuration.
+**License: AGPL-3.0-only.** The [hosted service](https://auto-voice.io) runs this
+exact code, so self-hosting gets you the whole bot, not a community edition.
 
-This is the **TypeScript rewrite** of the Python bot, rebuilt for scale.
+> Looking for the Python bot? It is unmaintained, but still on the
+> [`master`](https://github.com/GregZaal/Auto-Voice-Channels/tree/master) branch
+> under the MIT license. This branch is the TypeScript rewrite that replaces it.
 
-**License:** AGPL-3.0-only.
+## Self-host it
 
-## Architecture (at a glance)
+You need Docker, Docker Compose, and a free Discord application.
 
-- **discord.js** on Node 22 LTS; Postgres is the source of truth (caches tuned/off).
-- **Postgres** via **Drizzle**; coordination uses native primitives (advisory
-  locks, `LISTEN/NOTIFY`, lease rows). No Redis.
-- **Shards claimed via Postgres leases** (heartbeated). One instance claims all shards.
-- **Per-guild in-memory work queues** for ordering, fault isolation, and a
-  per-guild circuit-breaker.
-- All state-changing operations are **idempotent**; reconciliation is convergent.
-
-Monorepo: [`core/`](./core) (domain logic, DB schema, types, validation) +
-[`bot/`](./bot) (gateway/runtime, shard leases, dispatcher, ops). This repo is
-the self-hostable bot and is fully runnable on its own.
-
-## Self-hosting
-
-Requirements: Docker + Docker Compose, and a Discord application/bot.
-
-1. Create a bot in the [Discord Developer Portal](https://discord.com/developers/applications)
-   and enable the **privileged intents** (Presence, Server Members) — one-time.
-   The game-name feature requires the Presence intent.
-2. Configure:
+1. Create an application in the
+   [Discord Developer Portal](https://discord.com/developers/applications). Copy
+   the token from **Bot** and the application id from **General Information**,
+   then turn on both privileged intents (**Server Members** and **Presence**).
+   Presence is what lets room names follow the game people are playing.
+2. Clone, configure, run:
 
    ```bash
+   git clone https://github.com/GregZaal/Auto-Voice-Channels.git
+   cd Auto-Voice-Channels
    cp .env.example .env     # set DISCORD_TOKEN and CLIENT_ID
+   docker compose up -d
    ```
 
-   That's all you need. Self-hosting runs with entitlement gating off by
-   default (no trial, billing, or paywall), so there's nothing else to set.
+That is the whole setup. Postgres starts alongside the bot, migrations run on
+boot, slash commands register themselves, and trials, billing and paywalls do not
+apply to a self-hosted instance.
 
-3. Run:
+**[Full self-hosting guide](https://auto-voice.io/docs/self-hosting)**, including
+how much hardware your member count needs.
 
-   ```bash
-   docker compose up
-   ```
+## Docs
 
-   Postgres starts, migrations run automatically on boot, and slash commands
-   self-register. Health and diagnostics are served on `http://localhost:8477`
-   (the container listens on 8080; compose publishes it on 8477 so it does not
-   collide with whatever else you already run on 8080).
+- [Getting started](https://auto-voice.io/docs/getting-started): `/setup` and
+  your first creator channel
+- [Commands](https://auto-voice.io/docs/commands)
+- [Name templates](https://auto-voice.io/docs/name-templates): numbering, game
+  names, rich presence, conditionals
+- [Template assistant](https://auto-voice.io/docs/template-assistant): describe
+  the names you want in plain language, using any OpenAI-compatible key
+- [Troubleshooting](https://auto-voice.io/docs/troubleshooting)
 
-### Data persistence and backups
+## Day two
 
-Your data lives in the `pgdata` Docker volume, which survives `docker compose
-down` and does not survive `docker compose down -v`. That volume is the whole
-of your bot's state: guild settings, name templates, aliases, and every channel
-it is tracking.
+`.env.example` documents every optional variable. Two are worth setting now:
+`ADMIN_CHANNEL_ID`, where the bot posts errors it could not handle, and
+`WATCHDOG_PING_URL`, which is how you find out it has stopped.
 
-Backups off-machine are optional and off by default. Set the five
-`BACKUP_S3_*` variables in `.env` and the bot dumps Postgres on a schedule,
-encrypts it, uploads it, prunes old copies on a grandfather-father-son
-retention, and re-checks the newest one every week. No extra container, no
-cron, no second thing to keep running. It works against Backblaze B2,
-Cloudflare R2, AWS S3, MinIO, or anything else S3-compatible.
+- **Health.** `http://localhost:8477/health` reports per subsystem (database,
+  shard leases, gateway), and `/diagnostics` gives live state. Compose maps 8477
+  to the container's 8080, to stay clear of whatever else is on 8080 already.
+- **Updates.** `git pull && docker compose up -d --build`. Migrations only ever
+  add before they remove, so upgrading is safe.
+- **Your data** is the `pgdata` Docker volume: settings, templates, aliases and
+  every channel being tracked. It survives `docker compose down`, and does not
+  survive `docker compose down -v`.
 
-Set `BACKUP_ENCRYPTION_KEY` too. The dump contains everything, and with it set
-the storage provider only ever sees ciphertext. Generate one with `openssl rand
--base64 32`, and keep a copy somewhere other than the machine it protects:
-without the key the backups cannot be recovered by anyone, including you.
+### Backups
 
-Setting only some of the group is a startup error rather than a silent
-disable, because a typo that quietly turned backups off would surface during a
-restore, which is the worst possible moment to learn about it.
+Set the five `BACKUP_S3_*` variables and the bot dumps Postgres on a schedule,
+encrypts it, uploads it to any S3-compatible bucket, prunes old copies, and
+re-checks the newest one every week. No extra container and no cron. Set
+`BACKUP_ENCRYPTION_KEY` too, then keep a copy of it somewhere other than the
+machine it protects: without the key nobody can recover those backups, including
+you.
 
 ```bash
-docker compose exec bot node core/dist/backup/cli.js list     # what exists
-docker compose exec bot node core/dist/backup/cli.js drill    # is the newest one restorable
+docker compose exec bot node core/dist/backup/cli.js list    # what exists
+docker compose exec bot node core/dist/backup/cli.js drill   # is the newest one restorable
 ```
 
-Restoring is different, because `pg_restore --clean` drops and recreates tables
-the running bot is holding connections and locks on. Stop it first:
+Restoring drops and recreates tables the running bot holds locks on, so stop it
+first. `--force` is required to write over a database that already has tables,
+and `--at <ISO timestamp>` restores the newest backup at or before a moment
+instead of the latest.
 
 ```bash
 docker compose stop bot
@@ -92,58 +87,31 @@ docker compose run --rm bot node core/dist/backup/cli.js restore --force
 docker compose start bot
 ```
 
-(The image ships compiled JavaScript and production dependencies only, so it is
-`node core/dist/backup/cli.js` in a container and `pnpm --filter @avc/core run
-backup:list` from a source checkout.)
-
-`backup:restore` refuses to write over a database that already has tables
-unless you pass `--force`, and `--at <ISO timestamp>` restores the newest
-backup at or before a moment rather than the latest.
-
 ## Development
 
-Requirements: Node 22 LTS, pnpm (via corepack), Docker (for integration tests).
+Node 22 LTS, pnpm via corepack, and Docker for the integration tests, which run
+against a real ephemeral Postgres so advisory locks, `LISTEN/NOTIFY` and
+transactions are exercised for real.
 
 ```bash
-corepack enable
-pnpm install
-
-pnpm run typecheck          # tsc --build
-pnpm run lint               # eslint + prettier --check
-pnpm run test               # vitest: unit + integration
-pnpm run test:unit          # business-logic unit tests (no Docker)
-pnpm run test:integration   # DB / LISTEN-NOTIFY / advisory-lock tests (needs Docker)
-pnpm run build
+corepack enable && pnpm install
+pnpm run typecheck && pnpm run lint && pnpm run test
+pnpm run test:unit    # business logic only, no Docker needed
 ```
 
-- **Unit tests** cover pure business logic.
-- **Integration tests** run against a real ephemeral Postgres via Testcontainers,
-  so advisory locks / `LISTEN-NOTIFY` / transactions are exercised for real.
+[`core/`](./core) holds domain logic, the Drizzle schema, types and validation.
+[`bot/`](./bot) holds the gateway runtime, shard leases, the dispatcher, features
+and ops. [`deploy/fly/`](./deploy/fly) is the hosted service's config.
 
-### Database migrations
+Postgres is the source of truth, and every state-changing operation is
+idempotent. Coordination uses native Postgres primitives (advisory locks,
+`LISTEN/NOTIFY`, heartbeated shard leases) rather than Redis. Work is queued per
+guild, which buys ordering, fault isolation and a per-guild circuit breaker, and
+reconciliation converges instead of duplicating channels. Migrations follow
+strict expand/contract (add columns and tables first, drop only in a later
+release) and apply on boot, with
+`pnpm --filter @avc/core run db:generate` to write one from schema changes.
 
-Drizzle + drizzle-kit, following strict **expand/contract** discipline (add
-columns/tables first; drop only in a later release). Migrations run automatically
-on boot.
+## Help
 
-```bash
-pnpm --filter @avc/core run db:generate   # generate a migration from schema changes
-pnpm --filter @avc/core run db:migrate    # apply migrations (uses DATABASE_URL)
-```
-
-## Deployment (hosted)
-
-Fly-specific config lives under [`deploy/fly/`](./deploy/fly). Same image as
-self-host; only config differs. See [`deploy/fly/README.md`](./deploy/fly/README.md).
-
-## Operability
-
-Debug by querying state, not dashboards:
-
-- `GET /health` — per-subsystem readiness (db, leases, gateway); gates deploys.
-- `GET /diagnostics` — live state: claimed shards, per-guild queue depths,
-  tripped circuit-breakers, version/commit.
-- **SQL views** (`v_shard_ownership`, `v_guild_status`, `v_guild_auth_latest`,
-  `v_recent_ops`) for global state straight from Postgres.
-- **`runtime_flags`** — DB-backed no-deploy levers; every change is recorded in
-  `ops_audit`.
+[Support server](https://discord.gg/HT6GNhJ), or open an issue.
