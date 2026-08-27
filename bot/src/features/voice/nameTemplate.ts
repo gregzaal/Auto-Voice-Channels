@@ -58,8 +58,12 @@ const STD_ALIASES: Record<string, string> = {
 };
 
 export function getAlias(name: string, aliases: Record<string, string> = {}): string {
-  if (name in aliases) return aliases[name]!;
-  if (name in STD_ALIASES) return STD_ALIASES[name]!;
+  // Own-property checks, never `in`: the name comes from a member's Rich
+  // Presence, so someone playing a game called "constructor" or "toString"
+  // would otherwise resolve up the prototype chain and get the FUNCTION back,
+  // naming their room "function Object() { [native code] }".
+  if (Object.prototype.hasOwnProperty.call(aliases, name)) return aliases[name]!;
+  if (Object.prototype.hasOwnProperty.call(STD_ALIASES, name)) return STD_ALIASES[name]!;
   return name;
 }
 

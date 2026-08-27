@@ -14,6 +14,7 @@ import {
   type InteractionReplyOptions,
   type InteractionUpdateOptions,
   type ModalSubmitInteraction,
+  type StringSelectMenuInteraction,
 } from 'discord.js';
 import {
   isEntitled,
@@ -45,6 +46,17 @@ import {
   type VoteKickManager,
 } from '../features/voice/index.js';
 import { ALIAS_MODAL_ID, buildAliasModal, parseAliasModal } from './aliasModal.js';
+import {
+  ALIAS_INPUT_MAX,
+  ALIAS_PREFIX,
+  ALIAS_SELECT_ID,
+  buildAliasDetailPanel,
+  buildAliasEditModal,
+  buildAliasListPanel,
+  findAliasByHash,
+  parseAliasEditModal,
+  parseAliasId,
+} from './aliasPanel.js';
 import {
   ALL_REQUIRED_PERMISSION_LABELS,
   buildChannelPickerMessage,
@@ -170,7 +182,8 @@ interface AssistantSession {
 type ManageableInteraction =
   | ChatInputCommandInteraction
   | ButtonInteraction
-  | ChannelSelectMenuInteraction;
+  | ChannelSelectMenuInteraction
+  | StringSelectMenuInteraction;
 
 /**
  * The command/interaction surface. Resolves each interaction's guild + caller +
@@ -237,6 +250,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     if (interaction.isChatInputCommand()) return handleCommand(interaction);
     if (interaction.isButton()) return handleButton(interaction);
     if (interaction.isChannelSelectMenu()) return handleChannelSelect(interaction);
+    if (interaction.isStringSelectMenu()) return handleStringSelect(interaction);
     if (interaction.isModalSubmit()) return handleModal(interaction);
   }
 
@@ -377,7 +391,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       case 'create':
         return openCreateModal(interaction);
       case 'alias':
-        return openAliasModal(interaction);
+        return openAliasPanel(interaction);
       case 'setup':
         return openSetup(interaction);
       default:
@@ -1225,6 +1239,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       | ChatInputCommandInteraction
       | ButtonInteraction
       | ChannelSelectMenuInteraction
+      | StringSelectMenuInteraction
       | ModalSubmitInteraction,
   ): Promise<boolean> {
     if (hasManageChannels(interaction)) return true;
@@ -1501,10 +1516,115 @@ Already subscribed? Add the new server ` +
     return false;
   }
 
-  /** `/alias` → a modal to alias a game name, prefilled with your current game. */
-  async function openAliasModal(interaction: ChatInputCommandInteraction): Promise<void> {
-    // Admin-gated by Discord; the modal submit re-gates. Prefill from presence.
-    await interaction.showModal(buildAliasModal(currentGameName(interaction)));
+  /**
+   * Reads the guild's aliases WITHOUT the per-guild dispatcher, deliberately.
+   *
+   * Same call `openCreateModal` makes for the same reason: `GuildQueue` is
+   * serial per guild, so a queued read sits behind every channel create and
+   * rename already in flight, and this read has to complete before a
+   * `showModal` that cannot be deferred first. The queue also fails fast while
+   * a guild's circuit breaker is tripped, which would deny an admin the config
+   * surface exactly when they came to fix something. It buys nothing here
+   * either: this is a `SettingsCache` hit, not a query. Alias WRITES stay on
+   * the dispatcher, where the ordering actually matters.
+   */
+  const readAliases = (guildId: string): Promise<Record<string, string>> =>
+    deps.settings.listAliases(guildId);
+
+  /** `/alias` → the panel listing this guild's aliases. */
+  async function openAliasPanel(interaction: ChatInputCommandInteraction): Promise<void> {
+    // Admin-gated by Discord; every button and the modal submit re-gate.
+    await respond(interaction, buildAliasListPanel(await readAliases(interaction.guildId!)));
+  }
+
+  /** Re-renders the alias list in place, after a mutation or a page change. */
+  async function refreshAliasPanel(
+    interaction: ButtonInteraction | StringSelectMenuInteraction | ModalSubmitInteraction,
+    opts: { page?: number; note?: string } = {},
+  ): Promise<void> {
+    // Guarded the way refreshSetupPanel is: every caller defers today, and a
+    // future one that forgets would throw InteractionNotReplied here.
+    if (!interaction.deferred && !interaction.replied) await interaction.deferUpdate();
+    const aliases = await readAliases(interaction.guildId!);
+    await interaction.editReply(toUpdate(buildAliasListPanel(aliases, opts)));
+  }
+
+  /** The `/alias` panel's buttons: add, edit, remove, back, page, close. */
+  async function handleAliasButton(interaction: ButtonInteraction): Promise<void> {
+    if (!(await requireManageChannels(interaction))) return;
+    const parsed = parseAliasId(interaction.customId);
+    if (!parsed) return;
+    const guildId = interaction.guildId!;
+    const { action, arg } = parsed;
+
+    if (action === 'close') {
+      await interaction.update({ content: 'Closed.', embeds: [], components: [] });
+      return;
+    }
+    // Showing a modal is itself the acknowledgement, so this must not defer first.
+    if (action === 'add') {
+      await interaction.showModal(buildAliasModal(currentGameName(interaction)));
+      return;
+    }
+    if (action === 'back') {
+      await interaction.deferUpdate();
+      await refreshAliasPanel(interaction);
+      return;
+    }
+    if (action === 'page') {
+      await interaction.deferUpdate();
+      await refreshAliasPanel(interaction, { page: Number(arg) || 0 });
+      return;
+    }
+
+    // edit / remove both address one alias by hash, which may be gone by now.
+    if (!arg) return;
+
+    // Remove acknowledges FIRST, then reads. Edit cannot: showModal has to be
+    // the first response, so its read runs unqueued (see readAliases).
+    if (action === 'remove') {
+      await interaction.deferUpdate();
+      const found = findAliasByHash(await readAliases(guildId), arg);
+      if (!found) {
+        await refreshAliasPanel(interaction, { note: 'That alias is no longer there.' });
+        return;
+      }
+      const res = await run(guildId, 'alias:remove', () =>
+        deps.settings.removeAlias(guildId, found.game),
+      );
+      await refreshAliasPanel(interaction, { note: formatResult(res) });
+      return;
+    }
+    if (action === 'edit') {
+      const found = findAliasByHash(await readAliases(guildId), arg);
+      if (!found) {
+        await interaction.deferUpdate();
+        await refreshAliasPanel(interaction, { note: 'That alias is no longer there.' });
+        return;
+      }
+      await interaction.showModal(buildAliasEditModal(found.game, found.alias));
+    }
+  }
+
+  /** The alias picker: opens one alias's detail view in place. */
+  async function handleStringSelect(interaction: StringSelectMenuInteraction): Promise<void> {
+    if (interaction.customId !== ALIAS_SELECT_ID) return;
+    if (!(await requireManageChannels(interaction))) return;
+    const guildId = interaction.guildId!;
+    // The option value IS the hash (see buildAliasListPanel), so this resolves
+    // the same way the buttons do, including the "no longer there" path.
+    const hash = interaction.values[0];
+    if (!hash) return;
+    const aliases = await readAliases(guildId);
+    const found = findAliasByHash(aliases, hash);
+    if (!found) {
+      await respond(
+        interaction,
+        buildAliasListPanel(aliases, { note: 'That alias is no longer there.' }),
+      );
+      return;
+    }
+    await respond(interaction, buildAliasDetailPanel(found.game, found.alias));
   }
 
   // -- /setup : the primary entry point ------------------------------------
@@ -1720,6 +1840,7 @@ Already subscribed? Add the new server ` +
     if (interaction.customId.startsWith(JOIN_PREFIX)) return handleJoinDecision(interaction);
     if (interaction.customId.startsWith(ADOPT_PREFIX)) return handleAdoptButton(interaction);
     if (interaction.customId.startsWith(GROUP_PREFIX)) return handleGroupButton(interaction);
+    if (interaction.customId.startsWith(ALIAS_PREFIX)) return handleAliasButton(interaction);
     if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorButton(interaction);
     if (interaction.customId.startsWith(ASSISTANT_PREFIX))
       return handleAssistantButton(interaction);
@@ -1802,7 +1923,16 @@ Already subscribed? Add the new server ` +
     if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorModal(interaction);
     if (interaction.customId.startsWith(ASSISTANT_PREFIX)) return handleAssistantModal(interaction);
     if (interaction.customId === GENERAL_MODAL_ID) return handleGeneralSubmit(interaction);
+    // `avc:alias` is the pre-panel id of the Add modal, still accepted so a
+    // modal opened on an old instance mid-deploy can submit against a new one.
+    // It covers only that direction: a panel opened on a NEW instance whose
+    // guild then lands on an old one has buttons that old build cannot route,
+    // and the admin has to re-run `/alias`. That is deliberate, since the fix
+    // would be shipping the routing ahead of the feature in an earlier release.
+    // Removal is tracked in command-parity.md 3.1.
+    if (interaction.customId === 'avc:alias') return handleAliasSubmit(interaction);
     if (interaction.customId === ALIAS_MODAL_ID) return handleAliasSubmit(interaction);
+    if (interaction.customId.startsWith(ALIAS_PREFIX)) return handleAliasEditSubmit(interaction);
   }
 
   /** The `/setup` "no game" label modal submit. */
@@ -1815,13 +1945,55 @@ Already subscribed? Add the new server ` +
     await interaction.reply({ content: formatResult(res), ephemeral: true });
   }
 
-  /** The `/alias` modal submit. */
+  /** The alias panel's Add modal submit. */
   async function handleAliasSubmit(interaction: ModalSubmitInteraction): Promise<void> {
     if (!(await requireManageChannels(interaction))) return;
     const guildId = interaction.guildId!;
     const { game, alias } = parseAliasModal(interaction.fields);
-    const res = await run(guildId, 'cmd:alias', () => deps.settings.addAlias(guildId, game, alias));
-    await interaction.reply({ content: formatResult(res), ephemeral: true });
+    // A modal opened from the panel can edit it in place. The retired bare
+    // `avc:alias` id was opened straight from the slash command, so it has no
+    // message behind it and gets a plain reply instead.
+    if (!interaction.isFromMessage()) {
+      const res = await run(guildId, 'cmd:alias', () =>
+        deps.settings.addAlias(guildId, game, alias),
+      );
+      await interaction.reply({ content: formatResult(res), ephemeral: true });
+      return;
+    }
+    await interaction.deferUpdate();
+    const res = await run(guildId, 'alias:add', () => deps.settings.addAlias(guildId, game, alias));
+    await refreshAliasPanel(interaction, { note: formatResult(res) });
+  }
+
+  /** The alias panel's Edit modal submit (`avc:alias:save:<hash>`). */
+  async function handleAliasEditSubmit(interaction: ModalSubmitInteraction): Promise<void> {
+    if (!(await requireManageChannels(interaction))) return;
+    const parsed = parseAliasId(interaction.customId);
+    if (!parsed || parsed.action !== 'save' || !parsed.arg) return;
+    const guildId = interaction.guildId!;
+    const { game, alias } = parseAliasEditModal(interaction.fields);
+    // The edit modal is only ever opened from the panel, so this is defensive.
+    // It answers rather than returning silently, which Discord renders as a red
+    // "This interaction failed" with nothing explaining it.
+    if (!interaction.isFromMessage()) {
+      await interaction.reply({ content: 'Run `/alias` and try again.', ephemeral: true });
+      return;
+    }
+    await interaction.deferUpdate();
+    const found = findAliasByHash(await readAliases(guildId), parsed.arg);
+    if (!found) {
+      await refreshAliasPanel(interaction, { note: 'That alias is no longer there.' });
+      return;
+    }
+    // A text input caps at 100 characters, but an imported game name is bounded
+    // by nothing, so the modal prefills a truncation of anything longer. Reading
+    // that back as a new name would delete the real key and store the truncated
+    // one, silently breaking an alias the admin only opened to retitle.
+    const unchanged = game === found.game.slice(0, ALIAS_INPUT_MAX);
+    const res = await run(guildId, 'alias:edit', () =>
+      deps.settings.replaceAlias(guildId, found.game, unchanged ? found.game : game, alias),
+    );
+    await refreshAliasPanel(interaction, { note: formatResult(res) });
   }
 
   // -- helpers --------------------------------------------------------------
@@ -1873,7 +2045,9 @@ function currentVoiceChannelId(
 }
 
 /** The caller's current game (Playing/Streaming activity name), if any — for `/alias` prefill. */
-function currentGameName(interaction: ChatInputCommandInteraction): string | undefined {
+function currentGameName(
+  interaction: ChatInputCommandInteraction | ButtonInteraction,
+): string | undefined {
   const member =
     interaction.member instanceof GuildMember
       ? interaction.member
@@ -1890,6 +2064,7 @@ function categoryKeyForChannel(
     | ChatInputCommandInteraction
     | ButtonInteraction
     | ChannelSelectMenuInteraction
+    | StringSelectMenuInteraction
     | ModalSubmitInteraction,
   channelId: string,
 ): string {

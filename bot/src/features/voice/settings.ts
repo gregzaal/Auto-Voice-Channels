@@ -29,6 +29,26 @@ export type LogLevel = 1 | 2 | 3;
 const ok = (message: string): CommandResult => ({ ok: true, message });
 const fail = (message: string): CommandResult => ({ ok: false, message });
 
+/**
+ * Most game aliases one guild may hold.
+ *
+ * The map lives in the guild's `settings` blob, which every instance keeps in
+ * memory and re-parses on every channel render, so it needs a ceiling. The
+ * largest real guild has 23, so this is over four times the observed maximum.
+ */
+export const MAX_ALIASES = 100;
+
+/**
+ * Own-property test for a user-typed key.
+ *
+ * `in` walks the prototype chain, and an alias key is a game name, so a guild
+ * with a game called `constructor` or `toString` would otherwise read as having
+ * an alias it does not have (and `delete` on the inherited key does nothing).
+ * The same trap is documented in the importer's `unionKeepingExisting`.
+ */
+const has = (map: Record<string, string>, key: string): boolean =>
+  Object.prototype.hasOwnProperty.call(map, key);
+
 /** The default name for a freshly-created primary ("creator") channel. */
 export const DEFAULT_PRIMARY_NAME = '➕ New Session';
 
@@ -141,14 +161,109 @@ export class GuildSettingsService {
     return ok(`The "no game" label is now **${value}**.`);
   }
 
+  /**
+   * The guild's game aliases.
+   *
+   * Deliberately not `getConfig`, which also runs `autoChannels.listByGuild` --
+   * an uncached query the alias panel does not need and would repeat on every
+   * re-render. This reads the guild row the settings cache already holds.
+   */
+  async listAliases(guildId: string): Promise<Record<string, string>> {
+    const guild = await this.deps.guilds.ensure(guildId);
+    // A COPY. `parseVoiceSettings` hands back the map by reference, and the
+    // settings cache hands the same row to every caller, so returning it
+    // directly would let one caller's `aliases[x] = y` corrupt the cache
+    // process-wide with no write and no NOTIFY behind it.
+    return { ...parseVoiceSettings(guild.settings).aliases };
+  }
+
+  /**
+   * Applies a decision to the alias map under the row lock.
+   *
+   * NOT `updateSettings`, which merges DB-side only at the top level, so
+   * `aliases` is replaced wholesale and a read-then-write of it loses anything
+   * that landed in between. The importer merges the same key one level deeper
+   * and runs for minutes against guilds a live fleet is serving, so "in
+   * between" includes an import pass, and the per-guild dispatcher does not
+   * help: it is per instance, and two fleets already share 35 guilds.
+   * `decide` returns the new map to write, or a failing `CommandResult` to
+   * write nothing and report why.
+   */
+  private editAliases(
+    guildId: string,
+    decide: (
+      current: Record<string, string>,
+    ) => { aliases: Record<string, string> } | CommandResult,
+  ): Promise<CommandResult> {
+    return this.deps.guilds.mergeSettings(guildId, (existing) => {
+      const current = parseVoiceSettings(existing?.settings ?? {}).aliases;
+      const decided = decide(current);
+      if ('aliases' in decided) return { patch: { aliases: decided.aliases }, result: ok('') };
+      return { patch: {}, result: decided };
+    });
+  }
+
   async addAlias(guildId: string, game: string, alias: string): Promise<CommandResult> {
     const g = game.trim();
     const a = alias.trim();
     if (!g || !a) return fail('Provide both a game name and an alias.');
-    const config = await this.getConfig(guildId);
-    const aliases = { ...config.aliases, [g]: a };
-    await this.deps.guilds.updateSettings(guildId, { aliases });
-    return ok(`Alias added: **${g}** → **${a}**`);
+    let message = '';
+    const res = await this.editAliases(guildId, (current) => {
+      const replacing = has(current, g);
+      if (!replacing && Object.keys(current).length >= MAX_ALIASES) {
+        return fail(`This server already has ${MAX_ALIASES} aliases. Remove one to add another.`);
+      }
+      message = replacing
+        ? `Alias updated: **${g}** now shows as **${a}**`
+        : `Alias added: **${g}** → **${a}**`;
+      return { aliases: { ...current, [g]: a } };
+    });
+    return res.ok ? ok(message) : res;
+  }
+
+  /** Deletes one alias by its exact game name. */
+  async removeAlias(guildId: string, game: string): Promise<CommandResult> {
+    const res = await this.editAliases(guildId, (current) => {
+      if (!has(current, game)) return fail('That alias is no longer there.');
+      const aliases = { ...current };
+      delete aliases[game];
+      return { aliases };
+    });
+    return res.ok ? ok(`Removed the alias for **${game}**.`) : res;
+  }
+
+  /**
+   * Edits one alias, renaming the game name too when it changed.
+   *
+   * A rename is a delete plus a set in ONE write, so the old key can never be
+   * left behind by a failure between two writes. `previousGame` is the exact
+   * stored key (resolved from the panel's hash), so it is never trimmed.
+   */
+  async replaceAlias(
+    guildId: string,
+    previousGame: string,
+    game: string,
+    alias: string,
+  ): Promise<CommandResult> {
+    const g = game.trim();
+    const a = alias.trim();
+    if (!g || !a) return fail('Provide both a game name and an alias.');
+    let message = '';
+    const res = await this.editAliases(guildId, (current) => {
+      if (!has(current, previousGame)) return fail('That alias is no longer there.');
+      const renamed = g !== previousGame;
+      const overwrote = renamed && has(current, g);
+      message = overwrote
+        ? `Saved: **${g}** → **${a}**. This replaced the alias **${g}** already had.`
+        : renamed
+          ? `Saved: **${g}** → **${a}**, replacing the one for **${previousGame}**.`
+          : `Saved: **${g}** → **${a}**`;
+      const aliases = { ...current };
+      delete aliases[previousGame];
+      aliases[g] = a;
+      return { aliases };
+    });
+    return res.ok ? ok(message) : res;
   }
 
   /** Creates a Discord voice channel and registers it as a primary. */

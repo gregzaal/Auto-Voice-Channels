@@ -5,6 +5,8 @@ import { fakeLogger } from '../runtime/testUtils.js';
 import { registerInteractionHandler, type InteractionDeps } from './interactions.js';
 import { LOGGING_MODAL_ID } from './loggingModal.js';
 import { CREATE_MODAL_ID } from './createModal.js';
+import { ALIAS_MODAL_ID } from './aliasModal.js';
+import { ALIAS_SELECT_ID, aliasHash, aliasId } from './aliasPanel.js';
 
 /** A Discord "Missing Permissions" (50013) rejection, as thrown by a failed create. */
 function missingPermissions(): DiscordAPIError {
@@ -24,7 +26,7 @@ function fakeClient(): EventEmitter {
 }
 
 interface FakeInteractionOpts {
-  kind: 'command' | 'button' | 'select' | 'modal';
+  kind: 'command' | 'button' | 'select' | 'stringSelect' | 'modal';
   guildId?: string | null;
   commandName?: string;
   customId?: string;
@@ -46,6 +48,8 @@ interface FakeInteractionOpts {
   voiceChannelId?: string;
   /** Discord interaction locale, passed to the assistant as the reply language. */
   locale?: string;
+  /** True when a modal was opened from a component, so it can edit that message. */
+  fromMessage?: boolean;
 }
 
 /** Builds a minimal interaction with the methods/getters the router touches. */
@@ -94,7 +98,9 @@ function fakeInteraction(opts: FakeInteractionOpts) {
     isChatInputCommand: () => opts.kind === 'command',
     isButton: () => opts.kind === 'button',
     isChannelSelectMenu: () => opts.kind === 'select',
+    isStringSelectMenu: () => opts.kind === 'stringSelect',
     isModalSubmit: () => opts.kind === 'modal',
+    isFromMessage: () => opts.fromMessage ?? false,
     reply,
     followUp,
     editReply,
@@ -120,6 +126,10 @@ function setup(overrides: Partial<InteractionDeps> = {}) {
     getConfig: vi.fn().mockResolvedValue({ enabled: true, primaries: [], aliases: {} }),
     setLogging: vi.fn().mockResolvedValue({ ok: true, message: 'ok' }),
     getLogging: vi.fn().mockResolvedValue({ enabled: false, level: 1, channelId: null }),
+    listAliases: vi.fn().mockResolvedValue({}),
+    addAlias: vi.fn().mockResolvedValue({ ok: true, message: 'added' }),
+    removeAlias: vi.fn().mockResolvedValue({ ok: true, message: 'removed' }),
+    replaceAlias: vi.fn().mockResolvedValue({ ok: true, message: 'saved' }),
   };
   const guilds = {
     get: vi.fn().mockResolvedValue({ authStatus: 'active' }),
@@ -652,5 +662,296 @@ describe('registerInteractionHandler (/templateassistant)', () => {
     env.client.emit('interactionCreate', interaction);
     await flush();
     expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('session has expired');
+  });
+});
+
+describe('registerInteractionHandler (/alias panel)', () => {
+  let dispose: (() => void) | undefined;
+  afterEach(() => dispose?.());
+
+  const CS2 = aliasHash('Counter-Strike 2');
+  // Configure the spies setup() already wired into deps. Passing a fresh
+  // `settings` override instead would leave `env.settings` pointing at the
+  // original object, so every assertion would read a spy nothing ever called.
+  const withAliases = (aliases: Record<string, string>) => {
+    const env = setup();
+    env.settings.listAliases.mockResolvedValue(aliases);
+    env.settings.getConfig.mockResolvedValue({ enabled: true, primaries: [], aliases });
+    return env;
+  };
+
+  it('opens the list panel for /alias instead of a modal', async () => {
+    const env = withAliases({ 'Counter-Strike 2': 'CS2' });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'alias',
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(interaction.showModal).not.toHaveBeenCalled();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('Counter-Strike 2');
+  });
+
+  it('routes the picker to the detail view for the chosen alias', async () => {
+    const env = withAliases({ 'Counter-Strike 2': 'CS2' });
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'stringSelect',
+      customId: ALIAS_SELECT_ID,
+      manageChannels: true,
+      values: [CS2],
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    const shown = JSON.stringify(interaction.update.mock.calls[0]?.[0]);
+    expect(shown).toContain('Counter-Strike 2');
+    expect(shown).toContain(aliasId('remove', CS2));
+  });
+
+  it('gates the picker on Manage Channels', async () => {
+    const env = withAliases({ 'Counter-Strike 2': 'CS2' });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'stringSelect',
+      customId: ALIAS_SELECT_ID,
+      manageChannels: false,
+      values: [CS2],
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'You need the Manage Channels permission.' }),
+    );
+    expect(interaction.update).not.toHaveBeenCalled();
+  });
+
+  it('removes an alias and re-renders the list', async () => {
+    const env = withAliases({ 'Counter-Strike 2': 'CS2' });
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'button',
+      customId: aliasId('remove', CS2),
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(env.settings.removeAlias).toHaveBeenCalledWith('g1', 'Counter-Strike 2');
+    expect(interaction.deferUpdate).toHaveBeenCalled();
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('removed');
+  });
+
+  it('runs no mutation for a remove without Manage Channels', async () => {
+    const env = withAliases({ 'Counter-Strike 2': 'CS2' });
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'button',
+      customId: aliasId('remove', CS2),
+      manageChannels: false,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(env.settings.removeAlias).not.toHaveBeenCalled();
+  });
+
+  it('says so and mutates nothing when the alias vanished while the panel was open', async () => {
+    const env = withAliases({});
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'button',
+      customId: aliasId('remove', CS2),
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(env.settings.removeAlias).not.toHaveBeenCalled();
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('no longer there');
+  });
+
+  it('opens the edit modal prefilled, and saves against the previous name', async () => {
+    const env = withAliases({ 'Counter-Strike 2': 'CS2' });
+    dispose = env.dispose;
+    const open = fakeInteraction({
+      kind: 'button',
+      customId: aliasId('edit', CS2),
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', open.interaction);
+    await flush();
+    expect(JSON.stringify(open.interaction.showModal.mock.calls[0]?.[0])).toContain('CS2');
+
+    const save = fakeInteraction({
+      kind: 'modal',
+      customId: aliasId('save', CS2),
+      manageChannels: true,
+      textInputs: { game: 'Counter-Strike 2', alias: 'CS' },
+      fromMessage: true,
+    });
+    env.client.emit('interactionCreate', save.interaction);
+    await flush();
+    expect(env.settings.replaceAlias).toHaveBeenCalledWith(
+      'g1',
+      'Counter-Strike 2',
+      'Counter-Strike 2',
+      'CS',
+    );
+  });
+
+  it('adds through the panel and re-renders rather than replying', async () => {
+    const env = withAliases({});
+    dispose = env.dispose;
+    const { interaction, editReply, reply } = fakeInteraction({
+      kind: 'modal',
+      customId: ALIAS_MODAL_ID,
+      manageChannels: true,
+      textInputs: { game: 'Apex Legends', alias: 'Apex' },
+      fromMessage: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(env.settings.addAlias).toHaveBeenCalledWith('g1', 'Apex Legends', 'Apex');
+    expect(reply).not.toHaveBeenCalled();
+    expect(editReply).toHaveBeenCalled();
+  });
+
+  it('still accepts the retired bare modal id with a plain reply', async () => {
+    // A modal opened just before a rolling deploy submits against the new build.
+    const env = withAliases({});
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'modal',
+      customId: 'avc:alias',
+      manageChannels: true,
+      textInputs: { game: 'Apex Legends', alias: 'Apex' },
+      fromMessage: false,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(env.settings.addAlias).toHaveBeenCalledWith('g1', 'Apex Legends', 'Apex');
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('added');
+  });
+});
+
+describe('registerInteractionHandler (/alias panel buttons)', () => {
+  let dispose: (() => void) | undefined;
+  afterEach(() => dispose?.());
+
+  const many = (n: number): Record<string, string> =>
+    Object.fromEntries(Array.from({ length: n }, (_, i) => [`Game ${i}`, `G${i}`]));
+
+  const withAliases = (aliases: Record<string, string>) => {
+    const env = setup();
+    env.settings.listAliases.mockResolvedValue(aliases);
+    return env;
+  };
+
+  it('opens the add modal without deferring first', async () => {
+    // showModal must be the FIRST response, so a defer here is a hard failure
+    // in production that no other test would catch.
+    const env = withAliases({});
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'button',
+      customId: aliasId('add'),
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(interaction.showModal).toHaveBeenCalled();
+    expect(interaction.deferUpdate).not.toHaveBeenCalled();
+    expect(interaction.deferReply).not.toHaveBeenCalled();
+  });
+
+  it('gates the add button on Manage Channels', async () => {
+    const env = withAliases({});
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'button',
+      customId: aliasId('add'),
+      manageChannels: false,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(interaction.showModal).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'You need the Manage Channels permission.' }),
+    );
+  });
+
+  it('collapses the panel on close', async () => {
+    const env = withAliases({ 'Counter-Strike 2': 'CS2' });
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'button',
+      customId: aliasId('close'),
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(interaction.update).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'Closed.', embeds: [], components: [] }),
+    );
+  });
+
+  it('goes back to the list from the detail view', async () => {
+    const env = withAliases({ 'Counter-Strike 2': 'CS2' });
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'button',
+      customId: aliasId('back'),
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(interaction.deferUpdate).toHaveBeenCalled();
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('Counter-Strike 2');
+  });
+
+  it('renders the requested page, not always the first', async () => {
+    const env = withAliases(many(30));
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'button',
+      customId: aliasId('page', '1'),
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('Page 2 of 2');
+  });
+
+  it('answers rather than dying when the edit modal has no panel behind it', async () => {
+    const env = withAliases({ 'Counter-Strike 2': 'CS2' });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'modal',
+      customId: aliasId('save', aliasHash('Counter-Strike 2')),
+      manageChannels: true,
+      textInputs: { game: 'Counter-Strike 2', alias: 'CS' },
+      fromMessage: false,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(env.settings.replaceAlias).not.toHaveBeenCalled();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('/alias');
+  });
+
+  it('does not read a truncated prefill back as a rename', async () => {
+    // A modal input caps at 100 characters; an imported game name does not.
+    // Reading the prefill back unchanged must keep the real key.
+    const long = `${'g'.repeat(102)}`;
+    const env = withAliases({ [long]: 'Short' });
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'modal',
+      customId: aliasId('save', aliasHash(long)),
+      manageChannels: true,
+      textInputs: { game: long.slice(0, 100), alias: 'Shorter' },
+      fromMessage: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(env.settings.replaceAlias).toHaveBeenCalledWith('g1', long, long, 'Shorter');
   });
 });

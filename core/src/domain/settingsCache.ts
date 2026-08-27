@@ -1,5 +1,6 @@
 import { SETTINGS_INVALIDATE_CHANNEL } from '../db/notify.js';
 import type { PgNotifier } from '../db/notify.js';
+import type { AuthStatus } from './auth.js';
 import type { GuildRepository, GuildRow, TransitionAuthInput } from '../repositories/guilds.js';
 import type { TierId } from './tiers.js';
 
@@ -29,6 +30,22 @@ export interface GuildSettingsStore extends GuildSettingsReader {
    * for up to its TTL.
    */
   setBilledTier(guildId: string, tier: TierId | null): Promise<GuildRow>;
+  /**
+   * Read-modify-write under the row lock, with invalidation.
+   *
+   * For any settings key whose new value depends on its old one. `updateSettings`
+   * merges DB-side but only at the TOP level, so a nested map like `aliases` is
+   * replaced wholesale, and a read-then-write of it loses whatever landed in
+   * between. The legacy importer merges that same key one level deeper, so
+   * "in between" includes a live import pass, which is why the repository's own
+   * `mergeSettings` exists.
+   */
+  mergeSettings<T>(
+    guildId: string,
+    decide: (
+      existing: { authStatus: AuthStatus; settings: Record<string, unknown> } | undefined,
+    ) => { patch: Record<string, unknown>; result: T },
+  ): Promise<T>;
 }
 
 interface Entry {
@@ -94,6 +111,18 @@ export class SettingsCache implements GuildSettingsStore {
     const row = await this.repo.updateSettings(guildId, patch);
     await this.invalidate(guildId);
     return row;
+  }
+
+  /** Read-modify-write under the row lock, then invalidates the cache. */
+  async mergeSettings<T>(
+    guildId: string,
+    decide: (
+      existing: { authStatus: AuthStatus; settings: Record<string, unknown> } | undefined,
+    ) => { patch: Record<string, unknown>; result: T },
+  ): Promise<T> {
+    const result = await this.repo.mergeSettings(guildId, decide);
+    await this.invalidate(guildId);
+    return result;
   }
 
   /** Transitions auth state through to the DB, then invalidates the cache. */

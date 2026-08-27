@@ -135,7 +135,7 @@ export function buildCommandDefinitions(
     adminOnly(
       new SlashCommandBuilder()
         .setName('alias')
-        .setDescription('Add a shorter alias for a game name shown in channel names.'),
+        .setDescription('Add, edit or remove shorter aliases for game names in channel names.'),
     ),
     adminOnly(
       new SlashCommandBuilder()

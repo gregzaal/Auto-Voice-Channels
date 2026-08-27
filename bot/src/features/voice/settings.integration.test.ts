@@ -6,7 +6,7 @@ import { fakeLogger } from '../../runtime/testUtils.js';
 import { RecordingVoiceActions } from './actions.js';
 import { DEFAULT_CHANNEL_NAME_TEMPLATE } from './nameTemplate.js';
 import { readContact } from './guildSettings.js';
-import { GuildSettingsService } from './settings.js';
+import { GuildSettingsService, MAX_ALIASES } from './settings.js';
 
 const GUILD = 'guild-settings-test';
 
@@ -68,6 +68,112 @@ describe('GuildSettingsService (integration)', () => {
       'Counter-Strike 2': 'CS2',
       'Dead by Daylight': 'DbD',
     });
+  });
+
+  it('replaces the alias when the same game is added again', async () => {
+    await settings.addAlias(GUILD, 'Counter-Strike 2', 'CS2');
+    const res = await settings.addAlias(GUILD, 'Counter-Strike 2', 'CS');
+    expect(res.ok).toBe(true);
+    expect(res.message).toContain('updated');
+    expect(await settings.listAliases(GUILD)).toEqual({ 'Counter-Strike 2': 'CS' });
+  });
+
+  it('refuses to add past the cap, but still lets an existing one be replaced', async () => {
+    for (let i = 0; i < MAX_ALIASES; i += 1) await settings.addAlias(GUILD, `Game ${i}`, `G${i}`);
+    const full = await settings.addAlias(GUILD, 'One More', 'OM');
+    expect(full.ok).toBe(false);
+    expect(full.message).toContain(String(MAX_ALIASES));
+    const replace = await settings.addAlias(GUILD, 'Game 0', 'ZERO');
+    expect(replace.ok).toBe(true);
+    expect(Object.keys(await settings.listAliases(GUILD))).toHaveLength(MAX_ALIASES);
+  });
+
+  it('removes an alias, and reports a removal of one that is already gone', async () => {
+    await settings.addAlias(GUILD, 'Counter-Strike 2', 'CS2');
+    await settings.addAlias(GUILD, 'Dead by Daylight', 'DbD');
+
+    const res = await settings.removeAlias(GUILD, 'Counter-Strike 2');
+    expect(res.ok).toBe(true);
+    expect(await settings.listAliases(GUILD)).toEqual({ 'Dead by Daylight': 'DbD' });
+
+    const again = await settings.removeAlias(GUILD, 'Counter-Strike 2');
+    expect(again.ok).toBe(false);
+    expect(again.message).toContain('no longer there');
+  });
+
+  it('edits just the alias, leaving the game name alone', async () => {
+    await settings.addAlias(GUILD, 'Counter-Strike 2', 'CS2');
+    const res = await settings.replaceAlias(GUILD, 'Counter-Strike 2', 'Counter-Strike 2', 'CS');
+    expect(res.ok).toBe(true);
+    expect(await settings.listAliases(GUILD)).toEqual({ 'Counter-Strike 2': 'CS' });
+  });
+
+  it('renames the game name without leaving the old key behind', async () => {
+    await settings.addAlias(GUILD, 'Countr-Strike 2', 'CS2');
+    const res = await settings.replaceAlias(GUILD, 'Countr-Strike 2', 'Counter-Strike 2', 'CS2');
+    expect(res.ok).toBe(true);
+    // The whole point of the edit path: no orphan under the misspelling.
+    expect(await settings.listAliases(GUILD)).toEqual({ 'Counter-Strike 2': 'CS2' });
+  });
+
+  it('says so when a rename overwrites an alias that already existed', async () => {
+    await settings.addAlias(GUILD, 'Counter-Strike 2', 'CS2');
+    await settings.addAlias(GUILD, 'Apex Legends', 'Apex');
+    const res = await settings.replaceAlias(GUILD, 'Apex Legends', 'Counter-Strike 2', 'CS');
+    expect(res.ok).toBe(true);
+    expect(res.message).toContain('replaced');
+    expect(await settings.listAliases(GUILD)).toEqual({ 'Counter-Strike 2': 'CS' });
+  });
+
+  it('refuses to edit an alias that has been removed since the panel opened', async () => {
+    const res = await settings.replaceAlias(GUILD, 'Counter-Strike 2', 'Counter-Strike 2', 'CS');
+    expect(res.ok).toBe(false);
+    expect(res.message).toContain('no longer there');
+    expect(await settings.listAliases(GUILD)).toEqual({});
+  });
+
+  it('treats an inherited property name as an ordinary game name', async () => {
+    // `'constructor' in map` is true on any plain object, so a bare `in` check
+    // would report an alias this guild does not have, and deleting it would
+    // silently do nothing.
+    const missing = await settings.removeAlias(GUILD, 'constructor');
+    expect(missing.ok).toBe(false);
+
+    await settings.addAlias(GUILD, 'constructor', 'Ctor');
+    expect(await settings.listAliases(GUILD)).toEqual({ constructor: 'Ctor' });
+    const removed = await settings.removeAlias(GUILD, 'constructor');
+    expect(removed.ok).toBe(true);
+    expect(await settings.listAliases(GUILD)).toEqual({});
+  });
+
+  it('loses no alias when concurrent writers touch the map at once', async () => {
+    // The whole reason these go through mergeSettings rather than
+    // updateSettings. The latter merges DB-side only at the TOP level, so
+    // `aliases` is replaced wholesale and a read-then-write drops whatever
+    // landed in between. The per-guild dispatcher does not cover this: it is
+    // per instance, and the legacy importer writes this same key from outside
+    // the fleet entirely.
+    await settings.addAlias(GUILD, 'Seed', 'S');
+    await Promise.all([
+      settings.addAlias(GUILD, 'Apex Legends', 'Apex'),
+      settings.addAlias(GUILD, 'Counter-Strike 2', 'CS2'),
+      settings.addAlias(GUILD, 'Dead by Daylight', 'DbD'),
+      settings.addAlias(GUILD, 'Rocket League', 'RL'),
+    ]);
+    expect(await settings.listAliases(GUILD)).toEqual({
+      Seed: 'S',
+      'Apex Legends': 'Apex',
+      'Counter-Strike 2': 'CS2',
+      'Dead by Daylight': 'DbD',
+      'Rocket League': 'RL',
+    });
+  });
+
+  it('does not hand out the settings cache map by reference', async () => {
+    await settings.addAlias(GUILD, 'Counter-Strike 2', 'CS2');
+    const first = await settings.listAliases(GUILD);
+    first['Injected'] = 'nope';
+    expect(await settings.listAliases(GUILD)).toEqual({ 'Counter-Strike 2': 'CS2' });
   });
 
   it('creates a primary (real channel + registration) and lists it', async () => {

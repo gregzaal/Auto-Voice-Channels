@@ -6,8 +6,8 @@ import {
   type ModalSubmitFields,
 } from 'discord.js';
 
-/** Custom id for the `/alias` modal. */
-export const ALIAS_MODAL_ID = 'avc:alias';
+/** Custom id of the `/alias` panel's Add modal. */
+export const ALIAS_MODAL_ID = 'avc:alias:add';
 
 /**
  * The `/alias` modal: map a game's exact name to a shorter alias shown in
