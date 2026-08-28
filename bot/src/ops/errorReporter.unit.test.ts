@@ -173,6 +173,33 @@ describe('AdminChannelReporter', () => {
     await flush();
     expect(warn).toHaveBeenCalled();
   });
+
+  /**
+   * Both fleets post to the same admin channel and the message text otherwise
+   * carries no source, so a beta alert and a prod alert used to read as
+   * identical in Discord.
+   */
+  it('tags the message with fleet and instance when both are given', async () => {
+    const { client, sent } = fakeClient();
+    const r = new AdminChannelReporter({
+      client,
+      channelId: 'c',
+      logger,
+      fleet: 'beta',
+      instanceId: 'inst-a',
+    });
+    r.report('db.ping', 'Database down');
+    await flush();
+    expect(sent[0]).toContain('[beta:inst-a]');
+  });
+
+  it('omits the tag when fleet or instance is missing', async () => {
+    const { client, sent } = fakeClient();
+    const r = new AdminChannelReporter({ client, channelId: 'c', logger, fleet: 'prod' });
+    r.report('db.ping', 'Database down');
+    await flush();
+    expect(sent[0]).not.toContain('[');
+  });
 });
 
 describe('TeeErrorReporter', () => {

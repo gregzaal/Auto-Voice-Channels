@@ -1,5 +1,5 @@
 import { Routes, type Client } from 'discord.js';
-import type { AlertAudience, AlertRepository, Logger } from '@avc/core';
+import type { AlertAudience, AlertRepository, Fleet, Logger } from '@avc/core';
 
 /**
  * Reports significant operational errors to an admin Discord channel. This is a
@@ -44,6 +44,15 @@ export interface AdminChannelReporterOptions {
   logger: Logger;
   /** Per-kind throttle to avoid flooding the channel on error storms (ms). */
   throttleMs?: number;
+  /**
+   * Prefixed onto every message as `[fleet:instanceId]`. Both fleets post to
+   * the same admin channel and the message text otherwise carries no source,
+   * so a beta alert and a prod alert are indistinguishable in Discord. Both
+   * optional so a caller with neither still gets a plain message rather than
+   * a stray tag.
+   */
+  fleet?: Fleet;
+  instanceId?: string;
 }
 
 /**
@@ -128,7 +137,11 @@ export class AdminChannelReporter implements ErrorReporter {
     const carried = entry.suppressed;
     const suppressedNote = carried > 0 ? `\n_(+${carried} suppressed)_` : '';
     const detail = Object.keys(context).length ? `\n\`\`\`json\n${safeJson(context)}\n\`\`\`` : '';
-    const content = `⚠️ **${message}**${detail}${suppressedNote}`;
+    const tag =
+      this.opts.fleet && this.opts.instanceId
+        ? `[${this.opts.fleet}:${this.opts.instanceId}] `
+        : '';
+    const content = `⚠️ ${tag}**${message}**${detail}${suppressedNote}`;
 
     entry.inFlight = true;
     this.state.set(kind, entry);

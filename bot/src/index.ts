@@ -235,7 +235,13 @@ async function main(): Promise<void> {
    * same as the billing tables, since persisting for no reader is pointless.
    */
   const adminChannel = config.adminChannelId
-    ? new AdminChannelReporter({ client, channelId: config.adminChannelId, logger })
+    ? new AdminChannelReporter({
+        client,
+        channelId: config.adminChannelId,
+        logger,
+        fleet: config.fleet,
+        instanceId: config.instanceId,
+      })
     : undefined;
   const channelReporter: ErrorReporter = adminChannel ?? new NullErrorReporter();
   /** One repository, shared with the watcher below. Undefined (unused) on self-host. */
