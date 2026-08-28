@@ -163,6 +163,8 @@ export class RecordingVoiceActions implements VoiceActions {
   failCreate = false;
   /** When true, `moveMember` throws Missing Permissions (tests the created-but-stranded path). */
   failMove = false;
+  /** When true, `setPrivacy` throws Missing Permissions (tests the created-but-unlockable path). */
+  failPrivacy = false;
   private seq = 0;
   private readonly created = new Set<string>();
 
@@ -254,6 +256,18 @@ export class RecordingVoiceActions implements VoiceActions {
   }
 
   setPrivacy(guildId: string, channelId: string, isPrivate: boolean): Promise<void> {
+    if (this.failPrivacy) {
+      return Promise.reject(
+        new DiscordAPIError(
+          { code: 50013, message: 'Missing Permissions' } as never,
+          50013,
+          403,
+          'PUT',
+          'https://discord.test',
+          {} as never,
+        ),
+      );
+    }
     this.actions.push({ type: 'privacy', guildId, channelId, isPrivate });
     return Promise.resolve();
   }

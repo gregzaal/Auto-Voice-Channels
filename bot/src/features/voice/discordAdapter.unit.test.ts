@@ -513,3 +513,58 @@ describe('DiscordVoiceActions.renameChannel (deleted vs merely hidden)', () => {
     await expect(actions.renameChannel('g1', 'c1', 'x')).rejects.toBeInstanceOf(DiscordAPIError);
   });
 });
+
+describe('DiscordVoiceActions.setPrivacy', () => {
+  const everyone = { id: 'g1' };
+
+  function clientWithChannel() {
+    const edit = vi.fn().mockResolvedValue(undefined);
+    const channel = {
+      isVoiceBased: () => true,
+      guild: { roles: { everyone } },
+      permissionOverwrites: { edit },
+    };
+    const client = {
+      user: { id: BOT },
+      channels: { fetch: vi.fn().mockResolvedValue(channel) },
+    } as unknown as Client;
+    return { client, edit };
+  }
+
+  // Reproduces the prod incident: without this, denying @everyone Connect also
+  // denies it to the bot (a member of @everyone), and the very next grant to the
+  // room's owner fails with Missing Access -- see AGENTS.md's privacy section.
+  it('grants the bot its own access before denying @everyone Connect', async () => {
+    const { client, edit } = clientWithChannel();
+    await new DiscordVoiceActions(client).setPrivacy('g1', 'c1', true);
+    expect(edit).toHaveBeenNthCalledWith(
+      1,
+      BOT,
+      { ViewChannel: true, Connect: true, ManageChannels: true, MoveMembers: true },
+      { type: OverwriteType.Member },
+    );
+    expect(edit).toHaveBeenNthCalledWith(2, everyone, { Connect: false });
+  });
+
+  it('going public clears @everyone without touching the bot overwrite', async () => {
+    const { client, edit } = clientWithChannel();
+    await new DiscordVoiceActions(client).setPrivacy('g1', 'c1', false);
+    expect(edit).toHaveBeenCalledTimes(1);
+    expect(edit).toHaveBeenCalledWith(everyone, { Connect: null });
+  });
+
+  it('swallows an Unknown Channel error (idempotent)', async () => {
+    const channel = {
+      isVoiceBased: () => true,
+      guild: { roles: { everyone } },
+      permissionOverwrites: { edit: vi.fn().mockRejectedValue(apiError(UNKNOWN_CHANNEL)) },
+    };
+    const client = {
+      user: { id: BOT },
+      channels: { fetch: vi.fn().mockResolvedValue(channel) },
+    } as unknown as Client;
+    await expect(
+      new DiscordVoiceActions(client).setPrivacy('g1', 'c1', true),
+    ).resolves.toBeUndefined();
+  });
+});

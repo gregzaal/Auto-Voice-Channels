@@ -460,6 +460,25 @@ export class DiscordVoiceActions implements VoiceActions {
       const channel = await this.client.channels.fetch(channelId);
       if (!channel?.isVoiceBased()) return;
       const everyone = channel.guild.roles.everyone;
+      if (isPrivate) {
+        // Same lockout `withBotAccess` guards against at create time, reached
+        // by a different door: denying @everyone Connect below also denies it
+        // to the bot (a member of @everyone) unless a higher-precedence
+        // overwrite says otherwise, and without Administrator the bot then
+        // can't even grant the owner Connect right after (Discord: you can
+        // only set an overwrite bit you effectively hold) -- nor rename,
+        // delete, or move anyone out of the channel it just locked. Written
+        // first, so there is no window where the @everyone deny applies
+        // without it.
+        const botId = this.client.user?.id;
+        if (botId) {
+          await channel.permissionOverwrites.edit(
+            botId,
+            { ViewChannel: true, Connect: true, ManageChannels: true, MoveMembers: true },
+            { type: OverwriteType.Member },
+          );
+        }
+      }
       // `null` clears the overwrite (public); `false` denies Connect (private).
       await channel.permissionOverwrites.edit(everyone, { Connect: isPrivate ? false : null });
     } catch (err) {

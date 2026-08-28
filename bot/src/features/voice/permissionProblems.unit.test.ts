@@ -94,9 +94,19 @@ describe('permissionProblemMessage', () => {
     // refuse a create any more. Advice pointing at one is a hunt with no quarry.
     expect(msg).not.toContain('granting something I do not have');
   });
+
+  it('sends privacy failures to Manage Roles, not the general access advice', () => {
+    const msg = permissionProblemMessage('123', 'privacy');
+    expect(msg).toContain('made a room');
+    expect(msg).toContain('Manage Roles');
+    expect(msg).not.toContain('lost access');
+  });
 });
 
-const problem = (channelId: string, operation: 'create' | 'delete' = 'delete') => ({
+const problem = (
+  channelId: string,
+  operation: 'create' | 'delete' | 'move' | 'privacy' = 'delete',
+) => ({
   channelId,
   operation,
   at: 0,
@@ -122,6 +132,28 @@ describe('permissionProblemSummary', () => {
     expect(line).not.toContain('lost access');
     expect(line).not.toContain('could not create');
     expect(line).toContain('Move Members');
+  });
+
+  it('never describes a privacy failure as lost access or a move', () => {
+    // Same shape as a move failure (room created then deleted), but the fix is
+    // a different permission, so it needs its own line and its own wording.
+    const line = permissionProblemSummary([problem('a', 'privacy')])[0]!;
+    expect(line).not.toContain('lost access');
+    expect(line).not.toContain('could not create');
+    expect(line).not.toContain('Move Members');
+    expect(line).toContain('Manage Roles');
+  });
+
+  it('keeps privacy failures on their own line alongside the others', () => {
+    const lines = permissionProblemSummary([
+      problem('a', 'create'),
+      problem('b'),
+      problem('c', 'move'),
+      problem('d', 'privacy'),
+    ]);
+    expect(lines).toHaveLength(4);
+    expect(lines[2]).toContain('made rooms from <#d>');
+    expect(lines[2]).toContain('Manage Roles');
   });
 
   it('emits only the line it has problems for', () => {
@@ -187,11 +219,13 @@ describe('copy rules', () => {
     permissionProblemMessage('123'),
     permissionProblemMessage('123', 'create'),
     permissionProblemMessage('123', 'move'),
+    permissionProblemMessage('123', 'privacy'),
     ...permissionProblemSummary([
       problem('a', 'create'),
       problem('b'),
       problem('c'),
       problem('d', 'move'),
+      problem('e', 'privacy'),
     ]),
     ...permissionProblemSummary(Array.from({ length: 9 }, (_, i) => problem(`c${i}`, 'create'))),
     problemNoticeBody(permissionProblemSummary([problem('a', 'create')]), 1, 'contact'),

@@ -7,7 +7,7 @@
  * the same process that records an incident also serves that guild's `/setup` —
  * no cross-instance sharing is needed.
  */
-export type PermissionOperation = 'create' | 'move' | 'delete' | 'rename';
+export type PermissionOperation = 'create' | 'move' | 'delete' | 'rename' | 'privacy';
 
 export interface PermissionProblem {
   channelId: string;
@@ -161,6 +161,13 @@ export function permissionProblemMessage(
       'it again. I need **Move Members**, on the category the rooms are made in or on my role.'
     );
   }
+  if (operation === 'privacy') {
+    return (
+      `⚠️ I made a room from <#${channelId}> but could not make it private, so I deleted it ` +
+      'again. I need **Manage Roles** (to set permission overrides) and **Connect**, on the ' +
+      'category the rooms are made in or on my role.'
+    );
+  }
   return (
     `⚠️ I cannot manage <#${channelId}>, I have lost access to it (a permission override is ` +
     'hiding it from me). Grant my role **View Channel**, **Connect**, **Manage Channels** and ' +
@@ -210,7 +217,10 @@ export function permissionProblemSummary(problems: readonly ProblemLike[]): stri
   };
   const creates = problems.filter((p) => p.operation === 'create');
   const moves = problems.filter((p) => p.operation === 'move');
-  const access = problems.filter((p) => p.operation !== 'create' && p.operation !== 'move');
+  const privacyFails = problems.filter((p) => p.operation === 'privacy');
+  const access = problems.filter(
+    (p) => p.operation !== 'create' && p.operation !== 'move' && p.operation !== 'privacy',
+  );
   const lines: string[] = [];
   if (creates.length > 0) {
     lines.push(
@@ -235,6 +245,19 @@ export function permissionProblemSummary(problems: readonly ProblemLike[]): stri
       `I made rooms from ${list(moves)} but could not move anyone into them, so I deleted ` +
         'them again. I need **Move Members**, on the category the rooms are made in or on my ' +
         'role.',
+    );
+  }
+  /**
+   * Also its own line, for the same reason as `moves`: the room was created
+   * (so "I could not create rooms" is wrong) and then deleted (so "I lost
+   * access and stopped managing it" is wrong too). Only the permission named
+   * differs from a move failure.
+   */
+  if (privacyFails.length > 0) {
+    lines.push(
+      `I made rooms from ${list(privacyFails)} but could not make them private, so I deleted ` +
+        'them again. I need **Manage Roles** (to set permission overrides) and **Connect**, on ' +
+        'the category the rooms are made in or on my role.',
     );
   }
   if (access.length > 0) {

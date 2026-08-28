@@ -465,12 +465,33 @@ export class VoiceFeature {
     // Default-private primaries: lock the new channel before the creator lands in
     // it (granting Connect to them by id, since their move isn't cached yet).
     if (primary?.template.defaultPrivate) {
-      await this.deps.makePrivateOnCreate?.(
-        guildId,
-        newChannelId,
-        member.id,
-        displayName(settings, member),
-      );
+      try {
+        await this.deps.makePrivateOnCreate?.(
+          guildId,
+          newChannelId,
+          member.id,
+          displayName(settings, member),
+        );
+      } catch (err) {
+        if (!isPermissionError(err)) throw err;
+        // Same recovery as a failed move: a channel we can't finish locking
+        // down is worse than no channel, since nobody (not even the owner) can
+        // get into it. Stop tracking it, best-effort delete, and notify.
+        await this.deps.secondaries.remove(newChannelId);
+        await this.deps.onSecondaryRemoved?.(guildId, newChannelId);
+        await this.deps.actions.deleteChannel(guildId, newChannelId).catch(() => undefined);
+        this.deps.permissionProblems?.record(guildId, {
+          channelId,
+          operation: 'privacy',
+          at: Date.now(),
+        });
+        this.deps.serverLog?.(guildId, 1, permissionProblemMessage(channelId, 'privacy'));
+        this.deps.logger.warn(
+          { guildId, primaryId: channelId, secondaryId: newChannelId, err },
+          'created secondary but cannot make it private',
+        );
+        return { action: 'skip' };
+      }
     }
 
     try {

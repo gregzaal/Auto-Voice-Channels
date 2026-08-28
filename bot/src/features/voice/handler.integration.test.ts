@@ -837,6 +837,55 @@ describe('VoiceFeature (integration)', () => {
     expect(privacyIdx).toBeLessThan(moveIdx);
   });
 
+  it('deletes a default-private room it could not lock down, blaming the creator channel', async () => {
+    await env.handle.db.delete(db.schema.joinChannels);
+    const joinChannels = new JoinChannelRepository(env.handle.db);
+    const privacy = new PrivacyService({
+      secondaries,
+      joinChannels,
+      actions,
+      voice,
+      logger: fakeLogger(),
+    });
+    const problems = new PermissionProblemTracker();
+    const f = new VoiceFeature({
+      autoChannels,
+      secondaries,
+      guilds,
+      actions,
+      voice,
+      selfHosted: true,
+      logger: fakeLogger(),
+      permissionProblems: problems,
+      makePrivateOnCreate: (g, c, ownerId, ownerName) =>
+        privacy.makePrivateForCreation(g, c, ownerId, ownerName),
+    });
+    await guilds.transitionAuth({ guildId: GUILD, toStatus: 'trial' });
+    await autoChannels.upsert(GUILD, PRIMARY, { name: "@@creator@@'s room", defaultPrivate: true });
+
+    const alice = member('alice');
+    voice.put(PRIMARY, alice);
+    actions.failPrivacy = true;
+    await f.handleVoiceStateUpdate({ guildId: GUILD, member: alice, afterChannelId: PRIMARY });
+
+    const secondaryId = actions.ofType('create')[0]!.channelId;
+    // Created, then deleted again -- a locked room nobody, not even the
+    // owner, can get into is worse than no room at all.
+    expect(actions.ofType('delete')).toContainEqual(
+      expect.objectContaining({ channelId: secondaryId }),
+    );
+    expect(await secondaries.get(secondaryId)).toBeUndefined();
+    // Nobody was ever moved into a room they could not have gotten into anyway.
+    expect(actions.ofType('move')).toEqual([]);
+
+    // Same convention as a failed move: blame the creator channel, not the
+    // secondary that's already gone by the time this is recorded.
+    const recorded = problems.recent(GUILD);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]!.channelId).toBe(PRIMARY);
+    expect(recorded[0]!.operation).toBe('privacy');
+  });
+
   it('a public (default) primary spawns secondaries without locking them', async () => {
     const f = new VoiceFeature({
       autoChannels,
