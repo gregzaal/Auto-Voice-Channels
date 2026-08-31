@@ -535,6 +535,21 @@ export const subscriptions = pgTable(
      * cutting someone off while their request is judged would punish them for
      * asking.
      */
+    /**
+     * Which of Paddle's seven adjustment ACTIONS the row's refund fields
+     * describe: `refund`, `chargeback`, `credit`, and so on.
+     *
+     * Needed because these columns are no longer refund-only. Before
+     * `classifyAdjustment` they were, since anything that was not a refund was
+     * dropped before it reached the store. Now a chargeback is recorded here
+     * too, and without this every surface reading `refund_status = 'approved'`
+     * would tell a customer their money had been refunded when their bank had
+     * reversed the charge instead.
+     *
+     * Null on rows written before this existed, and those are all refunds, so a
+     * null reads as `refund`.
+     */
+    refundAction: text('refund_action'),
     refundStatus: text('refund_status'),
     /**
      * The transaction id that bought the CURRENT period, from

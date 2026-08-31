@@ -127,3 +127,20 @@ export function classifyAdjustment(
 
   return { kind: 'settle', reason: 'full_approved' };
 }
+
+/**
+ * Whether a row's refund columns describe an actual refund.
+ *
+ * The columns are shared with every other adjustment action now, so a surface
+ * that renders "Refunded" has to ask this first or it will tell a customer their
+ * money came back when their bank reversed the charge instead. Null reads as a
+ * refund, because every row written before the action column existed was one.
+ */
+export function isRefundRecord(refundAction: string | null | undefined): boolean {
+  return refundAction == null || refundAction === 'refund';
+}
+
+/** Whether a row's refund columns describe a chargeback (a disputed charge). */
+export function isChargebackRecord(refundAction: string | null | undefined): boolean {
+  return refundAction === 'chargeback';
+}

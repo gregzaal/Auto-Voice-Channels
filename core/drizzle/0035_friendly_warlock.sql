@@ -1,0 +1,1 @@
+ALTER TABLE "subscriptions" ADD COLUMN "refund_action" text;

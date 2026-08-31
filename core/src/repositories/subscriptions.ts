@@ -55,6 +55,13 @@ export const subscriptionRowSchema = z.object({
    * here, and guarantees the key is present on the way out.
    */
   refundStatus: z.string().nullish().default(null),
+  /**
+   * Which adjustment ACTION these fields describe. Null reads as `refund`,
+   * because every row written before the column existed was one. Any surface
+   * rendering "Refunded" has to check it, or a chargeback tells a customer their
+   * money came back from us when their bank reversed the charge instead.
+   */
+  refundAction: z.string().nullish().default(null),
   refundTotal: z.string().nullish(),
   /** When WE received the adjustment. Not the ordering guard's input: see schema.ts. */
   refundAt: z.date().nullish(),
@@ -684,6 +691,7 @@ export class SubscriptionRepository {
     const rows = await this.db
       .update(subscriptions)
       .set({
+        refundAction: adjustment.action,
         refundStatus: adjustment.status,
         refundTotal: adjustment.total,
         refundAt: now,
