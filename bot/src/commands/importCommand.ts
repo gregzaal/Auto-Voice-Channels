@@ -980,7 +980,17 @@ export function hasManageGuild(
   return interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ?? false;
 }
 
-/** Short enough for a 100-character custom id, unique enough for a 15-minute TTL. */
+/**
+ * The interaction id, whole.
+ *
+ * It was truncated to the last 18 characters, which bought nothing: a custom id
+ * of `avc:import:confirm:` plus a 19-digit snowflake is 38 characters against a
+ * 100-character budget. Truncating introduced a collision class instead, and
+ * `put` overwrites rather than refusing, so two ids agreeing on their last 18
+ * digits inside one 15-minute window would silently evict somebody else's
+ * pending plan. The guard on the confirm would catch the wrong-plan case, but
+ * the eviction would already have happened.
+ */
 function newSessionId(interactionId: string): string {
-  return interactionId.slice(-18);
+  return interactionId;
 }

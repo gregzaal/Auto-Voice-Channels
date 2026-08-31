@@ -272,7 +272,7 @@ describe('import and export flow (integration)', () => {
       expect(preview.content).toContain('Preview of');
       expect(preview.content).toContain('Subscription and trial state: unchanged');
 
-      const sessionId = 'i-1'.slice(-18);
+      const sessionId = 'i-1';
       const confirmed = fakeButton(fakeGuild(), importId('confirm', sessionId));
       await handleImportButton(confirmed.interaction, deps);
 
@@ -310,7 +310,7 @@ describe('import and export flow (integration)', () => {
       await handleImportCommand(previewed.interaction, deps);
 
       const guild = fakeGuild();
-      const confirmed = fakeButton(guild, importId('confirm', 'i-1'.slice(-18)));
+      const confirmed = fakeButton(guild, importId('confirm', 'i-1'));
       await handleImportButton(confirmed.interaction, deps);
 
       const snapshot = confirmed.replies.find((r) => r.files?.[0]?.name?.includes('before-import'));
@@ -340,7 +340,7 @@ describe('import and export flow (integration)', () => {
       ]);
       await handleImportCommand(previewed.interaction, deps);
       await handleImportButton(
-        fakeButton(fakeGuild(), importId('confirm', 'i-1'.slice(-18))).interaction,
+        fakeButton(fakeGuild(), importId('confirm', 'i-1')).interaction,
         deps,
       );
 
@@ -431,7 +431,7 @@ describe('import and export flow (integration)', () => {
       ]);
       await handleImportCommand(previewed.interaction, deps);
 
-      const id = importId('confirm', 'i-1'.slice(-18));
+      const id = importId('confirm', 'i-1');
       await handleImportButton(fakeButton(fakeGuild(), id).interaction, deps);
       const second = fakeButton(fakeGuild(), id);
       await handleImportButton(second.interaction, deps);
@@ -452,7 +452,7 @@ describe('import and export flow (integration)', () => {
       ]);
       await handleImportCommand(previewed.interaction, deps);
 
-      const cancelled = fakeButton(fakeGuild(), importId('cancel', 'i-1'.slice(-18)));
+      const cancelled = fakeButton(fakeGuild(), importId('cancel', 'i-1'));
       await handleImportButton(cancelled.interaction, deps);
 
       expect(text(cancelled.replies)).toContain('Nothing was imported');
@@ -486,7 +486,7 @@ describe('import and export flow (integration)', () => {
       expect(replies.at(-1)?.content).toContain('Preview of');
 
       await handleImportButton(
-        fakeButton(fakeGuild(), importId('confirm', 'i-1'.slice(-18))).interaction,
+        fakeButton(fakeGuild(), importId('confirm', 'i-1')).interaction,
         deps,
       );
 
