@@ -833,6 +833,31 @@ describe('diffGuildConfig: adopted channels', () => {
   });
 
   /**
+   * The permission answers are the full sets, not a single flag.
+   *
+   * A creator channel the bot can See but cannot Connect to creates no rooms,
+   * and an adopted channel where it holds Manage Channels but not View Channel
+   * cannot be renamed at all, so a proxy on one flag was wrong both ways.
+   */
+  it('names the missing permission on a drop, so the admin knows what to grant', () => {
+    const guildFacts = facts({
+      channels: new Map([
+        [
+          ADOPTED,
+          voiceChannel('Lobby', { botCanRename: false, missingPermissions: ['View Channel'] }),
+        ],
+      ]),
+    });
+    const plan = planOf(
+      nativeFile({ adopted_channels: [adoptedEntry()] as never }),
+      currentConfig(),
+      guildFacts,
+    );
+    const note = plan.notes.find((n) => n.code === 'channel_cannot_rename');
+    expect(note?.missingPermissions).toEqual(['View Channel']);
+  });
+
+  /**
    * The import self-destruct, and the reason this is a hard drop rather than a
    * warning. A `managed_channels` row for a channel the bot cannot rename makes
    * the next sweep call `rerenderManaged` with `onUnmanageable: 'abandon'`, which

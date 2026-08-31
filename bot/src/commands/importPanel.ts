@@ -404,7 +404,13 @@ function noteLine(note: ImportNote): string {
   const label = NOTE_LABELS[note.code] ?? note.code;
   const subject = note.name ?? SETTING_LABELS[note.subject] ?? note.subject;
   const limit = note.limit !== undefined ? ` (limit ${note.limit})` : '';
-  return `${subject}: ${label.toLowerCase()}${limit}`;
+  // Naming the permission is the difference between a line an admin can act on
+  // and one they have to guess at.
+  const missing =
+    note.missingPermissions && note.missingPermissions.length > 0
+      ? ` (needs ${note.missingPermissions.join(', ')})`
+      : '';
+  return `${subject}: ${label.toLowerCase()}${limit}${missing}`;
 }
 
 function cappedLines(lines: readonly string[], cap: number): string[] {

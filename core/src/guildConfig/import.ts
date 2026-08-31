@@ -57,10 +57,24 @@ export type ChannelKind = 'voice' | 'text' | 'category' | 'other';
 export interface ChannelFact {
   name: string;
   kind: ChannelKind;
-  /** Whether the bot can see and act on the channel at all. */
+  /**
+   * Whether the bot holds the full creator-channel permission set.
+   *
+   * Computed by the caller from `missingBotPermissions`, not from a single flag:
+   * a channel where the bot can see but cannot Connect creates no rooms, and a
+   * proxy that checked View Channel alone reported it as fine.
+   */
   botCanManage: boolean;
-  /** Whether the bot can rename it, which is all an adopted channel needs. */
+  /**
+   * Whether the bot can rename it, which is all an adopted channel needs.
+   *
+   * From `missingRenamePermissions`, which is deliberately narrower: renaming
+   * needs View Channel and Manage Channels and neither Move Members nor Manage
+   * Roles, so demanding the full set here would refuse setups that work.
+   */
   botCanRename: boolean;
+  /** The human labels of what is missing, for copy that says what to grant. */
+  missingPermissions?: readonly string[] | undefined;
 }
 
 /**
@@ -216,6 +230,8 @@ export interface ImportNote {
   limit?: number | undefined;
   /** A second id, for a mismatch. Never file content beyond an id. */
   other?: string | undefined;
+  /** Permission labels the bot is missing, so a drop can say what to grant. */
+  missingPermissions?: readonly string[] | undefined;
 }
 
 export interface SettingChange {
@@ -898,6 +914,7 @@ function diffCreatorChannels(
         severity: 'warning',
         subject: entry.channelId,
         name: fact.name,
+        missingPermissions: fact.missingPermissions,
       });
     }
 
@@ -1002,6 +1019,7 @@ function diffAdoptedChannels(
         severity: 'dropped',
         subject: entry.channelId,
         name: fact.name,
+        missingPermissions: fact.missingPermissions,
       });
       continue;
     }

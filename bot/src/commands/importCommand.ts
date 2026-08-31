@@ -37,6 +37,7 @@ import {
   type ConfigSnapshotDeps,
 } from '../features/voice/configSnapshot.js';
 import type { GuildSettingsService } from '../features/voice/settings.js';
+import { missingBotPermissions, missingRenamePermissions } from './setupPanel.js';
 import {
   destructiveCount,
   importButtons,
@@ -944,21 +945,36 @@ async function buildApplyFacts(
   };
 }
 
+/**
+ * One channel, as the differ needs it.
+ *
+ * The permission answers come from `missingBotPermissions` and
+ * `missingRenamePermissions`, the same two helpers `/setup` uses, rather than a
+ * single-flag proxy. That matters in both directions: a creator channel where
+ * the bot can See but cannot Connect creates no rooms, and an adopted channel
+ * where it holds Manage Channels but not View Channel cannot be renamed at all,
+ * which is precisely the case whose row the next sweep abandons.
+ */
 function channelFact(guild: Guild, channel: GuildBasedChannel): ChannelFact {
   const me = guild.members.me;
   const perms = me ? channel.permissionsFor(me) : null;
+  const has = (flag: bigint): boolean => perms?.has(flag) === true;
+  const missingForCreate = missingBotPermissions(has);
+  const missingForRename = missingRenamePermissions(has);
+  const kind: ChannelFact['kind'] =
+    channel.type === ChannelType.GuildVoice || channel.type === ChannelType.GuildStageVoice
+      ? 'voice'
+      : channel.type === ChannelType.GuildCategory
+        ? 'category'
+        : channel.type === ChannelType.GuildText || channel.type === ChannelType.GuildAnnouncement
+          ? 'text'
+          : 'other';
   return {
     name: channel.name,
-    kind:
-      channel.type === ChannelType.GuildVoice || channel.type === ChannelType.GuildStageVoice
-        ? 'voice'
-        : channel.type === ChannelType.GuildCategory
-          ? 'category'
-          : channel.type === ChannelType.GuildText || channel.type === ChannelType.GuildAnnouncement
-            ? 'text'
-            : 'other',
-    botCanManage: perms?.has(PermissionFlagsBits.ViewChannel) === true,
-    botCanRename: perms?.has(PermissionFlagsBits.ManageChannels) === true,
+    kind,
+    botCanManage: missingForCreate.length === 0,
+    botCanRename: missingForRename.length === 0,
+    missingPermissions: missingForCreate.length > 0 ? missingForCreate : missingForRename,
   };
 }
 
