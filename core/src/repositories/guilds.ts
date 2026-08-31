@@ -321,6 +321,14 @@ export class GuildRepository {
         toStatus: input.toStatus,
         reason: input.reason ?? null,
         actor: input.actor ?? 'system',
+        /**
+         * The expiry either side, because this method overwrites that column in
+         * place and nothing recorded it (`plans/refunds.md` §7.6). Read from
+         * `updated` rather than recomputed, so it is what actually landed and
+         * not what the caller intended.
+         */
+        fromExpiresAt: current.authExpiresAt,
+        toExpiresAt: updated?.authExpiresAt ?? null,
       });
 
       // Also record it in the operational audit log so auth changes — notably

@@ -168,6 +168,22 @@ export const guildAuthEvents = pgTable(
     reason: text('reason'),
     /** Actor that caused the transition (e.g. 'system', 'agent', a user id). */
     actor: text('actor'),
+    /**
+     * The `guilds.auth_expires_at` pair either side of the transition.
+     *
+     * `transitionAuth` overwrites that column in place and this log recorded
+     * only the statuses, so a wrong write DESTROYED a trial deadline with no
+     * record anywhere and the only recovery was a backup restore, at up to a
+     * 24-hour RPO (`plans/refunds.md` §7.6). That matters most for exactly the
+     * change that reads the column to decide entitlement.
+     *
+     * Both nullable: a null is a real value here (a guild with no deadline), so
+     * these cannot be distinguished from "not recorded" on rows written before
+     * the columns existed. Read them as evidence when present, never as proof
+     * of absence.
+     */
+    fromExpiresAt: timestamp('from_expires_at', { withTimezone: true }),
+    toExpiresAt: timestamp('to_expires_at', { withTimezone: true }),
     createdAt: createdAt(),
   },
   (t) => [index('guild_auth_events_guild_idx').on(t.guildId, t.createdAt)],
