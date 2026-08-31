@@ -395,7 +395,7 @@ export class GuildRepository {
     guildId: string,
     decide: (
       existing: { authStatus: AuthStatus; settings: Record<string, unknown> } | undefined,
-    ) => { patch: Record<string, unknown>; result: T },
+    ) => { patch: Record<string, unknown>; remove?: readonly string[]; result: T },
   ): Promise<T> {
     return this.db.transaction(async (tx) => {
       const [inserted] = await tx
@@ -410,7 +410,7 @@ export class GuildRepository {
         .for('update');
       if (!current) throw new Error(`Guild ${guildId} not found`);
 
-      const { patch, result } = decide(
+      const { patch, remove, result } = decide(
         // A row this statement just inserted is not a pre-existing one, however
         // much it looks like one by the time the SELECT reads it.
         inserted
@@ -421,13 +421,29 @@ export class GuildRepository {
             },
       );
 
-      if (Object.keys(patch).length > 0) {
+      const removeKeys = remove ?? [];
+      if (Object.keys(patch).length > 0 || removeKeys.length > 0) {
+        /**
+         * Concat cannot DELETE a key, and four settings keys have no writable
+         * "off" value: `general`, `channel_name_template`,
+         * `channel_status_template` and `problem_alerts` all fall back to a
+         * default when absent, so writing today's default in place of removing
+         * the key would pin the guild to it forever. `/import` restoring a
+         * pre-import snapshot has to be able to put a key back to absent
+         * (`plans/import_command.md` §3), so the minus is not optional.
+         *
+         * Applied after the concat, so a key in both is removed: no caller does
+         * that, and "the patch wins" would make an unnoticed collision silent.
+         */
+        // One `- key` per key rather than `- text[]`: drizzle expands a JS array
+        // into a tuple of placeholders, which Postgres reads as a record and
+        // refuses to cast. The keys are few (at most the eleven settings keys),
+        // and each stays a bound parameter this way.
+        let next = sql`${guilds.settings} || ${JSON.stringify(patch)}::jsonb`;
+        for (const key of removeKeys) next = sql`(${next}) - ${key}::text`;
         await tx
           .update(guilds)
-          .set({
-            settings: sql`${guilds.settings} || ${JSON.stringify(patch)}::jsonb`,
-            updatedAt: new Date(),
-          })
+          .set({ settings: next, updatedAt: new Date() })
           .where(eq(guilds.guildId, guildId));
       }
       return result;

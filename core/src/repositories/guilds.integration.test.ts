@@ -75,6 +75,67 @@ describe('GuildRepository (integration)', () => {
     expect(after.settings).toMatchObject({ prefix: '!', limit: 10 });
   });
 
+  describe('mergeSettings key removal', () => {
+    /**
+     * Concat can add and overwrite and cannot DELETE, which matters because four
+     * settings keys fall back to a default when absent
+     * (`general`, `channel_name_template`, `channel_status_template`,
+     * `problem_alerts`). Writing today's default in place of removing the key
+     * would pin the guild to it, so `/import` restoring a snapshot has to be
+     * able to put a key back to genuinely absent.
+     */
+    it('removes the named keys and leaves the rest alone', async () => {
+      await repo.ensure('g-rm-1');
+      await repo.updateSettings('g-rm-1', {
+        general: 'Voice',
+        channel_name_template: 'Room ##',
+        enabled: true,
+      });
+
+      await repo.mergeSettings('g-rm-1', () => ({
+        patch: { enabled: false },
+        remove: ['general', 'channel_name_template'],
+        result: null,
+      }));
+
+      const row = await repo.ensure('g-rm-1');
+      expect(Object.keys(row.settings).sort()).toEqual(['enabled']);
+      expect(row.settings.enabled).toBe(false);
+    });
+
+    it('is a no-op for a key that was not there', async () => {
+      await repo.ensure('g-rm-2');
+      await repo.updateSettings('g-rm-2', { enabled: true });
+
+      await repo.mergeSettings('g-rm-2', () => ({
+        patch: {},
+        remove: ['general', 'problem_alerts'],
+        result: null,
+      }));
+
+      expect((await repo.ensure('g-rm-2')).settings).toEqual({ enabled: true });
+    });
+
+    /** The existing shape has to keep working, since every other caller uses it. */
+    it('still merges when nothing is removed', async () => {
+      await repo.ensure('g-rm-3');
+      await repo.mergeSettings('g-rm-3', () => ({ patch: { general: 'Voice' }, result: null }));
+      await repo.mergeSettings('g-rm-3', () => ({ patch: { enabled: true }, result: null }));
+      expect((await repo.ensure('g-rm-3')).settings).toEqual({ general: 'Voice', enabled: true });
+    });
+
+    /** Sees what is stored, so a caller can decide what to remove from it. */
+    it('hands the decide callback the stored blob', async () => {
+      await repo.ensure('g-rm-4');
+      await repo.updateSettings('g-rm-4', { general: 'Voice', log_level: 3 });
+      const seen = await repo.mergeSettings('g-rm-4', (existing) => ({
+        patch: {},
+        result: Object.keys(existing?.settings ?? {}).sort(),
+      }));
+      expect(seen).toEqual(['general', 'log_level']);
+    });
+  });
+
   describe('markAnnounced', () => {
     /**
      * The bug this pins: `jsonb_set` with `create_missing` does NOT create an

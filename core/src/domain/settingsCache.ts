@@ -44,7 +44,7 @@ export interface GuildSettingsStore extends GuildSettingsReader {
     guildId: string,
     decide: (
       existing: { authStatus: AuthStatus; settings: Record<string, unknown> } | undefined,
-    ) => { patch: Record<string, unknown>; result: T },
+    ) => { patch: Record<string, unknown>; remove?: readonly string[]; result: T },
   ): Promise<T>;
 }
 
@@ -118,7 +118,7 @@ export class SettingsCache implements GuildSettingsStore {
     guildId: string,
     decide: (
       existing: { authStatus: AuthStatus; settings: Record<string, unknown> } | undefined,
-    ) => { patch: Record<string, unknown>; result: T },
+    ) => { patch: Record<string, unknown>; remove?: readonly string[]; result: T },
   ): Promise<T> {
     const result = await this.repo.mergeSettings(guildId, decide);
     await this.invalidate(guildId);
