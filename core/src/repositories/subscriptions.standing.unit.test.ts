@@ -8,6 +8,30 @@ import {
 } from './subscriptions.js';
 
 /**
+ * Builds the shape the predicates require.
+ *
+ * The inputs are REQUIRED properties on purpose, so a narrow projection that
+ * omits one fails to compile rather than silently reading `undefined`. That
+ * caught two real sites when it landed: `listSupporterTiersFor`'s select and
+ * the `RevenueSubscription` Pick that decides the ARR figure.
+ *
+ * **Worth knowing: it does not cover this file.** `core/tsconfig.json` excludes
+ * `*.test.ts`, so test sources are typechecked by nothing, and the largest
+ * single set of narrow calls in the repo was invisible to the gate the trick
+ * exists to be. Hence the builder: it keeps the calls honest by construction
+ * instead of relying on a compiler that never looks here.
+ */
+function sub(over: Partial<Parameters<typeof subscriptionIsSettled>[0]> = {}) {
+  return {
+    status: 'active',
+    refundStatus: null,
+    refundSettledAt: null,
+    scheduledChangeAction: null,
+    ...over,
+  };
+}
+
+/**
  * A refund does NOT cancel a Paddle subscription: the status stays `active`
  * for the rest of the paid term. So without this, the hourly reconcile job
  * would see a healthy subscription and reactivate a guild that was gated for
@@ -16,26 +40,30 @@ import {
 describe('subscriptionInGoodStanding', () => {
   it('accepts the paying statuses', () => {
     for (const status of SUBSCRIPTION_OK_STATUSES) {
-      expect(subscriptionInGoodStanding({ status }), status).toBe(true);
+      expect(subscriptionInGoodStanding(sub({ status })), status).toBe(true);
     }
   });
 
   it('rejects dunning and ended statuses', () => {
     for (const status of ['past_due', 'paused', 'canceled']) {
-      expect(subscriptionInGoodStanding({ status }), status).toBe(false);
+      expect(subscriptionInGoodStanding(sub({ status })), status).toBe(false);
     }
   });
 
   it('revokes standing for a GRANTED refund even while Paddle says active', () => {
-    expect(subscriptionInGoodStanding({ status: 'active', refundStatus: 'approved' })).toBe(false);
+    expect(subscriptionInGoodStanding(sub({ status: 'active', refundStatus: 'approved' }))).toBe(
+      false,
+    );
   });
 
   it('leaves standing intact while a refund is only requested or was rejected', () => {
-    expect(subscriptionInGoodStanding({ status: 'active', refundStatus: 'pending_approval' })).toBe(
+    expect(
+      subscriptionInGoodStanding(sub({ status: 'active', refundStatus: 'pending_approval' })),
+    ).toBe(true);
+    expect(subscriptionInGoodStanding(sub({ status: 'active', refundStatus: 'rejected' }))).toBe(
       true,
     );
-    expect(subscriptionInGoodStanding({ status: 'active', refundStatus: 'rejected' })).toBe(true);
-    expect(subscriptionInGoodStanding({ status: 'active', refundStatus: null })).toBe(true);
+    expect(subscriptionInGoodStanding(sub({ status: 'active', refundStatus: null }))).toBe(true);
   });
 });
 
@@ -47,7 +75,7 @@ describe('subscriptionInGoodStanding', () => {
 describe('subscriptionEarnsRecognition', () => {
   it('accepts everything good standing accepts', () => {
     for (const status of SUBSCRIPTION_OK_STATUSES) {
-      expect(subscriptionEarnsRecognition({ status }), status).toBe(true);
+      expect(subscriptionEarnsRecognition(sub({ status })), status).toBe(true);
     }
   });
 
@@ -58,20 +86,20 @@ describe('subscriptionEarnsRecognition', () => {
    * retries have even finished.
    */
   it('keeps recognition through dunning, which good standing does not', () => {
-    expect(subscriptionInGoodStanding({ status: 'past_due' })).toBe(false);
-    expect(subscriptionEarnsRecognition({ status: 'past_due' })).toBe(true);
+    expect(subscriptionInGoodStanding(sub({ status: 'past_due' }))).toBe(false);
+    expect(subscriptionEarnsRecognition(sub({ status: 'past_due' }))).toBe(true);
   });
 
   it('still rejects the ended statuses', () => {
     for (const status of ['paused', 'canceled']) {
-      expect(subscriptionEarnsRecognition({ status }), status).toBe(false);
+      expect(subscriptionEarnsRecognition(sub({ status })), status).toBe(false);
     }
   });
 
   /** Leniency is for a failed charge, not for money already given back. */
   it('revokes recognition for a granted refund, in every status', () => {
     for (const status of ['active', 'trialing', 'past_due']) {
-      expect(subscriptionEarnsRecognition({ status, refundStatus: 'approved' }), status).toBe(
+      expect(subscriptionEarnsRecognition(sub({ status, refundStatus: 'approved' })), status).toBe(
         false,
       );
     }
@@ -79,7 +107,7 @@ describe('subscriptionEarnsRecognition', () => {
 
   it('leaves recognition intact while a refund is only requested', () => {
     expect(
-      subscriptionEarnsRecognition({ status: 'past_due', refundStatus: 'pending_approval' }),
+      subscriptionEarnsRecognition(sub({ status: 'past_due', refundStatus: 'pending_approval' })),
     ).toBe(true);
   });
 });
@@ -105,44 +133,76 @@ describe('subscriptionWillChargeAgain', () => {
       );
     }
     // The case that costs money: gated by the refund, still on the billing run.
-    expect(subscriptionWillChargeAgain({ status: 'active' })).toBe(true);
+    expect(subscriptionWillChargeAgain(sub({ status: 'active' }))).toBe(true);
   });
 
   it('is false once it is cancelled, however that was spelled', () => {
-    expect(subscriptionWillChargeAgain({ status: 'canceled' })).toBe(false);
-    expect(subscriptionWillChargeAgain({ status: 'cancelled' })).toBe(false);
-    expect(subscriptionWillChargeAgain({ status: 'active', scheduledChangeAction: 'cancel' })).toBe(
-      false,
-    );
+    expect(subscriptionWillChargeAgain(sub({ status: 'canceled' }))).toBe(false);
+    expect(subscriptionWillChargeAgain(sub({ status: 'cancelled' }))).toBe(false);
+    expect(
+      subscriptionWillChargeAgain(sub({ status: 'active', scheduledChangeAction: 'cancel' })),
+    ).toBe(false);
   });
 
   /** A pause is not an ending: it resumes and bills again. */
   it('treats a scheduled pause as still live', () => {
-    expect(subscriptionWillChargeAgain({ status: 'active', scheduledChangeAction: 'pause' })).toBe(
-      true,
-    );
+    expect(
+      subscriptionWillChargeAgain(sub({ status: 'active', scheduledChangeAction: 'pause' })),
+    ).toBe(true);
   });
 });
 
 describe('subscriptionIsSettled', () => {
   it('is true only when it delivers nothing AND bills nothing again', () => {
-    expect(subscriptionIsSettled({ status: 'canceled' })).toBe(true);
+    expect(subscriptionIsSettled(sub({ status: 'canceled' }))).toBe(true);
     expect(
-      subscriptionIsSettled({
-        status: 'active',
-        refundStatus: 'approved',
-        scheduledChangeAction: 'cancel',
-      }),
+      subscriptionIsSettled(
+        sub({
+          status: 'active',
+          refundStatus: 'approved',
+          scheduledChangeAction: 'cancel',
+        }),
+      ),
     ).toBe(true);
   });
 
   it('is false while either half is still live', () => {
     // Refunded but never cancelled: nothing delivered, and it charges again.
-    expect(subscriptionIsSettled({ status: 'active', refundStatus: 'approved' })).toBe(false);
+    expect(subscriptionIsSettled(sub({ status: 'active', refundStatus: 'approved' }))).toBe(false);
     // Cancelled but still inside the paid term: no more charges, still serving.
-    expect(subscriptionIsSettled({ status: 'active', scheduledChangeAction: 'cancel' })).toBe(
+    expect(subscriptionIsSettled(sub({ status: 'active', scheduledChangeAction: 'cancel' }))).toBe(
       false,
     );
-    expect(subscriptionIsSettled({ status: 'active' })).toBe(false);
+    expect(subscriptionIsSettled(sub({ status: 'active' }))).toBe(false);
+  });
+});
+
+describe('refundSettledAt is the authority, refundStatus is the compat path', () => {
+  it('revokes standing on the settled marker alone', () => {
+    // The status says paying and no refund status is recorded, which is exactly
+    // the shape a derived row has once the writer ships.
+    expect(subscriptionInGoodStanding(sub({ refundSettledAt: new Date() }))).toBe(false);
+  });
+
+  it('still revokes on the old status alone, for rows nothing has derived yet', () => {
+    expect(subscriptionInGoodStanding(sub({ refundStatus: 'approved' }))).toBe(false);
+  });
+
+  it('revokes recognition on the settled marker too, so a badge cannot outlive a refund', () => {
+    expect(subscriptionEarnsRecognition(sub({ refundSettledAt: new Date() }))).toBe(false);
+  });
+
+  it('makes a refunded subscription that still renews NOT settled', () => {
+    // Standing and future billing are independent axes. This is the state the
+    // whole rework exists for: gated immediately, still going to charge.
+    const refunded = sub({ refundSettledAt: new Date() });
+    expect(subscriptionInGoodStanding(refunded)).toBe(false);
+    expect(subscriptionWillChargeAgain(refunded)).toBe(true);
+    expect(subscriptionIsSettled(refunded)).toBe(false);
+  });
+
+  it('makes a refunded AND cancelled subscription settled', () => {
+    const done = sub({ refundSettledAt: new Date(), scheduledChangeAction: 'cancel' });
+    expect(subscriptionIsSettled(done)).toBe(true);
   });
 });

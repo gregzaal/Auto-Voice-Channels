@@ -292,6 +292,14 @@ export class MetricsRepository {
        * disagreeing with the bot's ladder. The refund clause is the other half of
        * that function - an approved refund revokes standing while Paddle still
        * reports `active`.
+       *
+       * **This is the hand-written twin of `subscriptionInGoodStanding` and
+       * `tsc` cannot see it.** The predicate's required-property trick makes
+       * every TypeScript caller fail to compile when the rule changes; this one
+       * is a string, so it has to be changed in the same commit by hand. Both
+       * clauses are here for the same reason the predicate has both: the
+       * settled marker is the authority, and the status check is the compat
+       * path for rows written before the writer shipped.
        */
       await run(
         METRICS.SUBSCRIPTIONS_ACTIVE,
@@ -301,6 +309,7 @@ export class MetricsRepository {
                [...SUBSCRIPTION_OK_STATUSES].map((status) => sql`${status}`),
                sql`, `,
              )})
+               AND refund_settled_at IS NULL
                AND (refund_status IS NULL OR refund_status <> 'approved')
              GROUP BY tier`,
       );

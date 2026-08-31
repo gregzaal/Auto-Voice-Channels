@@ -40,8 +40,18 @@ export const subscriptionRowSchema = z.object({
   chargedTotal: z.string().nullish(),
   chargedTax: z.string().nullish(),
   chargedCurrency: z.string().nullish(),
-  /** Latest refund adjustment state, for display. See `refundSettledAt` for authority. */
-  refundStatus: z.string().nullish(),
+  /**
+   * Latest refund adjustment state, for display. See `refundSettledAt` for authority.
+   *
+   * `.default(null)` rather than a bare `.nullish()`, and the same on
+   * `refundSettledAt` below. `.nullish()` alone makes the KEY OPTIONAL in zod's
+   * output type, so a full `SubscriptionRow` would not satisfy the predicates'
+   * required-property signatures and every full-row caller would fail to
+   * compile alongside the narrow projections the requirement exists to catch.
+   * The default keeps the input tolerant, which is the point of `.nullish()`
+   * here, and guarantees the key is present on the way out.
+   */
+  refundStatus: z.string().nullish().default(null),
   refundTotal: z.string().nullish(),
   /** When WE received the adjustment. Not the ordering guard's input: see schema.ts. */
   refundAt: z.date().nullish(),
@@ -57,7 +67,7 @@ export const subscriptionRowSchema = z.object({
    * every row, and a predicate reading only this would report a refunded
    * subscription as healthy.
    */
-  refundSettledAt: z.date().nullish(),
+  refundSettledAt: z.date().nullish().default(null),
   refundAdjustmentId: z.string().nullish(),
   refundCurrency: z.string().nullish(),
   /** Pending Paddle change: 'cancel' | 'pause' | 'resume'. Null = renewing normally. */
@@ -156,8 +166,23 @@ export const SUBSCRIPTION_OK_STATUSES: ReadonlySet<string> = new Set(['active', 
  */
 export function subscriptionInGoodStanding(sub: {
   status: string;
-  refundStatus?: string | null | undefined;
+  refundStatus: string | null | undefined;
+  refundSettledAt: Date | null | undefined;
 }): boolean {
+  if (sub.refundSettledAt) return false;
+  /**
+   * Compat branch, and it has to stay until every row is derived.
+   *
+   * `refund_settled_at` is null on every row until the writer ships, so a
+   * predicate reading only it would report the one live refunded subscription,
+   * and any refunded before the writer lands, as perfectly healthy. Removing
+   * this is a separate change gated on the backfill, not a tidy-up.
+   *
+   * It is also deliberately the looser of the two: `refundStatus === 'approved'`
+   * ignores the current-period transaction test, so an old goodwill refund on a
+   * pre-writer row still revokes standing. That errs toward gating, which is the
+   * safe direction for a compat path.
+   */
   if (sub.refundStatus === 'approved') return false;
   return SUBSCRIPTION_OK_STATUSES.has(sub.status);
 }
@@ -207,7 +232,8 @@ export function subscriptionWillChargeAgain(sub: {
  */
 export function subscriptionIsSettled(sub: {
   status: string;
-  refundStatus?: string | null | undefined;
+  refundStatus: string | null | undefined;
+  refundSettledAt: Date | null | undefined;
   scheduledChangeAction?: string | null | undefined;
 }): boolean {
   return !subscriptionInGoodStanding(sub) && !subscriptionWillChargeAgain(sub);
@@ -236,7 +262,8 @@ export function subscriptionIsSettled(sub: {
  */
 export function subscriptionEarnsRecognition(sub: {
   status: string;
-  refundStatus?: string | null | undefined;
+  refundStatus: string | null | undefined;
+  refundSettledAt: Date | null | undefined;
 }): boolean {
   if (subscriptionInGoodStanding(sub)) return true;
   if (sub.refundStatus === 'approved') return false;
@@ -359,6 +386,11 @@ export class SubscriptionRepository {
           tier: subscriptions.tier,
           status: subscriptions.status,
           refundStatus: subscriptions.refundStatus,
+          // Required by `subscriptionEarnsRecognition`, and it did not compile
+          // without it. That is the required-property trick working: a badge
+          // decided off a projection missing the settled marker would keep a
+          // refunded customer's role indefinitely.
+          refundSettledAt: subscriptions.refundSettledAt,
         })
         .from(subscriptions)
         .innerJoin(accounts, eq(accounts.userId, subscriptions.purchaserUserId))
