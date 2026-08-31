@@ -173,6 +173,8 @@ export interface InteractionDeps {
     serverLog: (guildId: string, level: 1 | 2 | 3, message: string) => void;
     reconcileGuild: (guildId: string) => Promise<void>;
     sessions: ImportSessionStore;
+    /** Live occupants of a voice channel, for seeding a first-time adopt. */
+    membersInChannel: (channelId: string) => string[];
     counters?: ImportCounters;
   };
   selfHosted: boolean;
@@ -1337,6 +1339,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       serverLog: bundle.serverLog,
       reconcileGuild: bundle.reconcileGuild,
       dispatchRun: run,
+      membersInChannel: (channelId) => deps.configTransfer?.membersInChannel(channelId) ?? [],
       applicationId: deps.clientId,
       logger: deps.logger,
       sessions: bundle.sessions,

@@ -320,10 +320,21 @@ const SNOWFLAKE = /^\d{17,20}$/;
 
 const isSnowflake = (v: unknown): v is string => typeof v === 'string' && SNOWFLAKE.test(v);
 
-/** Order-insensitive structural equality, which is what a jsonb column needs. */
-function sameValue(a: unknown, b: unknown): boolean {
+/**
+ * Order-insensitive structural equality, which is what a jsonb column needs.
+ *
+ * Exported because the settings writer has to reach the same verdict as the
+ * differ. `jsonb` does not preserve key order, so a plain `JSON.stringify`
+ * comparison of `aliases`, `custom_nicks` or `groups` can report a difference
+ * that is not one, which on the drift path means warning an admin their file was
+ * overtaken when nothing happened.
+ */
+export function sameSettingsValue(a: unknown, b: unknown): boolean {
   return stable(a) === stable(b);
 }
+
+/** Local alias, so the many call sites below stay short. */
+const sameValue = sameSettingsValue;
 
 function stable(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'undefined';
@@ -497,6 +508,25 @@ export function diffGuildConfig(
   const storedCreators = new Map(current.creatorChannels.map((c) => [c.channelId, c]));
   const storedAdopted = new Map(current.adoptedChannels.map((c) => [c.channelId, c]));
 
+  /**
+   * Every channel id the file names, in EITHER section.
+   *
+   * Removals are computed against this rather than against the section being
+   * processed, and the difference is a silent loss. A channel the guild holds as
+   * a creator channel but the file lists under `adopted_channels` is dropped by
+   * the adopted pass (it cannot be both) and, if the creator pass only looked at
+   * `creator_channels`, removed by that pass for being absent. Net effect: the
+   * row is deleted, nothing is written, and the channel silently stops being
+   * managed.
+   *
+   * Naming it anywhere is the admin saying they still want it, so the right
+   * outcome is to leave the existing row alone and report the conflict.
+   */
+  const namedAnywhere = new Set<string>([
+    ...incoming.creatorChannels.map((c) => c.channelId),
+    ...incoming.adoptedChannels.map((c) => c.channelId),
+  ]);
+
   // Channels first, because the contact rule inside the settings pass only
   // applies to an import that actually writes a template.
   const creator = diffCreatorChannels(
@@ -506,6 +536,7 @@ export function diffGuildConfig(
     facts,
     limits,
     notes,
+    namedAnywhere,
   );
   const adopted = diffAdoptedChannels(
     incoming,
@@ -514,6 +545,7 @@ export function diffGuildConfig(
     facts,
     limits,
     notes,
+    namedAnywhere,
   );
   const wroteTemplates = creator.writes.length > 0 || adopted.writes.length > 0;
 
@@ -886,13 +918,12 @@ function diffCreatorChannels(
   facts: GuildFacts,
   limits: typeof IMPORT_LIMITS,
   notes: ImportNote[],
+  namedAnywhere: ReadonlySet<string>,
 ): ChannelDiff {
   const writes: ChannelDiff['writes'] = [];
   const changes: ChannelChange[] = [];
-  const named = new Set<string>();
 
   for (const entry of incoming.creatorChannels) {
-    named.add(entry.channelId);
     const fact = resolveChannel(entry, facts, notes, 'voice');
     if (!fact) continue;
 
@@ -947,7 +978,7 @@ function diffCreatorChannels(
       // Computed from FILE ABSENCE only, never from a resolution failure: doing
       // it the other way round makes the write set "resolvable file entries"
       // and deletes exactly the rows the keep-the-row rule says to keep.
-      if (named.has(stored.channelId)) continue;
+      if (namedAnywhere.has(stored.channelId)) continue;
       removals.push(stored.channelId);
       const fact = facts.channels.get(stored.channelId);
       changes.push({
@@ -984,13 +1015,12 @@ function diffAdoptedChannels(
   facts: GuildFacts,
   limits: typeof IMPORT_LIMITS,
   notes: ImportNote[],
+  namedAnywhere: ReadonlySet<string>,
 ): AdoptedDiff {
   const writes: AdoptedDiff['writes'] = [];
   const changes: ChannelChange[] = [];
-  const named = new Set<string>();
 
   for (const entry of incoming.adoptedChannels) {
-    named.add(entry.channelId);
     const fact = resolveChannel(entry, facts, notes, 'voice');
     if (!fact) continue;
 
@@ -1051,7 +1081,7 @@ function diffAdoptedChannels(
   const removals: string[] = [];
   if (incoming.authoritative) {
     for (const stored of storedAdopted.values()) {
-      if (named.has(stored.channelId)) continue;
+      if (namedAnywhere.has(stored.channelId)) continue;
       removals.push(stored.channelId);
       changes.push({
         channelId: stored.channelId,

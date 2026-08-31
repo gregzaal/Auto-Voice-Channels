@@ -9,28 +9,32 @@ import { managedChannels } from '../db/schema.js';
  * Per-channel templates for an adopted standalone channel. Mirrors the name +
  * status shape of a primary's template, but applies to this one channel.
  */
-export const managedTemplateSchema = z.object({
-  /** Channel-name template (typically uses the `__empty/occupied__` token). */
-  name: z.string().optional(),
-  /** Voice-channel-status template (blank/unset → no status). */
-  status: z.string().optional(),
-});
+export const managedTemplateSchema = z
+  .object({
+    /** Channel-name template (typically uses the `__empty/occupied__` token). */
+    name: z.string().optional(),
+    /** Voice-channel-status template (blank/unset → no status). */
+    status: z.string().optional(),
+  })
+  .passthrough();
 
 export type ManagedTemplate = z.infer<typeof managedTemplateSchema>;
 
-export const managedStateSchema = z.object({
-  /** Last rendered channel name (for change detection / skipping no-op renames). */
-  name: z.string().optional(),
-  /** Last rendered voice-channel status ('' = cleared). */
-  status: z.string().optional(),
-  /** Stable random seed for `[[random]]`/`@@random_emoji@@`, fixed at adoption. */
-  seed: z.number().int().optional(),
-  /**
-   * Member ids in arrival order, maintained as members come and go, to pick the
-   * longest-present member as `@@creator@@`/owner (same scheme as secondaries).
-   */
-  roster: z.array(z.string()).optional(),
-});
+export const managedStateSchema = z
+  .object({
+    /** Last rendered channel name (for change detection / skipping no-op renames). */
+    name: z.string().optional(),
+    /** Last rendered voice-channel status ('' = cleared). */
+    status: z.string().optional(),
+    /** Stable random seed for `[[random]]`/`@@random_emoji@@`, fixed at adoption. */
+    seed: z.number().int().optional(),
+    /**
+     * Member ids in arrival order, maintained as members come and go, to pick the
+     * longest-present member as `@@creator@@`/owner (same scheme as secondaries).
+     */
+    roster: z.array(z.string()).optional(),
+  })
+  .passthrough();
 
 export type ManagedState = z.infer<typeof managedStateSchema>;
 

@@ -189,6 +189,7 @@ describe('import and export flow (integration)', () => {
       applicationId: APP,
       logger: fakeLogger(),
       sessions: createImportSessionStore(),
+      membersInChannel: () => [],
     };
   });
 

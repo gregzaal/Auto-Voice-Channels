@@ -109,6 +109,7 @@ describe('import write phase (integration)', () => {
           }));
         },
       },
+      membersInChannel: () => ['user-live-1', 'user-live-2'],
       logger: fakeLogger(),
     };
   });
@@ -164,6 +165,68 @@ describe('import write phase (integration)', () => {
     expect(row?.state.roster).toEqual(['user-1', 'user-2']);
     expect(row?.state.name).toBe('Lobby');
     expect(row?.state.seed).toBe(7);
+  });
+
+  /**
+   * `adoptChannel` seeds owner and roster from the live occupants, and an import
+   * that adopts has to do the same. `roster` is arrival order and is what picks
+   * `@@creator@@` and the owner, and the file deliberately does not carry it,
+   * because importing one moment's arrival order would name somebody who is not
+   * in the channel.
+   */
+  it('seeds owner and roster from the live occupants on a first-time adopt', async () => {
+    await applyImportWrites(
+      plan({
+        adoptedWrites: [
+          {
+            channelId: ADOPTED,
+            template: { name: 'Lobby' },
+            state: { seed: 5 },
+            firstTime: true,
+          },
+        ],
+      }),
+      GUILD,
+      facts(),
+      deps,
+      [],
+    );
+
+    const row = await managed.get(ADOPTED);
+    expect(row?.ownerId).toBe('user-live-1');
+    expect(row?.state.roster).toEqual(['user-live-1', 'user-live-2']);
+  });
+
+  /** An existing row's roster is live bot state and must not be reseeded. */
+  it('does not reseed the roster of a channel it already manages', async () => {
+    await managed.create({
+      channelId: ADOPTED,
+      guildId: GUILD,
+      ownerId: 'user-original',
+      template: { name: 'old' },
+      state: { seed: 7, roster: ['user-original'] },
+    });
+
+    await applyImportWrites(
+      plan({
+        adoptedWrites: [
+          {
+            channelId: ADOPTED,
+            template: { name: 'new' },
+            state: { seed: 7, roster: ['user-original'] },
+            firstTime: false,
+          },
+        ],
+      }),
+      GUILD,
+      facts(),
+      deps,
+      [],
+    );
+
+    const row = await managed.get(ADOPTED);
+    expect(row?.ownerId).toBe('user-original');
+    expect(row?.state.roster).toEqual(['user-original']);
   });
 
   it('seeds state on a first-time adopt', async () => {

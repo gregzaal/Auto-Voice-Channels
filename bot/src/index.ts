@@ -460,6 +460,11 @@ async function main(): Promise<void> {
       serverLog: (guildId, level, message) => serverLogger.log(guildId, level, message),
       reconcileGuild: (guildId) => reconcileAfterImport(guildId),
       sessions: importSessions,
+      membersInChannel: (channelId) =>
+        voice
+          .membersInChannel(channelId)
+          .filter((m) => !m.bot)
+          .map((m) => m.id),
       counters: {
         previewed: () => metricsCollector.increment(METRICS.CONFIG_IMPORTS, 'previewed'),
         applied: () => metricsCollector.increment(METRICS.CONFIG_IMPORTS, 'applied'),

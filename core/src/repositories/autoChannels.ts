@@ -7,31 +7,38 @@ import { autoChannels } from '../db/schema.js';
 
 /**
  * Per-primary template/config, mirroring the legacy per-primary settings shape
- * (`channel_name_template`, default limit, position).
+ * (`channel_name_template`, default limit, position). *
+ * **`passthrough` is load-bearing for expand/contract (golden rule 3).** Without
+ * it this parse STRIPS any field a newer build added, so during a rolling deploy
+ * an old instance doing a read-modify-write on this column silently drops that
+ * field, and `/export` cannot carry it either. Verified by probe: a `z.object`
+ * here returned `{name}` for `{name, someFutureField}`.
  */
-export const primaryTemplateSchema = z.object({
-  /** Channel-name template for secondaries spawned from this primary. */
-  name: z.string().optional(),
-  /** Voice-channel-status template for secondaries spawned from this primary. */
-  status: z.string().optional(),
-  /** Default user limit applied to spawned secondaries (0 = unlimited). */
-  limit: z.number().int().min(0).optional(),
-  /** Position secondaries above (`true`) or below (default — absent/`false`) the primary. */
-  above: z.boolean().optional(),
-  /**
-   * When `true`, secondaries spawned from this primary are made private on
-   * creation (locked to @everyone, with a "⇩ Join" companion) — the same
-   * treatment as `/private`. Toggled via `/alwaysprivate` or the `/create` modal.
-   */
-  defaultPrivate: z.boolean().optional(),
-  /**
-   * Permission inheritance for spawned secondaries: `primary` (copy the primary
-   * channel's overwrites), `category` (copy the primary's category), or a
-   * specific channel id to copy. Unset → defaults to `primary` (the legacy
-   * behaviour), NOT Discord's implicit category-sync.
-   */
-  inheritperms: z.string().optional(),
-});
+export const primaryTemplateSchema = z
+  .object({
+    /** Channel-name template for secondaries spawned from this primary. */
+    name: z.string().optional(),
+    /** Voice-channel-status template for secondaries spawned from this primary. */
+    status: z.string().optional(),
+    /** Default user limit applied to spawned secondaries (0 = unlimited). */
+    limit: z.number().int().min(0).optional(),
+    /** Position secondaries above (`true`) or below (default — absent/`false`) the primary. */
+    above: z.boolean().optional(),
+    /**
+     * When `true`, secondaries spawned from this primary are made private on
+     * creation (locked to @everyone, with a "⇩ Join" companion) — the same
+     * treatment as `/private`. Toggled via `/alwaysprivate` or the `/create` modal.
+     */
+    defaultPrivate: z.boolean().optional(),
+    /**
+     * Permission inheritance for spawned secondaries: `primary` (copy the primary
+     * channel's overwrites), `category` (copy the primary's category), or a
+     * specific channel id to copy. Unset → defaults to `primary` (the legacy
+     * behaviour), NOT Discord's implicit category-sync.
+     */
+    inheritperms: z.string().optional(),
+  })
+  .passthrough();
 
 export type PrimaryTemplate = z.infer<typeof primaryTemplateSchema>;
 

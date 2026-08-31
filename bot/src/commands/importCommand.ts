@@ -107,6 +107,14 @@ export interface ImportCommandDeps extends ConfigSnapshotDeps {
    * a task that cannot start until the awaiting one finishes.
    */
   dispatchRun: <T>(guildId: string, name: string, task: () => Promise<T>) => Promise<T>;
+  /**
+   * Who is in a voice channel right now, for seeding a first-time adopt.
+   *
+   * `adoptChannel` seeds `ownerId` and `roster` from the live occupants, and an
+   * import that adopts has to do the same or `@@creator@@` resolves to nothing
+   * until the next time somebody joins or leaves.
+   */
+  membersInChannel: (channelId: string) => string[];
   /** This bot's application id, for the two-bots warning. */
   applicationId: string;
   logger: Logger;
@@ -412,7 +420,14 @@ export async function handleImportButton(
     });
   }
 
-  deps.serverLog(guildId, 1, renderLogEntry(outcome.applied, ctx));
+  /**
+   * Nothing landed means nothing to tell anyone.
+   *
+   * A no-op re-run must not post, or an admin retrying a file spams the channel,
+   * and a write phase that was refused outright must not be announced as a
+   * configuration change at all.
+   */
+  if (outcome.applied.changed) deps.serverLog(guildId, 1, renderLogEntry(outcome.applied, ctx));
 
   /**
    * Skipped when the flag is set, and reported as not posted either way, so the
@@ -422,7 +437,8 @@ export async function handleImportButton(
    * is its own lever, separate from the kill switch: taking away the command is
    * the wrong answer to a notice that turns out to be wrong for a server.
    */
-  const announced = (await announceDisabled(deps))
+  const announceSuppressed = !outcome.applied.changed || (await announceDisabled(deps));
+  const announced = announceSuppressed
     ? 'not_posted'
     : await announce(guild, renderAnnouncement(outcome.applied, ctx), deps);
 
@@ -439,7 +455,10 @@ export async function handleImportButton(
         'is not exactly what the preview showed.',
     );
   }
-  if (announced !== 'posted') {
+  if (announced !== 'posted' && !announceSuppressed) {
+    // Only when the post was actually attempted and did not land. Saying this
+    // because a flag suppressed it, or because nothing changed, would be a
+    // confident statement about a server's channels that is simply untrue.
     lines.push('Nobody else was notified. This server has no system channel AVC can post in.');
   }
   lines.push('Your previous configuration is in the file above. Import it to undo this.');
@@ -522,10 +541,35 @@ async function applyImport(
       failures.push('the audit record could not be written');
     });
 
-  // Only the writes need the per-guild ordering guarantee against voice events.
-  const applied = await deps.dispatchRun(guildId, 'cmd:import', async () => {
-    return applyImportWrites(previewPlan, guildId, facts, deps, failures);
-  });
+  /**
+   * Only the writes need the per-guild ordering guarantee against voice events.
+   *
+   * **The dispatch itself can be REFUSED**, which is different from a write
+   * inside it failing, and leaving it uncaught was worse than either. The
+   * per-guild circuit breaker is shared across task types, so a guild already
+   * failing at voice automation refuses this for reasons unrelated to the
+   * import, and a queue draining during a rolling deploy refuses it too. The
+   * throw then escaped to `route`'s catch, which shows a generic error, the
+   * session had already been claimed so a retry said "this import already ran",
+   * and the first audit row stood with no completion row, which the new
+   * `/api/watch` check reads as a stranded import.
+   *
+   * Nothing was written in that case, so the honest report is exactly that.
+   */
+  let applied: { plan: ImportPlan; driftedKeys: string[] };
+  try {
+    applied = await deps.dispatchRun(guildId, 'cmd:import', async () => {
+      return applyImportWrites(previewPlan, guildId, facts, deps, failures);
+    });
+  } catch (err) {
+    deps.logger.warn({ err, guildId }, 'import write phase was refused');
+    failures.push(
+      isCircuitOpen(err)
+        ? 'this server is in a failure cooldown, so nothing was written. Try again in about 30 seconds'
+        : 'the write could not be started, so nothing was written',
+    );
+    applied = { plan: emptyPlan(previewPlan), driftedKeys: [] };
+  }
 
   await deps.opsAudit
     .record({
@@ -559,6 +603,35 @@ async function applyImport(
   };
 }
 
+/** `true` when the per-guild queue refused the task rather than running it. */
+function isCircuitOpen(err: unknown): boolean {
+  return err instanceof Error && /circuit/i.test(`${err.name} ${err.message}`);
+}
+
+/**
+ * The same plan with nothing in it, for reporting a write phase that never ran.
+ *
+ * Keeps the announcement, the log entry and the reply describing what LANDED
+ * rather than what was intended, which is the difference between "partly
+ * imported, here is what did not finish" and a public post claiming a
+ * configuration was replaced when it was not.
+ */
+function emptyPlan(plan: ImportPlan): ImportPlan {
+  return {
+    ...plan,
+    settingsPatch: {},
+    settingsRemove: [],
+    creatorWrites: [],
+    creatorRemovals: [],
+    adoptedWrites: [],
+    adoptedRemovals: [],
+    settingChanges: [],
+    creatorChanges: [],
+    adoptedChanges: [],
+    changed: false,
+  };
+}
+
 /**
  * What the write phase needs, and nothing else.
  *
@@ -571,6 +644,8 @@ export interface ImportWriteDeps {
   autoChannels: AutoChannelRepository;
   managed: ManagedChannelRepository;
   settings: Pick<GuildSettingsService, 'applyImportedSettings'>;
+  /** Live occupants, for seeding a first-time adopt the way `adoptChannel` does. */
+  membersInChannel: (channelId: string) => string[];
   logger: Logger;
 }
 
@@ -582,16 +657,30 @@ export async function applyImportWrites(
   deps: ImportWriteDeps,
   failures: string[],
 ): Promise<{ plan: ImportPlan; driftedKeys: string[] }> {
+  /**
+   * What actually LANDED, accumulated as we go.
+   *
+   * The intended plan was returned before, so a run where half the writes failed
+   * was announced publicly and written to the guild's event log as a complete
+   * success. Every reader of this result describes what happened, so it has to
+   * be what happened.
+   */
+  const landedCreatorWrites: ImportPlan['creatorWrites'] = [];
+  const landedCreatorRemovals: string[] = [];
+  const landedAdoptedWrites: ImportPlan['adoptedWrites'] = [];
+  const landedAdoptedRemovals: string[] = [];
+  let landedSettings = false;
   // Creator channels, each re-resolved: a channel deleted since the preview
   // would otherwise get a PERMANENT phantom row, because only a channelDelete
   // dispatch removes one and the deletion happened before the row existed.
   for (const write of plan.creatorWrites) {
-    if (!stillWritable(write.channelId, facts)) {
-      failures.push(`a creator channel vanished before it could be written`);
+    if (!stillWritable(write.channelId, facts, { needsRename: false })) {
+      failures.push('a creator channel changed before it could be written, so it was skipped');
       continue;
     }
     try {
       await deps.autoChannels.upsert(guildId, write.channelId, write.template);
+      landedCreatorWrites.push(write);
     } catch (err) {
       deps.logger.warn({ err, guildId, channelId: write.channelId }, 'import creator write failed');
       failures.push('a creator channel could not be written');
@@ -600,6 +689,7 @@ export async function applyImportWrites(
   for (const channelId of plan.creatorRemovals) {
     try {
       await deps.autoChannels.remove(guildId, channelId);
+      landedCreatorRemovals.push(channelId);
     } catch (err) {
       deps.logger.warn({ err, guildId, channelId }, 'import creator removal failed');
       failures.push('a creator channel could not be removed');
@@ -612,20 +702,38 @@ export async function applyImportWrites(
   // occupants, matching `adoptChannel`, or `@@creator@@` resolves to nothing
   // until the next occupancy change.
   for (const write of plan.adoptedWrites) {
-    if (!stillWritable(write.channelId, facts)) {
-      failures.push('an adopted channel vanished before it could be written');
+    if (!stillWritable(write.channelId, facts, { needsRename: true })) {
+      failures.push('an adopted channel changed before it could be written, so it was skipped');
       continue;
     }
     try {
+      /**
+       * Owner and roster from the LIVE occupants on a first-time adopt, matching
+       * `adoptChannel`.
+       *
+       * `roster` is arrival order and is what picks `@@creator@@` and the owner.
+       * The file deliberately does not carry it (importing one moment's arrival
+       * order would name somebody who is not in the channel), so an adopt that
+       * seeded neither left the channel with no owner until the next occupancy
+       * change, which for an idle channel is indefinitely. Only on a first-time
+       * adopt: an existing row's roster is the bot's own live state and
+       * `write.state` already preserves it.
+       */
+      const roster = write.firstTime ? deps.membersInChannel(write.channelId) : [];
       await deps.managed.create({
         channelId: write.channelId,
         guildId,
-        ownerId: null,
+        ownerId: roster[0] ?? null,
         template: write.template,
-        state: write.state,
+        state: write.firstTime ? { ...write.state, roster } : write.state,
       });
       await deps.managed.setTemplate(guildId, write.channelId, write.template);
-      await deps.managed.updateState(guildId, write.channelId, write.state);
+      await deps.managed.updateState(
+        guildId,
+        write.channelId,
+        write.firstTime ? { ...write.state, roster } : write.state,
+      );
+      landedAdoptedWrites.push(write);
     } catch (err) {
       deps.logger.warn({ err, guildId, channelId: write.channelId }, 'import adopted write failed');
       failures.push('an adopted channel could not be written');
@@ -634,6 +742,7 @@ export async function applyImportWrites(
   for (const channelId of plan.adoptedRemovals) {
     try {
       await deps.managed.remove(guildId, channelId);
+      landedAdoptedRemovals.push(channelId);
     } catch (err) {
       deps.logger.warn({ err, guildId, channelId }, 'import adopted removal failed');
       failures.push('an adopted channel could not be removed');
@@ -646,23 +755,88 @@ export async function applyImportWrites(
   let driftedKeys: string[] = [];
   if (Object.keys(plan.settingsPatch).length > 0 || plan.settingsRemove.length > 0) {
     try {
+      /**
+       * What the PREVIEW saw, key by key, taken from the plan's own change list.
+       *
+       * The drift check compares this against the value under the row lock, so
+       * both sides are raw stored values and a concurrent `/alias` or `/nick`
+       * landing in the window is actually reported instead of being silently
+       * replaced.
+       */
+      const expectedBefore: Record<string, unknown> = {};
+      for (const change of plan.settingChanges) expectedBefore[change.key] = change.before;
+
       const result = await deps.settings.applyImportedSettings(
         guildId,
         plan.settingsPatch,
         plan.settingsRemove,
+        expectedBefore,
       );
       driftedKeys = result.driftedKeys;
+      landedSettings = true;
     } catch (err) {
       deps.logger.error({ err, guildId }, 'import settings write failed');
       failures.push('the server settings could not be written');
     }
   }
 
-  return { plan, driftedKeys };
+  /**
+   * The plan as it happened, so the announcement, the log entry and the
+   * completion audit row all describe reality.
+   *
+   * The change lists are narrowed to the ids that landed, because the renderers
+   * read those rather than the write arrays.
+   */
+  const landedIds = new Set<string>([
+    ...landedCreatorWrites.map((w) => w.channelId),
+    ...landedCreatorRemovals,
+    ...landedAdoptedWrites.map((w) => w.channelId),
+    ...landedAdoptedRemovals,
+  ]);
+  const landed: ImportPlan = {
+    ...plan,
+    settingsPatch: landedSettings ? plan.settingsPatch : {},
+    settingsRemove: landedSettings ? plan.settingsRemove : [],
+    creatorWrites: landedCreatorWrites,
+    creatorRemovals: landedCreatorRemovals,
+    adoptedWrites: landedAdoptedWrites,
+    adoptedRemovals: landedAdoptedRemovals,
+    settingChanges: landedSettings ? plan.settingChanges : [],
+    creatorChanges: plan.creatorChanges.filter((c) => landedIds.has(c.channelId)),
+    adoptedChanges: plan.adoptedChanges.filter((c) => landedIds.has(c.channelId)),
+    changed:
+      landedSettings ||
+      landedCreatorWrites.length > 0 ||
+      landedCreatorRemovals.length > 0 ||
+      landedAdoptedWrites.length > 0 ||
+      landedAdoptedRemovals.length > 0,
+  };
+
+  return { plan: landed, driftedKeys };
 }
 
-function stillWritable(channelId: string, facts: GuildFacts): boolean {
-  return facts.channels.has(channelId) && !facts.foreignFleetChannels.has(channelId);
+/**
+ * The apply-time re-check, which is section 5.2 step 6 rather than a presence
+ * test.
+ *
+ * `needsRename` is what makes an adopted channel different, and it is not
+ * optional: writing a `managed_channels` row for a channel the bot can no longer
+ * rename makes the next sweep call `rerenderManaged` with
+ * `onUnmanageable: 'abandon'`, which deletes the row AND records a permission
+ * problem, which fires the outbound notifier ladder. The preview refuses that
+ * case, and a permission removed during the 15-minute window would otherwise
+ * walk straight past it.
+ */
+function stillWritable(
+  channelId: string,
+  facts: GuildFacts,
+  opts: { needsRename: boolean },
+): boolean {
+  const fact = facts.channels.get(channelId);
+  if (!fact) return false;
+  if (facts.foreignFleetChannels.has(channelId)) return false;
+  if (fact.kind !== 'voice') return false;
+  return !opts.needsRename || fact.botCanRename;
 }
 
 /** What row one carries, bounded, with member data redacted. */

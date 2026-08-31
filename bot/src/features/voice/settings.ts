@@ -1,3 +1,4 @@
+import { sameSettingsValue } from '@avc/core';
 import type {
   AutoChannelRepository,
   AutoChannelRow,
@@ -557,16 +558,26 @@ export class GuildSettingsService {
     guildId: string,
     patch: Record<string, unknown>,
     remove: readonly string[],
+    expectedBefore: Record<string, unknown>,
   ): Promise<{ before: Record<string, unknown>; driftedKeys: string[] }> {
     return this.deps.guilds.mergeSettings(guildId, (existing) => {
       const before = existing?.settings ?? {};
-      const driftedKeys: string[] = [];
-      for (const key of Object.keys(patch)) {
-        if (JSON.stringify(before[key]) === JSON.stringify(patch[key])) driftedKeys.push(key);
-      }
-      for (const key of remove) {
-        if (!Object.prototype.hasOwnProperty.call(before, key)) driftedKeys.push(key);
-      }
+      /**
+       * Drift is the value under the LOCK differing from the value the PREVIEW
+       * showed, for a key this write is about to replace.
+       *
+       * Not "the new value equals the stored value", which is a no-op and the
+       * opposite of interesting, and not "the key is absent", which for a clear
+       * is the ordinary case. Getting this backwards made the one detector that
+       * can see a concurrent `/alias` or `/nick` loss report every harmless
+       * no-op and stay silent on every real loss.
+       *
+       * `expectedBefore` comes from the plan's own `settingChanges`, so this
+       * compares like with like: both sides are raw stored values.
+       */
+      const driftedKeys = [...Object.keys(patch), ...remove].filter(
+        (key) => !sameSettingsValue(before[key], expectedBefore[key]),
+      );
       return { patch, remove, result: { before, driftedKeys } };
     });
   }
