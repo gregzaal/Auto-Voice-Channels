@@ -33,6 +33,8 @@ interface FakeInteractionOpts {
   /** Channel ids the guild's cache holds. Absent = an empty (unpopulated) cache. */
   existingChannels?: string[];
   manageChannels?: boolean;
+  /** The higher tier, for /export and /import. */
+  manageGuild?: boolean;
   values?: string[];
   /** The interaction id (the retry token is keyed off it). */
   id?: string;
@@ -94,7 +96,8 @@ function fakeInteraction(opts: FakeInteractionOpts) {
     customId: opts.customId,
     memberPermissions: {
       has: (p: bigint) =>
-        (opts.manageChannels ?? false) && p === PermissionFlagsBits.ManageChannels,
+        (p === PermissionFlagsBits.ManageChannels && (opts.manageChannels ?? false)) ||
+        (p === PermissionFlagsBits.ManageGuild && (opts.manageGuild ?? false)),
     },
     replied: false,
     deferred: false,
@@ -193,6 +196,66 @@ describe('registerInteractionHandler (router)', () => {
     env.client.emit('interactionCreate', interaction);
     await flush();
     expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('auto-voice.io');
+  });
+
+  /**
+   * Decision 3 and decision 15, which are a pair and are the reason both are
+   * asserted here rather than left to the allow-list reading correctly.
+   *
+   * Refusing to let somebody take their own configuration with them because
+   * they stopped paying is exactly what the AGPL positioning rules out, so
+   * `/export` works while gated. `/import` is a write path, and the hard gate is
+   * non-destructive by design: it stops writes and destroys nothing.
+   */
+  it('an expired guild can still run /export, and gets no reactivation message', async () => {
+    const env = setup({
+      selfHosted: false,
+      guilds: { get: vi.fn().mockResolvedValue({ authStatus: 'expired' }) } as never,
+    });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'export',
+      manageGuild: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).not.toContain('auto-voice.io');
+  });
+
+  it('an expired guild cannot run /import', async () => {
+    const env = setup({
+      selfHosted: false,
+      guilds: { get: vi.fn().mockResolvedValue({ authStatus: 'expired' }) } as never,
+    });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'import',
+      manageGuild: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('auto-voice.io');
+  });
+
+  /**
+   * The registration default is a DEFAULT, not a gate: a server admin can
+   * re-open either command to any role in Server Settings > Integrations, so
+   * this in-code check is the only thing enforcing decision 1.
+   */
+  it.each(['export', 'import'])('refuses /%s without Manage Server', async (commandName) => {
+    const env = setup({});
+    dispose = env.dispose;
+    // ManageChannels alone, which is the bar the tier exists to clear.
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName,
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('Manage Server');
   });
 
   it('an expired guild can still open /setup (shows the gated state)', async () => {
