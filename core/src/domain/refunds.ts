@@ -33,8 +33,18 @@ export interface AdjustmentRecord {
   action: string;
   /** One of four: pending_approval, approved, rejected, reversed. */
   status: string;
-  /** Paddle's own label: 'full' | 'partial'. Null when we could not read it. */
+  /**
+   * Paddle's top-level label, 'full' or 'partial'. **Not sufficient on its own,
+   * and believing it was is the worst mistake in this file's history.**
+   *
+   * It describes HOW the adjustment was created, not whether it is economically
+   * complete. An adjustment made item-scoped from the Paddle dashboard, which is
+   * how the only real refund in production was made, carries `partial` at the
+   * top level while refunding the entire charge. See {@link adjustmentIsComplete}.
+   */
   type: string | null;
+  /** Per-line-item labels, which are what actually say how much was refunded. */
+  itemTypes: readonly string[];
   total: string | null;
   currency: string | null;
   /** The adjustment's own timestamp, which the ordering guard compares. */
@@ -76,6 +86,38 @@ const REVOKING_ACTIONS: ReadonlySet<string> = new Set(['refund', 'chargeback']);
  * rather than money taken from us.
  */
 const RESTORING_ACTIONS: ReadonlySet<string> = new Set(['chargeback_reverse']);
+
+/**
+ * Whether an adjustment returns the WHOLE charge, as opposed to part of it.
+ *
+ * **The top-level `type` cannot answer this alone.** Verified against the one
+ * real refund in production (adjustment `adj_01kzvab95th397pt0kjev05169`): top
+ * level `partial`, one item of `type: 'full'` for `3900`, against a
+ * `charged_total` of `3900`. A complete refund of the entire charge, labelled
+ * partial because it was created item-scoped from the Paddle dashboard, which is
+ * how an operator makes one and therefore the only route ever used. Reading the
+ * top-level label alone classified it as goodwill and gated nothing.
+ *
+ * So: complete when Paddle says so at the top level, OR when every line item it
+ * names is itself `full`.
+ *
+ * **The assumption that makes the second clause sound is one line item per
+ * transaction**, which holds by construction here: one subscription is one tier
+ * is one price, and `chargedTotalsOf` already relies on it ("the first line item
+ * is the price charged"). A multi-line transaction could name one of several
+ * items as `full` and read as complete when it is not. Nothing in this product
+ * creates one, and the fix if that changes is to compare the item count against
+ * the transaction's, NOT to start comparing amounts, which §7.1 rejects for five
+ * separate reasons that all still hold.
+ */
+export function adjustmentIsComplete(adjustment: {
+  type: string | null;
+  itemTypes: readonly string[];
+}): boolean {
+  if (adjustment.type === 'full') return true;
+  if (adjustment.itemTypes.length === 0) return adjustment.type !== 'partial';
+  return adjustment.itemTypes.every((t) => t === 'full');
+}
 
 /** Adjustment statuses that undo a previously granted refund. */
 const UNDOING_STATUSES: ReadonlySet<string> = new Set(['rejected', 'reversed']);
@@ -141,13 +183,13 @@ export function classifyAdjustment(
    * A partial refund is goodwill only and changes nothing but the record
    * (owner, 2026-08-28). No customer-facing path creates one.
    *
-   * A NULL type is treated as full, deliberately. It means we could not read
-   * the label, and the two failure directions are not symmetric: treating an
-   * unknown refund as partial leaves a customer whose money we returned still
-   * being served, while treating it as full gates someone we can put back with
-   * one operator action. Err toward gating.
+   * A NULL type with no items is treated as complete, deliberately. It means we
+   * could not read the labels, and the two failure directions are not
+   * symmetric: treating an unknown refund as partial leaves a customer whose
+   * money we returned still being served, while treating it as complete gates
+   * someone an operator can put back in one action. Err toward gating.
    */
-  if (adjustment.type === 'partial') {
+  if (!adjustmentIsComplete(adjustment)) {
     return { kind: 'record_only', reason: 'partial' };
   }
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  adjustmentIsComplete,
   classifyAdjustment,
   isChargebackRecord,
   isRefundRecord,
@@ -23,6 +24,7 @@ function adjustment(over: Partial<AdjustmentRecord> = {}): AdjustmentRecord {
     action: 'refund',
     status: 'approved',
     type: 'full',
+    itemTypes: ['full'],
     total: '3900',
     currency: 'USD',
     updatedAt: NOW,
@@ -49,8 +51,26 @@ describe('classifyAdjustment', () => {
     );
   });
 
-  it('leaves access alone for a partial refund, which is goodwill only', () => {
-    expect(classifyAdjustment(adjustment({ type: 'partial' }), CURRENT).kind).toBe('record_only');
+  it('leaves access alone for a genuinely partial refund, which is goodwill only', () => {
+    expect(
+      classifyAdjustment(adjustment({ type: 'partial', itemTypes: ['partial'] }), CURRENT).kind,
+    ).toBe('record_only');
+  });
+
+  it('SETTLES the real production payload, which Paddle labels partial', () => {
+    /**
+     * The exact shape of `adj_01kzvab95th397pt0kjev05169`, the only real refund
+     * in the database: top level `partial`, one item of `type: 'full'` for the
+     * whole 3900 charge. Paddle labels it partial because an operator created it
+     * item-scoped from the dashboard, which is how every operator refund is made
+     * and therefore the only route ever used.
+     *
+     * Reading the top-level label alone classified this as goodwill: no gating,
+     * no cancellation, no floor, and a write that disarmed the compat branch so
+     * the subscription read as healthy. This test is the regression guard.
+     */
+    const real = adjustment({ type: 'partial', itemTypes: ['full'], total: '3900' });
+    expect(classifyAdjustment(real, CURRENT).kind).toBe('settle');
   });
 
   it('leaves access alone for a full refund of some OTHER period', () => {
@@ -233,5 +253,30 @@ describe('isRefundRecord / isChargebackRecord', () => {
     expect(isChargebackRecord('chargeback')).toBe(true);
     expect(isChargebackRecord('refund')).toBe(false);
     expect(isChargebackRecord(null)).toBe(false);
+  });
+});
+
+describe('adjustmentIsComplete', () => {
+  it('trusts an explicit full label', () => {
+    expect(adjustmentIsComplete({ type: 'full', itemTypes: [] })).toBe(true);
+    expect(adjustmentIsComplete({ type: 'full', itemTypes: ['full'] })).toBe(true);
+  });
+
+  it('reads the ITEMS when the top level says partial', () => {
+    // The production case: item-scoped from the dashboard, whole charge returned.
+    expect(adjustmentIsComplete({ type: 'partial', itemTypes: ['full'] })).toBe(true);
+    expect(adjustmentIsComplete({ type: 'partial', itemTypes: ['partial'] })).toBe(false);
+  });
+
+  it('is not complete if ANY named item is partial', () => {
+    expect(adjustmentIsComplete({ type: 'partial', itemTypes: ['full', 'partial'] })).toBe(false);
+  });
+
+  it('errs toward complete when nothing is readable, and toward partial when Paddle said so', () => {
+    // Unreadable labels gate somebody an operator can restore in one action.
+    // Leaving a refunded customer served is the worse failure.
+    expect(adjustmentIsComplete({ type: null, itemTypes: [] })).toBe(true);
+    // But an explicit `partial` with no items is still Paddle telling us something.
+    expect(adjustmentIsComplete({ type: 'partial', itemTypes: [] })).toBe(false);
   });
 });

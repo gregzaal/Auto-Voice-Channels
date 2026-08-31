@@ -181,6 +181,15 @@ export interface RefundContext {
  * entitlement purposes (dunning states are not — they ride the leniency
  * ladder instead; monetization.md §9).
  */
+/**
+ * Advisory-lock namespace for the self-serve refund claim, keyed per purchaser.
+ *
+ * A sibling of `BILLING_ADVISORY_LOCK` (0x5a7c_0002) and `IDENTIFY_ADVISORY_LOCK`
+ * (0x5a7c_0001) in the same family, with its own namespace rather than a slot,
+ * because it is keyed by a hashed purchaser id rather than by a fixed job.
+ */
+export const REFUND_CLAIM_LOCK = 0x5a7c_0003;
+
 export const SUBSCRIPTION_OK_STATUSES: ReadonlySet<string> = new Set(['active', 'trialing']);
 
 /**
@@ -713,7 +722,14 @@ export class SubscriptionRepository {
     const rows = await this.db
       .update(subscriptions)
       .set({
-        refundAction: adjustment.action,
+        /**
+         * Only a verdict that DECIDES writes the action, because that is what the
+         * chargeback restore path matches on. Written for every acting
+         * adjustment it became "the last one seen", so a refund arriving after a
+         * chargeback replaced it and a later `chargeback_reverse` could no longer
+         * recognise what it was undoing, stranding a gated customer.
+         */
+        ...(verdict.kind === 'record_only' ? {} : { refundAction: adjustment.action }),
         refundStatus: adjustment.status,
         refundTotal: adjustment.total,
         refundAt: now,
@@ -831,7 +847,33 @@ export class SubscriptionRepository {
     purchaserUserId: string;
     at: Date;
   }): Promise<boolean> {
-    const rows = await this.db
+    /**
+     * A transaction with a purchaser-scoped advisory lock, because the per-row
+     * conditional UPDATE is NOT enough for the cross-subscription half.
+     *
+     * Two claims against DIFFERENT rows take no common row lock, so under READ
+     * COMMITTED neither statement's snapshot sees the other's uncommitted write
+     * and the `NOT EXISTS` subquery below passes for both: a purchaser holding
+     * two first-charge subscriptions could fire two requests in parallel and get
+     * two refunds. The row-level half was always atomic; this makes the
+     * per-purchaser half true as well, which is what the docblock claims.
+     *
+     * An advisory lock rather than a partial unique index deliberately: the
+     * index turns the loser into a 23505 throw, which would surface as the
+     * generic catch-all error instead of the deliberately uniform "ask us in the
+     * support server" message that every other refusal here returns.
+     */
+    return this.db.transaction(async (tx) => this.claimRefundRequestIn(tx, input));
+  }
+
+  private async claimRefundRequestIn(
+    tx: Database,
+    input: { subscriptionId: string; purchaserUserId: string; at: Date },
+  ): Promise<boolean> {
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(${REFUND_CLAIM_LOCK}, hashtext(${input.purchaserUserId}))`,
+    );
+    const rows = await tx
       .update(subscriptions)
       .set({ refundRequestedAt: input.at, updatedAt: input.at })
       .where(
