@@ -124,6 +124,61 @@ describe('BillingReconciler pool pass (integration)', () => {
     }
   });
 
+  it('never writes over a blocked member, but still keeps its billed tier in step', async () => {
+    /**
+     * `plans/refunds.md` §2.7. `advanceGuild` guards `blocked` but deliberately
+     * skips pooled non-free guilds, so this pass is their only evaluator and
+     * was laundering the abuse kill-switch into the pool's status.
+     *
+     * The tier write is deliberately still expected: skipping both would let a
+     * blocked member's billed tier drift from the subscription's, and
+     * `guilds.tier` entitles nothing on its own.
+     */
+    const poolId = 'pool-blocked-1';
+    const blocked = 'pool-blocked-g1';
+    const ordinary = 'pool-blocked-g2';
+    const now = new Date('2026-08-24T00:00:00.000Z');
+
+    await pools.create({
+      id: poolId,
+      ownerUserId: 'user-b',
+      name: 'Blocked pool',
+      billedTier: 'm',
+    });
+    await subscriptions.upsertForPool({
+      poolId,
+      paddleSubscriptionId: `sub_${poolId}`,
+      paddleCustomerId: 'ctm_b',
+      purchaserUserId: 'user-b',
+      tier: 'm',
+      status: 'active',
+    });
+    for (const guildId of [blocked, ordinary]) {
+      await guilds.ensure(guildId);
+      await guilds.recordMemberCountSample(guildId, 5_000, { at: now, authoritative: true });
+      await poolGuilds.add(poolId, guildId);
+      await guilds.setPoolId(guildId, poolId, null);
+    }
+    await guilds.transitionAuth({
+      guildId: blocked,
+      toStatus: 'blocked',
+      reason: 'abuse',
+      actor: 'test',
+    });
+    const auditBefore = await guildAuthEventCount(blocked);
+
+    const { reconciler } = makeReconciler(() => now);
+    await reconciler.runOnce();
+
+    const blockedRow = await guilds.getOrThrow(blocked);
+    expect(blockedRow.authStatus).toBe('blocked');
+    expect(blockedRow.tier).toBe('m');
+    expect(await guildAuthEventCount(blocked)).toBe(auditBefore);
+
+    // The rest of the pool still converged, so this is a skip and not a stall.
+    expect((await guilds.getOrThrow(ordinary)).authStatus).toBe('active');
+  });
+
   it('is idempotent under two concurrent passes: no duplicate audit rows, no thrash', async () => {
     const poolId = 'pool-concurrent-1';
     const guildId = 'pool-concurrent-g1';

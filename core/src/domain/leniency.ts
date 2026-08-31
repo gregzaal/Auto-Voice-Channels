@@ -491,6 +491,31 @@ function evaluateExpired(state: LeniencyState): LeniencyDecision {
   const required = requiredTierOf(state);
   // Shrinking back under the free line restores service (dormant trial).
   if (required.id === 'free') {
+    /**
+     * ...but a POOL with nothing billable left is not a free server, and must
+     * not reactivate itself off a dead subscription (`plans/refunds.md` §2.5).
+     *
+     * `requiredTierOf` reads `pooledMemberCount` first, so a pool whose
+     * billable set empties for one tick, by shrinkage or because the customer
+     * removed their servers, lands here. `advancePool` maps `trial` to
+     * `active` for pools, so the pool promoted itself back to entitling and
+     * fanned a reactivation notice to every member, on a subscription that had
+     * been refunded. One tick was enough, since this branch has no hysteresis.
+     *
+     * Scoped to the pool axis deliberately. On the guild axis this branch IS
+     * the free-forever promise (`/docs/billing`: "free forever whether or not
+     * it shares a subscription"), so it must keep firing for a server that
+     * genuinely shrank, whatever its subscription is doing. `pooledMemberCount`
+     * is the documented seam between the two, and a pool always sets it.
+     *
+     * Adding `sustainedUnder` hysteresis here as well was considered and NOT
+     * done: on the guild axis it would delay restoring a promise we advertise
+     * as immediate, which is worse for the customer than today.
+     */
+    const isPool = state.pooledMemberCount !== undefined;
+    if (isPool && state.hasSubscription && !state.subscriptionOk) {
+      return { notifications: [] };
+    }
     return {
       transition: {
         toStatus: 'trial',
@@ -539,6 +564,47 @@ function evaluateExpired(state: LeniencyState): LeniencyDecision {
 
 function utcDay(date: Date): string {
   return date.toISOString().slice(0, 10);
+}
+
+/**
+ * Whether leaving a pool should grant the exiting guild an entitled window at
+ * all. Shared by every caller, because they had already diverged once.
+ *
+ * `plans/refunds.md` §2.3. `poolExitTransition` reads only the member count, so
+ * it hands out `grace` plus a fresh 60 days regardless of whether anything is
+ * still paying, and `billing.hard_gate_disabled` on prod means that window never
+ * closes. Two ways that was exploitable, and a third the first fix created:
+ *
+ *  - **Refunded and emptied.** Buy a multi-server subscription, refund it, then
+ *    remove each server: every one lands entitled indefinitely.
+ *  - **Kicked and re-invited.** The `guildDelete` path does the same thing with
+ *    no site login at all, which made it the cheaper route.
+ *  - **Farmed.** Once a removed membership could be re-added (§2.10), add and
+ *    remove the same server every 59 days to renew its window forever.
+ *
+ * So: no grant while the pool cannot entitle anything, and never an extension of
+ * a window that is already open, which is the same rule the Paddle-side
+ * `transitionFor` follows for dunning.
+ *
+ * **Refuse the grant, never the removal.** An earlier pass refused the whole
+ * removal on a dead pool, which stranded the server: nothing else can move a
+ * guild off a pool, and `createPool` refuses any guild with a live membership
+ * whatever the pool's status, so a refunded customer could not remove, re-add or
+ * re-buy. Removing without granting leaves the guild exactly as it was, which
+ * for a gated member is gated, and frees it to buy its own subscription.
+ */
+export function shouldGrantPoolExit(
+  guild: { authStatus: AuthStatus; graceUntil: Date | null },
+  pool: { status: string } | null | undefined,
+  now: Date,
+): boolean {
+  // `blocked` outranks billing everywhere, and neither caller's own guard is a
+  // substitute for this one being right.
+  if (guild.authStatus === 'blocked') return false;
+  if (pool?.status === 'expired') return false;
+  const graceOpen =
+    guild.authStatus === 'grace' && guild.graceUntil !== null && guild.graceUntil > now;
+  return !graceOpen;
 }
 
 /**

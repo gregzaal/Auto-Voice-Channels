@@ -1,4 +1,4 @@
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Database } from '../db/client.js';
 import { memberPoolGuilds } from '../db/schema.js';
@@ -21,10 +21,45 @@ export const memberPoolGuildRowSchema = z.object({
 
 export type MemberPoolGuildRow = z.infer<typeof memberPoolGuildRowSchema>;
 
-/** Thrown when a guild is already in a different live pool. */
+/** Thrown when a guild is already in a live pool. */
 export class GuildAlreadyPooledError extends Error {
-  constructor(readonly guildId: string) {
-    super(`Guild ${guildId} is already in a live pool`);
+  constructor(
+    readonly guildId: string,
+    /**
+     * Whether the live membership is in the pool the caller asked about.
+     * `add` collapsed two different constraints into one error, so the
+     * dashboard told a customer "that server is already on a subscription"
+     * when it was on none: the primary key `(pool_id, guild_id)` fires for a
+     * server this pool once had and released, while the partial index
+     * `member_pool_guilds_live_guild_idx` is the one that means what the
+     * message says. The two now have different causes and different copy.
+     */
+    readonly samePool = false,
+  ) {
+    super(
+      samePool
+        ? `Guild ${guildId} is already live in this pool`
+        : `Guild ${guildId} is already in a live pool`,
+    );
+  }
+}
+
+/**
+ * Thrown when a removal names a guild that is not live in the pool given.
+ *
+ * The reason this is an error rather than a no-op is the whole of
+ * `plans/refunds.md` §2.2: `remove` matching zero rows used to be silent, and
+ * `removeGuildFromPoolAtomically` went on to null `guilds.pool_id` anyway, so
+ * owning any pool authorized a write against any guild id in existence. It
+ * also closes the race, because the transaction rolls back before the pointer
+ * write instead of relying on a check the caller made beforehand.
+ */
+export class GuildNotInPoolError extends Error {
+  constructor(
+    readonly guildId: string,
+    readonly poolId: string,
+  ) {
+    super(`Guild ${guildId} is not live in pool ${poolId}`);
   }
 }
 
@@ -32,24 +67,50 @@ export class MemberPoolGuildRepository {
   constructor(private readonly db: Database) {}
 
   /**
-   * Adds a guild to a pool. Throws {@link GuildAlreadyPooledError} if the
-   * guild already has a live membership elsewhere — the partial unique index
-   * `member_pool_guilds_live_guild_idx` is the actual enforcement; this just
-   * turns the resulting constraint violation into a typed error the caller
-   * can show a friendly message for, rather than a bare Postgres error code.
+   * Adds a guild to a pool, reviving a membership this pool previously
+   * released rather than refusing it forever (`plans/refunds.md` §2.10).
+   *
+   * The primary key is `(pool_id, guild_id)` and `remove` stamps `removed_at`
+   * instead of deleting, so a bare insert made "remove a server, change your
+   * mind, add it back" a permanent refusal — and reported it with the message
+   * for a completely different condition. The upsert is scoped by `setWhere`
+   * to rows that are actually removed, so a guild already LIVE in this pool
+   * still updates nothing and is still refused, which is the behaviour every
+   * existing caller was written against.
+   *
+   * Throws {@link GuildAlreadyPooledError}, with `samePool` distinguishing the
+   * two causes. A guild live in a DIFFERENT pool trips
+   * `member_pool_guilds_live_guild_idx` on the revived row, which is the
+   * constraint that genuinely means "already on a subscription".
    */
   async add(poolId: string, guildId: string, at = new Date()): Promise<void> {
+    let revived: { guildId: string }[];
     try {
-      await this.db.insert(memberPoolGuilds).values({ poolId, guildId, addedAt: at });
+      revived = await this.db
+        .insert(memberPoolGuilds)
+        .values({ poolId, guildId, addedAt: at })
+        .onConflictDoUpdate({
+          target: [memberPoolGuilds.poolId, memberPoolGuilds.guildId],
+          set: { addedAt: at, removedAt: null },
+          setWhere: isNotNull(memberPoolGuilds.removedAt),
+        })
+        .returning({ guildId: memberPoolGuilds.guildId });
     } catch (err) {
       if (isUniqueViolation(err)) throw new GuildAlreadyPooledError(guildId);
       throw err;
     }
+    // No row back means the conflict hit a row `setWhere` declined to touch,
+    // which can only be a live membership in THIS pool.
+    if (revived.length === 0) throw new GuildAlreadyPooledError(guildId, true);
   }
 
-  /** Marks a membership removed. No-op if the guild has no live row in this pool. */
-  async remove(poolId: string, guildId: string, at = new Date()): Promise<void> {
-    await this.db
+  /**
+   * Marks a membership removed. Returns whether a live row actually matched,
+   * so a caller can refuse rather than proceed on a guild that is not in this
+   * pool. See {@link GuildNotInPoolError} for why that matters.
+   */
+  async remove(poolId: string, guildId: string, at = new Date()): Promise<boolean> {
+    const rows = await this.db
       .update(memberPoolGuilds)
       .set({ removedAt: at })
       .where(
@@ -58,7 +119,9 @@ export class MemberPoolGuildRepository {
           eq(memberPoolGuilds.guildId, guildId),
           isNull(memberPoolGuilds.removedAt),
         ),
-      );
+      )
+      .returning({ guildId: memberPoolGuilds.guildId });
+    return rows.length > 0;
   }
 
   /**
@@ -135,7 +198,19 @@ export async function removeGuildFromPoolAtomically(
   at = new Date(),
 ): Promise<void> {
   await db.transaction(async (tx) => {
-    await new MemberPoolGuildRepository(tx).remove(poolId, guildId, at);
+    const removed = await new MemberPoolGuildRepository(tx).remove(poolId, guildId, at);
+    /**
+     * Refuse INSIDE the transaction, before the pointer write.
+     *
+     * This is the load-bearing half of `plans/refunds.md` §2.2, and it is also
+     * what closes the race a caller-side check cannot. The `UPDATE` above
+     * locks the membership row when it matches, so a concurrent add or remove
+     * of the same guild serializes behind it; and if the guild has since moved
+     * to another pool, nothing matches, this throws, and the rollback means
+     * `setPoolId` never nulls the OTHER pool's pointer. A check made before
+     * the transaction is read-then-write and cannot promise either.
+     */
+    if (!removed) throw new GuildNotInPoolError(guildId, poolId);
     await new GuildRepository(tx).setPoolId(guildId, null, null);
   });
 }

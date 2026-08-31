@@ -19,6 +19,7 @@ import {
   OpsAuditRepository,
   DEFAULT_FLEET,
   poolExitTransition,
+  shouldGrantPoolExit,
   probeForManifest,
   removeGuildFromAnyPoolAtomically,
   resolveDiscordUserId,
@@ -799,6 +800,31 @@ async function main(): Promise<void> {
         // one. The dashboard's own removeGuildFromPool does this too; this is
         // the parallel path for a kick nobody clicked a button for (§5.6).
         await memberPoolsRepo.resetSamples(poolId);
+
+        /**
+         * `blocked` outranks billing, and this path had no guard for it, so a
+         * kick and a re-invite laundered the abuse kill-switch into `grace`
+         * (`plans/refunds.md` §2.3).
+         */
+        if (row?.authStatus === 'blocked') return;
+
+        /**
+         * Refuse the GRANT, never the removal. Same shared rule the dashboard's
+         * own remove action uses, deliberately: this path has no authorization
+         * at all, so it must never be able to do more, or less, than the
+         * purchaser's own button. `shouldGrantPoolExit` carries the reasoning.
+         */
+        const pool = await memberPoolsRepo.get(poolId);
+        if (
+          !shouldGrantPoolExit(row ?? { authStatus: 'trial', graceUntil: null }, pool, removedAt)
+        ) {
+          logger.info(
+            { guildId: guild.id, poolId, poolStatus: pool?.status },
+            'pool exit: membership removed, entitlement grant skipped',
+          );
+          return;
+        }
+
         const exit = poolExitTransition(row?.memberCount ?? null, removedAt);
         await settingsCache.transitionAuth({
           guildId: guild.id,

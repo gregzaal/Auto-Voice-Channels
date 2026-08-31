@@ -3,6 +3,7 @@ import type { MemberCountSample } from './billing.js';
 import {
   DEFAULT_LENIENCY_CONFIG,
   evaluateLeniency,
+  shouldGrantPoolExit,
   sustainedBreach,
   sustainedDrop,
   type LeniencyState,
@@ -432,6 +433,72 @@ describe('evaluateLeniency — expired (reactivation)', () => {
   });
 });
 
+describe('evaluateLeniency — expired pool does not reactivate itself (refunds.md §2.5)', () => {
+  /**
+   * A pool always sets `pooledMemberCount`, and `requiredTierOf` reads it
+   * first, so an expired pool whose billable set empties for one tick lands in
+   * the free-forever branch. `advancePool` maps `trial` to `active` for pools,
+   * so it promoted itself back to entitling on a refunded subscription and
+   * announced a reactivation to every member.
+   */
+  const poolState = (overrides: Partial<LeniencyState>): LeniencyState =>
+    state({
+      authStatus: 'expired',
+      authExpiresAt: null,
+      memberCount: null,
+      pooledMemberCount: 0,
+      billedTier: 'm',
+      guildCreatedAt: null,
+      samples: [],
+      ...overrides,
+    });
+
+  it('does nothing when the subscription is not in good standing', () => {
+    const decision = evaluateLeniency(
+      poolState({ hasSubscription: true, subscriptionOk: false }),
+      NOW,
+    );
+    expect(decision.transition).toBeUndefined();
+    expect(decision.notifications).toEqual([]);
+  });
+
+  it('still reactivates when the subscription IS in good standing', () => {
+    const decision = evaluateLeniency(
+      poolState({ hasSubscription: true, subscriptionOk: true }),
+      NOW,
+    );
+    expect(decision.transition).toMatchObject({ toStatus: 'trial', reason: 'shrunk_to_free' });
+  });
+
+  it('still reactivates a pool with no subscription row at all', () => {
+    // A bespoke arrangement is entitled by agreement with no Paddle row, and
+    // must never be read as a failed payment.
+    const decision = evaluateLeniency(
+      poolState({ hasSubscription: false, subscriptionOk: false }),
+      NOW,
+    );
+    expect(decision.transition).toMatchObject({ toStatus: 'trial', reason: 'shrunk_to_free' });
+  });
+
+  it('leaves the per-guild free-forever promise alone, whatever the subscription is doing', () => {
+    // The guild axis has no `pooledMemberCount`. `/docs/billing` promises a
+    // sub-100 server is free forever "whether or not it shares a
+    // subscription", so this branch must keep firing for a real shrink.
+    const decision = evaluateLeniency(
+      state({
+        authStatus: 'expired',
+        memberCount: 42,
+        samples: samplesAt(42, 2),
+        billedTier: 'm',
+        hasSubscription: true,
+        subscriptionOk: false,
+      }),
+      NOW,
+    );
+    expect(decision.transition).toMatchObject({ toStatus: 'trial', reason: 'shrunk_to_free' });
+  });
+});
+
 describe('evaluateLeniency — blocked', () => {
   it('the kill-switch outranks billing entirely', () => {
     const decision = evaluateLeniency(
@@ -523,5 +590,54 @@ describe('pooledMemberCount (member-based-pricing.md §5.2)', () => {
       NOW,
     );
     expect(hardGated.transition).toMatchObject({ toStatus: 'expired', reason: 'grace_elapsed' });
+  });
+});
+
+describe('shouldGrantPoolExit (refunds.md §2.3)', () => {
+  const active = { status: 'active' };
+  const expired = { status: 'expired' };
+
+  it('grants on the ordinary path: healthy subscription, guild not already in grace', () => {
+    expect(shouldGrantPoolExit({ authStatus: 'active', graceUntil: null }, active, NOW)).toBe(true);
+  });
+
+  it('refuses on a subscription that cannot entitle anything', () => {
+    // Buy, refund, empty the subscription: every server used to land entitled
+    // for a fresh 60 days, and under hard_gate_disabled that never closes.
+    expect(shouldGrantPoolExit({ authStatus: 'expired', graceUntil: null }, expired, NOW)).toBe(
+      false,
+    );
+    expect(shouldGrantPoolExit({ authStatus: 'active', graceUntil: null }, expired, NOW)).toBe(
+      false,
+    );
+  });
+
+  it('never extends a grace window that is already open', () => {
+    // The farm: add, remove, bank 60 days, re-add, repeat every 59 days.
+    const open = { authStatus: 'grace' as const, graceUntil: new Date(NOW.getTime() + days(30)) };
+    expect(shouldGrantPoolExit(open, active, NOW)).toBe(false);
+  });
+
+  it('does grant when a grace window has already elapsed', () => {
+    const spent = { authStatus: 'grace' as const, graceUntil: new Date(NOW.getTime() - days(1)) };
+    expect(shouldGrantPoolExit(spent, active, NOW)).toBe(true);
+  });
+
+  it('grants to a guild in grace with no recorded deadline, which is a backfill not an extension', () => {
+    expect(shouldGrantPoolExit({ authStatus: 'grace', graceUntil: null }, active, NOW)).toBe(true);
+  });
+
+  it('never touches a blocked guild', () => {
+    expect(shouldGrantPoolExit({ authStatus: 'blocked', graceUntil: null }, active, NOW)).toBe(
+      false,
+    );
+  });
+
+  it('still grants when the pool cannot be read, which is deliberate', () => {
+    // A pool we cannot read is not the same as one we know has expired. The
+    // guild is losing its subscription either way, and stranding it un-entitled
+    // on missing data is the worse failure direction. Asserted rather than
+    // left implicit, so the choice is visible if it ever needs revisiting.
+    expect(shouldGrantPoolExit({ authStatus: 'active', graceUntil: null }, null, NOW)).toBe(true);
   });
 });

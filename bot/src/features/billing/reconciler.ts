@@ -531,7 +531,22 @@ export class BillingReconciler {
   ): Promise<void> {
     for (const guild of billableGuilds) {
       try {
-        if (guild.authStatus !== pool.status || datesDiffer(guild.graceUntil, pool.graceUntil)) {
+        /**
+         * `blocked` outranks billing, and this pass had no guard for it
+         * (`plans/refunds.md` §2.7). `advanceGuild` does guard it, but
+         * deliberately skips pooled non-free guilds, so this is their ONLY
+         * evaluator: a guild blocked for abuse was written back to the pool's
+         * status, lifting the kill-switch, once per re-block forever.
+         *
+         * The tier write below is deliberately NOT skipped. Skipping both
+         * would let a blocked member's billed tier drift from the
+         * subscription's, and `guilds.tier` entitles nothing on its own.
+         */
+        const blocked = guild.authStatus === 'blocked';
+        if (
+          !blocked &&
+          (guild.authStatus !== pool.status || datesDiffer(guild.graceUntil, pool.graceUntil))
+        ) {
           await this.deps.store.transitionAuth({
             guildId: guild.guildId,
             toStatus: pool.status,
