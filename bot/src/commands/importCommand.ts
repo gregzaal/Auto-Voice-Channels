@@ -37,6 +37,7 @@ import {
   type ConfigSnapshotDeps,
 } from '../features/voice/configSnapshot.js';
 import type { GuildSettingsService } from '../features/voice/settings.js';
+import { CircuitOpenError } from '../runtime/circuitBreaker.js';
 import { missingBotPermissions, missingRenamePermissions } from './setupPanel.js';
 import {
   destructiveCount,
@@ -140,7 +141,21 @@ export interface ImportCounters {
 export function createImportSessionStore(): ImportSessionStore {
   return new ImportSessionStore({
     ttlMs: SESSION_TTL_MS,
-    perGuild: 4,
+    /**
+     * Two per guild, not four.
+     *
+     * Nobody needs more than one preview open at a time and two leaves room for
+     * a second attempt, while four made the per-instance cap reachable by eight
+     * guilds, so a handful of admins could refuse `/import` for the ~1,380
+     * others sharing the machine's shards.
+     */
+    perGuild: 2,
+    /**
+     * 32 held plans at roughly 2 MiB each (512 KiB of text, several times that
+     * once parsed) is about 64 MiB, against the ~650 MB of V8 old space a prod
+     * machine has spare. Refused rather than evicted, so an admin is told to
+     * come back instead of losing a preview they were reading.
+     */
     perInstance: 32,
   });
 }
@@ -477,6 +492,14 @@ interface ApplyOutcome {
   failures: string[];
   driftedKeys: string[];
   reconcileNeeded: boolean;
+  /**
+   * False when the pre-import snapshot could not be delivered.
+   *
+   * The reply points at that file as the undo, so it has to stop doing that when
+   * the file is not there: an admin told to import it would go looking for
+   * something that does not exist.
+   */
+  snapshotDelivered: boolean;
 }
 
 async function applyImport(
@@ -510,6 +533,7 @@ async function applyImport(
    * took it with it and left the only copy inside an audit row the admin cannot
    * read. Self-host has no operator to read it either.
    */
+  let snapshotDelivered = true;
   await interaction
     .followUp({
       content:
@@ -524,9 +548,11 @@ async function applyImport(
       ephemeral: true,
     })
     .catch((err: unknown) => {
-      // Not fatal: the same snapshot goes into the audit row below.
+      // Not fatal: the same snapshot goes into the audit row below. But the
+      // reply must stop pointing at a file that is not there.
       deps.logger.warn({ err, guildId }, 'could not deliver the pre-import snapshot');
       failures.push('the pre-import snapshot could not be attached');
+      snapshotDelivered = false;
     });
 
   await deps.opsAudit
@@ -565,7 +591,8 @@ async function applyImport(
     deps.logger.warn({ err, guildId }, 'import write phase was refused');
     failures.push(
       isCircuitOpen(err)
-        ? 'this server is in a failure cooldown, so nothing was written. Try again in about 30 seconds'
+        ? 'this server is in a failure cooldown, so nothing was written. Try again in about ' +
+            `${Math.max(1, Math.round(err.retryAfterMs / 1000))} seconds`
         : 'the write could not be started, so nothing was written',
     );
     applied = { plan: emptyPlan(previewPlan), driftedKeys: [] };
@@ -600,12 +627,19 @@ async function applyImport(
       applied.plan.adoptedWrites.length > 0 ||
       applied.plan.settingsRemove.length > 0 ||
       Object.keys(applied.plan.settingsPatch).length > 0,
+    snapshotDelivered,
   };
 }
 
-/** `true` when the per-guild queue refused the task rather than running it. */
-function isCircuitOpen(err: unknown): boolean {
-  return err instanceof Error && /circuit/i.test(`${err.name} ${err.message}`);
+/**
+ * `true` when the per-guild queue refused the task rather than running it.
+ *
+ * `instanceof`, not a string match on the message: the class exists and carries
+ * `retryAfterMs`, so a regex would be guessing at something the type system can
+ * answer.
+ */
+function isCircuitOpen(err: unknown): err is CircuitOpenError {
+  return err instanceof CircuitOpenError;
 }
 
 /**
@@ -720,19 +754,27 @@ export async function applyImportWrites(
        * `write.state` already preserves it.
        */
       const roster = write.firstTime ? deps.membersInChannel(write.channelId) : [];
+      const state = write.firstTime ? { ...write.state, roster } : write.state;
       await deps.managed.create({
         channelId: write.channelId,
         guildId,
         ownerId: roster[0] ?? null,
         template: write.template,
-        state: write.firstTime ? { ...write.state, roster } : write.state,
+        state,
       });
-      await deps.managed.setTemplate(guildId, write.channelId, write.template);
-      await deps.managed.updateState(
-        guildId,
-        write.channelId,
-        write.firstTime ? { ...write.state, roster } : write.state,
-      );
+      /**
+       * The two follow-up writes are for an ALREADY-adopted channel only.
+       *
+       * `create` is `onConflictDoNothing`, so on an existing row it changes
+       * nothing and these are what apply the template and the merged state. On a
+       * first-time adopt `create` has just written both, so repeating them is
+       * two round trips per channel for no effect, and at the adopted cap that
+       * is 200 of them inside the queued phase the 30s drain has to fit.
+       */
+      if (!write.firstTime) {
+        await deps.managed.setTemplate(guildId, write.channelId, write.template);
+        await deps.managed.updateState(guildId, write.channelId, state);
+      }
       landedAdoptedWrites.push(write);
     } catch (err) {
       deps.logger.warn({ err, guildId, channelId: write.channelId }, 'import adopted write failed');
@@ -948,6 +990,23 @@ function readIncoming(parsed: unknown, fileName: string, guildId: string): ReadR
    * available for that format.
    */
   const plan = planGuild(guildId, stripped, {});
+  /**
+   * A JSON object with nothing recognisable in it is not a legacy config.
+   *
+   * Sniffing treats any object without `avc_export_version` as legacy, which is
+   * correct for the real corpus and wrong for a file somebody uploaded by
+   * mistake. Without this, an unrelated JSON file produced an empty plan and the
+   * reply said "this file matches the current configuration", which is a
+   * confident statement about a file we could not read.
+   */
+  if (Object.keys(plan.settings).length === 0 && plan.primaries.length === 0) {
+    return {
+      ok: false,
+      reason:
+        'it does not look like an AVC export or an old Python bot configuration. ' +
+        'If it came from /export, upload it again without editing it.',
+    };
+  }
   return {
     ok: true,
     incoming: fromLegacyPlan(plan, {

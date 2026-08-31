@@ -138,17 +138,33 @@ export class ImportSessionStore {
     return this.applied.has(id);
   }
 
-  /** For `/diagnostics`, which today can see nothing held in this closure. */
-  stats(): { sessions: number; byGuildMax: number; applied: number } {
+  /**
+   * For `/diagnostics`, which today can see nothing held in this closure.
+   *
+   * `heldBytesEstimate` is the number an operator with a memory alarm actually
+   * wants: a count of sessions says nothing about whether they are four small
+   * files or thirty-two large ones. Estimated from the uploaded file sizes,
+   * which is the only figure available without walking the plans, and stated as
+   * an estimate because a parsed plan costs several times its text.
+   */
+  stats(): {
+    sessions: number;
+    byGuildMax: number;
+    applied: number;
+    heldBytesEstimate: number;
+  } {
     this.prune();
     const perGuild = new Map<string, number>();
+    let bytes = 0;
     for (const session of this.sessions.values()) {
       perGuild.set(session.guildId, (perGuild.get(session.guildId) ?? 0) + 1);
+      bytes += session.fileSize;
     }
     return {
       sessions: this.sessions.size,
       byGuildMax: Math.max(0, ...perGuild.values()),
       applied: this.applied.size,
+      heldBytesEstimate: bytes,
     };
   }
 }
@@ -255,12 +271,33 @@ function capped(items: readonly string[], cap: number): string {
   return `${shown}, and ${items.length - cap} more`;
 }
 
-function describeValue(value: unknown): string {
+const SNOWFLAKE = /^\d{17,20}$/;
+
+/**
+ * Settings keys whose value is an id, and which kind, so no surface prints a
+ * bare snowflake.
+ *
+ * A quoted 19-digit number tells a reader nothing, and in the public
+ * announcement it is worse than nothing: a channel mention renders as
+ * unresolvable to a viewer without access, while the raw id is a lookup anyone
+ * can do. The contact stamp made this a common path rather than a rare one.
+ */
+const ID_SETTINGS: Record<string, 'channel' | 'user'> = {
+  logging: 'channel',
+  contact_user_id: 'user',
+};
+
+function describeValue(value: unknown, key?: string): string {
   if (value === undefined || value === null) return 'not set';
   if (value === true) return 'on';
   if (value === false) return 'off';
   if (typeof value === 'number') return String(value);
-  if (typeof value === 'string') return value === '' ? 'empty' : `"${value}"`;
+  if (typeof value === 'string') {
+    if (value === '') return 'empty';
+    const kind = key ? ID_SETTINGS[key] : undefined;
+    if (kind && SNOWFLAKE.test(value)) return kind === 'channel' ? `<#${value}>` : `<@${value}>`;
+    return `"${value}"`;
+  }
   if (typeof value === 'object') {
     const size = Object.keys(value as Record<string, unknown>).length;
     return size === 1 ? '1 entry' : `${size} entries`;
@@ -313,7 +350,26 @@ export function renderPreview(plan: ImportPlan, ctx: RenderContext): string {
     lines.push('');
   }
 
-  const warnings = plan.notes.filter((n) => n.severity === 'warning');
+  /**
+   * The two-bots warning gets its own section, above everything else.
+   *
+   * It is the only failure mode the headline flow produces EVERY time, and it
+   * looks like the import broke something rather than like two bots doing what
+   * they were told. As one line among ten in "Worth knowing" it was five
+   * uninformative words that could be capped away entirely.
+   */
+  if (plan.notes.some((n) => n.code === 'other_bot_may_be_present')) {
+    lines.push('**Read this first**');
+    lines.push(
+      '- Another AVC bot may still be managing these channels in this server. Two bots with the ' +
+        'same creator channels each create a room on every join, so remove the other one first.',
+    );
+    lines.push('');
+  }
+
+  const warnings = plan.notes.filter(
+    (n) => n.severity === 'warning' && n.code !== 'other_bot_may_be_present',
+  );
   if (warnings.length > 0) {
     lines.push('**Worth knowing**');
     lines.push(...cappedLines(warnings.map(noteLine), LIST_CAP));
@@ -343,7 +399,7 @@ function settingLine(change: SettingChange): string {
     if (removed > 0 && change.key === 'custom_nicks') {
       return `${label}: cleared (${removed} removed)`;
     }
-    return `${label}: back to the default (was ${describeValue(change.before)})`;
+    return `${label}: back to the default (was ${describeValue(change.before, change.key)})`;
   }
   if (
     change.entriesAdded.length + change.entriesRemoved.length + change.entriesChanged.length >
@@ -355,7 +411,7 @@ function settingLine(change: SettingChange): string {
     if (change.entriesRemoved.length > 0) parts.push(`${change.entriesRemoved.length} removed`);
     return `${label}: ${parts.join(', ')}`;
   }
-  return `${label}: ${describeValue(change.after)} (was ${describeValue(change.before)})`;
+  return `${label}: ${describeValue(change.after, change.key)} (was ${describeValue(change.before, change.key)})`;
 }
 
 function channelLine(change: ChannelChange, isPublic: boolean): string {
@@ -400,8 +456,19 @@ function removalSection(plan: ImportPlan, isPublic: boolean): string[] {
   return out;
 }
 
+/** Notes that describe the whole import, so a subject prefix would be noise. */
+const WHOLE_IMPORT_NOTES = new Set<ImportNoteCode>([
+  'automation_switched_off',
+  'position_overwritten',
+  'other_bot_may_be_present',
+  'legacy_marked_left',
+]);
+
 function noteLine(note: ImportNote): string {
   const label = NOTE_LABELS[note.code] ?? note.code;
+  // A whole-import warning prefixed with the guild's own snowflake reads as if
+  // something is wrong with a channel called 460459401086763010.
+  if (WHOLE_IMPORT_NOTES.has(note.code)) return label;
   const subject = note.name ?? SETTING_LABELS[note.subject] ?? note.subject;
   const limit = note.limit !== undefined ? ` (limit ${note.limit})` : '';
   // Naming the permission is the difference between a line an admin can act on

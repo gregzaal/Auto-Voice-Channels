@@ -291,6 +291,13 @@ describe('ImportSessionStore', () => {
     return new ImportSessionStore({ ttlMs: 1000, perGuild: 2, perInstance: 3, now });
   }
 
+  it('reports the held bytes, not just a count', () => {
+    const s = store(() => 0);
+    s.put('a', { ...session('g1'), fileSize: 1000 });
+    s.put('b', { ...session('g2'), fileSize: 2400 });
+    expect(s.stats()).toMatchObject({ sessions: 2, heldBytesEstimate: 3400 });
+  });
+
   it('holds a session and hands it back once', () => {
     const s = store(() => 0);
     expect(s.put('a', session('g1'))).toEqual({ ok: true });
