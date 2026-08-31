@@ -1068,6 +1068,25 @@ async function main(): Promise<void> {
         alerts: { ...alertScheduler.stats },
         topgg: topggScheduler ? { ...topggScheduler.stats } : { configured: false },
         supporterRoles: supporterRoles ? { ...supporterRoles.stats } : { enabled: false },
+        /**
+         * `/import`, which is the largest thing this process holds in memory
+         * that nothing else can see.
+         *
+         * The interaction handler has no stats block at all, so
+         * `assistantSessions` and `createRetries` are already invisible, and
+         * held import plans are bigger than either. At 3am with a memory alarm
+         * the only question is what is being held, and the flag list above
+         * answers whether a lever is set, not whether the feature is hurting.
+         *
+         * `disabled` is read across every fleet, matching what the command
+         * actually does, so this field answers "can anyone import right now"
+         * rather than "is the row for my fleet set".
+         */
+        configImport: {
+          disabled: await flags.getBoolAnyFleet(RUNTIME_FLAGS.IMPORT_DISABLED).catch(() => null),
+          announceDisabled: runtimeFlags[RUNTIME_FLAGS.IMPORT_ANNOUNCE_DISABLED] === true,
+          ...importSessions.stats(),
+        },
       };
     },
   });
