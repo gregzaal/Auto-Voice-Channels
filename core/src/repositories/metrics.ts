@@ -297,9 +297,11 @@ export class MetricsRepository {
        * `tsc` cannot see it.** The predicate's required-property trick makes
        * every TypeScript caller fail to compile when the rule changes; this one
        * is a string, so it has to be changed in the same commit by hand. Both
-       * clauses are here for the same reason the predicate has both: the
-       * settled marker is the authority, and the status check is the compat
-       * path for rows written before the writer shipped.
+       * clauses mirror the predicate exactly: the settled marker is the
+       * authority, and the status check applies ONLY to rows the derived writer
+       * has never touched (`refund_updated_at IS NULL`). Without that scoping a
+       * partial refund, whose status is also `approved`, would drop a paying
+       * subscription out of the count.
        */
       await run(
         METRICS.SUBSCRIPTIONS_ACTIVE,
@@ -310,7 +312,11 @@ export class MetricsRepository {
                sql`, `,
              )})
                AND refund_settled_at IS NULL
-               AND (refund_status IS NULL OR refund_status <> 'approved')
+               AND (
+                     refund_updated_at IS NOT NULL
+                  OR refund_status IS NULL
+                  OR refund_status <> 'approved'
+                   )
              GROUP BY tier`,
       );
 

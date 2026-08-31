@@ -4,6 +4,7 @@ import { startPostgres, type PgTestEnv } from '../test/pgContainer.js';
 import { BillingEventRepository } from './billingEvents.js';
 import { BillingRunRepository } from './billingRuns.js';
 import { GuildRepository } from './guilds.js';
+import { classifyAdjustment } from '../domain/refunds.js';
 import { SubscriptionRepository } from './subscriptions.js';
 
 describe('billing repositories (integration)', () => {
@@ -231,6 +232,142 @@ describe('billing repositories (integration)', () => {
       expect(await subs.getByGuild('sub-origin')).toMatchObject({
         billingCountryCode: 'ZA',
       });
+    });
+  });
+
+  describe('applyAdjustment (the ordering guard)', () => {
+    /**
+     * `plans/refunds.md` §2.6. `recordRefund` is last-write-wins, so a second
+     * refund request arriving `pending_approval` overwrote `'approved'`,
+     * standing flipped back true and the ladder reactivated a guild whose money
+     * we had already returned. The guard is in the WHERE clause rather than
+     * read-then-written, so two concurrent deliveries cannot both win.
+     */
+    const adj = (over: Record<string, unknown> = {}) => ({
+      adjustmentId: 'adj_1',
+      paddleSubscriptionId: 'sub_guard',
+      transactionId: 'txn_current',
+      action: 'refund',
+      status: 'approved',
+      type: 'full',
+      total: '3900',
+      currency: 'USD',
+      updatedAt: new Date('2026-08-31T12:00:00.000Z'),
+      ...over,
+    });
+
+    async function seed() {
+      await guilds.ensure('guard-guild');
+      return subs.upsert({
+        guildId: 'guard-guild',
+        paddleSubscriptionId: 'sub_guard',
+        paddleCustomerId: 'ctm_guard',
+        tier: 'm',
+        status: 'active',
+      });
+    }
+
+    it('applies a newer adjustment and refuses an older one', async () => {
+      await seed();
+      await subs.recordChargedTotals('sub_guard', {
+        total: '3900',
+        transactionId: 'txn_current',
+      });
+
+      const approved = adj();
+      const applied = await subs.applyAdjustment(
+        approved,
+        classifyAdjustment(approved, {
+          chargedTransactionId: 'txn_current',
+          refundAdjustmentId: null,
+        }),
+      );
+      expect(applied).toBe(true);
+
+      let row = await subs.getByGuild('guard-guild');
+      expect(row?.refundSettledAt).not.toBeNull();
+      expect(row?.refundAdjustmentId).toBe('adj_1');
+
+      // The §2.6 attack: a SECOND request, stamped earlier, arriving after.
+      const stale = adj({
+        adjustmentId: 'adj_2',
+        status: 'pending_approval',
+        updatedAt: new Date('2026-08-30T12:00:00.000Z'),
+      });
+      const staleApplied = await subs.applyAdjustment(
+        stale,
+        classifyAdjustment(stale, {
+          chargedTransactionId: 'txn_current',
+          refundAdjustmentId: 'adj_1',
+        }),
+      );
+      expect(staleApplied).toBe(false);
+
+      row = await subs.getByGuild('guard-guild');
+      expect(row?.refundStatus).toBe('approved');
+      expect(row?.refundSettledAt).not.toBeNull();
+    });
+
+    it('lets the same adjustment progress, since Paddle can stamp two events alike', async () => {
+      await guilds.ensure('guard-guild-2');
+      await subs.upsert({
+        guildId: 'guard-guild-2',
+        paddleSubscriptionId: 'sub_guard_2',
+        paddleCustomerId: 'ctm_guard_2',
+        tier: 'm',
+        status: 'active',
+      });
+      const at = new Date('2026-08-31T12:00:00.000Z');
+      const created = adj({
+        paddleSubscriptionId: 'sub_guard_2',
+        status: 'pending_approval',
+        updatedAt: at,
+      });
+      await subs.applyAdjustment(
+        created,
+        classifyAdjustment(created, { chargedTransactionId: null, refundAdjustmentId: null }),
+      );
+      // Same timestamp, now approved. `<=` rather than `<` is what admits this.
+      const approved = adj({ paddleSubscriptionId: 'sub_guard_2', updatedAt: at });
+      expect(
+        await subs.applyAdjustment(
+          approved,
+          classifyAdjustment(approved, { chargedTransactionId: null, refundAdjustmentId: null }),
+        ),
+      ).toBe(true);
+      const row = await subs.getByGuild('guard-guild-2');
+      expect(row?.refundSettledAt).not.toBeNull();
+    });
+
+    it('clears the marker on a reversal of the adjustment that set it', async () => {
+      await guilds.ensure('guard-guild-3');
+      await subs.upsert({
+        guildId: 'guard-guild-3',
+        paddleSubscriptionId: 'sub_guard_3',
+        paddleCustomerId: 'ctm_guard_3',
+        tier: 'm',
+        status: 'active',
+      });
+      const approved = adj({ paddleSubscriptionId: 'sub_guard_3' });
+      await subs.applyAdjustment(
+        approved,
+        classifyAdjustment(approved, { chargedTransactionId: null, refundAdjustmentId: null }),
+      );
+      const reversed = adj({
+        paddleSubscriptionId: 'sub_guard_3',
+        status: 'reversed',
+        updatedAt: new Date('2026-09-01T12:00:00.000Z'),
+      });
+      await subs.applyAdjustment(
+        reversed,
+        classifyAdjustment(reversed, {
+          chargedTransactionId: null,
+          refundAdjustmentId: 'adj_1',
+        }),
+      );
+      const row = await subs.getByGuild('guard-guild-3');
+      expect(row?.refundSettledAt).toBeNull();
+      expect(row?.refundAdjustmentId).toBeNull();
     });
   });
 

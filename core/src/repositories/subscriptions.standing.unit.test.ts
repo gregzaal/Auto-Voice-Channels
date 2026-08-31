@@ -26,6 +26,7 @@ function sub(over: Partial<Parameters<typeof subscriptionIsSettled>[0]> = {}) {
     status: 'active',
     refundStatus: null,
     refundSettledAt: null,
+    refundUpdatedAt: null,
     scheduledChangeAction: null,
     ...over,
   };
@@ -204,5 +205,43 @@ describe('refundSettledAt is the authority, refundStatus is the compat path', ()
   it('makes a refunded AND cancelled subscription settled', () => {
     const done = sub({ refundSettledAt: new Date(), scheduledChangeAction: 'cancel' });
     expect(subscriptionIsSettled(done)).toBe(true);
+  });
+});
+
+describe('the compat branch is scoped to rows the derived writer never touched', () => {
+  it('gates a legacy approved refund, where the marker cannot exist yet', () => {
+    expect(subscriptionInGoodStanding(sub({ refundStatus: 'approved' }))).toBe(false);
+  });
+
+  it('does NOT gate a partial refund the derived writer recorded', () => {
+    /**
+     * The defect this scoping exists for. A partial refund's status is also
+     * `approved`, so an unconditional compat branch would gate a customer who
+     * was handed goodwill money and is still fully paid up. Partial refunds are
+     * goodwill only and change nothing but the record (owner, 2026-08-28).
+     */
+    expect(
+      subscriptionInGoodStanding(
+        sub({ refundStatus: 'approved', refundUpdatedAt: new Date(), refundSettledAt: null }),
+      ),
+    ).toBe(true);
+  });
+
+  it('does NOT gate a full refund of some other period, recorded the same way', () => {
+    // Same shape: the writer looked at it, decided it does not revoke access,
+    // and the absence of the marker is that decision rather than a gap.
+    expect(
+      subscriptionInGoodStanding(
+        sub({ refundStatus: 'approved', refundUpdatedAt: new Date(), refundSettledAt: null }),
+      ),
+    ).toBe(true);
+  });
+
+  it('still gates once the writer sets the marker', () => {
+    expect(
+      subscriptionInGoodStanding(
+        sub({ refundStatus: 'approved', refundUpdatedAt: new Date(), refundSettledAt: new Date() }),
+      ),
+    ).toBe(false);
   });
 });

@@ -1,0 +1,1 @@
+ALTER TABLE "subscriptions" ADD COLUMN "charged_transaction_id" text;

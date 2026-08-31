@@ -520,6 +520,17 @@ export const subscriptions = pgTable(
      * asking.
      */
     refundStatus: text('refund_status'),
+    /**
+     * The transaction id that bought the CURRENT period, from
+     * `transaction.completed`.
+     *
+     * Exists so a refund can be tested against the term it actually paid for.
+     * Paddle's `type: 'full'` describes a TRANSACTION, not the paid term, so
+     * without this a goodwill refund of month one's charge on an annual
+     * subscription reads as a full refund and gates a customer who is eight
+     * months paid up. That was found by review of `plans/refunds.md` §7.1.
+     */
+    chargedTransactionId: text('charged_transaction_id'),
     /** Refunded amount (minor units) for that adjustment. */
     refundTotal: text('refund_total'),
     /**

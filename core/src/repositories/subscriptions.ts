@@ -1,7 +1,8 @@
-import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Database } from '../db/client.js';
 import { accounts, subscriptions } from '../db/schema.js';
+import type { AdjustmentRecord, RefundVerdict } from '../domain/refunds.js';
 import { TIER_IDS, compareTiers, type TierId } from '../domain/tiers.js';
 
 /**
@@ -38,6 +39,8 @@ export const subscriptionRowSchema = z.object({
   currentPeriodEnd: z.date().nullable(),
   /** Actually-charged total (minor units, tax-inclusive). See schema.ts. */
   chargedTotal: z.string().nullish(),
+  /** The transaction that bought the current period. See schema.ts for why it matters. */
+  chargedTransactionId: z.string().nullish(),
   chargedTax: z.string().nullish(),
   chargedCurrency: z.string().nullish(),
   /**
@@ -56,7 +59,7 @@ export const subscriptionRowSchema = z.object({
   /** When WE received the adjustment. Not the ordering guard's input: see schema.ts. */
   refundAt: z.date().nullish(),
   /** The adjustment's own Paddle timestamp, which IS the ordering guard's input. */
-  refundUpdatedAt: z.date().nullish(),
+  refundUpdatedAt: z.date().nullish().default(null),
   /**
    * The authority for "access is revoked": a full, approved refund of the
    * transaction that bought the current period.
@@ -139,9 +142,22 @@ export interface UpsertPoolSubscriptionInput {
  * yet know whether it belongs to a guild or a pool (`applyRefund`) — everyone
  * else already knows which one they are asking for.
  */
-export type AnySubscriptionRef =
-  | { kind: 'guild'; id: string; guildId: string }
-  | { kind: 'pool'; id: string; poolId: string };
+/**
+ * Which axis a subscription bills through, plus the two fields an adjustment
+ * decision needs. Both are carried here rather than fetched separately because
+ * the axis lookup is already the one query every adjustment does, and neither
+ * field parses through the axis-specific row schemas.
+ */
+export type AnySubscriptionRef = { id: string; refundContext: RefundContext } & (
+  | { kind: 'guild'; guildId: string }
+  | { kind: 'pool'; poolId: string }
+);
+
+/** What {@link classifyAdjustment} needs to know about the row it is judging. */
+export interface RefundContext {
+  chargedTransactionId: string | null;
+  refundAdjustmentId: string | null;
+}
 
 /**
  * Paddle subscription statuses that count as "in good standing" for
@@ -168,22 +184,26 @@ export function subscriptionInGoodStanding(sub: {
   status: string;
   refundStatus: string | null | undefined;
   refundSettledAt: Date | null | undefined;
+  refundUpdatedAt: Date | null | undefined;
 }): boolean {
   if (sub.refundSettledAt) return false;
   /**
-   * Compat branch, and it has to stay until every row is derived.
+   * Compat branch, scoped to rows the derived writer has never touched.
    *
-   * `refund_settled_at` is null on every row until the writer ships, so a
-   * predicate reading only it would report the one live refunded subscription,
-   * and any refunded before the writer lands, as perfectly healthy. Removing
-   * this is a separate change gated on the backfill, not a tidy-up.
+   * `refund_settled_at` is null on every row until that writer ships, so a
+   * predicate reading only it would report the one live refunded subscription as
+   * perfectly healthy. But the branch cannot be unconditional either:
+   * `refundStatus` is `'approved'` for a PARTIAL refund too, and for a full
+   * refund of some earlier period's transaction, and gating on those is exactly
+   * the "a refund punishes" defect the settled marker exists to avoid.
    *
-   * It is also deliberately the looser of the two: `refundStatus === 'approved'`
-   * ignores the current-period transaction test, so an old goodwill refund on a
-   * pre-writer row still revokes standing. That errs toward gating, which is the
-   * safe direction for a compat path.
+   * `refundUpdatedAt` is the discriminator, and it is reliable because only
+   * `applyAdjustment` writes it and it writes all four columns together. Null
+   * means no derived write has happened, so the old status is the best answer we
+   * have. Non-null means the marker is the whole answer, and its absence is a
+   * decision rather than a gap.
    */
-  if (sub.refundStatus === 'approved') return false;
+  if (!sub.refundUpdatedAt && sub.refundStatus === 'approved') return false;
   return SUBSCRIPTION_OK_STATUSES.has(sub.status);
 }
 
@@ -234,6 +254,7 @@ export function subscriptionIsSettled(sub: {
   status: string;
   refundStatus: string | null | undefined;
   refundSettledAt: Date | null | undefined;
+  refundUpdatedAt: Date | null | undefined;
   scheduledChangeAction?: string | null | undefined;
 }): boolean {
   return !subscriptionInGoodStanding(sub) && !subscriptionWillChargeAgain(sub);
@@ -264,6 +285,7 @@ export function subscriptionEarnsRecognition(sub: {
   status: string;
   refundStatus: string | null | undefined;
   refundSettledAt: Date | null | undefined;
+  refundUpdatedAt: Date | null | undefined;
 }): boolean {
   if (subscriptionInGoodStanding(sub)) return true;
   if (sub.refundStatus === 'approved') return false;
@@ -391,6 +413,7 @@ export class SubscriptionRepository {
           // decided off a projection missing the settled marker would keep a
           // refunded customer's role indefinitely.
           refundSettledAt: subscriptions.refundSettledAt,
+          refundUpdatedAt: subscriptions.refundUpdatedAt,
         })
         .from(subscriptions)
         .innerJoin(accounts, eq(accounts.userId, subscriptions.purchaserUserId))
@@ -522,13 +545,19 @@ export class SubscriptionRepository {
         id: subscriptions.id,
         guildId: subscriptions.guildId,
         poolId: subscriptions.poolId,
+        chargedTransactionId: subscriptions.chargedTransactionId,
+        refundAdjustmentId: subscriptions.refundAdjustmentId,
       })
       .from(subscriptions)
       .where(eq(subscriptions.paddleSubscriptionId, paddleSubscriptionId))
       .limit(1);
     if (!row) return undefined;
-    if (row.guildId) return { kind: 'guild', id: row.id, guildId: row.guildId };
-    if (row.poolId) return { kind: 'pool', id: row.id, poolId: row.poolId };
+    const refundContext: RefundContext = {
+      chargedTransactionId: row.chargedTransactionId,
+      refundAdjustmentId: row.refundAdjustmentId,
+    };
+    if (row.guildId) return { kind: 'guild', id: row.id, guildId: row.guildId, refundContext };
+    if (row.poolId) return { kind: 'pool', id: row.id, poolId: row.poolId, refundContext };
     return undefined;
   }
 
@@ -548,6 +577,7 @@ export class SubscriptionRepository {
       currency?: string | null;
       countryCode?: string | null;
       priceId?: string | null;
+      transactionId?: string | null;
     },
   ): Promise<void> {
     await this.db
@@ -556,6 +586,16 @@ export class SubscriptionRepository {
         chargedTotal: totals.total,
         chargedTax: totals.tax ?? null,
         chargedCurrency: totals.currency ?? null,
+        /**
+         * Overwritten with the totals, deliberately, unlike the origin fields
+         * below: they describe where the money came from and must not be
+         * nulled by a payload we merely failed to parse, while this identifies
+         * WHICH charge the totals are for. Keeping a previous period's id
+         * beside a new period's totals is the one combination that would make
+         * the refund test wrong in the dangerous direction, gating a customer
+         * who is paid up.
+         */
+        chargedTransactionId: totals.transactionId ?? null,
         // Origin fields are written only when we HAVE one, unlike the totals
         // above, which always arrive together on the same event and are
         // meaningless individually. A payload shape we do not recognise yields
@@ -614,6 +654,73 @@ export class SubscriptionRepository {
         updatedAt: new Date(),
       })
       .where(eq(subscriptions.paddleSubscriptionId, paddleSubscriptionId));
+  }
+
+  /**
+   * Records an adjustment and applies its verdict, ORDER-GUARDED.
+   *
+   * `recordRefund` above is last-write-wins and its docblock says overwriting is
+   * the point. That is `plans/refunds.md` §2.6: a second refund request arrives
+   * `pending_approval`, overwrites `'approved'`, standing flips back true and the
+   * ladder reactivates a guild whose money we already returned. A `rejected` or
+   * `reversed` adjustment did the same.
+   *
+   * So this one applies only when the incoming adjustment is at least as new as
+   * what we hold, compared on the ADJUSTMENT's own timestamp and never on
+   * `refund_at`, which is receipt wall-clock and would judge every incoming
+   * event stale. The comparison is in the WHERE clause rather than read-then-
+   * written, so two concurrent deliveries cannot both win.
+   *
+   * Returns whether it applied, so a caller can tell "we ignored a replay" from
+   * "we changed nothing".
+   */
+  async applyAdjustment(
+    adjustment: AdjustmentRecord,
+    verdict: RefundVerdict,
+    now = new Date(),
+  ): Promise<boolean> {
+    if (!adjustment.paddleSubscriptionId) return false;
+    const settled = verdict.kind === 'settle' ? now : verdict.kind === 'clear' ? null : undefined;
+    const rows = await this.db
+      .update(subscriptions)
+      .set({
+        refundStatus: adjustment.status,
+        refundTotal: adjustment.total,
+        refundAt: now,
+        refundUpdatedAt: adjustment.updatedAt,
+        refundCurrency: adjustment.currency,
+        /**
+         * The adjustment id is written with the marker and cleared with it, so
+         * the clearing rule always has the id of whichever adjustment revoked
+         * access and can refuse one that did not.
+         */
+        ...(settled === undefined
+          ? {}
+          : {
+              refundSettledAt: settled,
+              refundAdjustmentId: settled ? adjustment.adjustmentId : null,
+            }),
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(subscriptions.paddleSubscriptionId, adjustment.paddleSubscriptionId),
+          /**
+           * `<=` and not `<`: Paddle can deliver two events with the same
+           * timestamp (an approval stamped in the same second it was created),
+           * and refusing the second would drop a real state change. Replaying
+           * an identical event is harmless because every write is idempotent.
+           */
+          or(
+            isNull(subscriptions.refundUpdatedAt),
+            adjustment.updatedAt
+              ? lte(subscriptions.refundUpdatedAt, adjustment.updatedAt)
+              : sql`true`,
+          ),
+        ),
+      )
+      .returning({ id: subscriptions.id });
+    return rows.length > 0;
   }
 
   async getByGuild(guildId: string): Promise<SubscriptionRow | undefined> {
