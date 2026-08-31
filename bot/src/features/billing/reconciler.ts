@@ -1,6 +1,8 @@
 import {
   DEFAULT_LENIENCY_CONFIG,
   evaluateLeniency,
+  ENTITLED_STATUSES,
+  guildFloor,
   isCountDiscrepant,
   parseBillingMeta,
   RUNTIME_FLAGS,
@@ -52,6 +54,22 @@ const POOL_FAN_OUT_KINDS: ReadonlySet<LeniencyNotification['kind']> = new Set([
   'hard_gate',
   'reactivated',
 ]);
+
+/**
+ * Where a pool's members actually landed this tick.
+ *
+ * Notifications are derived from THIS rather than from the pool's own ladder
+ * history, because a refund produces no ladder history at all: `applyRefund`
+ * writes the pool `expired` straight from `active`, and `evaluateExpired` gates
+ * its `hard_gate` on a `grace_*` key that a healthy subscription never had. So
+ * today a refund tells nobody on either axis while `/refunds` promises the bot
+ * stops. Both kinds are needed: narrowing only the stop notice would silently
+ * kill reactivation notices too.
+ */
+interface PoolLanding {
+  entitled: string[];
+  gated: string[];
+}
 
 /** Leniency transition reasons that make things WORSE for the customer if the count is wrong. */
 const POOL_UPGRADE_REASONS: ReadonlySet<string> = new Set(['over_limit', 'grace_elapsed']);
@@ -406,7 +424,7 @@ export class BillingReconciler {
      * else happens. Excluded here rather than merely zero-valued, so it is
      * never a fan-out target either — its own dormant trial state is untouched.
      */
-    const billableGuilds = memberGuilds.filter((g) => tierFor(g.memberCount ?? 0).id !== 'free');
+    let billableGuilds = memberGuilds.filter((g) => tierFor(g.memberCount ?? 0).id !== 'free');
     const pooledSum = billableGuilds.reduce((sum, g) => sum + (g.memberCount ?? 0), 0);
 
     /**
@@ -457,6 +475,16 @@ export class BillingReconciler {
         }));
         state = this.poolLeniencyState(current, subscription, freshSum);
         decision = evaluateLeniency(state, now, config);
+        /**
+         * Re-read the member rows, because the loop above just corrected their
+         * counts and the array below was snapshotted BEFORE it.
+         *
+         * Harmless while the fan-out only used a stale count for a status diff.
+         * Not harmless now: `guildFloor` reads `memberCount` to decide a STATUS,
+         * so a member the same pass measured at 80 could be floored to `expired`
+         * off a stale 5,000 and a free-forever server would be gated for a day.
+         */
+        billableGuilds = await this.reloadBillable(billableGuilds);
       }
     }
 
@@ -480,11 +508,19 @@ export class BillingReconciler {
       }
     }
 
-    await this.fanOutToPoolMembers(pool.id, billableGuilds, current);
+    const landed = await this.convergePoolMembers(
+      pool.id,
+      billableGuilds,
+      current,
+      subscription,
+      now,
+      config,
+    );
     await this.queuePoolNotifications(
       current,
       decision.notifications,
       state.pooledMemberCount ?? 0,
+      landed,
     );
   }
 
@@ -510,51 +546,108 @@ export class BillingReconciler {
   }
 
   /**
-   * Writes the pool's status and billed tier to every member it actually
-   * differs for. Diffed, not unconditional (§6.5): a 999-server pool writing
-   * every member's status every hour, unconditionally, is ~2,000 audit rows
-   * and 999 cache evictions an hour, forever.
+   * Lands every billable member of a pool on the right state, and reports where
+   * they landed.
    *
-   * **The diff here is read-then-write, so it is backed by
-   * `skipIfUnchanged`.** Two concurrent advance passes converging the same
-   * not-yet-converged guild would otherwise each decide a write was due and
-   * each insert a `guild_auth_events` and an `ops_audit` row. The flag makes
-   * `transitionAuth` re-check under its own `SELECT ... FOR UPDATE`, so the
-   * second pass blocks on the row lock and then returns without writing. The
-   * diff below stays because it saves the round trip in the steady state,
-   * where nothing has changed for any member; the flag is what makes it exact.
+   * The old `fanOutToPoolMembers` wrote `pool.status` verbatim to every member.
+   * That is correct while the subscription is paying and wrong the moment it is
+   * not: a per-guild floor written by the refund webhook was overwritten within
+   * the hour, and re-applying it would have thrashed forever, since the two
+   * values genuinely differ so `skipIfUnchanged` could not help.
+   *
+   * **The first branch tests the SUBSCRIPTION, not `pool.status`.** Reading the
+   * stored status as "the subscription's standing" was the defect: an expired
+   * pool promotes itself back to `active` through `evaluateExpired`'s
+   * member-count branch, and the pass-through then wrote that onto a server
+   * whose customer had been refunded.
+   *
+   * A null floor hands the guild to its own ladder, which is where the trial
+   * warnings, the 60-day grace, `hard_gate_disabled` and the notification dedupe
+   * all live. That is the part of this design with the least margin: §6.5 and
+   * the pooled-skip in the per-guild walk exist to say a pooled guild is
+   * evaluated by exactly one thing, and this points that hazard the other way.
+   * Every branch was checked, but it is still an argument that a documented
+   * hazard is safe in one direction.
    */
-  private async fanOutToPoolMembers(
+  private async convergePoolMembers(
     poolId: string,
     billableGuilds: readonly GuildRow[],
     pool: MemberPoolRow,
-  ): Promise<void> {
+    subscription: PoolSubscriptionRow | undefined,
+    now: Date,
+    config: LeniencyConfig,
+  ): Promise<PoolLanding> {
+    const landing: PoolLanding = { entitled: [], gated: [] };
+    /**
+     * Only a subscription that EXISTS and is not paying its way triggers the
+     * floor. A pool with no subscription row at all is the `no_subscription`
+     * operator condition (entitled with nothing behind it), and gating those
+     * servers is a different decision from this one, so it keeps today's
+     * behaviour and stays visible on the operator queue.
+     */
+    const useFloor = subscription !== undefined && !subscriptionInGoodStanding(subscription);
+
     for (const guild of billableGuilds) {
       try {
         /**
-         * `blocked` outranks billing, and this pass had no guard for it
-         * (`plans/refunds.md` §2.7). `advanceGuild` does guard it, but
-         * deliberately skips pooled non-free guilds, so this is their ONLY
-         * evaluator: a guild blocked for abuse was written back to the pool's
-         * status, lifting the kill-switch, once per re-block forever.
+         * `blocked` outranks billing, and this pass had no guard for it. The
+         * per-guild ladder does guard it but deliberately skips pooled non-free
+         * guilds, so this is their ONLY evaluator: a guild blocked for abuse was
+         * written back to the pool's status, lifting the kill-switch.
          *
-         * The tier write below is deliberately NOT skipped. Skipping both
-         * would let a blocked member's billed tier drift from the
-         * subscription's, and `guilds.tier` entitles nothing on its own.
+         * The tier write below is deliberately NOT skipped: skipping both would
+         * let a blocked member's billed tier drift, and `guilds.tier` entitles
+         * nothing on its own.
          */
-        const blocked = guild.authStatus === 'blocked';
-        if (
-          !blocked &&
-          (guild.authStatus !== pool.status || datesDiffer(guild.graceUntil, pool.graceUntil))
-        ) {
-          await this.deps.store.transitionAuth({
-            guildId: guild.guildId,
-            toStatus: pool.status,
-            reason: `pool:${poolId}`,
-            actor: 'billing-reconciler',
-            graceUntil: pool.graceUntil,
-            skipIfUnchanged: true,
-          });
+        if (guild.authStatus !== 'blocked') {
+          if (useFloor) {
+            const floor = guildFloor(
+              {
+                authStatus: guild.authStatus,
+                memberCount: guild.memberCount,
+                authExpiresAt: guild.authExpiresAt,
+                createdAt: guild.createdAt,
+              },
+              now,
+            );
+            if (floor) {
+              await this.deps.store.transitionAuth({
+                guildId: guild.guildId,
+                toStatus: floor.toStatus,
+                reason: `${floor.reason}:${poolId}`,
+                actor: 'billing-reconciler',
+                skipIfUnchanged: true,
+                ...(floor.expiresAtIfNull ? { expiresAtIfNull: floor.expiresAtIfNull } : {}),
+              });
+              this.stats.transitions += 1;
+              (floor.toStatus === 'expired' ? landing.gated : landing.entitled).push(guild.guildId);
+            } else {
+              // Already at or above its floor. Its own ladder decides what
+              // happens next, which is what stops a resumed trial running
+              // forever with no warnings and no grace.
+              await this.advanceGuild(guild, config);
+              (ENTITLED_STATUSES.has(guild.authStatus) ? landing.entitled : landing.gated).push(
+                guild.guildId,
+              );
+            }
+          } else {
+            if (
+              guild.authStatus !== pool.status ||
+              datesDiffer(guild.graceUntil, pool.graceUntil)
+            ) {
+              await this.deps.store.transitionAuth({
+                guildId: guild.guildId,
+                toStatus: pool.status,
+                reason: `pool:${poolId}`,
+                actor: 'billing-reconciler',
+                graceUntil: pool.graceUntil,
+                skipIfUnchanged: true,
+              });
+            }
+            (ENTITLED_STATUSES.has(pool.status) ? landing.entitled : landing.gated).push(
+              guild.guildId,
+            );
+          }
         }
         if (guild.tier !== pool.billedTier) {
           await this.deps.store.setBilledTier(guild.guildId, pool.billedTier);
@@ -565,10 +658,25 @@ export class BillingReconciler {
         this.stats.errors += 1;
         this.deps.logger.error(
           { err, poolId, guildId: guild.guildId },
-          'pool fan-out failed for one member (isolated)',
+          'pool convergence failed for one member (isolated)',
         );
       }
     }
+    return landing;
+  }
+
+  /**
+   * Re-reads member rows after the pass has corrected their counts, keeping only
+   * the ones still billable. See the call site for why the stale array is not
+   * safe once a member count decides a status.
+   */
+  private async reloadBillable(previous: readonly GuildRow[]): Promise<GuildRow[]> {
+    const out: GuildRow[] = [];
+    for (const stale of previous) {
+      const fresh = await this.deps.guilds.get(stale.guildId);
+      if (fresh && tierFor(fresh.memberCount ?? 0).id !== 'free') out.push(fresh);
+    }
+    return out;
   }
 
   /**
@@ -591,10 +699,21 @@ export class BillingReconciler {
     current: MemberPoolRow,
     notifications: readonly LeniencyNotification[],
     memberCount: number,
+    landed: PoolLanding,
   ): Promise<void> {
     for (const notification of notifications) {
       if (POOL_FAN_OUT_KINDS.has(notification.kind)) {
-        const targets = await this.deps.memberPoolGuilds.listLive(current.id);
+        /**
+         * The servers that actually landed there, not every live member.
+         *
+         * `listLive` included free-sized members, whose service never stopped,
+         * so a lapse told them it had. It also now excludes a blocked member and
+         * one the floor lifted rather than gated, neither of which experienced
+         * the thing being announced.
+         */
+        const targets = (notification.kind === 'hard_gate' ? landed.gated : landed.entitled).map(
+          (guildId) => ({ guildId }),
+        );
         for (const membership of targets) {
           const queued = await this.deps.notifications.enqueue(
             membership.guildId,

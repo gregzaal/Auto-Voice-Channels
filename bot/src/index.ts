@@ -18,6 +18,7 @@ import {
   MetricsRepository,
   OpsAuditRepository,
   DEFAULT_FLEET,
+  guildFloor,
   poolExitTransition,
   shouldGrantPoolExit,
   probeForManifest,
@@ -809,17 +810,39 @@ async function main(): Promise<void> {
         if (row?.authStatus === 'blocked') return;
 
         /**
-         * Refuse the GRANT, never the removal. Same shared rule the dashboard's
-         * own remove action uses, deliberately: this path has no authorization
-         * at all, so it must never be able to do more, or less, than the
-         * purchaser's own button. `shouldGrantPoolExit` carries the reasoning.
+         * Identical to the dashboard's own remove action, deliberately: this
+         * path has no authorization at all, so it must never be able to do more,
+         * or less, than the purchaser's own button. A live subscription gives the
+         * published fresh grace window; a dead one gives the floor, which lifts a
+         * free-sized or unconsumed-trial server rather than leaving it gated.
          */
         const pool = await memberPoolsRepo.get(poolId);
-        if (
-          !shouldGrantPoolExit(row ?? { authStatus: 'trial', graceUntil: null }, pool, removedAt)
-        ) {
+        const current = row ?? { authStatus: 'trial' as const, graceUntil: null };
+        if (pool?.status === 'expired') {
+          const floor = guildFloor(
+            {
+              authStatus: current.authStatus,
+              memberCount: row?.memberCount ?? null,
+              authExpiresAt: row?.authExpiresAt ?? null,
+              createdAt: row?.createdAt ?? null,
+            },
+            removedAt,
+          );
+          if (floor) {
+            await settingsCache.transitionAuth({
+              guildId: guild.id,
+              toStatus: floor.toStatus,
+              reason: floor.reason,
+              actor: 'system',
+              skipIfUnchanged: true,
+              ...(floor.expiresAtIfNull ? { expiresAtIfNull: floor.expiresAtIfNull } : {}),
+            });
+          }
+          return;
+        }
+        if (!shouldGrantPoolExit(current, pool, removedAt)) {
           logger.info(
-            { guildId: guild.id, poolId, poolStatus: pool?.status },
+            { guildId: guild.id, poolId },
             'pool exit: membership removed, entitlement grant skipped',
           );
           return;

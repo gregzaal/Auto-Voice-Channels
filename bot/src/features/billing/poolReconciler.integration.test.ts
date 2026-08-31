@@ -179,6 +179,127 @@ describe('BillingReconciler pool pass (integration)', () => {
     expect((await guilds.getOrThrow(ordinary)).authStatus).toBe('active');
   });
 
+  it("floors a refunded subscription's members and then writes NOTHING on later ticks", async () => {
+    /**
+     * `plans/refunds.md` §12's three-tick test. A single tick cannot see thrash:
+     * the old fan-out wrote `pool.status` verbatim, so a per-guild floor written
+     * by the refund webhook was overwritten within the hour, and re-applying it
+     * would have alternated forever at two audit rows and a cache eviction per
+     * member per tick.
+     *
+     * Four members, one per landing state, so the same three ticks also assert
+     * the blocked guard and the free-sized exclusion.
+     */
+    const poolId = 'pool-floor-1';
+    const now = new Date('2026-08-24T00:00:00.000Z');
+    const spentTrial = 'floor-spent';
+    const liveTrial = 'floor-live';
+    const freeSized = 'floor-free';
+    const blocked = 'floor-blocked';
+
+    await pools.create({ id: poolId, ownerUserId: 'user-f', name: 'Refunded', billedTier: 'm' });
+    await subscriptions.upsertForPool({
+      poolId,
+      paddleSubscriptionId: `sub_${poolId}`,
+      paddleCustomerId: 'ctm_f',
+      purchaserUserId: 'user-f',
+      tier: 'm',
+      status: 'active',
+    });
+    // Refunded: standing is revoked while Paddle still reports `active`.
+    await subscriptions.applyAdjustment(
+      {
+        adjustmentId: 'adj_floor',
+        paddleSubscriptionId: `sub_${poolId}`,
+        transactionId: null,
+        action: 'refund',
+        status: 'approved',
+        type: 'full',
+        total: '3900',
+        currency: 'USD',
+        updatedAt: now,
+      },
+      { kind: 'settle', reason: 'full_approved' },
+    );
+    await pools.transitionStatus({
+      poolId,
+      toStatus: 'expired',
+      reason: 'refunded',
+      actor: 'test',
+      graceUntil: null,
+    });
+
+    for (const [guildId, members] of [
+      [spentTrial, 5_000],
+      [liveTrial, 5_000],
+      [freeSized, 40],
+      [blocked, 5_000],
+    ] as const) {
+      await guilds.ensure(guildId);
+      await guilds.recordMemberCountSample(guildId, members, { at: now, authoritative: true });
+      await poolGuilds.add(poolId, guildId);
+      await guilds.setPoolId(guildId, poolId, null);
+    }
+    // A spent trial floors to `expired`; an unconsumed one resumes on its date.
+    await guilds.transitionAuth({
+      guildId: spentTrial,
+      toStatus: 'active',
+      reason: 'seed',
+      actor: 'test',
+      expiresAtIfNull: new Date('2026-01-01T00:00:00.000Z'),
+    });
+    await guilds.transitionAuth({
+      guildId: liveTrial,
+      toStatus: 'expired',
+      reason: 'seed',
+      actor: 'test',
+      expiresAtIfNull: new Date('2027-06-16T00:00:00.000Z'),
+    });
+    await guilds.transitionAuth({
+      guildId: blocked,
+      toStatus: 'blocked',
+      reason: 'abuse',
+      actor: 'test',
+    });
+
+    const { reconciler } = makeReconciler(() => now);
+    await reconciler.runOnce();
+
+    // Tick one: each member lands on its own floor, not the pool's status.
+    expect((await guilds.getOrThrow(spentTrial)).authStatus).toBe('expired');
+    const lifted = await guilds.getOrThrow(liveTrial);
+    expect(lifted.authStatus).toBe('trial');
+    // Lifted onto its ORIGINAL date, not a fresh window.
+    expect(lifted.authExpiresAt?.toISOString()).toBe('2027-06-16T00:00:00.000Z');
+    expect((await guilds.getOrThrow(blocked)).authStatus).toBe('blocked');
+    // Free-sized members are excluded from the billable set entirely.
+    expect((await guilds.getOrThrow(freeSized)).authStatus).toBe('trial');
+
+    const after1 = {
+      spent: await guildAuthEventCount(spentTrial),
+      live: await guildAuthEventCount(liveTrial),
+      blocked: await guildAuthEventCount(blocked),
+      free: await guildAuthEventCount(freeSized),
+    };
+
+    // Ticks two and three must write nothing at all.
+    const later = new Date(now.getTime() + 3_600_000);
+    const { reconciler: r2 } = makeReconciler(() => later);
+    await r2.runOnce();
+    const evenLater = new Date(now.getTime() + 7_200_000);
+    const { reconciler: r3 } = makeReconciler(() => evenLater);
+    await r3.runOnce();
+
+    expect(await guildAuthEventCount(spentTrial)).toBe(after1.spent);
+    expect(await guildAuthEventCount(liveTrial)).toBe(after1.live);
+    expect(await guildAuthEventCount(blocked)).toBe(after1.blocked);
+    expect(await guildAuthEventCount(freeSized)).toBe(after1.free);
+    // And the lifted member still holds its own date.
+    expect((await guilds.getOrThrow(liveTrial)).authExpiresAt?.toISOString()).toBe(
+      '2027-06-16T00:00:00.000Z',
+    );
+  });
+
   it('is idempotent under two concurrent passes: no duplicate audit rows, no thrash', async () => {
     const poolId = 'pool-concurrent-1';
     const guildId = 'pool-concurrent-g1';

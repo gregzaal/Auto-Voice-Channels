@@ -3,6 +3,7 @@ import type { MemberCountSample } from './billing.js';
 import {
   DEFAULT_LENIENCY_CONFIG,
   evaluateLeniency,
+  guildFloor,
   shouldGrantPoolExit,
   sustainedBreach,
   sustainedDrop,
@@ -639,5 +640,138 @@ describe('shouldGrantPoolExit (refunds.md §2.3)', () => {
     // on missing data is the worse failure direction. Asserted rather than
     // left implicit, so the choice is visible if it ever needs revisiting.
     expect(shouldGrantPoolExit({ authStatus: 'active', graceUntil: null }, null, NOW)).toBe(true);
+  });
+});
+
+describe('guildFloor (refunds.md §5)', () => {
+  const g = (over: Partial<Parameters<typeof guildFloor>[0]> = {}) => ({
+    authStatus: 'active' as const,
+    memberCount: 5_000,
+    authExpiresAt: null,
+    createdAt: new Date(NOW.getTime() - days(400)),
+    ...over,
+  });
+
+  describe('the rungs', () => {
+    it('floors a free-sized server to a dormant trial, whatever anybody paid', () => {
+      const out = guildFloor(g({ authStatus: 'expired', memberCount: 50 }), NOW);
+      expect(out).toMatchObject({ toStatus: 'trial', reason: 'floor_free' });
+      expect(out?.expiresAtIfNull).toBeUndefined();
+    });
+
+    it('resumes an unconsumed trial on its ORIGINAL date, touching no column', () => {
+      const out = guildFloor(
+        g({ authStatus: 'expired', authExpiresAt: new Date(NOW.getTime() + days(300)) }),
+        NOW,
+      );
+      expect(out).toMatchObject({ toStatus: 'trial', reason: 'floor_trial' });
+      // The entire mechanism: no expiry is returned, so the stored date stands.
+      expect(out?.expiresAtIfNull).toBeUndefined();
+    });
+
+    it('backfills a NULL deadline from the creation date rather than reading it as spent', () => {
+      /**
+       * `{active, null}` is the stable state for any server pooled before the
+       * hourly backfill first ran, and `advanceGuild`'s own backfill is gated on
+       * the server already being `trial`, so an expired one had no edge out.
+       */
+      const created = new Date(NOW.getTime() - days(100));
+      const out = guildFloor(g({ authStatus: 'expired', createdAt: created }), NOW);
+      expect(out).toMatchObject({ toStatus: 'trial', reason: 'floor_trial_backfill' });
+      expect(out?.expiresAtIfNull).toEqual(new Date(created.getTime() + days(365)));
+    });
+
+    it('gates a spent trial', () => {
+      const out = guildFloor(
+        g({ authStatus: 'active', authExpiresAt: new Date(NOW.getTime() - days(1)) }),
+        NOW,
+      );
+      expect(out).toMatchObject({ toStatus: 'expired', reason: 'floor_expired' });
+    });
+  });
+
+  describe('the comparison, which is the part that was prose before', () => {
+    const spent = new Date(NOW.getTime() - days(1));
+    const unspent = new Date(NOW.getTime() + days(300));
+
+    it('never touches a blocked server, whatever the floor says', () => {
+      for (const authExpiresAt of [spent, unspent, null]) {
+        expect(guildFloor(g({ authStatus: 'blocked', authExpiresAt }), NOW)).toBeNull();
+      }
+    });
+
+    it('does nothing when the server and the floor are both entitled', () => {
+      // Refuses to choose between two entitled states. The ladder decides next.
+      for (const authStatus of ['trial', 'active', 'grace'] as const) {
+        expect(guildFloor(g({ authStatus, authExpiresAt: unspent }), NOW)).toBeNull();
+      }
+    });
+
+    it('revokes an entitled server whose floor is expired', () => {
+      for (const authStatus of ['trial', 'active', 'grace'] as const) {
+        expect(
+          guildFloor(g({ authStatus, authExpiresAt: spent, createdAt: null }), NOW),
+        ).toMatchObject({ toStatus: 'expired' });
+      }
+    });
+
+    it('lifts an expired server whose floor is entitled', () => {
+      expect(guildFloor(g({ authStatus: 'expired', authExpiresAt: unspent }), NOW)).toMatchObject({
+        toStatus: 'trial',
+      });
+    });
+
+    it('does nothing when both are expired', () => {
+      expect(
+        guildFloor(g({ authStatus: 'expired', authExpiresAt: spent, createdAt: null }), NOW),
+      ).toBeNull();
+    });
+  });
+
+  describe('convergence', () => {
+    it('is a fixed point: two clock values a WEEK apart give the same answer', () => {
+      /**
+       * The guard against anyone reintroducing a clock-derived deadline. A week
+       * rather than an hour, because a day-granular `startOfDay(now) + 60d`
+       * would pass an hour-apart test and still write daily.
+       */
+      const guild = g({
+        authStatus: 'expired',
+        authExpiresAt: new Date(NOW.getTime() + days(300)),
+      });
+      const later = new Date(NOW.getTime() + days(7));
+      expect(guildFloor(guild, NOW)).toEqual(guildFloor(guild, later));
+    });
+
+    it('returns no deadline at all on the two rungs that must not write one', () => {
+      expect(
+        guildFloor(g({ authStatus: 'expired', memberCount: 50 }), NOW)?.expiresAtIfNull,
+      ).toBeUndefined();
+      expect(
+        guildFloor(
+          g({ authStatus: 'expired', authExpiresAt: new Date(NOW.getTime() + days(300)) }),
+          NOW,
+        )?.expiresAtIfNull,
+      ).toBeUndefined();
+    });
+
+    it('applying its own output is a no-op the second time', () => {
+      // Lift an expired server, then ask again as if the write had landed.
+      const before = g({
+        authStatus: 'expired',
+        authExpiresAt: new Date(NOW.getTime() + days(300)),
+      });
+      const verdict = guildFloor(before, NOW);
+      expect(verdict).not.toBeNull();
+      const after = { ...before, authStatus: verdict!.toStatus };
+      expect(guildFloor(after, NOW)).toBeNull();
+    });
+  });
+
+  it('gives an XXL server no trial window to backfill', () => {
+    // `trialDurationMs` is null for the hard-gate policy, so there is no honest
+    // date to invent and the floor is `expired`.
+    const out = guildFloor(g({ authStatus: 'active', memberCount: 2_000_000 }), NOW);
+    expect(out).toMatchObject({ toStatus: 'expired', reason: 'floor_expired' });
   });
 });

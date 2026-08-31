@@ -1,6 +1,13 @@
-import type { AuthStatus } from './auth.js';
+import { ENTITLED_STATUSES, type AuthStatus } from './auth.js';
 import type { MemberCountSample } from './billing.js';
-import { compareTiers, tierById, tierFor, type TierId } from './tiers.js';
+import {
+  compareTiers,
+  tierById,
+  tierFor,
+  trialDurationMs,
+  trialPolicyFor,
+  type TierId,
+} from './tiers.js';
 
 /**
  * The standardized leniency model (monetization.md §4) — a single, pure state
@@ -564,6 +571,114 @@ function evaluateExpired(state: LeniencyState): LeniencyDecision {
 
 function utcDay(date: Date): string {
   return date.toISOString().slice(0, 10);
+}
+
+/**
+ * What state a server would have been in **if the payment had never happened**.
+ *
+ * `plans/refunds.md` §5. The question every caller here used to ask was "what
+ * state does this event produce", which is why a refund could leave a server
+ * worse off than never having paid: `applyRefund` wrote `expired` while
+ * `auth_expires_at` still held an unconsumed trial deadline, because that column
+ * is never rewritten when a trial converts.
+ *
+ * **The comparison lives inside this function on purpose.** The first design
+ * returned a floor and left "apply it only where the computed transition would
+ * be worse" as prose at four call sites. That is not a definable order: `grace`
+ * against `trial` inverts depending on `hard_gate_disabled`, two callers needed
+ * opposite answers from that same pair, and `blocked` was not representable in
+ * the signature at all, so each caller had to remember it separately. One of
+ * them already forgot. Returning null for "do nothing" makes the whole rule
+ * testable in one place.
+ *
+ * Two rules keep it convergent, and they are why the return shape is what it is:
+ *
+ * - **Never a clock-derived deadline.** `now + duration` differs from the row it
+ *   just wrote on every tick, so it would write forever.
+ * - **Never a bare `expiresAt`.** The set-if-null form is one-shot by
+ *   construction, because the update becomes empty once the column is non-null
+ *   and `transitionAuth`'s skip test reads exactly that emptiness. An earlier
+ *   version of this rule forbade both, which would have forbidden the backfill
+ *   rung below.
+ */
+export function guildFloor(
+  guild: {
+    authStatus: AuthStatus;
+    memberCount: number | null;
+    authExpiresAt: Date | null;
+    /** When the bot was first added, the only honest basis for a missing deadline. */
+    createdAt: Date | null;
+  },
+  now: Date,
+): { toStatus: AuthStatus; reason: string; expiresAtIfNull?: Date } | null {
+  // `blocked` outranks billing everywhere, guarded once here instead of four
+  // times at the call sites.
+  if (guild.authStatus === 'blocked') return null;
+
+  const floor = floorRung(guild, now);
+  const currentlyEntitled = ENTITLED_STATUSES.has(guild.authStatus);
+  const floorEntitled = ENTITLED_STATUSES.has(floor.toStatus);
+
+  /**
+   * Both entitled: refuse to choose, and this is the resolution of the
+   * ambiguity rather than a dodge. No harm is being done, so there is nothing
+   * for a floor to fix, and the server's own ladder is the right authority for
+   * what happens next. It also deletes the first design's "a member keeps its
+   * grace window" deviation, which was the same defect seen from the other side.
+   */
+  if (currentlyEntitled && floorEntitled) return null;
+
+  // Entitled, floor is not: revoke. The row the first design got wrong, because
+  // its branch fired only for a server reading `active`, and a pooled server
+  // almost never is.
+  if (currentlyEntitled && !floorEntitled) return floor;
+
+  // Not entitled, floor is: lift. Repairs rows already wrong in the database,
+  // which is what makes a rollback of this recoverable in both directions.
+  if (!currentlyEntitled && floorEntitled) return floor;
+
+  return null;
+}
+
+/** The floor status itself, before any comparison with where the server is now. */
+function floorRung(
+  guild: { memberCount: number | null; authExpiresAt: Date | null; createdAt: Date | null },
+  now: Date,
+): { toStatus: AuthStatus; reason: string; expiresAtIfNull?: Date } {
+  // Free-forever, whatever anybody paid. `/docs/billing` promises this
+  // regardless of whether the server shares a subscription.
+  if (tierFor(guild.memberCount ?? 0).id === 'free') {
+    return { toStatus: 'trial', reason: 'floor_free' };
+  }
+
+  // An unconsumed trial resumes on its ORIGINAL date. No expiry is passed, so
+  // the column is left exactly as it is: that is the entire mechanism.
+  if (guild.authExpiresAt && guild.authExpiresAt.getTime() > now.getTime()) {
+    return { toStatus: 'trial', reason: 'floor_trial' };
+  }
+
+  /**
+   * A null deadline is NOT a spent trial, and reading it as one was a defect.
+   *
+   * `advanceGuild`'s own backfill is gated on the server already being `trial`,
+   * so an `expired` server never got the window it was owed and there was no
+   * edge out. `{active, null}` is also the STABLE state for any server pooled
+   * before that hourly backfill first ran, so this is a population rather than
+   * an edge case. Note the asymmetry it removes: an unknown member count already
+   * took the most generous rung, while an unknown deadline took the harshest.
+   */
+  if (!guild.authExpiresAt && guild.createdAt) {
+    const duration = trialDurationMs(trialPolicyFor(guild.memberCount ?? 0));
+    if (duration !== null) {
+      return {
+        toStatus: 'trial',
+        reason: 'floor_trial_backfill',
+        expiresAtIfNull: new Date(guild.createdAt.getTime() + duration),
+      };
+    }
+  }
+
+  return { toStatus: 'expired', reason: 'floor_expired' };
 }
 
 /**

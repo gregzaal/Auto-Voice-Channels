@@ -22,7 +22,14 @@ export function isAuthStatus(value: unknown): value is AuthStatus {
 }
 
 /** The auth states that grant feature access (before the SELF_HOSTED bypass). */
-const ENTITLED_STATUSES: ReadonlySet<AuthStatus> = new Set(['trial', 'active', 'grace']);
+/**
+ * The statuses under which the bot serves a guild.
+ *
+ * Exported so `guildFloor` can compare two statuses for "is this entitled"
+ * without going through {@link isEntitled}, whose `selfHosted` argument has no
+ * meaning when the question is about a status rather than a deployment.
+ */
+export const ENTITLED_STATUSES: ReadonlySet<AuthStatus> = new Set(['trial', 'active', 'grace']);
 
 export interface EntitlementInput {
   status: AuthStatus;
