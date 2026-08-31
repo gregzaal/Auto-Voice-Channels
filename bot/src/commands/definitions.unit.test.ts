@@ -13,7 +13,9 @@ describe('buildCommandDefinitions', () => {
         'alwaysprivate',
         'create',
         'defaultlimit',
+        'export',
         'group',
+        'import',
         'inheritpermissions',
         'invite',
         'kick',
@@ -33,6 +35,24 @@ describe('buildCommandDefinitions', () => {
         'unlimit',
       ].sort(),
     );
+  });
+
+  /**
+   * One tier above the configuration commands, per decision 1: `/import`
+   * replaces another admin's work from a file, and `/export` discloses channel
+   * ids, the recorded contact and every self-chosen nickname. `/docs/commands`
+   * publishes "Manage Server" for both, so this is a published commitment.
+   */
+  it('gates export and import behind ManageGuild, one tier higher', () => {
+    const manageGuild = PermissionFlagsBits.ManageGuild.toString();
+    for (const name of ['export', 'import']) {
+      expect(byName.get(name)!.default_member_permissions).toBe(manageGuild);
+    }
+  });
+
+  it('takes the import file as a required attachment', () => {
+    const option = byName.get('import')!.options?.[0];
+    expect(option).toMatchObject({ name: 'file', required: true });
   });
 
   it('gates admin commands behind ManageChannels', () => {

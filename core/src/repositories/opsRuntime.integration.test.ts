@@ -31,6 +31,41 @@ describe('RuntimeFlags + OpsAudit (integration)', () => {
     expect(entry?.details).toMatchObject({ value: true, reason: 'incident' });
   });
 
+  /**
+   * `import.disabled` is the one lever whose blast radius is not fleet-scoped:
+   * `guilds.settings` has no fleet column, so an import through either bot
+   * rewrites the row both read. One click has to stop every path into it.
+   */
+  describe('getBoolAnyFleet', () => {
+    it('is true when any fleet has set it, whichever fleet is asking', async () => {
+      const beta = new RuntimeFlagsRepository(env.handle.db, 'beta');
+      const prod = new RuntimeFlagsRepository(env.handle.db, 'prod');
+
+      expect(await prod.getBoolAnyFleet('import.disabled')).toBe(false);
+
+      await beta.set('import.disabled', true, { actor: 'agent', reason: 'incident' });
+
+      // Per-fleet reads still disagree, which is the trap this method exists for.
+      expect(await prod.getBool('import.disabled')).toBe(false);
+      expect(await beta.getBool('import.disabled')).toBe(true);
+
+      expect(await prod.getBoolAnyFleet('import.disabled')).toBe(true);
+      expect(await beta.getBoolAnyFleet('import.disabled')).toBe(true);
+    });
+
+    it('is false once every fleet has cleared it', async () => {
+      const beta = new RuntimeFlagsRepository(env.handle.db, 'beta');
+      const prod = new RuntimeFlagsRepository(env.handle.db, 'prod');
+      await beta.set('import.announce_disabled', true, { actor: 'agent' });
+      await prod.set('import.announce_disabled', false, { actor: 'agent' });
+
+      expect(await prod.getBoolAnyFleet('import.announce_disabled')).toBe(true);
+
+      await beta.set('import.announce_disabled', false, { actor: 'agent' });
+      expect(await prod.getBoolAnyFleet('import.announce_disabled')).toBe(false);
+    });
+  });
+
   it('overwrites an existing flag value', async () => {
     await flags.set('throttle.create', 5, { actor: 'agent' });
     await flags.set('throttle.create', 10, { actor: 'agent' });

@@ -530,6 +530,47 @@ export class GuildSettingsService {
     return ok(`📗 Logging events (level **${level}**) to <#${target}>.${alertLine}`);
   }
 
+  /**
+   * Writes an import's whole settings diff: one transaction, one `pg_notify`.
+   *
+   * **`mergeSettings`, not `updateSettings`, and that is a correctness choice
+   * rather than a style one.** `updateSettings` merges DB-side at the top level,
+   * so `aliases`, `custom_nicks` and `groups` are each replaced wholesale by
+   * whatever the diff computed. The diff is computed at the start of the apply
+   * and this write happens at the end, separated by up to 150 channel writes, so
+   * an `/alias` or `/nick` landing in that window would be discarded SILENTLY:
+   * the announcement would truthfully report replacing the alias list it read,
+   * and nothing anywhere would know an entry had been lost. `editAliases` uses
+   * `mergeSettings` for exactly this and names the importer as the concrete
+   * concurrent writer.
+   *
+   * Doing the read and the write in one transaction under `FOR UPDATE` also
+   * upgrades the report from "recompute so it is honest" to "the value reported
+   * is the value overwritten", which is the only shape that can detect the drift
+   * at all. `driftedKeys` is what came back different from the preview.
+   *
+   * `remove` exists because concat cannot delete a key, and four keys fall back
+   * to a default when absent, so writing today's default over one would pin the
+   * guild to it forever.
+   */
+  async applyImportedSettings(
+    guildId: string,
+    patch: Record<string, unknown>,
+    remove: readonly string[],
+  ): Promise<{ before: Record<string, unknown>; driftedKeys: string[] }> {
+    return this.deps.guilds.mergeSettings(guildId, (existing) => {
+      const before = existing?.settings ?? {};
+      const driftedKeys: string[] = [];
+      for (const key of Object.keys(patch)) {
+        if (JSON.stringify(before[key]) === JSON.stringify(patch[key])) driftedKeys.push(key);
+      }
+      for (const key of remove) {
+        if (!Object.prototype.hasOwnProperty.call(before, key)) driftedKeys.push(key);
+      }
+      return { patch, remove, result: { before, driftedKeys } };
+    });
+  }
+
   private async primaryFor(
     guildId: string,
     secondaryChannelId: string,

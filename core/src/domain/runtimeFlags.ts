@@ -192,6 +192,39 @@ export const RUNTIME_FLAGS = {
    * whatever prompted the switch. `global.pause` stops it too.
    */
   SUPPORT_ROLES_DISABLED: 'support.roles_disabled',
+
+  // -- Config import/export (plans/import_command.md section 9) ---------------
+  /**
+   * Kill-switch for `/import`, checked in BOTH the command and the confirm
+   * handler: checking only the first leaves every already-previewed import
+   * applying straight through an incident.
+   *
+   * **Read across ALL fleets, not per fleet, and it is the only lever here that
+   * works that way.** `guilds.settings` has no `fleet` column and the
+   * invalidation channel is one global name, so an import run through beta
+   * rewrites the row prod reads and NOTIFYs every prod instance, `enabled`
+   * included. 35 guilds have both bots today. A per-fleet read would give an
+   * operator one click that stops one of two paths into the same blob while
+   * looking exactly like its neighbours on `/admin/ops`.
+   *
+   * `/export` is deliberately unaffected: a defect in the write path is no
+   * reason to take away the only way out. And `global.pause` does NOT cover
+   * this, because it covers no slash command at all.
+   */
+  IMPORT_DISABLED: 'import.disabled',
+
+  /**
+   * Stops `/import`'s system-channel announcement on **this fleet**, leaving the
+   * command working.
+   *
+   * Separate from {@link IMPORT_DISABLED} because they answer different
+   * questions. This is the second unsolicited push the bot makes into a guild,
+   * and the first (permission problems) has both a per-guild preference and a
+   * per-fleet flag, precisely because "too frequent" and "reaching the wrong
+   * people" are invisible from inside the fleet. Taking away the whole command
+   * is the wrong response to a notice that turns out to be wrong.
+   */
+  IMPORT_ANNOUNCE_DISABLED: 'import.announce_disabled',
 } as const;
 
 /** Defaults for the AI levers, kept next to the keys so bot + tooling agree. */

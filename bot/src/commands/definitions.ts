@@ -35,6 +35,23 @@ export function buildCommandDefinitions(
     guildOnly(b).setDefaultMemberPermissions(
       PermissionFlagsBits.ManageChannels,
     ) as SlashCommandBuilder;
+  /**
+   * One tier above {@link adminOnly}, for the two commands that move a whole
+   * configuration.
+   *
+   * `ManageChannels` is deliberately generous, which is right for `/template`
+   * and `/create`. `/import` replaces another admin's work from a file the bot
+   * cannot vouch for, and `/export` discloses channel ids, the recorded contact
+   * and every nickname members chose for themselves.
+   *
+   * The default is a DEFAULT, not a gate: a server admin can re-open either
+   * command to any role in Server Settings > Integrations, so the in-code
+   * `requireManageGuild` is what actually enforces this.
+   */
+  const serverAdminOnly = (b: SlashCommandBuilder): SlashCommandBuilder =>
+    guildOnly(b).setDefaultMemberPermissions(
+      PermissionFlagsBits.ManageGuild,
+    ) as SlashCommandBuilder;
 
   const commands: SlashCommandBuilder[] = [
     guildOnly(
@@ -181,6 +198,22 @@ export function buildCommandDefinitions(
       new SlashCommandBuilder()
         .setName('logging')
         .setDescription('Configure event logging to a text channel (or turn it off).'),
+    ),
+    serverAdminOnly(
+      new SlashCommandBuilder()
+        .setName('export')
+        .setDescription("Download this server's AVC configuration as a file."),
+    ),
+    serverAdminOnly(
+      new SlashCommandBuilder()
+        .setName('import')
+        .setDescription('Load a configuration file, with a preview before anything is written.')
+        .addAttachmentOption((o) =>
+          o
+            .setName('file')
+            .setDescription('A file from /export, or a config from the old Python bot.')
+            .setRequired(true),
+        ) as SlashCommandBuilder,
     ),
   ];
 

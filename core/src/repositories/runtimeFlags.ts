@@ -42,6 +42,28 @@ export class RuntimeFlagsRepository {
   }
 
   /**
+   * Whether ANY fleet has this flag set true.
+   *
+   * Almost every lever here is correctly per fleet: pausing beta must not pause
+   * production. `import.disabled` is the exception, because the thing it stops
+   * is not fleet-scoped. `guilds.settings` has no `fleet` column and
+   * `avc_settings_invalidate` is one global channel, so an `/import` run through
+   * the beta bot rewrites the row prod reads and tells every prod instance to
+   * pick it up, `enabled` included. 35 guilds have both bots installed.
+   *
+   * So an operator reaching for the kill switch during an incident needs one
+   * click to stop every path into that blob, not one per fleet with no
+   * indication that the others exist.
+   */
+  async getBoolAnyFleet(key: string): Promise<boolean> {
+    const rows = await this.db
+      .select({ value: runtimeFlags.value })
+      .from(runtimeFlags)
+      .where(eq(runtimeFlags.key, key));
+    return rows.some((r) => r.value === true);
+  }
+
+  /**
    * Removes a flag, and records the removal.
    *
    * **Not `set(key, null)`.** `runtime_flags.value` is `NOT NULL`, so writing a
