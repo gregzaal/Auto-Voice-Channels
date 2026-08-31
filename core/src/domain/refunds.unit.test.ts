@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { classifyAdjustment, type AdjustmentRecord } from './refunds.js';
+import {
+  classifyAdjustment,
+  isChargebackRecord,
+  isRefundRecord,
+  refundWindow,
+  REFUND_WINDOW_DAYS,
+  type AdjustmentRecord,
+} from './refunds.js';
 
 /**
  * `plans/refunds.md` §7.1 and §7.2. Each case here is a rule that was wrong at
@@ -132,5 +139,58 @@ describe('classifyAdjustment', () => {
         'record_only',
       );
     });
+  });
+});
+
+describe('refundWindow', () => {
+  const DAY = 86_400_000;
+
+  it('is open for the published 14 days after the charge', () => {
+    const charged = new Date(NOW.getTime() - 3 * DAY);
+    const out = refundWindow(charged, NOW);
+    expect(out).not.toBeNull();
+    expect(out?.daysLeft).toBe(REFUND_WINDOW_DAYS - 3);
+    expect(out?.closesAt).toEqual(new Date(charged.getTime() + REFUND_WINDOW_DAYS * DAY));
+  });
+
+  it('returns NULL once closed, so there is nothing to render', () => {
+    /**
+     * Owner decision, 2026-08-28: after the window there is to be no refund UI
+     * at all, not a disabled control and not a "you missed it" notice. Returning
+     * null rather than `{ open: false }` is what makes that the only possible
+     * rendering.
+     */
+    expect(refundWindow(new Date(NOW.getTime() - REFUND_WINDOW_DAYS * DAY), NOW)).toBeNull();
+    expect(refundWindow(new Date(NOW.getTime() - 365 * DAY), NOW)).toBeNull();
+  });
+
+  it('returns null when the charge date is unknown', () => {
+    // Every row until the backfill runs. Quoting a window we cannot compute
+    // would be worse than quoting none.
+    expect(refundWindow(null, NOW)).toBeNull();
+    expect(refundWindow(undefined, NOW)).toBeNull();
+  });
+
+  it('never reports zero days left while it is still open', () => {
+    // A customer told "0 days left" would reasonably conclude it had closed.
+    const out = refundWindow(new Date(NOW.getTime() - REFUND_WINDOW_DAYS * DAY + 1000), NOW);
+    expect(out?.daysLeft).toBe(1);
+  });
+});
+
+describe('isRefundRecord / isChargebackRecord', () => {
+  it('reads a null action as a refund, because every old row was one', () => {
+    expect(isRefundRecord(null)).toBe(true);
+    expect(isRefundRecord(undefined)).toBe(true);
+    expect(isRefundRecord('refund')).toBe(true);
+  });
+
+  it('refuses to call a chargeback or a credit a refund', () => {
+    for (const action of ['chargeback', 'credit', 'chargeback_warning']) {
+      expect(isRefundRecord(action)).toBe(false);
+    }
+    expect(isChargebackRecord('chargeback')).toBe(true);
+    expect(isChargebackRecord('refund')).toBe(false);
+    expect(isChargebackRecord(null)).toBe(false);
   });
 });

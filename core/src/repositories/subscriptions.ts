@@ -41,6 +41,8 @@ export const subscriptionRowSchema = z.object({
   chargedTotal: z.string().nullish(),
   /** The transaction that bought the current period. See schema.ts for why it matters. */
   chargedTransactionId: z.string().nullish(),
+  /** When that transaction was paid. What the refund window is measured from. */
+  chargedAt: z.date().nullish(),
   chargedTax: z.string().nullish(),
   chargedCurrency: z.string().nullish(),
   /**
@@ -585,6 +587,7 @@ export class SubscriptionRepository {
       countryCode?: string | null;
       priceId?: string | null;
       transactionId?: string | null;
+      chargedAt?: Date | null;
     },
   ): Promise<void> {
     await this.db
@@ -603,6 +606,7 @@ export class SubscriptionRepository {
          * who is paid up.
          */
         chargedTransactionId: totals.transactionId ?? null,
+        chargedAt: totals.chargedAt ?? null,
         // Origin fields are written only when we HAVE one, unlike the totals
         // above, which always arrive together on the same event and are
         // meaningless individually. A payload shape we do not recognise yields

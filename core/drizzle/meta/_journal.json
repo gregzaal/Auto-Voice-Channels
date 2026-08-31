@@ -253,6 +253,13 @@
       "when": 1788165738933,
       "tag": "0035_friendly_warlock",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1788165963889,
+      "tag": "0036_even_crusher_hogan",
+      "breakpoints": true
     }
   ]
 }

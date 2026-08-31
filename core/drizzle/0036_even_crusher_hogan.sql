@@ -1,0 +1,1 @@
+ALTER TABLE "subscriptions" ADD COLUMN "charged_at" timestamp with time zone;

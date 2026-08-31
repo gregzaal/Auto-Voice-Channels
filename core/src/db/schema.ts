@@ -562,6 +562,17 @@ export const subscriptions = pgTable(
      * months paid up. That was found by review of `plans/refunds.md` §7.1.
      */
     chargedTransactionId: text('charged_transaction_id'),
+    /**
+     * When the current period was actually paid for, from the transaction's own
+     * timestamp rather than from when we happened to receive the webhook.
+     *
+     * The refund window is measured from a payment, and nothing here recorded
+     * one: `refund_at` is the receipt time of a REFUND, `created_at` is when we
+     * first wrote the row, and `current_period_end` is a year out. So no surface
+     * could tell a customer whether their 14 days were still open, which is the
+     * one fact they need at the moment they are looking for it.
+     */
+    chargedAt: timestamp('charged_at', { withTimezone: true }),
     /** Refunded amount (minor units) for that adjustment. */
     refundTotal: text('refund_total'),
     /**

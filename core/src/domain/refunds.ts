@@ -144,3 +144,37 @@ export function isRefundRecord(refundAction: string | null | undefined): boolean
 export function isChargebackRecord(refundAction: string | null | undefined): boolean {
   return refundAction === 'chargeback';
 }
+
+/**
+ * How long after a payment a full refund can be asked for, per `/refunds` §2.
+ * Published, so it is a promise rather than a tunable.
+ */
+export const REFUND_WINDOW_DAYS = 14;
+
+const DAY_MS = 86_400_000;
+
+/**
+ * The open refund window for a payment, or null when there is none.
+ *
+ * **Null once it has closed, deliberately, and that is an owner decision rather
+ * than an implementation detail** (2026-08-28): after the window there is to be
+ * no refund UI at all, not a disabled control and not a "you missed it" notice.
+ * A surface that renders something for a closed window is reminding a customer
+ * of a thing they cannot have, every time they look at their own dashboard.
+ *
+ * Null also when the charge date is unknown, which is every row until the
+ * backfill runs. Saying nothing is right there too: quoting a window we cannot
+ * actually compute would be worse than quoting none.
+ */
+export function refundWindow(
+  chargedAt: Date | null | undefined,
+  now: Date,
+): { closesAt: Date; daysLeft: number } | null {
+  if (!chargedAt) return null;
+  const closesAt = new Date(chargedAt.getTime() + REFUND_WINDOW_DAYS * DAY_MS);
+  if (closesAt.getTime() <= now.getTime()) return null;
+  return {
+    closesAt,
+    daysLeft: Math.max(1, Math.ceil((closesAt.getTime() - now.getTime()) / DAY_MS)),
+  };
+}
