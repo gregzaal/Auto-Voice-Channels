@@ -105,6 +105,44 @@ describe('renderPreview', () => {
     assertCopyRules(renderPreview(plan({ changed: false }), ctx));
   });
 
+  /** Four note labels contain the product name, and it was being lowercased. */
+  it('does not lowercase the product name', () => {
+    const text = renderPreview(
+      plan({
+        notes: [
+          {
+            code: 'channel_cannot_rename',
+            severity: 'dropped',
+            subject: '1',
+            name: 'Lobby',
+          },
+          { code: 'automation_switched_off', severity: 'warning', subject: 'enabled' },
+        ],
+      }),
+      ctx,
+    );
+    expect(text).toContain('AVC');
+    expect(text).not.toContain('avc cannot');
+    expect(text).not.toContain('turns avc off');
+  });
+
+  /** A whole-import warning must not be prefixed with the guild's own id. */
+  it('does not prefix a whole-import warning with a snowflake', () => {
+    const text = renderPreview(
+      plan({
+        notes: [
+          {
+            code: 'other_bot_may_be_present',
+            severity: 'warning',
+            subject: '460459401086763010',
+          },
+        ],
+      }),
+      ctx,
+    );
+    expect(text).not.toContain('460459401086763010:');
+  });
+
   it('says nothing would change, rather than showing an empty preview', () => {
     expect(renderPreview(plan({ changed: false }), ctx)).toContain('Nothing would change');
   });
@@ -260,20 +298,29 @@ describe('confirmLabel and destructiveCount', () => {
   /** Proportional: a guild with nothing stored is not destroying anything. */
   it('does not pretend a first-time import is destructive', () => {
     const fresh = plan({ creatorChanges: [channel('1', { action: 'adopt' })] });
-    expect(destructiveCount(fresh)).toBe(0);
-    expect(confirmLabel(0)).toBe('Apply this configuration');
+    expect(destructiveCount(fresh)).toEqual({ replaced: 0, removed: 0 });
+    expect(confirmLabel({ replaced: 0, removed: 0 })).toBe('Apply this configuration');
   });
 
-  it('counts overwritten settings and replaced or removed channels', () => {
+  it('counts overwritten settings and replaced channels separately from removals', () => {
     const heavy = plan({
       settingChanges: [setting(), setting({ key: 'aliases', before: undefined, after: {} })],
       creatorChanges: [channel('1'), channel('2', { action: 'remove' })],
       adoptedChanges: [channel('3', { action: 'adopt' })],
     });
-    // One setting had a stored value, two channels were replaced or removed.
-    expect(destructiveCount(heavy)).toBe(3);
-    expect(confirmLabel(3)).toBe('Replace 3 things');
-    expect(confirmLabel(1)).toBe('Replace 1 thing');
+    // One setting had a stored value, one channel is replaced, one is removed.
+    expect(destructiveCount(heavy)).toEqual({ replaced: 2, removed: 1 });
+  });
+
+  /**
+   * The split matters: a plan whose only destructive act is a deletion read
+   * "Replace 2 things" on the control authorising it, and nothing else in the
+   * product can put a removed creator channel back.
+   */
+  it('names a removal as a removal', () => {
+    expect(confirmLabel({ replaced: 0, removed: 2 })).toBe('remove 2');
+    expect(confirmLabel({ replaced: 3, removed: 2 })).toBe('Replace 3, remove 2');
+    expect(confirmLabel({ replaced: 3, removed: 0 })).toBe('Replace 3');
   });
 });
 

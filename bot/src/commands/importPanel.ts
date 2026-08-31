@@ -171,15 +171,16 @@ export class ImportSessionStore {
 
 export function importButtons(
   session: string,
-  destructiveCount: number,
+  counts: DestructiveCounts,
 ): ActionRowBuilder<ButtonBuilder> {
+  const destructive = counts.replaced + counts.removed;
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId(importId('confirm', session))
-      .setLabel(confirmLabel(destructiveCount))
+      .setLabel(confirmLabel(counts))
       // Proportional, not uniform: a guild with no existing configuration is not
       // being asked to destroy anything and the button should not pretend it is.
-      .setStyle(destructiveCount > 0 ? ButtonStyle.Danger : ButtonStyle.Success),
+      .setStyle(destructive > 0 ? ButtonStyle.Danger : ButtonStyle.Success),
     new ButtonBuilder()
       .setCustomId(importId('cancel', session))
       .setLabel('Cancel')
@@ -187,24 +188,40 @@ export function importButtons(
   );
 }
 
-/**
- * The label carries the destructive count, because that is the information that
- * prevents the mistake. A number retyped from the line above it is not.
- */
-export function confirmLabel(destructiveCount: number): string {
-  if (destructiveCount === 0) return 'Apply this configuration';
-  return destructiveCount === 1 ? 'Replace 1 thing' : `Replace ${destructiveCount} things`;
+export interface DestructiveCounts {
+  /** Stored values this plan overwrites. */
+  replaced: number;
+  /** Channel rows this plan deletes, which no other command can put back. */
+  removed: number;
 }
 
-/** How many stored things the plan overwrites or deletes. */
-export function destructiveCount(plan: ImportPlan): number {
+/**
+ * The label carries the destructive counts, SPLIT, because a removal is not a
+ * replacement and collapsing them hides the consequential half.
+ *
+ * A plan whose only destructive act was deleting two creator channels read
+ * "Replace 2 things" on the control that authorises it. Nothing else in the
+ * product can register an existing voice channel as a creator channel, so that
+ * removal is the one part only the attached snapshot can undo, and it gets its
+ * own word.
+ */
+export function confirmLabel(counts: DestructiveCounts): string {
+  const parts: string[] = [];
+  if (counts.replaced > 0) parts.push(`Replace ${counts.replaced}`);
+  if (counts.removed > 0) parts.push(`remove ${counts.removed}`);
+  return parts.length === 0 ? 'Apply this configuration' : parts.join(', ');
+}
+
+/** How many stored things the plan overwrites, and how many it deletes. */
+export function destructiveCount(plan: ImportPlan): DestructiveCounts {
   const settingsReplaced = plan.settingChanges.filter(
     (c) => c.before !== undefined && c.before !== null,
   ).length;
-  const templatesReplaced = plan.creatorChanges
-    .concat(plan.adoptedChanges)
-    .filter((c) => c.action === 'update' || c.action === 'remove').length;
-  return settingsReplaced + templatesReplaced;
+  const all = plan.creatorChanges.concat(plan.adoptedChanges);
+  return {
+    replaced: settingsReplaced + all.filter((c) => c.action === 'update').length,
+    removed: all.filter((c) => c.action === 'remove').length,
+  };
 }
 
 export interface RenderContext {
@@ -237,30 +254,31 @@ const NOTE_LABELS: Record<ImportNoteCode, string> = {
   too_many_adopted_channels: 'Too many adopted channels in the file',
   channel_in_both_sections: 'A channel is listed twice in the file',
   every_channel_foreign_fleet: 'Every channel here is managed by another AVC bot',
-  channel_missing: 'No longer exists in this server',
-  channel_wrong_type: 'Not a voice channel any more',
-  channel_foreign_fleet: 'Managed by another AVC bot in this server',
-  channel_already_creator: 'Already a creator channel here',
-  channel_already_adopted: 'Already an adopted channel here',
-  channel_cannot_manage: 'AVC cannot see or manage this channel yet',
-  channel_cannot_rename: 'AVC cannot rename this channel, so it was skipped',
-  creator_removal_is_one_way: 'Will stop being a creator channel',
-  setting_invalid: 'Value was not usable',
-  setting_over_limit: 'Value was too long or too large',
-  setting_unknown_key: 'Setting is not one AVC uses',
-  logging_unresolved: 'Log channel does not resolve here',
-  group_unresolved: 'Category does not exist here',
-  inheritperms_unresolved: 'Permission source channel does not exist here',
-  contact_not_member: 'Named contact has left this server',
-  contact_stamped: 'Recorded as the server contact for AVC problem notices',
-  template_field_invalid: 'Template value was not usable',
+  channel_missing: 'no longer exists in this server',
+  channel_wrong_type: 'is not a voice channel any more',
+  channel_foreign_fleet: 'is managed by another AVC bot in this server',
+  channel_already_creator: 'is already a creator channel here',
+  channel_already_adopted: 'is already an adopted channel here',
+  channel_cannot_manage: 'AVC cannot see or manage it yet',
+  channel_cannot_rename: 'AVC cannot rename it, so it was skipped',
+  creator_removal_is_one_way:
+    'will stop being a creator channel, and only re-importing the attached file brings it back',
+  setting_invalid: 'the value was not usable',
+  setting_over_limit: 'the value was too long or too large',
+  setting_unknown_key: 'is not a setting AVC uses',
+  logging_unresolved: 'that log channel does not exist here',
+  group_unresolved: 'that category does not exist here',
+  inheritperms_unresolved: 'the permission source channel does not exist here',
+  contact_not_member: 'the named contact has left this server',
+  contact_stamped: 'you are now recorded as the server contact for AVC problem notices',
+  template_field_invalid: 'the template value was not usable',
   automation_switched_off: 'This file turns AVC off in this server',
   position_overwritten: 'Channel position is always rewritten by an old Python config',
   other_bot_may_be_present: 'Another AVC bot may still be managing these channels',
-  legacy_field_dropped: 'Old setting AVC no longer has',
+  legacy_field_dropped: 'is an old setting AVC no longer has',
   legacy_marked_left: 'This file was saved after the old bot was removed',
-  orphaned_text_channel: 'Left behind by the old bot, safe to delete',
-  orphaned_role: 'Role left behind by the old bot, safe to delete',
+  orphaned_text_channel: 'was left behind by the old bot and is safe to delete',
+  orphaned_role: 'is a role left behind by the old bot and is safe to delete',
 };
 
 /** A list, capped, with an honest tail. Never a silent truncation. */
@@ -477,7 +495,15 @@ function noteLine(note: ImportNote): string {
     note.missingPermissions && note.missingPermissions.length > 0
       ? ` (needs ${note.missingPermissions.join(', ')})`
       : '';
-  return `${subject}: ${label.toLowerCase()}${limit}${missing}`;
+  /**
+   * The label is used as written, never lowercased.
+   *
+   * Four of them contain the product name, and `toLowerCase` turned them into
+   * "avc cannot rename this channel" in the main preview an admin reads before
+   * pressing a destructive button. The labels are phrased to sit after a colon
+   * instead.
+   */
+  return `${subject}: ${label}${limit}${missing}`;
 }
 
 function cappedLines(lines: readonly string[], cap: number): string[] {

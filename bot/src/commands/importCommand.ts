@@ -21,6 +21,7 @@ import {
   type ChannelFact,
   type Database,
   type Fleet,
+  type GuildConfigFile,
   type GuildFacts,
   type ImportNote,
   type ImportPlan,
@@ -200,14 +201,21 @@ export async function handleExport(
         'and are not in this file.',
     );
   }
-  const oversize = text.length > IMPORT_LIMITS.attachmentBytes;
-  if (oversize) {
-    // An export must never produce a file /import refuses. Saying so beats an
-    // admin discovering it at the other end.
+  const overCeiling = importCeilingsExceeded(file, text);
+  if (overCeiling.length > 0) {
+    /**
+     * An export must never produce a file `/import` refuses, and saying so beats
+     * an admin discovering it at the other end.
+     *
+     * The earlier wording said the file "can be read by a self-hosted instance",
+     * which is true of nothing: `/import` is the only reader there is and it
+     * applies the same limits wherever it runs.
+     */
     lines.push(
       '',
-      `This file is larger than the ${Math.round(IMPORT_LIMITS.attachmentBytes / 1024)} KB that /import accepts, ` +
-        'so it can be read by a self-hosted instance but not loaded back through the command.',
+      `This server is past what /import accepts (${overCeiling.join(', ')}), so this file is a ` +
+        'record of your setup rather than something you can load back. ' +
+        'Ask in the support server if you need to move a server this size.',
     );
   }
 
@@ -215,6 +223,38 @@ export async function handleExport(
     content: lines.join('\n'),
     files: [{ attachment: Buffer.from(text, 'utf8'), name: exportFilename(guildId, now) }],
   });
+}
+
+/**
+ * Which import ceilings a file would breach, named for the copy.
+ *
+ * **The invariant is "`/export` must never produce a file `/import` refuses",
+ * and the byte cap was the only half being checked.** The two array caps are
+ * hard REFUSALS in the differ, so a guild past either had its only documented
+ * rollback path be a file the command rejects, while being told the opposite at
+ * the exact moment it mattered. `/docs/commands` publishes the undo as product
+ * copy, which makes an unqualified promise here a claim the code does not
+ * support.
+ *
+ * Empty for every real guild: the caps are 50 and 100 against a fleet mean of
+ * 1.95 creator channels and 40 adopted rooms across the whole install base.
+ */
+function importCeilingsExceeded(file: GuildConfigFile, text: string): string[] {
+  const over: string[] = [];
+  if (text.length > IMPORT_LIMITS.attachmentBytes) {
+    over.push(`over ${Math.round(IMPORT_LIMITS.attachmentBytes / 1024)} KB`);
+  }
+  if (file.creator_channels.length > IMPORT_LIMITS.creatorChannels) {
+    over.push(`more than ${IMPORT_LIMITS.creatorChannels} creator channels`);
+  }
+  if (file.adopted_channels.length > IMPORT_LIMITS.adoptedChannels) {
+    over.push(`more than ${IMPORT_LIMITS.adoptedChannels} adopted channels`);
+  }
+  const nicks = file.settings.custom_nicks;
+  if (nicks !== null && Object.keys(nicks).length > IMPORT_LIMITS.customNicks) {
+    over.push(`more than ${IMPORT_LIMITS.customNicks} member nicknames`);
+  }
+  return over;
 }
 
 // -- /import, step one: the preview -----------------------------------------
@@ -458,16 +498,22 @@ export async function handleImportButton(
     : await announce(guild, renderAnnouncement(outcome.applied, ctx), deps);
 
   const lines: string[] = [];
-  lines.push(
-    outcome.failures.length === 0
-      ? 'Imported. The configuration in the file is now live in this server.'
-      : 'Partly imported. Some steps did not finish, listed below. Running the same import again is safe.',
-  );
+  if (!outcome.applied.changed) {
+    // The write phase was refused or every step failed. Saying "imported" here
+    // would be the single most misleading thing this command could print.
+    lines.push('Nothing was imported.');
+  } else {
+    lines.push(
+      outcome.failures.length === 0
+        ? 'Imported. The configuration in the file is now live in this server.'
+        : 'Partly imported. Some steps did not finish, listed below. Running the same import again is safe.',
+    );
+  }
   for (const failure of outcome.failures) lines.push(`- ${failure}`);
   if (outcome.driftedKeys.length > 0) {
     lines.push(
-      `- ${outcome.driftedKeys.length} settings had changed since the preview, so what was replaced ` +
-        'is not exactly what the preview showed.',
+      `- ${outcome.driftedKeys.length} setting(s) had been changed by somebody else since the ` +
+        'preview, so what was replaced is not what the preview showed.',
     );
   }
   if (announced !== 'posted' && !announceSuppressed) {
@@ -476,7 +522,39 @@ export async function handleImportButton(
     // confident statement about a server's channels that is simply untrue.
     lines.push('Nobody else was notified. This server has no system channel AVC can post in.');
   }
-  lines.push('Your previous configuration is in the file above. Import it to undo this.');
+  if (outcome.applied.changed) {
+    lines.push(
+      'Any setup panel you had open before now is out of date. Run the command again for a fresh one.',
+    );
+  }
+  if (outcome.applied.creatorRemovals.length > 0) {
+    /**
+     * Said here because nothing else in the product can put it back.
+     * `createPrimary` always creates a NEW Discord channel, so no command turns
+     * an existing voice channel back into a creator channel, and the attached
+     * snapshot is the only route. Section 5.5a rule 3 asks for exactly this.
+     */
+    const n = outcome.applied.creatorRemovals.length;
+    lines.push(
+      `${n === 1 ? '1 channel' : `${n} channels`} stopped being a creator channel. ` +
+        'No command puts that back, so the file above is the only way to restore it.',
+    );
+  }
+  if (outcome.snapshotDelivered && outcome.snapshotReimportable) {
+    lines.push('Your previous configuration is in the file above. Import it to undo this.');
+  } else if (outcome.snapshotDelivered) {
+    lines.push(
+      'Your previous configuration is in the file above. This server is past what /import accepts, ' +
+        'so ask in the support server if you need it restored.',
+    );
+  } else {
+    // Promising a file that is not there is worse than admitting it is missing:
+    // the admin would go looking, and the operator record is the only route left.
+    lines.push(
+      'The file holding your previous configuration could not be attached. ' +
+        'It is recorded on our side, so ask in the support server if you need it back.',
+    );
+  }
 
   await interaction.followUp({
     content: lines.filter(Boolean).join('\n'),
@@ -500,6 +578,11 @@ interface ApplyOutcome {
    * something that does not exist.
    */
   snapshotDelivered: boolean;
+  /**
+   * False when the snapshot is past an import ceiling, so it is a record rather
+   * than a working undo. Only reachable for a guild far outside the caps.
+   */
+  snapshotReimportable: boolean;
 }
 
 async function applyImport(
@@ -534,14 +617,23 @@ async function applyImport(
    * read. Self-host has no operator to read it either.
    */
   let snapshotDelivered = true;
+  const snapshotText = serializeGuildConfig(snapshot);
+  const snapshotOverCeiling = importCeilingsExceeded(snapshot, snapshotText);
   await interaction
     .followUp({
       content:
         "Before anything is written, here is this server's current configuration. " +
-        'Nothing has changed yet. Keep this file: importing it undoes what happens next.',
+        'Nothing has changed yet. ' +
+        (snapshotOverCeiling.length === 0
+          ? 'Keep this file: importing it undoes what happens next.'
+          : // Never call it an undo when /import would refuse it. This is the one
+            // moment the claim has to be true.
+            'Keep this file as a record. This server is past what /import accepts ' +
+            `(${snapshotOverCeiling.join(', ')}), so it cannot be loaded back through the ` +
+            'command. Ask in the support server if you need to roll this back.'),
       files: [
         {
-          attachment: Buffer.from(serializeGuildConfig(snapshot), 'utf8'),
+          attachment: Buffer.from(snapshotText, 'utf8'),
           name: snapshotFilename(guildId, new Date()),
         },
       ],
@@ -628,6 +720,7 @@ async function applyImport(
       applied.plan.settingsRemove.length > 0 ||
       Object.keys(applied.plan.settingsPatch).length > 0,
     snapshotDelivered,
+    snapshotReimportable: snapshotOverCeiling.length === 0,
   };
 }
 
