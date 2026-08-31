@@ -18,11 +18,24 @@ import {
 } from 'discord.js';
 import {
   isEntitled,
+  type AutoChannelRepository,
+  type Database,
+  type Fleet,
   type GuildRepository,
   type Logger,
   type ManagedChannelRepository,
+  type OpsAuditRepository,
+  type RuntimeFlagsRepository,
 } from '@avc/core';
 import type { GuildDispatcher } from '../runtime/dispatcher.js';
+import {
+  handleExport,
+  handleImportButton,
+  handleImportCommand,
+  type ImportCommandDeps,
+  type ImportCounters,
+} from './importCommand.js';
+import { IMPORT_PREFIX, type ImportSessionStore } from './importPanel.js';
 import {
   expiredInteractionMessage,
   SITE_URL,
@@ -134,6 +147,8 @@ export interface InteractionDeps {
   feature: VoiceFeature;
   guilds: GuildRepository;
   managed: ManagedChannelRepository;
+  /** Creator channels, which `/export` reads and `/import` writes. */
+  autoChannels?: AutoChannelRepository;
   /** Recent "I lost access to this channel" incidents, surfaced in `/setup`. */
   permissionProblems?: PermissionProblemTracker;
   /**
@@ -142,6 +157,24 @@ export interface InteractionDeps {
    * in that case, so this only has to cover the "flag flipped after boot" path.
    */
   assistant?: TemplateAssistant;
+  /**
+   * Everything `/export` and `/import` need beyond what the rest of this
+   * handler already holds.
+   *
+   * One optional bundle rather than eight optional fields, so a test that does
+   * not care about config transfer stays a two-line fixture and the two
+   * commands refuse honestly instead of throwing when it is absent.
+   */
+  configTransfer?: {
+    db: Database;
+    fleet: Fleet;
+    flags: RuntimeFlagsRepository;
+    opsAudit: OpsAuditRepository;
+    serverLog: (guildId: string, level: 1 | 2 | 3, message: string) => void;
+    reconcileGuild: (guildId: string) => Promise<void>;
+    sessions: ImportSessionStore;
+    counters?: ImportCounters;
+  };
   selfHosted: boolean;
   /** Discord application id, for building the `/invite` link. */
   clientId: string;
@@ -262,7 +295,18 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
    */
   function allowedWhileExpired(interaction: Interaction): boolean {
     if (interaction.isChatInputCommand()) {
-      return ['setup', 'ping', 'invite', 'source', 'debug', 'logging'].includes(
+      /**
+       * `/export` is on this list and `/import` deliberately is not.
+       *
+       * Refusing to let someone take their own configuration with them because
+       * they stopped paying is exactly the behaviour the AGPL positioning rules
+       * out. `/import` is a write path, and the hard gate is non-destructive by
+       * design: it stops writes and destroys nothing.
+       *
+       * Both are still refused in a `blocked` guild, which `route` handles
+       * above this point, and that stays: `blocked` is the abuse switch.
+       */
+      return ['setup', 'ping', 'invite', 'source', 'debug', 'logging', 'export'].includes(
         interaction.commandName,
       );
     }
@@ -380,6 +424,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return openInheritModal(interaction);
       case 'logging':
         return openLoggingModal(interaction);
+      case 'export':
+        return handleConfigTransfer(interaction, 'export');
+      case 'import':
+        return handleConfigTransfer(interaction, 'import');
       case 'ping':
         return handlePing(interaction);
       case 'invite':
@@ -1250,6 +1298,67 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     return false;
   }
 
+  /**
+   * Gate the two config-transfer commands.
+   *
+   * **Not a copy of `requireManageChannels`.** That one always calls
+   * `interaction.reply`, and the confirm handler has already updated the message
+   * by the time it re-checks, so a verbatim copy would throw into `route`'s
+   * catch and show a generic error on the one path whose entire job is refusing
+   * an unauthorized destructive write. `safeReply` picks the right method.
+   */
+  async function requireManageGuild(
+    interaction: ChatInputCommandInteraction | ButtonInteraction,
+  ): Promise<boolean> {
+    if (interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) === true) return true;
+    await safeReply(interaction, 'You need the Manage Server permission to use that.');
+    return false;
+  }
+
+  /**
+   * Assembles the full dependency set for `/export` and `/import`.
+   *
+   * Returns undefined when the bundle is absent, which in production cannot
+   * happen (both commands register unconditionally) but keeps every existing
+   * test fixture valid.
+   */
+  function importDeps(): ImportCommandDeps | undefined {
+    const bundle = deps.configTransfer;
+    if (!bundle || !deps.autoChannels) return undefined;
+    return {
+      db: bundle.db,
+      fleet: bundle.fleet,
+      guilds: deps.guilds,
+      autoChannels: deps.autoChannels,
+      managed: deps.managed,
+      settings: deps.settings,
+      flags: bundle.flags,
+      opsAudit: bundle.opsAudit,
+      serverLog: bundle.serverLog,
+      reconcileGuild: bundle.reconcileGuild,
+      dispatchRun: run,
+      applicationId: deps.clientId,
+      logger: deps.logger,
+      sessions: bundle.sessions,
+      ...(bundle.counters ? { counters: bundle.counters } : {}),
+    };
+  }
+
+  async function handleConfigTransfer(
+    interaction: ChatInputCommandInteraction,
+    which: 'export' | 'import',
+  ): Promise<void> {
+    if (!(await requireManageGuild(interaction))) return;
+    const importDependencies = importDeps();
+    if (!importDependencies) {
+      await safeReply(interaction, 'Configuration transfer is not available on this instance.');
+      return;
+    }
+    return which === 'export'
+      ? handleExport(interaction, importDependencies)
+      : handleImportCommand(interaction, importDependencies);
+  }
+
   async function handlePing(interaction: ChatInputCommandInteraction): Promise<void> {
     const ws = Math.round(deps.client.ws.ping);
     await interaction.reply({ content: '🏓 Pinging…', ephemeral: true });
@@ -1865,6 +1974,17 @@ Already subscribed? Add the new server ` +
     if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorButton(interaction);
     if (interaction.customId.startsWith(ASSISTANT_PREFIX))
       return handleAssistantButton(interaction);
+    if (interaction.customId.startsWith(IMPORT_PREFIX)) {
+      const importDependencies = importDeps();
+      if (!importDependencies) {
+        await safeReply(interaction, 'Configuration transfer is not available on this instance.');
+        return;
+      }
+      // The ManageGuild re-check lives inside, after the session is claimed, so
+      // a click from someone whose roles changed cannot leave the plan claimable
+      // by a second click either.
+      return handleImportButton(interaction, importDependencies);
+    }
     if (interaction.customId.startsWith(SETUP_PREFIX)) return handleSetupButton(interaction);
 
     /**

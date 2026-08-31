@@ -128,6 +128,16 @@ export const METRICS = {
   COMMANDS_INVOKED: 'commands.invoked',
   /** Handled errors, keyed by coarse category. */
   ERRORS: 'errors',
+  /**
+   * Configuration imports, keyed by outcome.
+   *
+   * `commands.invoked` cannot answer this. It fires before the command switch,
+   * so for `/import` it counts the PREVIEW: fifty admins reading a diff and
+   * fifty configurations replaced are the same number there. `applied` and
+   * `partial` are the two an operator actually needs and neither is recoverable
+   * from any table afterwards.
+   */
+  CONFIG_IMPORTS: 'config.imports',
   /** Deepest total dispatcher queue depth seen in the bucket. */
   QUEUE_DEPTH_PEAK: 'queue.depth.peak',
   /** Most guilds with a tripped circuit-breaker seen in the bucket. */
@@ -226,6 +236,13 @@ const DEFINITIONS: Record<MetricName, MetricDefinition> = {
     scope: 'fleet',
     dimension: 'error category',
     describe: 'Handled errors by coarse category.',
+  },
+  [METRICS.CONFIG_IMPORTS]: {
+    kind: 'counter',
+    scope: 'fleet',
+    dimension: 'outcome',
+    describe:
+      'Configuration imports by outcome: previewed, applied, partial, or refused with a reason.',
   },
   [METRICS.QUEUE_DEPTH_PEAK]: {
     kind: 'peak',

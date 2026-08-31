@@ -77,6 +77,7 @@ import {
 } from './features/voice/index.js';
 import { buildCommandDefinitions, registerCommands } from './commands/definitions.js';
 import { registerInteractionHandler } from './commands/interactions.js';
+import { createImportSessionStore } from './commands/importCommand.js';
 import { OpenAiCompatClient, TemplateAssistant } from './features/templateAssistant/index.js';
 import {
   BillingReconciler,
@@ -426,6 +427,18 @@ async function main(): Promise<void> {
         logger,
       })
     : undefined;
+  /**
+   * The reconciler is built below this point, so `/import` reaches it through a
+   * holder rather than a direct reference.
+   *
+   * It is invoked only AFTER the import's queued write task has returned, never
+   * awaited from inside one: `dispatch` runs a guild's tasks strictly
+   * sequentially with no timeout, so a nested dispatch on the same guild would
+   * wait for a task that cannot start until the awaiting one finishes, hanging
+   * that guild's queue until the process restarted.
+   */
+  let reconcileAfterImport: (guildId: string) => Promise<void> = async () => {};
+  const importSessions = createImportSessionStore();
   const disposeInteractions = registerInteractionHandler({
     client,
     dispatcher,
@@ -436,8 +449,25 @@ async function main(): Promise<void> {
     feature: voiceFeature,
     guilds: guildsRepo,
     managed,
+    autoChannels,
     permissionProblems,
     ...(assistant ? { assistant } : {}),
+    configTransfer: {
+      db,
+      fleet: config.fleet ?? DEFAULT_FLEET,
+      flags,
+      opsAudit: new OpsAuditRepository(db, config.fleet),
+      serverLog: (guildId, level, message) => serverLogger.log(guildId, level, message),
+      reconcileGuild: (guildId) => reconcileAfterImport(guildId),
+      sessions: importSessions,
+      counters: {
+        previewed: () => metricsCollector.increment(METRICS.CONFIG_IMPORTS, 'previewed'),
+        applied: () => metricsCollector.increment(METRICS.CONFIG_IMPORTS, 'applied'),
+        partiallyApplied: () => metricsCollector.increment(METRICS.CONFIG_IMPORTS, 'partial'),
+        refused: (reason) =>
+          metricsCollector.increment(METRICS.CONFIG_IMPORTS, `refused:${reason}`),
+      },
+    },
     selfHosted: config.selfHosted,
     clientId: config.clientId,
     // Its own kind: interaction failures are the one of these that can storm.
@@ -469,6 +499,21 @@ async function main(): Promise<void> {
     // reconciler.ts. A no-op at one instance, where every shard is owned.
     ownsGuild: (guildId) => leaseManager.ownsGuild(guildId),
   });
+
+  /**
+   * Now that the reconciler exists, let `/import` converge the guild it wrote.
+   *
+   * Three things need it and none takes effect without it: members already
+   * sitting in a newly imported creator channel get no room until the catch-up
+   * loop, an adopted channel keeps its pre-import Discord name until
+   * `rerenderManaged`, and an imported `groups` map does not renumber or
+   * reposition existing rooms. The sweep converges it within five minutes
+   * anyway, but only if `sweep.disabled` and `global.pause` are both unset, and
+   * until then the reply says "imported" while nothing visible has changed.
+   */
+  reconcileAfterImport = async (guildId: string): Promise<void> => {
+    await reconciler.reconcileGuild(guildId);
+  };
 
   // Monetization (dormant when SELF_HOSTED): new-guild onboarding + the
   // advisory-locked trial/billing reconcile job (samples member counts,
