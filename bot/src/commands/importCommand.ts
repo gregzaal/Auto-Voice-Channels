@@ -523,7 +523,7 @@ async function applyImport(
 
   // Only the writes need the per-guild ordering guarantee against voice events.
   const applied = await deps.dispatchRun(guildId, 'cmd:import', async () => {
-    return writeAll(previewPlan, guildId, facts, deps, failures);
+    return applyImportWrites(previewPlan, guildId, facts, deps, failures);
   });
 
   await deps.opsAudit
@@ -558,12 +558,27 @@ async function applyImport(
   };
 }
 
+/**
+ * What the write phase needs, and nothing else.
+ *
+ * Narrower than {@link ImportCommandDeps} so the risky half can be exercised
+ * against a real database without a Discord fake: `create` is
+ * `onConflictDoNothing` and `updateState` replaces a whole jsonb column, and
+ * neither behaviour is visible to a unit test.
+ */
+export interface ImportWriteDeps {
+  autoChannels: AutoChannelRepository;
+  managed: ManagedChannelRepository;
+  settings: Pick<GuildSettingsService, 'applyImportedSettings'>;
+  logger: Logger;
+}
+
 /** The write phase, in the order the design fixes. */
-async function writeAll(
+export async function applyImportWrites(
   plan: ImportPlan,
   guildId: string,
   facts: GuildFacts,
-  deps: ImportCommandDeps,
+  deps: ImportWriteDeps,
   failures: string[],
 ): Promise<{ plan: ImportPlan; driftedKeys: string[] }> {
   // Creator channels, each re-resolved: a channel deleted since the preview
