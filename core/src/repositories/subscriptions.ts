@@ -166,6 +166,8 @@ export type AnySubscriptionRef = { id: string; refundContext: RefundContext } & 
 export interface RefundContext {
   chargedTransactionId: string | null;
   refundAdjustmentId: string | null;
+  /** What the last revoking adjustment was, which decides how it can be undone. */
+  refundAction: string | null;
 }
 
 /**
@@ -556,6 +558,7 @@ export class SubscriptionRepository {
         poolId: subscriptions.poolId,
         chargedTransactionId: subscriptions.chargedTransactionId,
         refundAdjustmentId: subscriptions.refundAdjustmentId,
+        refundAction: subscriptions.refundAction,
       })
       .from(subscriptions)
       .where(eq(subscriptions.paddleSubscriptionId, paddleSubscriptionId))
@@ -564,6 +567,7 @@ export class SubscriptionRepository {
     const refundContext: RefundContext = {
       chargedTransactionId: row.chargedTransactionId,
       refundAdjustmentId: row.refundAdjustmentId,
+      refundAction: row.refundAction,
     };
     if (row.guildId) return { kind: 'guild', id: row.id, guildId: row.guildId, refundContext };
     if (row.poolId) return { kind: 'pool', id: row.id, poolId: row.poolId, refundContext };

@@ -50,6 +50,33 @@ export type RefundVerdict =
   /** Record it in the display mirror and change nothing about entitlement. */
   | { kind: 'record_only'; reason: string };
 
+/**
+ * Actions that take money we had, and so must stop paid service.
+ *
+ * **A chargeback gates, exactly like a refund** (decision, 2026-08-31). We are
+ * not being paid, so paid service stops, or the invariant in §1 is broken in the
+ * direction that costs us. Two things make that fair rather than punitive: it
+ * goes through `guildFloor`, so a free-sized server stays free and an unconsumed
+ * trial resumes and nobody loses anything they would have had without paying;
+ * and a reversal restores it immediately, so a customer whose card was used
+ * fraudulently by someone else is not left worse off once the dispute settles.
+ *
+ * Before this a chargeback reached no branch at all, which meant it left service
+ * running while the money and Paddle's dispute fee were both gone.
+ */
+const REVOKING_ACTIONS: ReadonlySet<string> = new Set(['refund', 'chargeback']);
+
+/**
+ * Actions that give the money back to us, and so restore what they revoked.
+ *
+ * `chargeback_warning` is deliberately absent from both sets: the issuer has
+ * signalled a dispute may be coming and no money has moved, so gating on it
+ * would punish a customer over a bank's advance notice about something that may
+ * never happen. Credits are absent too, being money applied to a future invoice
+ * rather than money taken from us.
+ */
+const RESTORING_ACTIONS: ReadonlySet<string> = new Set(['chargeback_reverse']);
+
 /** Adjustment statuses that undo a previously granted refund. */
 const UNDOING_STATUSES: ReadonlySet<string> = new Set(['rejected', 'reversed']);
 
@@ -60,16 +87,32 @@ export function classifyAdjustment(
     chargedTransactionId: string | null | undefined;
     /** Which adjustment last revoked access, if any. */
     refundAdjustmentId: string | null | undefined;
+    /** What that adjustment WAS, which decides how it can be undone. */
+    refundAction: string | null | undefined;
   },
 ): RefundVerdict {
-  if (adjustment.action !== 'refund') {
-    /**
-     * A chargeback takes the money AND leaves service running, which is worth
-     * more to an abuser than asking for a refund. That is a real gap and it is
-     * deliberately not closed here: whether a chargeback should gate is a policy
-     * decision, not a code one (`plans/refunds.md` §13). Recording and
-     * attributing it is what lets an operator see it at all.
-     */
+  /**
+   * A chargeback reversal restores, and it CANNOT be matched on the adjustment
+   * id the way a refund's own reversal is.
+   *
+   * A refund goes `approved` then `reversed` as ONE adjustment, so the id test
+   * below is what stops a second, rejected request clearing the first one's
+   * marker. A chargeback reversal is a SEPARATE adjustment with its own id, so
+   * that same test would refuse every legitimate one and leave a customer gated
+   * after we had already been paid back. Matching on the stored action instead
+   * is both sufficient and safe: only a chargeback can be chargeback-reversed.
+   */
+  if (RESTORING_ACTIONS.has(adjustment.action)) {
+    if (current.refundAction === 'chargeback') {
+      return { kind: 'clear', reason: `undone:${adjustment.action}` };
+    }
+    return { kind: 'record_only', reason: `undone_nothing:${adjustment.action}` };
+  }
+
+  if (!REVOKING_ACTIONS.has(adjustment.action)) {
+    // A credit is money applied to a future invoice, and a chargeback warning is
+    // a bank's notice that no money has acted on. Recorded and attributed so an
+    // operator can see them, and never reaching entitlement.
     return { kind: 'record_only', reason: `action:${adjustment.action}` };
   }
 

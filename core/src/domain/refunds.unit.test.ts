@@ -30,7 +30,11 @@ function adjustment(over: Partial<AdjustmentRecord> = {}): AdjustmentRecord {
   };
 }
 
-const CURRENT = { chargedTransactionId: 'txn_current', refundAdjustmentId: null };
+const CURRENT = {
+  chargedTransactionId: 'txn_current',
+  refundAdjustmentId: null,
+  refundAction: null,
+};
 
 describe('classifyAdjustment', () => {
   it('revokes access for a full, approved refund of the current period', () => {
@@ -73,16 +77,51 @@ describe('classifyAdjustment', () => {
   });
 
   describe('actions other than refund never reach entitlement', () => {
-    it('records a chargeback without gating', () => {
+    it('GATES a chargeback, exactly like a refund', () => {
       /**
-       * Worth stating plainly: this means a chargeback currently takes the money
-       * AND leaves service running, which is better value to an abuser than
-       * asking for a refund. Whether it should gate is a policy decision, not a
-       * code one. Recording it is what lets an operator see it at all.
+       * Decision, 2026-08-31. The money and Paddle's dispute fee are both gone,
+       * so paid service stops or the invariant is broken in the direction that
+       * costs us. It goes through the floor, so nobody loses anything they would
+       * have had without paying, and a reversal restores it.
        */
       const verdict = classifyAdjustment(adjustment({ action: 'chargeback' }), CURRENT);
+      expect(verdict.kind).toBe('settle');
+    });
+
+    it('does NOT gate a chargeback warning, where no money has moved', () => {
+      // Gating on a bank's advance notice would punish a customer over something
+      // that may never happen.
+      for (const action of ['chargeback_warning', 'chargeback_warning_reverse']) {
+        expect(classifyAdjustment(adjustment({ action }), CURRENT).kind).toBe('record_only');
+      }
+    });
+
+    it('restores on a chargeback reversal, matching the stored ACTION not the id', () => {
+      /**
+       * The bug this caught: a refund goes approved then reversed as ONE
+       * adjustment, so the id test is what stops a second request clearing the
+       * first one's marker. A chargeback reversal is a SEPARATE adjustment with
+       * its own id, so that same test would have refused every legitimate one and
+       * left a customer gated after we had already been paid back.
+       */
+      const verdict = classifyAdjustment(
+        adjustment({ adjustmentId: 'adj_different', action: 'chargeback_reverse' }),
+        {
+          chargedTransactionId: 'txn_current',
+          refundAdjustmentId: 'adj_1',
+          refundAction: 'chargeback',
+        },
+      );
+      expect(verdict.kind).toBe('clear');
+    });
+
+    it('does not let a chargeback reversal clear a REFUND', () => {
+      const verdict = classifyAdjustment(adjustment({ action: 'chargeback_reverse' }), {
+        chargedTransactionId: 'txn_current',
+        refundAdjustmentId: 'adj_1',
+        refundAction: 'refund',
+      });
       expect(verdict.kind).toBe('record_only');
-      expect(verdict.reason).toBe('action:chargeback');
     });
 
     it('records a credit without gating', () => {
@@ -91,14 +130,10 @@ describe('classifyAdjustment', () => {
       );
     });
 
-    it('records a chargeback reversal without restoring anything', () => {
-      // `chargeback_reverse` is an undoing STATUS on a non-refund action. The
-      // action test comes first, so it cannot clear a refund's marker.
-      const verdict = classifyAdjustment(
-        adjustment({ action: 'chargeback_reverse', status: 'reversed' }),
-        { chargedTransactionId: 'txn_current', refundAdjustmentId: 'adj_1' },
+    it('records a credit reversal without restoring anything', () => {
+      expect(classifyAdjustment(adjustment({ action: 'credit_reverse' }), CURRENT).kind).toBe(
+        'record_only',
       );
-      expect(verdict.kind).toBe('record_only');
     });
   });
 
@@ -107,6 +142,7 @@ describe('classifyAdjustment', () => {
       const verdict = classifyAdjustment(adjustment({ status: 'reversed' }), {
         chargedTransactionId: 'txn_current',
         refundAdjustmentId: 'adj_1',
+        refundAction: 'refund',
       });
       expect(verdict.kind).toBe('clear');
     });
@@ -115,6 +151,7 @@ describe('classifyAdjustment', () => {
       const verdict = classifyAdjustment(adjustment({ status: 'rejected' }), {
         chargedTransactionId: 'txn_current',
         refundAdjustmentId: 'adj_1',
+        refundAction: 'refund',
       });
       expect(verdict.kind).toBe('clear');
     });
@@ -128,7 +165,11 @@ describe('classifyAdjustment', () => {
        */
       const verdict = classifyAdjustment(
         adjustment({ adjustmentId: 'adj_2', status: 'rejected' }),
-        { chargedTransactionId: 'txn_current', refundAdjustmentId: 'adj_1' },
+        {
+          chargedTransactionId: 'txn_current',
+          refundAdjustmentId: 'adj_1',
+          refundAction: 'refund',
+        },
       );
       expect(verdict.kind).toBe('record_only');
       expect(verdict.reason).toBe('undone_other:rejected');
