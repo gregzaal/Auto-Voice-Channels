@@ -82,6 +82,30 @@ describe('parseLegacyJson', () => {
     expect(typeof parsed.b).toBe('number');
   });
 
+  /**
+   * The case the forward-looking guard alone missed. A long *fractional* half
+   * has no `.` after it, so it was quoted, and `0."300...4"` made the whole file
+   * unparseable. Python's `repr` of a float emits up to 17 significant digits,
+   * so this is an ordinary shape rather than a contrived one.
+   */
+  it('leaves a long fractional half alone', () => {
+    const parsed = parseLegacyJson('{"a": 0.30000000000000004, "b": 605724722902204416}') as Record<
+      string,
+      unknown
+    >;
+    expect(parsed.a).toBe(0.30000000000000004);
+    expect(parsed.b).toBe('605724722902204416');
+  });
+
+  it('leaves a long exponent alone', () => {
+    const parsed = parseLegacyJson('{"a": 1e1234567890123456, "b": 2e-1234567890123456}') as Record<
+      string,
+      unknown
+    >;
+    expect(typeof parsed.a).toBe('number');
+    expect(typeof parsed.b).toBe('number');
+  });
+
   /** A negative number is never an id, so it stays a number rather than
    * becoming `-"605..."`, which is not JSON at all. */
   it('leaves negative numbers alone', () => {

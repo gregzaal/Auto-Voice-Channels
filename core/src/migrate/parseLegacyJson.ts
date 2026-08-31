@@ -59,13 +59,24 @@ export function quoteLongIntegers(text: string): string {
       while (j < text.length && text[j]! >= '0' && text[j]! <= '9') j++;
       const digits = text.slice(i, j);
       const next = text[j];
-      // Only a plain integer: a following '.', 'e' or 'E' makes it a float or
-      // exponent, which is not an id and must not be quoted.
+      // Only a plain integer: a following '.', 'e' or 'E' makes this the
+      // mantissa of a float or exponent, which is not an id.
       const isPlainInteger = next !== '.' && next !== 'e' && next !== 'E';
-      // A negative number is never an id, and quoting the digits after the sign
-      // would emit `-"605..."`, which is not JSON at all. Leave it a number.
-      const negative = out.endsWith('-');
-      if (isPlainInteger && !negative && digits.length >= UNSAFE_DIGITS) {
+      // And the run must not be the *tail* of one either. Looking forward alone
+      // is not enough: `0.30000000000000004` reaches here with a 17-digit run
+      // whose next char is `}`, so it got quoted, emitting `0."300...4"` and
+      // making `JSON.parse` throw "Unterminated fractional number" for the whole
+      // file. Python's `repr` of a float routinely emits 17 significant digits,
+      // so this is an ordinary shape, and for `/import` it is a file the admin
+      // cannot fix rather than one line of a bulk dump.
+      //
+      // `-` and `+` are in the set for the original reason: a signed number is
+      // never an id, and quoting the digits after the sign would emit
+      // `-"605..."`, which is not JSON at all.
+      const prev = out.at(-1);
+      const continuesANumber =
+        prev === '.' || prev === 'e' || prev === 'E' || prev === '-' || prev === '+';
+      if (isPlainInteger && !continuesANumber && digits.length >= UNSAFE_DIGITS) {
         out += `"${digits}"`;
       } else {
         out += digits;

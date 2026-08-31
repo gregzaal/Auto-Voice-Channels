@@ -135,10 +135,18 @@ export interface LoggingConfig {
   channelId: string | null;
 }
 
-/** Reads the logging config from the settings blob (channel id + verbosity level). */
+/**
+ * Reads the logging config from the settings blob (channel id + verbosity level).
+ *
+ * The id is validated, not merely truthy. Until `/import` existed the only
+ * writer was the `/logging` modal, whose channel picker Discord scopes to the
+ * guild, so any non-empty string was in practice a real channel here. A file an
+ * admin uploads carries no such guarantee, and this value outlives whatever
+ * wrote it. {@link ServerLogger} binds the guild at the read end too.
+ */
 export function readLogging(settings: Record<string, unknown>): LoggingConfig {
   const raw = settings[SETTINGS_KEYS.logging];
-  const channelId = typeof raw === 'string' && raw ? raw : null;
+  const channelId = isSnowflake(raw) ? raw : null;
   const lvl = settings[SETTINGS_KEYS.logLevel];
   const level: 1 | 2 | 3 = lvl === 2 || lvl === 3 ? lvl : 1;
   return { enabled: channelId !== null, level, channelId };

@@ -64,7 +64,7 @@ describe('channel repositories: fleet isolation (integration)', () => {
   it("cannot delete the other fleet's creator channel", async () => {
     await prodAuto.upsert(GUILD, 'chan-prod');
 
-    await betaAuto.remove('chan-prod');
+    await betaAuto.remove(GUILD, 'chan-prod');
 
     expect(await prodAuto.get('chan-prod')).toBeDefined();
   });
@@ -167,5 +167,72 @@ describe('channel repositories: fleet isolation (integration)', () => {
     await expect(betaManaged.create({ channelId: 'man-prod', guildId: GUILD })).rejects.toThrow(
       /another fleet/,
     );
+  });
+
+  /**
+   * The same shape one axis over: SAME fleet, DIFFERENT guild.
+   *
+   * Fleet was bound from the start and guild was not, because every writer
+   * reached these tables through a service layer that checked
+   * `row.guildId === guildId` first. `/import` writes channel ids straight from
+   * a file an admin uploads, so the guild is bound in the repository now and
+   * these are the cases that prove it. Without them the only thing standing
+   * between an uploaded snowflake and another server's creator channel is a
+   * caller remembering to check.
+   */
+  describe('across guilds within one fleet', () => {
+    const OTHER = 'guild-other';
+
+    it("refuses to upsert over another guild's creator channel", async () => {
+      await prodAuto.upsert(GUILD, 'chan-a', { name: 'theirs' });
+
+      await expect(prodAuto.upsert(OTHER, 'chan-a', { name: 'mine' })).rejects.toThrow(
+        /another guild/,
+      );
+      const row = await prodAuto.get('chan-a');
+      expect(row?.guildId).toBe(GUILD);
+      expect(row?.template.name).toBe('theirs');
+    });
+
+    it("cannot delete another guild's creator channel", async () => {
+      await prodAuto.upsert(GUILD, 'chan-a');
+
+      await prodAuto.remove(OTHER, 'chan-a');
+
+      expect(await prodAuto.get('chan-a')).toBeDefined();
+    });
+
+    it("refuses to adopt another guild's managed channel", async () => {
+      const managed = new ManagedChannelRepository(env.handle.db, 'prod');
+      await managed.create({ channelId: 'man-a', guildId: GUILD, template: { name: 'theirs' } });
+
+      await expect(managed.create({ channelId: 'man-a', guildId: OTHER })).rejects.toThrow(
+        /another guild/,
+      );
+      expect((await managed.get('man-a'))?.template.name).toBe('theirs');
+    });
+
+    it("cannot mutate or remove another guild's managed channel", async () => {
+      const managed = new ManagedChannelRepository(env.handle.db, 'prod');
+      await managed.create({
+        channelId: 'man-a',
+        guildId: GUILD,
+        ownerId: 'user-1',
+        template: { name: 'theirs' },
+        state: { seed: 7, roster: ['user-1'] },
+      });
+
+      await managed.setTemplate(OTHER, 'man-a', { name: 'hijacked' });
+      await managed.updateState(OTHER, 'man-a', { seed: 99 });
+      await managed.setOwner(OTHER, 'man-a', 'user-hijack');
+      await managed.remove(OTHER, 'man-a');
+
+      const row = await managed.get('man-a');
+      expect(row).toBeDefined();
+      expect(row?.template.name).toBe('theirs');
+      expect(row?.state.seed).toBe(7);
+      expect(row?.state.roster).toEqual(['user-1']);
+      expect(row?.ownerId).toBe('user-1');
+    });
   });
 });

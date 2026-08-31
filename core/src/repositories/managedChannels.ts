@@ -78,6 +78,21 @@ export class ManagedChannelRepository {
     return and(eq(managedChannels.fleet, this.fleet), ...conditions);
   }
 
+  /**
+   * Fleet AND guild AND channel: the predicate every write on this table uses.
+   *
+   * A channel id is globally unique, so binding it alone looks sufficient and
+   * is not. `/import` takes channel ids from a file an admin uploads, so the
+   * guild has to be bound at the write, not by a service-layer check the way
+   * `setManagedName` and `setManagedStatus` do it. Separate from
+   * {@link scoped} so a reader keyed only by channel id stays a one-liner.
+   */
+  private scopedTo(guildId: string, channelId: string) {
+    return this.scoped(
+      and(eq(managedChannels.guildId, guildId), eq(managedChannels.channelId, channelId)),
+    );
+  }
+
   /** Adopts a channel (or no-ops if already adopted, leaving its config intact). */
   async create(input: CreateManagedInput): Promise<ManagedChannelRow> {
     const [row] = await this.db
@@ -99,6 +114,12 @@ export class ManagedChannelRepository {
     // as something having vanished.
     const existing = await this.get(input.channelId);
     if (!existing) throw new Error(`managed channel ${input.channelId} belongs to another fleet`);
+    // Same fleet, different guild. Returning it would hand the caller a row
+    // carrying someone else's `guildId`, and `/import` writes this from a file,
+    // so the check cannot live in the caller the way `setManagedName`'s does.
+    if (existing.guildId !== input.guildId) {
+      throw new Error(`managed channel ${input.channelId} belongs to another guild`);
+    }
     return existing;
   }
 
@@ -142,32 +163,30 @@ export class ManagedChannelRepository {
     return rows.map((r) => r.guildId);
   }
 
-  async setTemplate(channelId: string, template: ManagedTemplate): Promise<void> {
+  async setTemplate(guildId: string, channelId: string, template: ManagedTemplate): Promise<void> {
     await this.db
       .update(managedChannels)
       .set({ template, updatedAt: new Date() })
-      .where(this.scoped(eq(managedChannels.channelId, channelId)));
+      .where(this.scopedTo(guildId, channelId));
   }
 
-  async updateState(channelId: string, state: ManagedState): Promise<void> {
+  async updateState(guildId: string, channelId: string, state: ManagedState): Promise<void> {
     await this.db
       .update(managedChannels)
       .set({ state, updatedAt: new Date() })
-      .where(this.scoped(eq(managedChannels.channelId, channelId)));
+      .where(this.scopedTo(guildId, channelId));
   }
 
   /** Reassigns the occupant-owner (or clears it with `null` when the channel empties). */
-  async setOwner(channelId: string, ownerId: string | null): Promise<void> {
+  async setOwner(guildId: string, channelId: string, ownerId: string | null): Promise<void> {
     await this.db
       .update(managedChannels)
       .set({ ownerId, updatedAt: new Date() })
-      .where(this.scoped(eq(managedChannels.channelId, channelId)));
+      .where(this.scopedTo(guildId, channelId));
   }
 
   /** Stops managing a channel (un-adopt). Idempotent. */
-  async remove(channelId: string): Promise<void> {
-    await this.db
-      .delete(managedChannels)
-      .where(this.scoped(eq(managedChannels.channelId, channelId)));
+  async remove(guildId: string, channelId: string): Promise<void> {
+    await this.db.delete(managedChannels).where(this.scopedTo(guildId, channelId));
   }
 }

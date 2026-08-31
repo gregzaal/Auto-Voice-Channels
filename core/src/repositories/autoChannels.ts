@@ -79,20 +79,32 @@ export class AutoChannelRepository {
         set: { template, updatedAt: new Date() },
         /**
          * A channel id is globally unique, so the conflict target stays the
-         * primary key. But the row it conflicts with may belong to the OTHER
-         * fleet, and without this guard the update would silently rewrite that
-         * fleet's template. Gating makes this practically unreachable, which is
-         * exactly why it should fail loudly rather than corrupt quietly if the
-         * gate ever fails: no row comes back, and the caller below throws.
+         * primary key. But the row it conflicts with may belong to another
+         * fleet, or to another GUILD, and without this guard the update would
+         * silently rewrite it and return a row carrying someone else's
+         * `guildId`.
+         *
+         * The guild half matters because `/import` writes this from a file:
+         * every other writer reaches it through `primaryFor`, which checks
+         * `primary.guildId === guildId` in the service layer, so a repository
+         * that binds fleet alone was safe only by the grace of its callers.
+         * Bind it here instead, where a new caller cannot forget.
          */
-        setWhere: eq(autoChannels.fleet, this.fleet),
+        // Non-null because both conditions are present: drizzle's `and` is typed
+        // as optional only because it drops undefined ones.
+        setWhere: and(eq(autoChannels.fleet, this.fleet), eq(autoChannels.guildId, guildId))!,
       })
       .returning();
-    // Only reachable when the guard above declined: the channel is already a
-    // creator channel of the other fleet. Say so, rather than letting a zod
-    // parse failure on `undefined` describe it as a schema problem.
+    // Only reachable when the guard above declined. Which of the two reasons it
+    // was needs one lookup, and it is worth it: "belongs to another guild" and
+    // "belongs to another fleet" call for completely different responses.
     if (!row) {
-      throw new Error(`auto channel ${channelId} belongs to another fleet`);
+      const existing = await this.get(channelId);
+      throw new Error(
+        existing
+          ? `auto channel ${channelId} belongs to another guild`
+          : `auto channel ${channelId} belongs to another fleet`,
+      );
     }
     return autoChannelRowSchema.parse(row);
   }
@@ -126,8 +138,19 @@ export class AutoChannelRepository {
     return rows.map((r) => autoChannelRowSchema.parse(r));
   }
 
-  async remove(channelId: string): Promise<void> {
-    await this.db.delete(autoChannels).where(this.scoped(eq(autoChannels.channelId, channelId)));
+  /**
+   * Un-registers a creator channel. Idempotent.
+   *
+   * Guild-bound like every other write here: `/import` deletes rows a native
+   * export omits (`plans/import_command.md` §5.5a), so a channel id from a file
+   * reaches this, and nothing above it re-checks the guild.
+   */
+  async remove(guildId: string, channelId: string): Promise<void> {
+    await this.db
+      .delete(autoChannels)
+      .where(
+        this.scoped(and(eq(autoChannels.guildId, guildId), eq(autoChannels.channelId, channelId))),
+      );
   }
 
   /** Distinct guild ids that have at least one registered primary. */

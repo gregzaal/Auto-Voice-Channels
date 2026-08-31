@@ -54,10 +54,10 @@ describe('guildSettings', () => {
 
   it('readLogging derives enabled/level/channel', () => {
     expect(readLogging({})).toEqual({ enabled: false, level: 1, channelId: null });
-    expect(readLogging({ logging: 'c1', log_level: 3 })).toEqual({
+    expect(readLogging({ logging: '234567890123456789', log_level: 3 })).toEqual({
       enabled: true,
       level: 3,
-      channelId: 'c1',
+      channelId: '234567890123456789',
     });
     // Out-of-range / non-numeric level falls back to 1; logging:false → disabled.
     expect(readLogging({ logging: false, log_level: 9 })).toEqual({
@@ -65,6 +65,20 @@ describe('guildSettings', () => {
       level: 1,
       channelId: null,
     });
+  });
+
+  /**
+   * The id is validated, not merely truthy. `/import` can put an arbitrary
+   * string here, and a value that is not a snowflake cannot be a channel.
+   */
+  it('readLogging rejects a channel id that is not a snowflake', () => {
+    for (const bad of ['c1', '', '12345', '2345678901234567890123', '23456789012345678\n', 42]) {
+      expect(readLogging({ logging: bad, log_level: 2 })).toEqual({
+        enabled: false,
+        level: 2,
+        channelId: null,
+      });
+    }
   });
 
   it('groupKeyFor maps a category id to itself and null/undefined to the root sentinel', () => {

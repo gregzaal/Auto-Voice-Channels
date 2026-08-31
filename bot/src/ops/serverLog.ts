@@ -65,7 +65,16 @@ export class ServerLogger {
     const { channelId, level: configured } = readLogging(guild.settings);
     if (channelId === null || level > configured) return;
 
-    const channel = await this.deps.client.channels.fetch(channelId).catch(() => null);
+    // Resolved through the guild, never `client.channels.fetch`, which is global
+    // and would post this guild's event log into whatever server the id belongs
+    // to. `/import` lets an admin put an arbitrary snowflake in this setting, and
+    // at level 3 the stream is every join and leave in every managed channel.
+    // `GuildChannelManager.fetch` hits the cache first and rejects a channel
+    // owned by another guild, which is the same guard
+    // `resolveInheritedOverwrites` applies to the one other admin-supplied
+    // cross-guild id, and what `canUserReadChannel` below already relies on.
+    const logGuild = this.deps.client.guilds.cache.get(guildId);
+    const channel = await logGuild?.channels.fetch(channelId).catch(() => null);
     if (!channel?.isTextBased() || !('send' in channel)) return;
 
     const content = message.slice(0, 2000);

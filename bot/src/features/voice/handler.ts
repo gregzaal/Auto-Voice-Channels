@@ -703,11 +703,12 @@ export class VoiceFeature {
     if (!ordered.includes(memberId)) ordered.push(memberId);
 
     if (!sameOrder(ordered, row.state.roster)) {
-      await this.deps.managed.updateState(channelId, { ...row.state, roster: ordered });
+      await this.deps.managed.updateState(guildId, channelId, { ...row.state, roster: ordered });
     }
     // Owner only set when there isn't a present one (e.g. the channel was empty).
     const ownerPresent = row.ownerId !== null && present.has(row.ownerId);
-    if (!ownerPresent && ordered[0]) await this.deps.managed.setOwner(channelId, ordered[0]);
+    if (!ownerPresent && ordered[0])
+      await this.deps.managed.setOwner(guildId, channelId, ordered[0]);
   }
 
   /**
@@ -730,13 +731,13 @@ export class VoiceFeature {
     for (const m of members) if (!ordered.includes(m.id)) ordered.push(m.id);
 
     if (!sameOrder(ordered, row.state.roster)) {
-      await this.deps.managed.updateState(channelId, { ...row.state, roster: ordered });
+      await this.deps.managed.updateState(guildId, channelId, { ...row.state, roster: ordered });
     }
 
     // Reassign ownership only when the owner is the one who left.
     if (row.ownerId !== leaverId) return;
     const nextOwner = ordered[0] ?? null; // null → channel emptied
-    await this.deps.managed.setOwner(channelId, nextOwner);
+    await this.deps.managed.setOwner(guildId, channelId, nextOwner);
   }
 
   /**
@@ -802,7 +803,7 @@ export class VoiceFeature {
         // Confirmed deleted on Discord — objective and unrecoverable, so the row
         // goes whoever asked. Nothing to notify about on the background path: the
         // admin deleted it, which is not a problem to report back to them.
-        await this.deps.managed.remove(channelId);
+        await this.deps.managed.remove(guildId, channelId);
         this.deps.logger.info(
           { guildId, managedId: channelId },
           'managed channel no longer exists; stopped managing it',
@@ -825,7 +826,7 @@ export class VoiceFeature {
       await this.deps.actions.setVoiceStatus(guildId, channelId, result.status);
     }
     // Persist the freshly-rendered values (so change detection is stable next time).
-    await this.deps.managed.updateState(channelId, {
+    await this.deps.managed.updateState(guildId, channelId, {
       ...row.state,
       ...(renderedName !== undefined ? { name: renderedName } : {}),
       ...(renderedStatus !== undefined ? { status: renderedStatus } : {}),
@@ -851,7 +852,7 @@ export class VoiceFeature {
     operation: PermissionOperation,
     err: unknown,
   ): Promise<void> {
-    await this.deps.managed?.remove(channelId);
+    await this.deps.managed?.remove(guildId, channelId);
     this.deps.permissionProblems?.record(guildId, { channelId, operation, at: Date.now() });
     this.deps.serverLog?.(guildId, 1, permissionProblemMessage(channelId));
     this.deps.logger.warn(
@@ -881,7 +882,7 @@ export class VoiceFeature {
 
     const managed = await this.deps.managed?.get(channelId);
     if (managed && managed.guildId === guildId) {
-      await this.deps.managed?.remove(channelId);
+      await this.deps.managed?.remove(guildId, channelId);
       this.deps.permissionProblems?.clear(guildId, channelId);
       this.deps.logger.info(
         { guildId, managedId: channelId },
@@ -901,7 +902,7 @@ export class VoiceFeature {
      */
     const primary = await this.deps.autoChannels.get(channelId);
     if (primary && primary.guildId === guildId) {
-      await this.deps.autoChannels.remove(channelId);
+      await this.deps.autoChannels.remove(guildId, channelId);
       this.deps.permissionProblems?.clear(guildId, channelId);
       this.deps.logger.info(
         { guildId, primaryChannelId: channelId },
@@ -987,7 +988,7 @@ export class VoiceFeature {
     }
     const trimmed = value.trim().replace(/[\r\n]+/g, ' ');
     if (trimmed === '') return { ok: false, message: "The name template can't be empty." };
-    await this.deps.managed.setTemplate(channelId, { ...row.template, name: trimmed });
+    await this.deps.managed.setTemplate(guildId, channelId, { ...row.template, name: trimmed });
     await this.rerenderManaged(guildId, channelId);
     return { ok: true, message: "Updated this channel's name template." };
   }
@@ -1008,7 +1009,7 @@ export class VoiceFeature {
     }
     const trimmed = value.trim();
     const cleared = trimmed === '' || trimmed.toLowerCase() === 'reset';
-    await this.deps.managed.setTemplate(channelId, {
+    await this.deps.managed.setTemplate(guildId, channelId, {
       ...row.template,
       status: cleared ? '' : trimmed,
     });
@@ -1028,7 +1029,7 @@ export class VoiceFeature {
     if (!row || row.guildId !== guildId) {
       return { ok: false, message: "AVC doesn't manage this channel." };
     }
-    await this.deps.managed.remove(channelId);
+    await this.deps.managed.remove(guildId, channelId);
     this.deps.logger.info({ guildId, channelId }, 'stopped managing channel');
     return {
       ok: true,
@@ -1641,7 +1642,7 @@ export class VoiceFeature {
         const { channelId } = managed;
         if (!this.deps.voice.channelExists(channelId)) {
           if (this.deps.ownsGuild && !this.deps.ownsGuild(guildId)) continue;
-          if (!dryRun) await this.deps.managed.remove(channelId);
+          if (!dryRun) await this.deps.managed.remove(guildId, channelId);
           drift.orphanedRecords.push(channelId);
           continue;
         }
@@ -1678,10 +1679,14 @@ export class VoiceFeature {
     const ordered = (row.state.roster ?? []).filter((id) => present.has(id));
     for (const m of members) if (!ordered.includes(m.id)) ordered.push(m.id);
     if (!sameOrder(ordered, row.state.roster)) {
-      await this.deps.managed.updateState(row.channelId, { ...row.state, roster: ordered });
+      await this.deps.managed.updateState(guildId, row.channelId, {
+        ...row.state,
+        roster: ordered,
+      });
     }
     const ownerPresent = row.ownerId !== null && present.has(row.ownerId);
     const nextOwner = ownerPresent ? row.ownerId : (ordered[0] ?? null);
-    if (nextOwner !== row.ownerId) await this.deps.managed.setOwner(row.channelId, nextOwner);
+    if (nextOwner !== row.ownerId)
+      await this.deps.managed.setOwner(guildId, row.channelId, nextOwner);
   }
 }
