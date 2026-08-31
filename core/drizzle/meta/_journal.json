@@ -260,6 +260,20 @@
       "when": 1788165963889,
       "tag": "0036_even_crusher_hogan",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1788172423357,
+      "tag": "0037_fantastic_butterfly",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1788172561955,
+      "tag": "0038_gigantic_ulik",
+      "breakpoints": true
     }
   ]
 }

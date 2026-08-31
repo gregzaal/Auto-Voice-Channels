@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, lte, ne, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Database } from '../db/client.js';
 import { accounts, subscriptions } from '../db/schema.js';
@@ -43,6 +43,10 @@ export const subscriptionRowSchema = z.object({
   chargedTransactionId: z.string().nullish(),
   /** When that transaction was paid. What the refund window is measured from. */
   chargedAt: z.date().nullish(),
+  /** The FIRST charge, set once. Equality with `chargedAt` is the first-charge test. */
+  firstChargedAt: z.date().nullish(),
+  /** When the purchaser used the self-serve refund button. The cap's claim. */
+  refundRequestedAt: z.date().nullish(),
   chargedTax: z.string().nullish(),
   chargedCurrency: z.string().nullish(),
   /**
@@ -81,6 +85,8 @@ export const subscriptionRowSchema = z.object({
    */
   refundSettledAt: z.date().nullish().default(null),
   refundAdjustmentId: z.string().nullish(),
+  /** Which adjustment we already asked Paddle to cancel for. See schema.ts. */
+  cancelRequestedAdjustmentId: z.string().nullish(),
   refundCurrency: z.string().nullish(),
   /** Pending Paddle change: 'cancel' | 'pause' | 'resume'. Null = renewing normally. */
   scheduledChangeAction: z.string().nullish(),
@@ -611,6 +617,14 @@ export class SubscriptionRepository {
          */
         chargedTransactionId: totals.transactionId ?? null,
         chargedAt: totals.chargedAt ?? null,
+        /**
+         * Set ONCE, unlike `charged_at` beside it, which moves to each renewal.
+         * Their equality is what tells a first charge from a renewal, which the
+         * self-serve refund cap needs and no counter could answer idempotently.
+         */
+        ...(totals.chargedAt
+          ? { firstChargedAt: sql`coalesce(${subscriptions.firstChargedAt}, ${totals.chargedAt})` }
+          : {}),
         // Origin fields are written only when we HAVE one, unlike the totals
         // above, which always arrive together on the same event and are
         // meaningless individually. A payload shape we do not recognise yields
@@ -732,6 +746,129 @@ export class SubscriptionRepository {
             adjustment.updatedAt
               ? lte(subscriptions.refundUpdatedAt, adjustment.updatedAt)
               : sql`true`,
+          ),
+        ),
+      )
+      .returning({ id: subscriptions.id });
+    return rows.length > 0;
+  }
+
+  /**
+   * Claims the right to ask Paddle to cancel, for exactly one adjustment.
+   *
+   * A single conditional UPDATE, so two concurrent webhook deliveries cannot
+   * both win and the caller does not have to read-then-write. Returns whether
+   * this call may proceed.
+   *
+   * **A failed cancellation is deliberately not retried.** The claim is taken
+   * BEFORE the call, so a Paddle error or timeout leaves it consumed. Retrying
+   * an outbound write to a live payment provider on a schedule nobody is
+   * watching is worse than surfacing it: the operator queue and the customer's
+   * own card both say "refunded, still set to renew", with the date.
+   */
+  /**
+   * The status and scheduled change for a Paddle subscription id, on either
+   * axis, without caring which.
+   *
+   * A narrow projection on purpose: neither axis-specific row schema parses the
+   * other, and a caller that only needs to decide whether an outbound call is
+   * safe should not have to pick a shape or risk a parse failure over fields it
+   * is not reading.
+   */
+  async getRawByPaddleId(
+    paddleSubscriptionId: string,
+  ): Promise<{ status: string; scheduledChangeAction: string | null } | undefined> {
+    const [row] = await this.db
+      .select({
+        status: subscriptions.status,
+        scheduledChangeAction: subscriptions.scheduledChangeAction,
+      })
+      .from(subscriptions)
+      .where(eq(subscriptions.paddleSubscriptionId, paddleSubscriptionId))
+      .limit(1);
+    return row;
+  }
+
+  /**
+   * Claims the one self-serve refund a purchaser gets, atomically.
+   *
+   * A single conditional UPDATE, so two clicks 200ms apart cannot both win.
+   * `refund_status` could not be the test: the webhook writes it seconds to
+   * minutes later, so both requests would read it as null and both pass.
+   * `AiUsageRepository.reserveBuild` is the same shape for the same reason.
+   *
+   * The conditions ARE the policy, so they are worth reading as a list:
+   *
+   * - the caller must be the recorded purchaser, which `plans/refunds.md` §2.1
+   *   had to be fixed before it meant anything;
+   * - no refund may already be requested or settled on this subscription;
+   * - it must still be the FIRST charge, or a renewal would reopen the window
+   *   every year;
+   * - the purchaser must not have used their self-serve refund elsewhere;
+   * - and nothing about the subscription may look like a dispute, since a refund
+   *   on top of a chargeback pays twice.
+   *
+   * **A false return is never a refusal of the refund**, only of the button. The
+   * support route is unconditional, because a statutory withdrawal right is not
+   * declinable for abuse.
+   */
+  /** One subscription by our own row id, whichever axis it bills. */
+  async getById(id: string): Promise<SubscriptionRow | PoolSubscriptionRow | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(subscriptions)
+      .where(eq(subscriptions.id, id))
+      .limit(1);
+    if (!row) return undefined;
+    const asGuild = subscriptionRowSchema.safeParse(row);
+    if (asGuild.success) return asGuild.data;
+    const asPool = poolSubscriptionRowSchema.safeParse(row);
+    return asPool.success ? asPool.data : undefined;
+  }
+
+  async claimRefundRequest(input: {
+    subscriptionId: string;
+    purchaserUserId: string;
+    at: Date;
+  }): Promise<boolean> {
+    const rows = await this.db
+      .update(subscriptions)
+      .set({ refundRequestedAt: input.at, updatedAt: input.at })
+      .where(
+        and(
+          eq(subscriptions.id, input.subscriptionId),
+          eq(subscriptions.purchaserUserId, input.purchaserUserId),
+          isNull(subscriptions.refundRequestedAt),
+          isNull(subscriptions.refundSettledAt),
+          isNull(subscriptions.refundStatus),
+          isNull(subscriptions.refundAction),
+          isNotNull(subscriptions.chargedAt),
+          // Still the first charge: `charged_at` moves on renewal, this does not.
+          sql`${subscriptions.chargedAt} = ${subscriptions.firstChargedAt}`,
+          // One self-serve refund per purchaser, across every subscription they
+          // hold. Computed from rows we already keep, so no separate refund
+          // history has to be stored or retained.
+          sql`NOT EXISTS (
+                SELECT 1 FROM ${subscriptions} AS other
+                 WHERE other.purchaser_user_id = ${input.purchaserUserId}
+                   AND other.refund_requested_at IS NOT NULL
+              )`,
+        ),
+      )
+      .returning({ id: subscriptions.id });
+    return rows.length > 0;
+  }
+
+  async claimCancelRequest(paddleSubscriptionId: string, adjustmentId: string): Promise<boolean> {
+    const rows = await this.db
+      .update(subscriptions)
+      .set({ cancelRequestedAdjustmentId: adjustmentId, updatedAt: new Date() })
+      .where(
+        and(
+          eq(subscriptions.paddleSubscriptionId, paddleSubscriptionId),
+          or(
+            isNull(subscriptions.cancelRequestedAdjustmentId),
+            ne(subscriptions.cancelRequestedAdjustmentId, adjustmentId),
           ),
         ),
       )

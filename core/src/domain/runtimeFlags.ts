@@ -39,6 +39,30 @@ export const RUNTIME_FLAGS = {
    */
   BILLING_HARD_GATE_DISABLED: 'billing.hard_gate_disabled',
 
+  /**
+   * Stops the outbound Paddle cancellation that follows a settled refund.
+   *
+   * Read by `avc-web` alone, which is unusual for a flag in this file and is why
+   * it says so: the key has to live here because this enum is the single
+   * definition site and `/admin/ops` derives its lever list from it, but nothing
+   * in the bot reads it. `/admin/ops` takes its fleet from `WEB_FLEET`, so one
+   * row is the whole switch.
+   *
+   * Ships ENABLED (`false`). A refund that does not cancel leaves the customer
+   * being billed again for service that already stopped, which is the invariant
+   * this design exists to hold, and the cancellation is a SCHEDULED one that a
+   * single PATCH reverses. The flag exists for the case where Paddle starts
+   * refusing the call, not as a staged rollout.
+   */
+  BILLING_AUTO_CANCEL_DISABLED: 'billing.auto_cancel_disabled',
+
+  /**
+   * Stops the self-serve refund action. The support route is unaffected, and so
+   * is `adjustment.*` processing: this switches off the button, never the
+   * handling of a refund somebody already got.
+   */
+  BILLING_REFUND_REQUESTS_DISABLED: 'billing.refund_requests_disabled',
+
   // -- AI-assisted templates (plans/assisted_templates.md §5) ----------------
   // NOT plan features. The per-guild cap is uniform on every tier and is never
   // raised by paying; it exists so a stuck client loop cannot run up a bill.

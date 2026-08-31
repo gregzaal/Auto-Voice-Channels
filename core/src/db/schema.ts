@@ -573,6 +573,32 @@ export const subscriptions = pgTable(
      * one fact they need at the moment they are looking for it.
      */
     chargedAt: timestamp('charged_at', { withTimezone: true }),
+    /**
+     * The FIRST charge on this subscription, set once and never overwritten.
+     *
+     * `charged_at` moves to each renewal, so it cannot answer "is this still the
+     * first charge", and the self-serve refund cap has to: `/refunds` §2 scopes
+     * the no-questions guarantee to a first subscription, and §11 notes the cap
+     * must test the first CHARGE or a renewal reopens the window every year.
+     *
+     * Comparing it against `charged_at` for equality is that test, and it is
+     * exact and idempotent, unlike a counter that a redelivered
+     * `transaction.completed` would double.
+     */
+    firstChargedAt: timestamp('first_charged_at', { withTimezone: true }),
+    /**
+     * When the purchaser asked for a refund through the SELF-SERVE button.
+     *
+     * The cap is claimed by writing this in the same statement that tests it,
+     * because `refund_status` is written by the webhook seconds to minutes later:
+     * two requests 200ms apart would both read it as null and both pass. Modelled
+     * on `AiUsageRepository.reserveBuild`, which is the same shape.
+     *
+     * Never a reason to refuse the SUPPORT route. The cap governs the convenience
+     * path only: a statutory withdrawal right is not declinable for abuse, so
+     * anything past the cap goes to a human rather than being refused.
+     */
+    refundRequestedAt: timestamp('refund_requested_at', { withTimezone: true }),
     /** Refunded amount (minor units) for that adjustment. */
     refundTotal: text('refund_total'),
     /**
@@ -613,6 +639,20 @@ export const subscriptions = pgTable(
     refundSettledAt: timestamp('refund_settled_at', { withTimezone: true }),
     /** Which adjustment set `refund_settled_at`, so the clearing rule can match it. */
     refundAdjustmentId: text('refund_adjustment_id'),
+    /**
+     * Which adjustment we have already asked Paddle to cancel for.
+     *
+     * The webhook's own idempotency gate is not enough for an outbound call:
+     * `markProcessed` is its LAST statement, so any throw between the refund
+     * write and it returns 500, Paddle retries with a fresh signature, the gate
+     * does not fire, and the cancellation is scheduled twice. The harm is a
+     * duplicate cancellation email to a customer we just refunded.
+     *
+     * Claimed by a conditional UPDATE before the call, so a failed attempt is
+     * NOT retried: one attempt, and a failure is surfaced on the operator queue
+     * and the customer's card rather than repeated at a live payment provider.
+     */
+    cancelRequestedAdjustmentId: text('cancel_requested_adjustment_id'),
     /** The adjustment's own currency, which is not necessarily the charge's. */
     refundCurrency: text('refund_currency'),
     createdAt: createdAt(),

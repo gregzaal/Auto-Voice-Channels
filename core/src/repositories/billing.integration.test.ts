@@ -371,6 +371,116 @@ describe('billing repositories (integration)', () => {
     });
   });
 
+  describe('claimRefundRequest (the self-serve cap)', () => {
+    /**
+     * `plans/refunds.md` §11. The cap has to be claimed in the same statement
+     * that tests it: `refund_status` is written by the webhook seconds to
+     * minutes later, so two clicks 200ms apart would both read it as null and
+     * both pass. Real Postgres, because that atomicity IS the feature.
+     */
+    async function seedCharged(guildId: string, paddleId: string, user: string, at: Date) {
+      await guilds.ensure(guildId);
+      const row = await subs.upsert({
+        guildId,
+        paddleSubscriptionId: paddleId,
+        paddleCustomerId: `ctm_${paddleId}`,
+        purchaserUserId: user,
+        tier: 'm',
+        status: 'active',
+      });
+      await subs.recordChargedTotals(paddleId, {
+        total: '3900',
+        transactionId: `txn_${paddleId}`,
+        chargedAt: at,
+      });
+      return row.id;
+    }
+
+    it('grants once and refuses the second attempt', async () => {
+      const at = new Date('2026-08-31T00:00:00.000Z');
+      const id = await seedCharged('cap-g1', 'sub_cap_1', 'user-cap-1', at);
+      expect(
+        await subs.claimRefundRequest({ subscriptionId: id, purchaserUserId: 'user-cap-1', at }),
+      ).toBe(true);
+      expect(
+        await subs.claimRefundRequest({ subscriptionId: id, purchaserUserId: 'user-cap-1', at }),
+      ).toBe(false);
+    });
+
+    it('lets only ONE of two simultaneous claims win', async () => {
+      const at = new Date('2026-08-31T00:00:00.000Z');
+      const id = await seedCharged('cap-g2', 'sub_cap_2', 'user-cap-2', at);
+      const results = await Promise.all([
+        subs.claimRefundRequest({ subscriptionId: id, purchaserUserId: 'user-cap-2', at }),
+        subs.claimRefundRequest({ subscriptionId: id, purchaserUserId: 'user-cap-2', at }),
+      ]);
+      expect(results.filter(Boolean)).toHaveLength(1);
+    });
+
+    it('refuses somebody who is not the purchaser', async () => {
+      const at = new Date('2026-08-31T00:00:00.000Z');
+      const id = await seedCharged('cap-g3', 'sub_cap_3', 'user-cap-3', at);
+      expect(
+        await subs.claimRefundRequest({ subscriptionId: id, purchaserUserId: 'someone-else', at }),
+      ).toBe(false);
+    });
+
+    it('refuses a RENEWAL, so the window does not reopen every year', async () => {
+      const first = new Date('2026-08-31T00:00:00.000Z');
+      const id = await seedCharged('cap-g4', 'sub_cap_4', 'user-cap-4', first);
+      // A second charge moves `charged_at` and leaves `first_charged_at` alone,
+      // and their inequality is what the claim tests.
+      await subs.recordChargedTotals('sub_cap_4', {
+        total: '3900',
+        transactionId: 'txn_renewal',
+        chargedAt: new Date('2027-08-31T00:00:00.000Z'),
+      });
+      expect(
+        await subs.claimRefundRequest({
+          subscriptionId: id,
+          purchaserUserId: 'user-cap-4',
+          at: new Date('2027-09-01T00:00:00.000Z'),
+        }),
+      ).toBe(false);
+    });
+
+    it('gives a purchaser ONE self-serve refund across all their subscriptions', async () => {
+      const at = new Date('2026-08-31T00:00:00.000Z');
+      const a = await seedCharged('cap-g5', 'sub_cap_5', 'user-cap-5', at);
+      const b = await seedCharged('cap-g6', 'sub_cap_6', 'user-cap-5', at);
+      expect(
+        await subs.claimRefundRequest({ subscriptionId: a, purchaserUserId: 'user-cap-5', at }),
+      ).toBe(true);
+      // Refund then rebuy would otherwise reset the cap.
+      expect(
+        await subs.claimRefundRequest({ subscriptionId: b, purchaserUserId: 'user-cap-5', at }),
+      ).toBe(false);
+    });
+
+    it('refuses when a dispute is already on the record', async () => {
+      const at = new Date('2026-08-31T00:00:00.000Z');
+      const id = await seedCharged('cap-g7', 'sub_cap_7', 'user-cap-7', at);
+      await subs.applyAdjustment(
+        {
+          adjustmentId: 'adj_cb',
+          paddleSubscriptionId: 'sub_cap_7',
+          transactionId: 'txn_sub_cap_7',
+          action: 'chargeback',
+          status: 'approved',
+          type: 'full',
+          total: '3900',
+          currency: 'USD',
+          updatedAt: at,
+        },
+        { kind: 'settle', reason: 'full_approved' },
+      );
+      // Refunding on top of a chargeback pays the same money back twice.
+      expect(
+        await subs.claimRefundRequest({ subscriptionId: id, purchaserUserId: 'user-cap-7', at }),
+      ).toBe(false);
+    });
+  });
+
   describe('BillingEventRepository (webhook idempotency)', () => {
     it('recordOnce inserts once; replays are no-ops', async () => {
       const input = {
