@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { z } from 'zod';
+import type { z } from 'zod';
 import { primaryTemplateSchema } from '../repositories/autoChannels.js';
 import { managedStateSchema, managedTemplateSchema } from '../repositories/managedChannels.js';
 import {
