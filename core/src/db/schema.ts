@@ -522,7 +522,46 @@ export const subscriptions = pgTable(
     refundStatus: text('refund_status'),
     /** Refunded amount (minor units) for that adjustment. */
     refundTotal: text('refund_total'),
+    /**
+     * When WE received the adjustment, not when Paddle stamped it.
+     *
+     * Load-bearing distinction, and the reason `refund_updated_at` exists
+     * beside it: `recordRefund` writes `refund.at ?? new Date()` and no caller
+     * passes `at`, so this is always receipt wall-clock. Two customer-facing
+     * surfaces render it as the refund date. It cannot double as the ordering
+     * guard's input, because a receipt time is always LATER than the
+     * adjustment's own timestamp, so the guard would judge every incoming event
+     * stale and freeze the status it was meant to protect.
+     */
     refundAt: timestamp('refund_at', { withTimezone: true }),
+    /**
+     * The adjustment's own `updated_at`, from Paddle. The ordering guard's
+     * input: an incoming adjustment is applied only when its timestamp is at or
+     * after what we hold, so a redelivered `created` cannot regress an
+     * `approved` (`plans/refunds.md` §2.6, §7.2).
+     */
+    refundUpdatedAt: timestamp('refund_updated_at', { withTimezone: true }),
+    /**
+     * Set when a FULL, APPROVED refund of the transaction that bought the
+     * CURRENT period arrives. **The authority for "access is revoked"**, read
+     * first by `subscriptionInGoodStanding`.
+     *
+     * All three qualifiers matter. `full` comes from Paddle's own label, never
+     * from comparing amounts. `approved` excludes a request still being judged.
+     * And the transaction test is what stops a goodwill refund of an old charge
+     * gating a customer who is fully paid up: `type: 'full'` describes a
+     * transaction, not the paid term.
+     *
+     * Cleared when the ordering guard admits a `rejected` or `reversed` status
+     * for the adjustment named in `refund_adjustment_id`. Without that, a
+     * reversal, which is Paddle giving us the money back, would leave the
+     * servers gated and the supporter badge revoked forever.
+     */
+    refundSettledAt: timestamp('refund_settled_at', { withTimezone: true }),
+    /** Which adjustment set `refund_settled_at`, so the clearing rule can match it. */
+    refundAdjustmentId: text('refund_adjustment_id'),
+    /** The adjustment's own currency, which is not necessarily the charge's. */
+    refundCurrency: text('refund_currency'),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },

@@ -40,10 +40,26 @@ export const subscriptionRowSchema = z.object({
   chargedTotal: z.string().nullish(),
   chargedTax: z.string().nullish(),
   chargedCurrency: z.string().nullish(),
-  /** Latest refund adjustment state. Consumed by `subscriptionInGoodStanding`. */
+  /** Latest refund adjustment state, for display. See `refundSettledAt` for authority. */
   refundStatus: z.string().nullish(),
   refundTotal: z.string().nullish(),
+  /** When WE received the adjustment. Not the ordering guard's input: see schema.ts. */
   refundAt: z.date().nullish(),
+  /** The adjustment's own Paddle timestamp, which IS the ordering guard's input. */
+  refundUpdatedAt: z.date().nullish(),
+  /**
+   * The authority for "access is revoked": a full, approved refund of the
+   * transaction that bought the current period.
+   *
+   * `.nullish()` like every other added column, so a build predating the
+   * migration still parses. That is also why `subscriptionInGoodStanding` keeps
+   * a compat branch on `refundStatus`: until the writer ships, this is null on
+   * every row, and a predicate reading only this would report a refunded
+   * subscription as healthy.
+   */
+  refundSettledAt: z.date().nullish(),
+  refundAdjustmentId: z.string().nullish(),
+  refundCurrency: z.string().nullish(),
   /** Pending Paddle change: 'cancel' | 'pause' | 'resume'. Null = renewing normally. */
   scheduledChangeAction: z.string().nullish(),
   scheduledChangeAt: z.date().nullish(),
