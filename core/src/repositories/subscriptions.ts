@@ -152,6 +152,51 @@ export function subscriptionInGoodStanding(sub: {
  */
 export const SUBSCRIPTION_DUNNING_STATUSES: ReadonlySet<string> = new Set(['past_due']);
 
+/** Scheduled Paddle changes that end a subscription rather than pausing it. */
+const SUBSCRIPTION_TERMINAL_CHANGES: ReadonlySet<string> = new Set(['cancel']);
+
+/**
+ * Whether this subscription can still produce a future charge.
+ *
+ * The complement of {@link subscriptionInGoodStanding}, not its negation, and
+ * the two are independent: an approved refund revokes standing immediately
+ * while Paddle keeps billing on schedule, so a refunded subscription with no
+ * cancellation behind it renews and charges again for service we have already
+ * stopped delivering.
+ *
+ * That gap is what this answers, and two decisions depend on it. A customer
+ * cannot be offered a second subscription for a server whose existing one will
+ * charge again, or they are billed twice. And a subscription that will never
+ * charge again is settled: it needs no cancel control, so the server it used to
+ * cover can be sold a fresh subscription instead of being stuck behind a dead
+ * row until Paddle's own cancellation date lands.
+ *
+ * `pause` is deliberately NOT terminal: a paused subscription resumes and bills
+ * again, so it counts as live. `canceled` is, whatever the refund says.
+ */
+export function subscriptionWillChargeAgain(sub: {
+  status: string;
+  scheduledChangeAction?: string | null | undefined;
+}): boolean {
+  if (sub.status === 'canceled' || sub.status === 'cancelled') return false;
+  if (sub.scheduledChangeAction && SUBSCRIPTION_TERMINAL_CHANGES.has(sub.scheduledChangeAction)) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Whether a subscription is finished: delivering nothing and charging nothing
+ * ever again. A row in this state exists only as history.
+ */
+export function subscriptionIsSettled(sub: {
+  status: string;
+  refundStatus?: string | null | undefined;
+  scheduledChangeAction?: string | null | undefined;
+}): boolean {
+  return !subscriptionInGoodStanding(sub) && !subscriptionWillChargeAgain(sub);
+}
+
 /**
  * Whether a subscription earns its purchaser public recognition, as distinct
  * from whether it is paying its way right now.

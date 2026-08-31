@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   subscriptionEarnsRecognition,
   subscriptionInGoodStanding,
+  subscriptionIsSettled,
+  subscriptionWillChargeAgain,
   SUBSCRIPTION_OK_STATUSES,
 } from './subscriptions.js';
 
@@ -79,5 +81,68 @@ describe('subscriptionEarnsRecognition', () => {
     expect(
       subscriptionEarnsRecognition({ status: 'past_due', refundStatus: 'pending_approval' }),
     ).toBe(true);
+  });
+});
+
+/**
+ * The third predicate, and the one the other two cannot answer: **a refund does
+ * not cancel a subscription.** Standing and future billing are independent, so
+ * a refunded subscription can be delivering nothing while Paddle still has a
+ * renewal date for it.
+ *
+ * Two decisions ride on this. A server whose existing subscription will charge
+ * again must not be sold a second one, or the customer pays twice. And a
+ * subscription that will never charge again is finished, so the server it used
+ * to cover can be sold a fresh one instead of being stuck behind a dead row
+ * until Paddle's own cancellation date lands, up to a year out.
+ */
+describe('subscriptionWillChargeAgain', () => {
+  it('is true for every status Paddle still bills, refunded or not', () => {
+    for (const status of ['active', 'trialing', 'past_due', 'paused']) {
+      expect(subscriptionWillChargeAgain({ status }), status).toBe(true);
+      expect(subscriptionWillChargeAgain({ status, scheduledChangeAction: null }), status).toBe(
+        true,
+      );
+    }
+    // The case that costs money: gated by the refund, still on the billing run.
+    expect(subscriptionWillChargeAgain({ status: 'active' })).toBe(true);
+  });
+
+  it('is false once it is cancelled, however that was spelled', () => {
+    expect(subscriptionWillChargeAgain({ status: 'canceled' })).toBe(false);
+    expect(subscriptionWillChargeAgain({ status: 'cancelled' })).toBe(false);
+    expect(subscriptionWillChargeAgain({ status: 'active', scheduledChangeAction: 'cancel' })).toBe(
+      false,
+    );
+  });
+
+  /** A pause is not an ending: it resumes and bills again. */
+  it('treats a scheduled pause as still live', () => {
+    expect(subscriptionWillChargeAgain({ status: 'active', scheduledChangeAction: 'pause' })).toBe(
+      true,
+    );
+  });
+});
+
+describe('subscriptionIsSettled', () => {
+  it('is true only when it delivers nothing AND bills nothing again', () => {
+    expect(subscriptionIsSettled({ status: 'canceled' })).toBe(true);
+    expect(
+      subscriptionIsSettled({
+        status: 'active',
+        refundStatus: 'approved',
+        scheduledChangeAction: 'cancel',
+      }),
+    ).toBe(true);
+  });
+
+  it('is false while either half is still live', () => {
+    // Refunded but never cancelled: nothing delivered, and it charges again.
+    expect(subscriptionIsSettled({ status: 'active', refundStatus: 'approved' })).toBe(false);
+    // Cancelled but still inside the paid term: no more charges, still serving.
+    expect(subscriptionIsSettled({ status: 'active', scheduledChangeAction: 'cancel' })).toBe(
+      false,
+    );
+    expect(subscriptionIsSettled({ status: 'active' })).toBe(false);
   });
 });
