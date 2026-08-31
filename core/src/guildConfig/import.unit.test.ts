@@ -30,6 +30,7 @@ const CATEGORY = '567890123456789012';
 const CONTACT = '123456789012345678';
 const HOSTED_APP = '479393422705426432';
 const SELF_HOST_APP = '675405085752164372';
+const ACTOR = '333333333333333333';
 
 function voiceChannel(name: string, over: Partial<ChannelFact> = {}): ChannelFact {
   return { name, kind: 'voice', botCanManage: true, botCanRename: true, ...over };
@@ -48,6 +49,7 @@ function facts(over: Partial<GuildFacts> = {}): GuildFacts {
     foreignFleetChannels: new Map(),
     applicationId: HOSTED_APP,
     otherFleetsPresent: [],
+    actorId: ACTOR,
     ...over,
   };
 }
@@ -475,6 +477,96 @@ describe('diffGuildConfig: settings', () => {
     const plan = planOf(file);
     expect(plan.settingsPatch.log_level).toBeUndefined();
     expect(noteCodes(plan)).toContain('setting_invalid');
+  });
+
+  /**
+   * The fourth hook on `settings.contact_user_id`.
+   *
+   * A path that configures creator channels and leaves nobody recorded produces
+   * a guild nothing can reach when its automation breaks, which is why the three
+   * existing writers all stamp it.
+   */
+  describe('the contact stamp', () => {
+    const withTemplate = () =>
+      nativeFile({
+        creator_channels: [
+          {
+            channel_id: CREATOR,
+            channel_name: null,
+            template: {
+              name: 'Room ##',
+              status: null,
+              limit: null,
+              above: null,
+              defaultPrivate: null,
+              inheritperms: null,
+            },
+          },
+        ],
+      });
+
+    it('stamps the importer when the file names nobody and the guild has nobody', () => {
+      const plan = planOf(withTemplate());
+      expect(plan.settingsPatch.contact_user_id).toBe(ACTOR);
+      expect(noteCodes(plan)).toContain('contact_stamped');
+    });
+
+    it('stamps the importer when the file names somebody who has left', () => {
+      const file = withTemplate();
+      file.settings.contact_user_id = '222222222222222222';
+      const plan = planOf(file);
+      expect(noteCodes(plan)).toContain('contact_not_member');
+      expect(plan.settingsPatch.contact_user_id).toBe(ACTOR);
+    });
+
+    it('leaves the file own contact alone when that person is a member', () => {
+      const file = withTemplate();
+      file.settings.contact_user_id = CONTACT;
+      const plan = planOf(file);
+      expect(plan.settingsPatch.contact_user_id).toBe(CONTACT);
+      expect(noteCodes(plan)).not.toContain('contact_stamped');
+    });
+
+    it('leaves a stored contact alone when the file carries the same one', () => {
+      const file = withTemplate();
+      file.settings.contact_user_id = CONTACT;
+      const plan = planOf(file, currentConfig({ settings: { contact_user_id: CONTACT } }));
+      expect(plan.settingsPatch.contact_user_id).toBeUndefined();
+      expect(plan.settingsRemove).not.toContain('contact_user_id');
+    });
+
+    /**
+     * The case worth pinning: the clear is WITHDRAWN, not layered over. The
+     * settings write applies the key minus AFTER the concat, so a key left in
+     * both would be deleted again and the stamp would silently do nothing.
+     */
+    it('withdraws the clear rather than writing and deleting the same key', () => {
+      const plan = planOf(
+        withTemplate(),
+        currentConfig({ settings: { contact_user_id: CONTACT } }),
+      );
+      expect(plan.settingsRemove).not.toContain('contact_user_id');
+      expect(plan.settingsPatch.contact_user_id).toBe(ACTOR);
+    });
+
+    /** Settings-only imports are not a setup path, so they do not stamp. */
+    it('does not stamp when the import writes no template', () => {
+      const file = nativeFile();
+      file.settings.general = 'Voice';
+      const plan = planOf(file);
+      expect(plan.settingsPatch.contact_user_id).toBeUndefined();
+      expect(noteCodes(plan)).not.toContain('contact_stamped');
+    });
+
+    it('does not stamp when there is no actor to stamp', () => {
+      const result = diffGuildConfig(
+        fromNativeFile(withTemplate()),
+        currentConfig(),
+        facts({ actorId: null }),
+      );
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.plan.settingsPatch.contact_user_id).toBeUndefined();
+    });
   });
 
   it('warns when the file switches automation off', () => {

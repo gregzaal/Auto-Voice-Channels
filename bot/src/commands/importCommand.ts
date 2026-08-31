@@ -256,14 +256,14 @@ export async function handleImportCommand(
     return;
   }
 
-  const read = readIncoming(parsed, attachment.name);
+  const read = readIncoming(parsed, attachment.name, guildId);
   if (!read.ok) {
     deps.counters?.refused('unreadable');
     await interaction.editReply(`That file was not usable: ${read.reason}`);
     return;
   }
 
-  const facts = await buildFacts(guild, read.incoming, deps);
+  const facts = await buildFacts(guild, read.incoming, interaction.user.id, deps);
   const current = await readCurrentConfig(deps, guildId);
   const result = diffGuildConfig(read.incoming, current, facts);
 
@@ -472,7 +472,7 @@ async function applyImport(
   // Everything about the GUILD is re-read here, which is the whole reason the
   // file is not re-fetched: the plan applied is the plan previewed, and the
   // state it is applied to is current.
-  const facts = await buildApplyFacts(guild, previewPlan, deps);
+  const facts = await buildApplyFacts(guild, previewPlan, interaction.user.id, deps);
   const current = await readCurrentConfig(deps, guildId);
   const snapshot = buildExportFile(current, {
     guildId,
@@ -734,7 +734,7 @@ async function announce(
 
 type ReadResult = { ok: true; incoming: IncomingConfig } | { ok: false; reason: string };
 
-function readIncoming(parsed: unknown, fileName: string): ReadResult {
+function readIncoming(parsed: unknown, fileName: string, guildId: string): ReadResult {
   const sniff = sniffFormat(parsed);
   if (sniff.format === 'unreadable') return { ok: false, reason: sniff.reason };
 
@@ -758,7 +758,21 @@ function readIncoming(parsed: unknown, fileName: string): ReadResult {
   const stripped: Record<string, unknown> = { ...raw };
   delete stripped.left;
 
-  const plan = planGuild('unknown', stripped, {});
+  /**
+   * The guild running the command, not a placeholder.
+   *
+   * `planGuild` only uses it to stamp its own output and to consult
+   * `liveGuildIds` (which a per-guild caller does not pass), so a placeholder
+   * would be inert. It is still the wrong thing to write: the plan would carry
+   * an id that is not this guild's, and the next reader has to work out whether
+   * that matters.
+   *
+   * `fromLegacyPlan` still reports `guildId: null` on the INCOMING config, and
+   * that is the semantically load-bearing part: a legacy FILE carries no guild
+   * id of its own, which is why the filename is the only cross-guild check
+   * available for that format.
+   */
+  const plan = planGuild(guildId, stripped, {});
   return {
     ok: true,
     incoming: fromLegacyPlan(plan, {
@@ -866,6 +880,7 @@ async function fleetFacts(
 async function buildFacts(
   guild: Guild,
   incoming: IncomingConfig,
+  actorId: string,
   deps: ImportCommandDeps,
 ): Promise<GuildFacts> {
   const ids = [
@@ -888,6 +903,7 @@ async function buildFacts(
     channels: channelFacts(guild),
     members,
     applicationId: deps.applicationId,
+    actorId,
     ...(await fleetFacts(guild, ids, deps)),
   };
 }
@@ -911,6 +927,7 @@ async function buildFacts(
 async function buildApplyFacts(
   guild: Guild,
   plan: ImportPlan,
+  actorId: string,
   deps: ImportCommandDeps,
 ): Promise<GuildFacts> {
   const ids = [
@@ -922,6 +939,7 @@ async function buildApplyFacts(
     channels: channelFacts(guild),
     members: new Map(),
     applicationId: deps.applicationId,
+    actorId,
     ...(await fleetFacts(guild, ids, deps)),
   };
 }

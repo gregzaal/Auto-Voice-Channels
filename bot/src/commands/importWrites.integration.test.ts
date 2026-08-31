@@ -49,6 +49,7 @@ function facts(over: Partial<GuildFacts> = {}): GuildFacts {
     foreignFleetChannels: new Map(),
     applicationId: '479393422705426432',
     otherFleetsPresent: [],
+    actorId: '333333333333333333',
     ...over,
   };
 }

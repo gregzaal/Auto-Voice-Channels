@@ -54,6 +54,7 @@ function facts(): GuildFacts {
     foreignFleetChannels: new Map(),
     applicationId: APP,
     otherFleetsPresent: [],
+    actorId: CONTACT,
   };
 }
 

@@ -83,6 +83,16 @@ export interface GuildFacts {
   applicationId: string | null;
   /** Other AVC fleets configured in this guild, if any. */
   otherFleetsPresent: readonly string[];
+  /**
+   * Whoever ran the command, for the contact rule in {@link diffSettings}.
+   *
+   * `/import` is the fourth writer of `settings.contact_user_id`, alongside
+   * `handleCreateSubmit`, `applyEditor` and `handleAdoptButton`, and the rule
+   * they all follow is that a path which writes a template must not leave the
+   * guild with no recorded contact. Null only for a caller with nobody to
+   * stamp, which no real caller is.
+   */
+  actorId: string | null;
 }
 
 export interface CurrentCreatorChannel {
@@ -174,6 +184,7 @@ export type ImportNoteCode =
   | 'group_unresolved'
   | 'inheritperms_unresolved'
   | 'contact_not_member'
+  | 'contact_stamped'
   | 'template_field_invalid'
   | 'automation_switched_off'
   | 'position_overwritten'
@@ -470,8 +481,8 @@ export function diffGuildConfig(
   const storedCreators = new Map(current.creatorChannels.map((c) => [c.channelId, c]));
   const storedAdopted = new Map(current.adoptedChannels.map((c) => [c.channelId, c]));
 
-  const settingsResult = diffSettings(incoming, current, facts, limits, notes);
-
+  // Channels first, because the contact rule inside the settings pass only
+  // applies to an import that actually writes a template.
   const creator = diffCreatorChannels(
     incoming,
     storedCreators,
@@ -488,6 +499,9 @@ export function diffGuildConfig(
     limits,
     notes,
   );
+  const wroteTemplates = creator.writes.length > 0 || adopted.writes.length > 0;
+
+  const settingsResult = diffSettings(incoming, current, facts, limits, notes, wroteTemplates);
 
   // Every channel in the file belongs to another fleet, so the import would
   // change settings only. That is a partial success the admin should get to
@@ -550,6 +564,7 @@ function diffSettings(
   facts: GuildFacts,
   limits: typeof IMPORT_LIMITS,
   notes: ImportNote[],
+  wroteTemplates: boolean,
 ): SettingsDiff {
   const patch: Record<string, unknown> = {};
   const remove: string[] = [];
@@ -578,7 +593,72 @@ function diffSettings(
     changes.push(settingChange(key, stored, validated));
   }
 
+  if (wroteTemplates) stampContactIfNeeded(patch, remove, current, facts, changes, notes);
   return { patch, remove, changes };
+}
+
+/**
+ * `/import` is the fourth hook on `settings.contact_user_id`, and this is it.
+ *
+ * The contact is who gets told when a guild's automation breaks, and the three
+ * existing writers all stamp it because a path that configures creator channels
+ * and leaves nobody recorded produces a guild nothing can reach. An import that
+ * writes templates is such a path, and it has two ways to end up with no
+ * contact: the file names nobody, or the file names somebody who has since left
+ * and their id was dropped.
+ *
+ * Only ever fills a GAP: it never overrides a contact that SURVIVES the import,
+ * whether that came from the file or was already stored. Where the import would
+ * leave the guild with nobody, the importer is stamped, which is what the other
+ * three hooks do and is the same person who just chose to apply the file.
+ *
+ * Note the case that is easy to misread: a native file carrying
+ * `contact_user_id: null` clears the stored contact, because null means absent
+ * and replace means replace. The stamp then fills the gap that clear just made.
+ * Leaving the old contact in place instead would break the exact round trip,
+ * since a snapshot taken from a guild with no contact could no longer restore
+ * that state.
+ */
+function stampContactIfNeeded(
+  patch: Record<string, unknown>,
+  remove: string[],
+  current: CurrentConfig,
+  facts: GuildFacts,
+  changes: SettingChange[],
+  notes: ImportNote[],
+): void {
+  // Truthiness, not `!== null`: `core/tsconfig.json` excludes `*.test.ts`, so a
+  // fixture that omits `actorId` passes undefined here and typechecks nowhere.
+  // A strict null check would then write `undefined` into the patch.
+  if (!facts.actorId) return;
+
+  const key: ExportSettingsKey = 'contact_user_id';
+  if (Object.prototype.hasOwnProperty.call(patch, key)) return; // the file named somebody usable
+
+  const clearing = remove.includes(key);
+  const stored = current.settings[key];
+  const wouldBeUnset = clearing || typeof stored !== 'string' || stored === '';
+  if (!wouldBeUnset) return;
+
+  patch[key] = facts.actorId;
+  /**
+   * The clear is WITHDRAWN rather than layered over.
+   *
+   * `mergeSettings` applies the minus after the concat, deliberately, so a key
+   * left in both would be deleted again and the stamp would silently do
+   * nothing.
+   */
+  const at = remove.indexOf(key);
+  if (at !== -1) remove.splice(at, 1);
+
+  const existing = changes.find((c) => c.key === key);
+  if (existing) {
+    existing.after = facts.actorId;
+    existing.cleared = false;
+  } else {
+    changes.push(settingChange(key, stored, facts.actorId));
+  }
+  notes.push({ code: 'contact_stamped', severity: 'warning', subject: key, other: facts.actorId });
 }
 
 function clearedChange(key: ExportSettingsKey, before: unknown): SettingChange {

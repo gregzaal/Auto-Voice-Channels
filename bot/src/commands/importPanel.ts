@@ -236,6 +236,7 @@ const NOTE_LABELS: Record<ImportNoteCode, string> = {
   group_unresolved: 'Category does not exist here',
   inheritperms_unresolved: 'Permission source channel does not exist here',
   contact_not_member: 'Named contact has left this server',
+  contact_stamped: 'Recorded as the server contact for AVC problem notices',
   template_field_invalid: 'Template value was not usable',
   automation_switched_off: 'This file turns AVC off in this server',
   position_overwritten: 'Channel position is always rewritten by an old Python config',
