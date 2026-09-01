@@ -36,6 +36,7 @@ function depsRecording(order: string[]): ShutdownDeps {
     alertScheduler: {
       stop: step('alertScheduler.stop'),
     } as unknown as ShutdownDeps['alertScheduler'],
+    gatewaySupervisor: { stop: () => order.push('gatewaySupervisor.stop') },
     leaseManager: { releaseAll: step('releaseAll') } as unknown as ShutdownDeps['leaseManager'],
     settingsCache: { stop: step('settingsCache.stop') } as unknown as ShutdownDeps['settingsCache'],
     notifier: { close: step('notifier.close') } as unknown as ShutdownDeps['notifier'],
@@ -51,6 +52,7 @@ describe('gracefulDrain', () => {
 
     expect(order).toEqual([
       'alertScheduler.stop',
+      'gatewaySupervisor.stop',
       'stopSweep',
       'billingReconciler.stop',
       'disposeInteractions',
@@ -118,5 +120,27 @@ describe('gracefulDrain', () => {
     await gracefulDrain(deps);
     expect(spy).toHaveBeenCalledWith(deps.dbPingTimer);
     spy.mockRestore();
+  });
+  /**
+   * **`client.destroy()` below makes the gateway genuinely down.**
+   *
+   * A supervisor still ticking through a slow drain therefore confirms it, posts
+   * "instance is restarting" about a machine already shutting down on purpose,
+   * and writes an `instance.self_restart` row that spends the real hourly
+   * allowance the next boot has to respect. Same reasoning as stopping the
+   * watcher first, with a durable side effect on top.
+   */
+  it('stops the gateway supervisor before destroying the gateway', async () => {
+    const order: string[] = [];
+    await gracefulDrain(depsRecording(order));
+    expect(order.indexOf('gatewaySupervisor.stop')).toBeLessThan(order.indexOf('client.destroy'));
+    expect(order.indexOf('gatewaySupervisor.stop')).toBeLessThan(order.indexOf('drainAll'));
+  });
+
+  /** Absent on a self-host build that never constructed one. */
+  it('does not require a supervisor', async () => {
+    const order: string[] = [];
+    const deps = depsRecording(order);
+    await expect(gracefulDrain({ ...deps, gatewaySupervisor: undefined })).resolves.toBeUndefined();
   });
 });

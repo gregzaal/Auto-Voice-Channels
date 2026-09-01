@@ -104,6 +104,69 @@ describe('RuntimeFlags + OpsAudit (integration)', () => {
     });
   });
 
+  /**
+   * **The durable rate limit behind `GatewaySupervisor`, which used to be a page
+   * scan and therefore failed open.**
+   *
+   * It read `recent(50)` and looked for its own row in the result, but those 50
+   * slots are shared with every writer of this table, including one row per
+   * guild the billing pass moves. A busy hour pushed the restart record off the
+   * page, the guard concluded "no recent restart", and the only thing bounding a
+   * restart loop was gone. The first case here is that exact scenario.
+   */
+  describe('hasActionSince', () => {
+    const HOUR = 60 * 60_000;
+
+    it('finds the row however many unrelated rows were written after it', async () => {
+      await env.handle.db.execute('DELETE FROM ops_audit');
+      await audit.record({ actor: 'i1', action: 'instance.self_restart', target: 'i1' });
+      for (let i = 0; i < 60; i += 1) {
+        await audit.record({ actor: 'billing', action: 'guild.auth.grace', target: `g${i}` });
+      }
+
+      const found = await audit.hasActionSince(
+        'instance.self_restart',
+        'i1',
+        new Date(Date.now() - HOUR),
+      );
+      expect(found).toBe(true);
+      // The shape that used to be relied on, for contrast: 50 newest rows no
+      // longer contain it at all.
+      const page = await audit.recent(50);
+      expect(page.some((r) => r.action === 'instance.self_restart')).toBe(false);
+    });
+
+    it('is false past the window', async () => {
+      await env.handle.db.execute('DELETE FROM ops_audit');
+      await env.handle.db.execute(
+        `INSERT INTO ops_audit (actor, action, target, created_at) VALUES
+           ('i1', 'instance.self_restart', 'i1', '2026-08-01T00:00:00Z')`,
+      );
+      expect(
+        await audit.hasActionSince('instance.self_restart', 'i1', new Date(Date.now() - HOUR)),
+      ).toBe(false);
+    });
+
+    it('does not confuse one instance with another', async () => {
+      await env.handle.db.execute('DELETE FROM ops_audit');
+      await audit.record({ actor: 'i2', action: 'instance.self_restart', target: 'i2' });
+      expect(
+        await audit.hasActionSince('instance.self_restart', 'i1', new Date(Date.now() - HOUR)),
+      ).toBe(false);
+      expect(
+        await audit.hasActionSince('instance.self_restart', 'i2', new Date(Date.now() - HOUR)),
+      ).toBe(true);
+    });
+
+    it('does not match a different action by the same instance', async () => {
+      await env.handle.db.execute('DELETE FROM ops_audit');
+      await audit.record({ actor: 'i1', action: 'flag.set', target: 'i1' });
+      expect(
+        await audit.hasActionSince('instance.self_restart', 'i1', new Date(Date.now() - HOUR)),
+      ).toBe(false);
+    });
+  });
+
   it('overwrites an existing flag value', async () => {
     await flags.set('throttle.create', 5, { actor: 'agent' });
     await flags.set('throttle.create', 10, { actor: 'agent' });

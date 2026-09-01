@@ -144,6 +144,25 @@ export const RUNTIME_FLAGS = {
    */
   ALERTS_DISABLED: 'alerts.disabled',
 
+  /**
+   * Kill-switch for `GatewaySupervisor` on THIS fleet: a machine whose gateway
+   * is confirmed dead reports it and waits for a human instead of restarting
+   * itself.
+   *
+   * **The only autonomous behaviour here that restarts a production machine, so
+   * it is the one that most needs a no-deploy lever.** Every other autonomous
+   * subsystem already has one, and a deploy into a fleet that is cycling itself
+   * is the worst available moment to discover this one did not: the deploy is
+   * competing with the restarts.
+   *
+   * Setting it does not make anything less safe. Detection is unaffected, so
+   * `/health` still reports the gateway down, the `gateway.down` alert still
+   * fires, and the watchdog ping is still withheld fleet-wide. What stops is
+   * the machine acting on its own, which is the pre-2026-09-01 behaviour plus
+   * three working signals.
+   */
+  GATEWAY_SELF_RESTART_DISABLED: 'gateway.self_restart_disabled',
+
   // -- Marketing (plans/marketing.md §5.1 item 5) ----------------------------
   /**
    * Suppresses automated marketing posts (release notes, social/top.gg

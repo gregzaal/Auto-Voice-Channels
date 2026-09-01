@@ -32,7 +32,7 @@ function presence(guildId: string, channelId: string | null, game: string | unde
 }
 
 /** Wires the real gateway + real dispatcher to a spy feature, via a fake client. */
-function harness(opts: { entitled?: (guildId: string) => boolean } = {}) {
+function harness(opts: { entitled?: (guildId: string) => boolean; serving?: () => boolean } = {}) {
   const client = new EventEmitter();
   const handleVoiceStateUpdate = vi.fn(async () => ['sec-1']);
   const rerenderChannelName = vi.fn(async () => ({}));
@@ -45,6 +45,7 @@ function harness(opts: { entitled?: (guildId: string) => boolean } = {}) {
     logger: fakeLogger(),
     renameDelayMs: 5,
     ...(opts.entitled ? { entitled: opts.entitled, onGatedJoin } : {}),
+    ...(opts.serving ? { serving: opts.serving } : {}),
   });
   return { client, handleVoiceStateUpdate, rerenderChannelName, onGatedJoin, dispose };
 }
@@ -170,5 +171,75 @@ describe('registerVoiceGateway (gateway → dispatcher → feature pipeline)', (
     );
     await tick(10);
     expect(h.handleVoiceStateUpdate).not.toHaveBeenCalled();
+  });
+  /**
+   * **`plans/scaling.md` §6.1's live half, which the ownership primitive cannot
+   * reach.**
+   *
+   * `ownsGuild` is consulted by the reconcile sweep and the two record-vanished
+   * branches, all convergent and low-frequency. The live path had no ownership
+   * check at all, so in the split-brain §6.1 describes, an instance whose lease
+   * has aged out still holds the shard's WebSocket, still receives every join,
+   * and still creates a room alongside the peer that legitimately claimed that
+   * shard. Two real Discord channels, two rows, duplicate renames on top. Three
+   * documents claimed this was fixed while it was not.
+   */
+  describe('an instance that cannot prove it owns its shards', () => {
+    it('drops a join rather than creating a room a peer is also creating', async () => {
+      const h = harness({ serving: () => false });
+      dispose = h.dispose;
+      h.client.emit(
+        'voiceStateUpdate',
+        voiceState('g1', 'u1', null),
+        voiceState('g1', 'u1', 'sec-1'),
+      );
+      await tick(10);
+      expect(h.handleVoiceStateUpdate).not.toHaveBeenCalled();
+    });
+
+    it('drops presence churn rather than issuing a duplicate rename', async () => {
+      const h = harness({ serving: () => false });
+      dispose = h.dispose;
+      h.client.emit(
+        'presenceUpdate',
+        presence('g1', 'sec-1', 'Halo'),
+        presence('g1', 'sec-1', 'Doom'),
+      );
+      await tick(20);
+      expect(h.rerenderChannelName).not.toHaveBeenCalled();
+    });
+
+    /**
+     * The rename is debounced for four seconds, so the claim can expire during
+     * the wait. Re-checked at fire time for the same reason the entitlement gate
+     * is.
+     */
+    it('drops a debounced rename whose claim expired while it waited', async () => {
+      let serving = true;
+      const h = harness({ serving: () => serving });
+      dispose = h.dispose;
+      h.client.emit(
+        'voiceStateUpdate',
+        voiceState('g1', 'u1', null),
+        voiceState('g1', 'u1', 'sec-1'),
+      );
+      await tick(1);
+      serving = false;
+      await tick(20);
+      expect(h.handleVoiceStateUpdate).toHaveBeenCalled();
+      expect(h.rerenderChannelName).not.toHaveBeenCalled();
+    });
+
+    it('serves normally once ownership is proven again', async () => {
+      const h = harness({ serving: () => true });
+      dispose = h.dispose;
+      h.client.emit(
+        'voiceStateUpdate',
+        voiceState('g1', 'u1', null),
+        voiceState('g1', 'u1', 'sec-1'),
+      );
+      await tick(20);
+      expect(h.handleVoiceStateUpdate).toHaveBeenCalled();
+    });
   });
 });

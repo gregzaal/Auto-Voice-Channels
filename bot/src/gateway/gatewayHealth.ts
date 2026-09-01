@@ -40,22 +40,43 @@ export interface GatewayHealthDeps {
    * `gateway.down` alert needs before it wakes anyone.
    */
   graceMs?: number;
+  /**
+   * How long a process may go without ever reaching its first ready before this
+   * reports `down` anyway.
+   *
+   * **The pre-ready state needs a bounded life, because otherwise it is a second
+   * copy of the bug this file exists to fix.** `unknown` is not `down`, so a
+   * shard that wedges in `Connecting` on a NEW connection rather than on a resume
+   * never reaches ready, `hasBeenReady` stays false forever, and every signal
+   * reports a healthy booting machine for as long as the process lives. Worse,
+   * `client.login()` does not resolve until every shard is ready, so nothing
+   * after it in boot ever runs.
+   *
+   * Ten minutes is far past any real boot (a fleet-wide start is measured at
+   * 50-100s fully dark) and well past Fly's own 30s health-check grace, so the
+   * deploy gate is unaffected either way.
+   */
+  bootDeadlineMs?: number;
 }
 
 export const GATEWAY_GRACE_MS = 120_000;
+export const GATEWAY_BOOT_DEADLINE_MS = 10 * 60_000;
 
 export function createGatewayHealth(deps: GatewayHealthDeps): () => SubsystemStatus {
   const now = deps.now ?? (() => Date.now());
   const graceMs = deps.graceMs ?? GATEWAY_GRACE_MS;
+  const bootDeadlineMs = deps.bootDeadlineMs ?? GATEWAY_BOOT_DEADLINE_MS;
   /** Latched: "not connected yet" and "disconnected" are different answers. */
   let hasBeenReady = false;
   let unhealthySince: number | null = null;
+  const createdAt = now();
 
   return () => {
     if (deps.readyAt() !== null) hasBeenReady = true;
-    // Before the first ready this is a booting machine, not a broken one. Fly's
-    // own grace period covers the boot window.
-    if (!hasBeenReady) return 'unknown';
+    // Before the first ready this is a booting machine, not a broken one, until
+    // it has been booting for longer than any boot takes. Fly's own grace period
+    // covers the normal window.
+    if (!hasBeenReady) return now() - createdAt >= bootDeadlineMs ? 'down' : 'unknown';
 
     const statuses = deps.shardStatuses();
     const allReady = statuses.length > 0 && statuses.every((status) => status === Status.Ready);

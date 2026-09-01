@@ -59,6 +59,13 @@ export interface WatchCheckDeps {
 const MEMORY_WARN_FRACTION = 0.85;
 
 /**
+ * Ratio of Discord's recommended shard count to this fleet's, at which the shard
+ * wall is worth a warning. See the `shard.headroom` check for why this is a ratio
+ * rather than a comparison.
+ */
+const SHARD_HEADROOM_RATIO = 1.75;
+
+/**
  * Consecutive lease heartbeat failures before this is worth waking someone.
  *
  * The heartbeat runs every 10s against a 30s TTL, so two failures means 20s
@@ -167,11 +174,7 @@ export function buildWatchChecks(deps: WatchCheckDeps): WatchCheck[] {
     },
     {
       /**
-       * Read from the gateway rather than from the latched `gatewayStatus` the
-       * health server keeps, which goes `down` on any `client.error` and is
-       * only ever cleared by a fresh READY.
-       *
-       * **`client.ws.status` is latched too**, and the per-shard loop is what
+       * **`client.ws.status` is latched**, and the per-shard loop is what
        * makes this correct rather than the manager's aggregate: discord.js
        * writes `ws.status` exactly twice, `Idle` at construction and `Ready` in
        * `checkShardsReady`, and never resets it on a disconnect. A stuck-true
@@ -379,13 +382,40 @@ export function buildWatchChecks(deps: WatchCheckDeps): WatchCheck[] {
       confirmations: 2,
       run: () => {
         const headroom = deps.shardHeadroom?.();
-        if (!headroom || headroom.recommended <= headroom.running) return [];
+        if (!headroom || headroom.running <= 0) return [];
+        /**
+         * A RATIO, not "recommended exceeds running", and the difference is the
+         * whole usefulness of this check.
+         *
+         * `recommended_shards` is Discord's advisory sizing at roughly a thousand
+         * guilds per shard, so a fleet is normally under it and nothing is wrong.
+         * Prod runs 4 against a recommendation of 6 today, so a bare comparison
+         * is true right now, cannot be cleared by anything short of a
+         * `TOTAL_SHARDS` change (which reshuffles every guild-to-shard mapping,
+         * so nobody does it soon), and therefore re-announces itself once per
+         * process: four identical messages per deploy, which is how a channel
+         * stops being read.
+         *
+         * The wall being approached is Discord's hard ceiling of one shard per
+         * **2,500** guilds, past which a shard cannot connect at all. Since the
+         * recommendation tracks guild count, `recommended / running` estimates
+         * guilds per shard in thousands, so 1.75 is roughly 70% of that ceiling:
+         * genuine notice, with a whole deploy cycle of room to act.
+         */
+        const ratio = headroom.recommended / headroom.running;
+        if (ratio < SHARD_HEADROOM_RATIO) return [];
         return [
           {
             message:
-              `Discord recommends ${headroom.recommended} shards and this fleet runs ` +
-              `${headroom.running}. Raise TOTAL_SHARDS before Discord starts refusing identifies.`,
-            details: { running: headroom.running, recommended: headroom.recommended },
+              `This fleet runs ${headroom.running} shards and Discord now recommends ` +
+              `${headroom.recommended}, which puts it near an estimated ` +
+              `${Math.round(ratio * 1000)} guilds per shard against a hard ceiling of 2,500. ` +
+              'Raising TOTAL_SHARDS needs a full fleet stop-and-start, so plan it rather than react to it.',
+            details: {
+              running: headroom.running,
+              recommended: headroom.recommended,
+              estimatedGuildsPerShard: Math.round(ratio * 1000),
+            },
           },
         ];
       },

@@ -38,6 +38,12 @@ export interface ShutdownDeps {
   alertScheduler: AlertScheduler;
   /** Absent without a `TOPGG_TOKEN`. */
   topggScheduler: TopggScheduler | undefined;
+  /**
+   * Stopped early in the drain. A holder rather than the instance itself,
+   * because the drain handler has to exist before the supervisor is built (the
+   * supervisor's whole action is to call this handler).
+   */
+  gatewaySupervisor?: { stop: () => void } | undefined;
   /** Always present: the collector runs on self-host too. */
   metricsCollector: MetricsCollector;
   entitlementGate: EntitlementGate;
@@ -66,6 +72,16 @@ export async function gracefulDrain(deps: ShutdownDeps): Promise<void> {
    * designed.
    */
   await deps.alertScheduler.stop();
+  /**
+   * Stopped with the watcher, and for a sharper version of the same reason.
+   *
+   * `client.destroy()` below makes the gateway genuinely down, so a supervisor
+   * still ticking during a slow drain confirms it, posts "Gateway confirmed
+   * down, instance is restarting" about a machine that is already shutting down
+   * on purpose, and writes an `instance.self_restart` row that spends the real
+   * hourly allowance the next boot has to respect.
+   */
+  deps.gatewaySupervisor?.stop();
   // Stopped alongside the watcher, and for the same reason: it talks to a third
   // party, and a machine on its way out should stop doing that first.
   await deps.topggScheduler?.stop();
@@ -126,12 +142,55 @@ export async function gracefulDrain(deps: ShutdownDeps): Promise<void> {
  * lease-loss reaction drains then exits non-zero so the orchestrator restarts us
  * into a clean re-claim. Re-entrant calls are ignored.
  */
+/**
+ * How long a self-initiated drain may take before the process exits regardless.
+ *
+ * **Nothing else bounds one.** Fly's `kill_timeout` (30s on both bot fleets)
+ * SIGKILLs a drain Fly started, which is what keeps a rolling deploy honest, and
+ * it does not apply to a drain this process started itself. Those drains are the
+ * two failover paths, a lost lease and a dead gateway, and both await work with
+ * no timeout of its own: `backupScheduler.stop()` waits for an in-flight dump
+ * that `fly.prod.toml` itself notes "can run for minutes", `dispatcher.drainAll()`
+ * has no deadline, and `client.destroy()` is being asked to tear down the very
+ * WebSocket that wedged.
+ *
+ * So a self-heal firing during a backup window used to block indefinitely, having
+ * already posted "instance is restarting" to the admin channel, which reads as
+ * handled. Matched to `kill_timeout` deliberately: this is the guarantee Fly
+ * would have given if Fly had asked for the stop.
+ */
+export const SELF_DRAIN_DEADLINE_MS = 30_000;
+
 export function installShutdown(deps: ShutdownDeps): (reason: string, exitCode: number) => void {
   let shuttingDown = false;
   const handler = (reason: string, exitCode = 0): void => {
     if (shuttingDown) return;
     shuttingDown = true;
     deps.logger.info({ reason, exitCode }, 'shutting down (graceful drain)');
+    /**
+     * Armed only for a non-zero exit, which is exactly the set Fly did not ask
+     * for and is therefore not policing. A SIGTERM drain keeps the existing
+     * behaviour, because Fly's own timer already guarantees the exit and cutting
+     * a deploy's drain shorter than `kill_timeout` would lose work Fly was
+     * willing to wait for.
+     */
+    if (exitCode !== 0) {
+      const deadline = setTimeout(() => {
+        deps.logger.error(
+          { reason, deadlineMs: SELF_DRAIN_DEADLINE_MS },
+          'drain did not finish in time, exiting anyway',
+        );
+        process.exit(exitCode);
+      }, SELF_DRAIN_DEADLINE_MS);
+      /**
+       * Deliberately NOT unref'd. This timer is the exit guarantee, and an
+       * unref'd one would let the process fall out of the event loop instead:
+       * a hung drain whose other handles are all unref'd exits 0, which Fly's
+       * `on-failure` policy does not restart. The wrong exit code on a failover
+       * path is the one outcome worse than a slow one.
+       */
+      void deadline;
+    }
     void gracefulDrain(deps).then(
       () => {
         deps.logger.info('shutdown complete');

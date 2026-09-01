@@ -130,8 +130,26 @@ async function main(): Promise<void> {
   });
 
   let dbStatus: SubsystemStatus = 'unknown';
-  /** Last gateway limits seen, for the supervisor's identify-budget guard. */
-  let lastGatewayLimits: GatewayLimits | undefined;
+  /**
+   * Last gateway limits seen, for the supervisor's identify-budget guard.
+   *
+   * Stamped with the observation time, because a frozen reading is worse than an
+   * absent one: `GET /gateway/bot` fails during exactly the Discord incident the
+   * guard exists for, so an unstamped cache would understate identify
+   * consumption precisely while a fleet is cycling.
+   */
+  let lastGatewayLimits: (GatewayLimits & { observedAt: number }) | undefined;
+  /**
+   * Built late (it needs the drain handler, whose whole job it calls) but read
+   * early by `/diagnostics`.
+   *
+   * A holder, not a `const`. The diagnostics closure is installed before
+   * `client.login()`, so reading a `const` declared after login threw a
+   * temporal-dead-zone `ReferenceError` on every request for the whole gateway
+   * connect: `/diagnostics` answered 500 on all four machines during precisely
+   * the window an operator watching a slow boot would ask it anything.
+   */
+  const gatewaySupervisorHolder: { current?: GatewaySupervisor } = {};
   try {
     await runMigrations(db);
     dbStatus = 'up';
@@ -209,10 +227,42 @@ async function main(): Promise<void> {
     return;
   }
 
+  /**
+   * Started here, immediately after the claim, and NOT after `client.login()`
+   * where it used to be.
+   *
+   * `leasesProven` accepts the claim itself as proof for exactly one 30s TTL, and
+   * everything between here and login has to fit inside it: a REST call, the
+   * notifier connect, the caches, the identify wait (5s per bucket, serialized
+   * cluster-wide, so ~15s for the last of four machines booting together), then
+   * the WebSocket connect. On a rolling deploy that is ~14s and fine. On a
+   * fleet-wide stop-and-start it is ~29s and lands the wrong side of the TTL, at
+   * which point a perfectly healthy machine reports `/health` down as Fly's grace
+   * period ends, declines every ownership-scoped path, and refuses to create a
+   * room on any join.
+   *
+   * Safe this early by construction: the heartbeat only refreshes shards already
+   * in `owned`, so it cannot claim anything, and `onLeaseLost` already falls back
+   * to `process.exit(1)` while the drain handler does not exist, which is the
+   * right outcome during boot anyway.
+   */
+  leaseManager.startHeartbeat();
+
   // Serialize identifies cluster-wide so a multi-instance deploy can't exceed
   // Discord's max_concurrency. We read the live concurrency from the gateway and
   // back the throttler with the Postgres-coordinated per-bucket spacing.
-  const maxConcurrency = await fetchIdentifyConcurrency(config.discordToken, logger);
+  const boot = await fetchGatewayBoot(config.discordToken, logger);
+  const maxConcurrency = boot.maxConcurrency;
+  /**
+   * Seeded here, from a call boot already makes, so the identify-budget guard is
+   * armed from the first second of the process.
+   *
+   * Without this the only writer was the metrics collector's five-minute tick,
+   * which left a five-minute hole on every boot and a permanent one whenever
+   * `global.pause` or `metrics.disabled` was set. The guard treats an unknown
+   * budget as a refusal, so an unseeded process could not self-heal at all.
+   */
+  if (boot.limits) lastGatewayLimits = { ...boot.limits, observedAt: Date.now() };
   const identifyThrottler = new PgIdentifyThrottler({ repo: leaseRepo, maxConcurrency, logger });
 
   // Gateway + voice feature. The lease manager decides which shards this
@@ -375,6 +425,13 @@ async function main(): Promise<void> {
     feature: voiceFeature,
     logger,
     entitled: (guildId) => entitlementGate.check(guildId),
+    /**
+     * The live half of `plans/scaling.md` §6.1. `ownsGuild` reaches only the
+     * reconcile paths, so without this an instance whose lease has aged out keeps
+     * receiving joins on a shard a peer has legitimately claimed and creates a
+     * second room for each one.
+     */
+    serving: () => leaseManager.leasesProven(),
     onGatedJoin: (guildId, channelId) => expiredJoinNotifier.handleGatedJoin(guildId, channelId),
     // Gated guilds still get their emptied temp channels tidied away, through
     // the per-guild dispatcher so it stays ordered and fault-isolated like
@@ -624,7 +681,7 @@ async function main(): Promise<void> {
       // Cached rather than re-fetched: the supervisor needs the identify budget
       // to decide whether it may spend one, and the collector is already asking
       // hourly. A second caller would be a second REST call for the same answer.
-      if (limits) lastGatewayLimits = limits;
+      if (limits) lastGatewayLimits = { ...limits, observedAt: Date.now() };
       return limits;
     },
   });
@@ -992,7 +1049,19 @@ async function main(): Promise<void> {
      */
     const syncPresence = async (): Promise<void> => {
       const guildIds = [...client.guilds.cache.keys()];
-      const holdsEveryShard = leaseManager.ownedShards.length >= config.totalShards;
+      /**
+       * `leasesProven` as well as the shard count, because narrowing is the one
+       * ownership-derived write here that REMOVES something.
+       *
+       * An instance that cannot prove it owns one shard certainly cannot prove it
+       * owns all of them, and a guild wrongly stamped `removed_at` is a guild the
+       * `billing_notifications` claim join hands to no fleet, so it silently
+       * stops being told its trial or grace window is ending. The fallback
+       * (`markManyPresent`) is documented as always safe, so this costs nothing
+       * but a slower self-heal on the remove side.
+       */
+      const holdsEveryShard =
+        leaseManager.ownedShards.length >= config.totalShards && leaseManager.leasesProven();
       const result = holdsEveryShard
         ? await presenceRepo.reconcilePresence(guildIds)
         : await presenceRepo.markManyPresent(guildIds);
@@ -1152,7 +1221,9 @@ async function main(): Promise<void> {
          * actually does, so this field answers "can anyone import right now"
          * rather than "is the row for my fleet set".
          */
-        gatewaySupervisor: { ...gatewaySupervisor.stats },
+        gatewaySupervisor: gatewaySupervisorHolder.current
+          ? { ...gatewaySupervisorHolder.current.stats }
+          : { running: false },
         configImport: {
           disabled: await flags.getBoolAnyFleet(RUNTIME_FLAGS.IMPORT_DISABLED).catch(() => null),
           announceDisabled: runtimeFlags[RUNTIME_FLAGS.IMPORT_ANNOUNCE_DISABLED] === true,
@@ -1162,6 +1233,48 @@ async function main(): Promise<void> {
     },
   });
   await health.start();
+
+  /**
+   * Restarts this machine when its gateway is confirmed dead and nothing else
+   * will (2026-09-01: shard 0 wedged for 3h37m, and peers never poach a live
+   * lease, so nothing was going to take it).
+   *
+   * **Started BEFORE `client.login()`, which is the only place it can cover the
+   * worst case.** `login` does not resolve until every shard reaches ready, so a
+   * shard that wedges on its first connect parks boot forever: built after login
+   * this would never exist, and the machine would sit dark with no supervisor, no
+   * alert row, and therefore invisible to the fleet-wide watchdog too. Boot is
+   * when a gateway connection is most likely to fail and was the one case with
+   * zero coverage.
+   *
+   * `requestRestart` resolves the drain handler at call time, so building this
+   * before `installShutdown` is safe: the confirmation window is minutes and the
+   * handler exists within seconds of login, and in the pre-login wedge there is
+   * nothing to drain, so the `process.exit(1)` fallback is the correct path.
+   *
+   * Its guards are in `gatewaySupervisor.ts`, all of them fail closed, and every
+   * one is there because the unguarded version is worse than the bug.
+   */
+  const gatewaySupervisor = new GatewaySupervisor({
+    gatewayStatus: currentGatewayStatus,
+    leasesProven: () => leaseManager.leasesProven(),
+    sessionBudget: () =>
+      lastGatewayLimits
+        ? {
+            used: lastGatewayLimits.sessionUsed,
+            total: lastGatewayLimits.sessionTotal,
+            observedAt: lastGatewayLimits.observedAt,
+          }
+        : undefined,
+    opsAudit: new OpsAuditRepository(db, config.fleet),
+    flags,
+    instanceId: config.instanceId,
+    requestRestart: (reason) => (shutdown.request ?? ((_r, code) => process.exit(code)))(reason, 1),
+    report: (kind, message, context) => errorReporter.report(kind, message, context),
+    logger,
+  });
+  gatewaySupervisorHolder.current = gatewaySupervisor;
+  gatewaySupervisor.start();
 
   // Keep the DB subsystem status live (it was only set at boot, so a post-boot
   // outage would otherwise still read "up"). A cheap periodic ping gates deploys
@@ -1238,6 +1351,7 @@ async function main(): Promise<void> {
     alertScheduler,
     topggScheduler,
     entitlementGate,
+    gatewaySupervisor,
     closeDb,
   });
 
@@ -1271,36 +1385,11 @@ async function main(): Promise<void> {
   alertScheduler.start();
 
   /**
-   * Restarts this machine when its gateway is confirmed dead and nothing else
-   * will (2026-09-01: shard 0 wedged for 3h37m, and peers never poach a live
-   * lease, so nothing was going to take it).
-   *
-   * Built here, after the drain handler exists, because that is what it asks
-   * for: the same drain-and-exit path a lease loss already uses. Its guards are
-   * in `gatewaySupervisor.ts` and every one of them is there because the
-   * unguarded version is worse than the bug.
-   */
-  const gatewaySupervisor = new GatewaySupervisor({
-    gatewayStatus: currentGatewayStatus,
-    leasesProven: () => leaseManager.leasesProven(),
-    sessionBudget: () =>
-      lastGatewayLimits
-        ? { used: lastGatewayLimits.sessionUsed, total: lastGatewayLimits.sessionTotal }
-        : undefined,
-    opsAudit: new OpsAuditRepository(db, config.fleet),
-    instanceId: config.instanceId,
-    requestRestart: (reason) => (shutdown.request ?? ((_r, code) => process.exit(code)))(reason, 1),
-    report: (kind, message, context) => errorReporter.report(kind, message, context),
-    logger,
-  });
-  /**
    * Started with the others, after the drain handler. Nothing here is
    * latency-critical and the first tick is deliberate: a deploy that changed the
    * command list publishes it now rather than up to a quarter of an hour later.
    */
   topggScheduler?.start();
-  leaseManager.startHeartbeat();
-  gatewaySupervisor.start();
 }
 
 /**
@@ -1342,22 +1431,45 @@ async function fetchGatewayLimits(
 }
 
 /**
- * Reads Discord's identify `max_concurrency` (how many shards may identify in
- * parallel per 5s window) from `GET /gateway/bot`. Falls back to 1 — the safe,
- * universal floor — if the call fails, so the throttler still serializes.
+ * One `GET /gateway/bot` at boot, answering two questions.
+ *
+ * `maxConcurrency` (how many shards may identify per 5s window) is what the
+ * throttler needs, and it falls back to 1 — the safe universal floor — so a
+ * failed call still serializes.
+ *
+ * `limits` is the same body's identify budget, returned rather than discarded so
+ * `GatewaySupervisor`'s budget guard is armed from boot. That guard refuses when
+ * the budget is unknown, and its only other writer is a five-minute metrics
+ * tick, so discarding this left every process unable to self-heal for its first
+ * five minutes and forever whenever a metrics kill switch was set. Undefined
+ * here is honest: the call failed, and the guard treats that as a refusal.
  */
-async function fetchIdentifyConcurrency(token: string, logger: Logger): Promise<number> {
+async function fetchGatewayBoot(
+  token: string,
+  logger: Logger,
+): Promise<{ maxConcurrency: number; limits: GatewayLimits | undefined }> {
   try {
     const rest = new REST({ version: '10' }).setToken(token);
     const info = (await rest.get(Routes.gatewayBot())) as {
-      session_start_limit?: { max_concurrency?: number };
+      shards?: number;
+      session_start_limit?: { max_concurrency?: number; remaining?: number; total?: number };
     };
-    const maxConcurrency = Math.max(1, info.session_start_limit?.max_concurrency ?? 1);
+    const limit = info.session_start_limit;
+    const maxConcurrency = Math.max(1, limit?.max_concurrency ?? 1);
     logger.info({ maxConcurrency }, 'fetched gateway identify concurrency');
-    return maxConcurrency;
+    const limits =
+      limit && typeof limit.total === 'number' && typeof limit.remaining === 'number'
+        ? {
+            recommendedShards: info.shards ?? 0,
+            maxConcurrency,
+            sessionUsed: Math.max(0, limit.total - limit.remaining),
+            sessionTotal: limit.total,
+          }
+        : undefined;
+    return { maxConcurrency, limits };
   } catch (err) {
     logger.warn({ err }, 'failed to fetch gateway bot info; defaulting max_concurrency=1');
-    return 1;
+    return { maxConcurrency: 1, limits: undefined };
   }
 }
 

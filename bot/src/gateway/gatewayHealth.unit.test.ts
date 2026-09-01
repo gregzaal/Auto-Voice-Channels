@@ -17,12 +17,14 @@ describe('gateway health', () => {
     statuses: number[];
     now: () => number;
     graceMs?: number;
+    bootDeadlineMs?: number;
   }) =>
     createGatewayHealth({
       readyAt: () => (opts.readyAt === undefined ? new Date() : opts.readyAt),
       shardStatuses: () => opts.statuses,
       now: opts.now,
       ...(opts.graceMs === undefined ? {} : { graceMs: opts.graceMs }),
+      ...(opts.bootDeadlineMs === undefined ? {} : { bootDeadlineMs: opts.bootDeadlineMs }),
     });
 
   it('is unknown before the gateway has ever been ready', () => {
@@ -114,5 +116,60 @@ describe('gateway health', () => {
     expect(health()).toBe('up');
     clock = 1_001_000;
     expect(health()).toBe('down');
+  });
+  /**
+   * **The same outage with a different trigger, and it had zero coverage.**
+   *
+   * `unknown` is not `down`, so a shard that wedges on its FIRST connect rather
+   * than on a resume never reaches ready, and every signal reported a healthy
+   * booting machine for the life of the process. Worse, `client.login()` does
+   * not resolve until every shard is ready, so nothing later in boot ever ran:
+   * no supervisor, no alert row, and therefore invisible to the fleet-wide
+   * watchdog too.
+   */
+  describe('a gateway that never reaches its first ready', () => {
+    it('stays unknown for as long as a real boot could take', () => {
+      let clock = 0;
+      const health = build({
+        readyAt: null,
+        statuses: [Status.Connecting],
+        now: () => clock,
+        bootDeadlineMs: 600_000,
+      });
+      expect(health()).toBe('unknown');
+      clock = 120_000;
+      expect(health()).toBe('unknown');
+    });
+
+    it('is down once it has been booting for longer than any boot takes', () => {
+      let clock = 0;
+      const health = build({
+        readyAt: null,
+        statuses: [Status.Connecting],
+        now: () => clock,
+        bootDeadlineMs: 600_000,
+      });
+      expect(health()).toBe('unknown');
+      clock = 600_001;
+      expect(health()).toBe('down');
+    });
+
+    /** A boot that simply took a while must not be punished after the fact. */
+    it('goes up normally if it becomes ready inside the deadline', () => {
+      let clock = 0;
+      let ready: Date | null = null;
+      const health = createGatewayHealth({
+        readyAt: () => ready,
+        shardStatuses: () => [Status.Ready],
+        now: () => clock,
+        bootDeadlineMs: 600_000,
+      });
+      expect(health()).toBe('unknown');
+      clock = 590_000;
+      ready = new Date();
+      expect(health()).toBe('up');
+      clock = 700_000;
+      expect(health()).toBe('up');
+    });
   });
 });

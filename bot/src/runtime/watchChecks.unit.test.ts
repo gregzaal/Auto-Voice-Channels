@@ -419,13 +419,38 @@ describe('buildWatchChecks', () => {
       expect(find(d, 'shard.headroom').run()).toEqual([]);
     });
 
-    it('warns, with both numbers, once the recommendation passes the fleet', () => {
+    /**
+     * **Prod's own numbers, and they must NOT warn.**
+     *
+     * 4 shards against a recommendation of 6 is the state today, and the check
+     * used to fire on it. `recommended_shards` is advisory sizing at roughly a
+     * thousand guilds per shard, so being under it is ordinary. Since the only
+     * remedy is a `TOTAL_SHARDS` change that reshuffles every guild-to-shard
+     * mapping, a warning here could not be cleared and re-announced itself once
+     * per process: four identical messages per deploy.
+     */
+    it('says nothing at the ordinary distance below the recommendation', () => {
       const d = deps({ shardHeadroom: () => ({ running: 4, recommended: 6 }) });
+      expect(find(d, 'shard.headroom').run()).toEqual([]);
+    });
+
+    /**
+     * The wall is Discord's hard ceiling of one shard per 2,500 guilds. At a
+     * ratio of 1.75 the estimate is ~1,750 guilds per shard, about 70% of it,
+     * which is notice with a deploy cycle of room to act.
+     */
+    it('warns, with both numbers, once the ratio says the wall is close', () => {
+      const d = deps({ shardHeadroom: () => ({ running: 4, recommended: 8 }) });
       const raised = find(d, 'shard.headroom').run();
       expect(raised).toHaveLength(1);
-      expect(raised[0]?.message).toContain('6');
+      expect(raised[0]?.message).toContain('8');
       expect(raised[0]?.message).toContain('4');
-      expect(raised[0]?.details).toEqual({ running: 4, recommended: 6 });
+      expect(raised[0]?.message).toContain('2,500');
+      expect(raised[0]?.details).toEqual({
+        running: 4,
+        recommended: 8,
+        estimatedGuildsPerShard: 2000,
+      });
     });
 
     /**

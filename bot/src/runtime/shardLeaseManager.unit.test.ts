@@ -305,6 +305,117 @@ describe('ShardLeaseManager', () => {
       }
     });
 
+    /**
+     * **A leading beat, because the claim's own proof lasts exactly one TTL.**
+     *
+     * `startHeartbeat` used to schedule a bare `setInterval`, so the first
+     * refresh landed a full interval after it was called, and it used to be
+     * called after `client.login()` resolved. A boot whose gateway connect took
+     * longer than the 30s TTL therefore spent the rest of its boot unable to
+     * prove ownership it genuinely held: `/health` down as Fly's grace period
+     * ends, and every ownership-scoped path declining.
+     */
+    it('beats once immediately, rather than waiting out the first interval', async () => {
+      const repo = fakeRepo({ claimAvailable: vi.fn(async () => [0]) });
+      const mgr = new ShardLeaseManager({
+        repo,
+        logger: fakeLogger(),
+        instanceId: 'i1',
+        totalShards: 4,
+        setInterval: ((fn: () => void) => {
+          void fn;
+          return 1 as unknown as ReturnType<typeof setInterval>;
+        }) as typeof setInterval,
+      });
+      await mgr.claim();
+      mgr.startHeartbeat();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(repo.heartbeat).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * **The quiet half, and the one this deployment has actually had.**
+     *
+     * A beat that never settles (a pool client that never checks out, a socket
+     * the network blackholed) rejects nothing, so the catch never runs. The
+     * stand-aside is decided by AGE but used to be reported only from a
+     * rejection, so in the hung case `ownsGuild` went false and `/health`
+     * reported leases down with no alert at all from the component that detected
+     * it. `watchChecks.ts` documents the same split at `HEARTBEAT_STALE_MS`.
+     */
+    it('reports standing aside when a beat HANGS rather than fails', async () => {
+      const report = vi.fn();
+      let tick = (): void => {};
+      const repo = fakeRepo({
+        claimAvailable: vi.fn(async () => [0]),
+        // Never settles, so nothing is ever thrown or returned.
+        heartbeat: vi.fn(() => new Promise<number[]>(() => {})),
+      });
+      const mgr = new ShardLeaseManager({
+        repo,
+        logger: fakeLogger(),
+        instanceId: 'i1',
+        totalShards: 4,
+        leaseTtlMs: 30_000,
+        report,
+        setInterval: ((fn: () => void) => {
+          tick = fn;
+          return 1 as unknown as ReturnType<typeof setInterval>;
+        }) as typeof setInterval,
+      });
+      await mgr.claim();
+      mgr.startHeartbeat();
+
+      const base = Date.now();
+      vi.spyOn(Date, 'now').mockReturnValue(base + 31_000);
+      try {
+        tick();
+        expect(mgr.leasesProven()).toBe(false);
+        expect(report.mock.calls.filter((c) => c[0] === 'shard.lease_unproven')).toHaveLength(1);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+
+    /**
+     * The database row's expiry is computed when the statement executes, so
+     * measuring our proof from when the answer got back would assert ownership
+     * for longer than any peer considers the lease alive. The error is the round
+     * trip, which is exactly the quantity that grows in an incident.
+     */
+    it('measures the proof from before the query, not after it', async () => {
+      const base = 1_000_000;
+      const spy = vi.spyOn(Date, 'now');
+      try {
+        // Claim at `base`, the beat starts at `base`, and its answer arrives
+        // 5s later.
+        spy.mockReturnValue(base);
+        const repo = fakeRepo({
+          claimAvailable: vi.fn(async () => [0]),
+          heartbeat: vi.fn(async () => {
+            spy.mockReturnValue(base + 5_000);
+            return [0];
+          }),
+        });
+        const mgr = new ShardLeaseManager({
+          repo,
+          logger: fakeLogger(),
+          instanceId: 'i1',
+          totalShards: 4,
+          leaseTtlMs: 30_000,
+        });
+        await mgr.claim();
+        await mgr.heartbeatOnce();
+        // 30s after the query STARTED is expired. Stamping on return would have
+        // left five more seconds of proof than the row has.
+        expect(mgr.leasesProven(base + 30_001)).toBe(false);
+        expect(mgr.leasesProven(base + 29_000)).toBe(true);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+
     it('is unproven when it owns nothing at all', () => {
       const mgr = managerWithClock(fakeRepo());
       expect(mgr.leasesProven()).toBe(false);

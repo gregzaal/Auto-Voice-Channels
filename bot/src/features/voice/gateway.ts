@@ -66,6 +66,32 @@ export interface VoiceGatewayDeps {
    * up by hand.
    */
   onGatedLeave?: (guildId: string, channelId: string) => void;
+  /**
+   * Whether this instance can still prove it owns the shards it is serving.
+   *
+   * **This is the half of `plans/scaling.md` §6.1 that the ownership primitive
+   * cannot reach, and without it the stand-aside does not stop the harm §6.1 is
+   * about.** `ownsGuild` is consulted by the reconcile sweep and the two
+   * record-vanished branches, all of which are convergent and low-frequency. The
+   * live path had no ownership check at all: in the split-brain §6.1 describes,
+   * an instance whose lease has aged out still holds the shard's WebSocket, so it
+   * still receives every join and still creates a room alongside the peer that
+   * legitimately claimed that shard. Two real Discord channels, two rows, and
+   * duplicate renames on top.
+   *
+   * Dropping the event is the right response rather than queueing it: by the time
+   * ownership is proven again the peer has already acted, so acting late is
+   * acting twice.
+   *
+   * `channelDelete` is deliberately NOT gated by this. It is bookkeeping for a
+   * channel that no longer exists, it converges (the second instance to run it
+   * finds nothing to do), and dropping it is how a row outlives its channel
+   * permanently, which is the one thing nothing else cleans up.
+   *
+   * Omitted means ownership is never in doubt, which is true of a self-host
+   * holding every shard, and keeps every existing test unchanged.
+   */
+  serving?: () => boolean;
 }
 
 /**
@@ -91,6 +117,11 @@ export function registerVoiceGateway(deps: VoiceGatewayDeps): () => void {
       // once the refresh has resolved the guild as gated — the rename path has
       // no downstream entitlement check of its own.
       if (deps.entitled && !deps.entitled(guildId)) return Promise.resolve();
+      // Re-checked at fire time for the same reason as the gate above: a rename
+      // debounced for four seconds must not execute on a claim that expired
+      // during the wait, or it lands next to the same rename from the peer that
+      // now legitimately owns the shard.
+      if (deps.serving && !deps.serving()) return Promise.resolve();
       return deps.dispatcher.dispatch(guildId, 'rerenderChannel', async () => {
         // Routes to the secondary or adopted-managed re-render as appropriate.
         // `abandon`: nobody is waiting on this, so a channel we can no longer act
@@ -109,6 +140,11 @@ export function registerVoiceGateway(deps: VoiceGatewayDeps): () => void {
     const event = normalizeVoiceState(oldState, newState);
     if (!event) return;
     if (event.beforeChannelId === event.afterChannelId) return; // mute/unmute
+
+    // Ownership before anything else: creating or cleaning up a room on a lease
+    // this instance can no longer prove is what produces the duplicate rooms
+    // §6.1 describes. See the `serving` doc.
+    if (deps.serving && !deps.serving()) return;
 
     // Hard-gate short-circuit: a non-entitled guild's voice events never reach
     // the dispatcher (enforcement + the §10 cost model). Joins are handed to
@@ -136,6 +172,10 @@ export function registerVoiceGateway(deps: VoiceGatewayDeps): () => void {
     const guildId = newPresence.guild?.id;
     const channelId = newPresence.member?.voice.channelId;
     if (!guildId || !channelId) return;
+    // Cheapest ownership check on the highest-volume event, before any string
+    // work: a rename issued from an expired claim duplicates the one the real
+    // owner is already issuing.
+    if (deps.serving && !deps.serving()) return;
     // 2. Skip the constant status / custom-status churn: only act when a
     //    Playing/Streaming activity actually changed (the fields a name reads).
     if (gameSignature(oldPresence) === gameSignature(newPresence)) return;

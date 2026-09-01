@@ -462,6 +462,23 @@ export class MetricsCollector {
   }
 
   private async runTick(): Promise<void> {
+    /**
+     * Polled BEFORE the kill-switch check, and that ordering is load-bearing for
+     * something outside this class.
+     *
+     * `index.ts` caches this reading, and `GatewaySupervisor` reads the cache to
+     * decide whether it may spend an identify on restarting the machine. While
+     * the poll sat after the early return below, `metrics.disabled` or
+     * `global.pause` left that cache permanently empty, which silently disarmed
+     * the one guard that speaks to fleet-wide identify exhaustion. `global.pause`
+     * is exactly the lever an operator sets while load-shedding during an
+     * incident, which is precisely when the guard matters.
+     *
+     * A poll is a REST read, not a metric write, so neither flag is about it.
+     * One call per flush interval is negligible even under a deliberate
+     * load-shed, and what the flags still suppress is the four points it feeds.
+     */
+    const gatewayLimits = await this.pollGatewayLimits();
     if (await this.writesDisabled()) {
       /**
        * Disabled means "stop writing", not "stop bounding memory".
@@ -480,7 +497,7 @@ export class MetricsCollector {
     }
 
     await this.flush();
-    await this.flushGatewayLimits();
+    await this.writeGatewayLimits(gatewayLimits);
 
     const reserved = await this.deps.runs
       .reserveRun(
@@ -521,12 +538,22 @@ export class MetricsCollector {
    * 1 in the store reads as a real collapse of the identify budget rather than
    * as an unanswered question. Absence is how this store says "unknown".
    */
-  private async flushGatewayLimits(): Promise<void> {
+  private async pollGatewayLimits(): Promise<GatewayLimits | undefined> {
     const poll = this.deps.pollGateway;
-    if (!poll) return;
+    if (!poll) return undefined;
     try {
-      const limits = await poll();
-      if (!limits) return;
+      return await poll();
+    } catch (err) {
+      // Never fatal to the tick: the counters that follow matter more than
+      // these do, and an unwritten gauge is a gap rather than a wrong number.
+      this.deps.logger.warn({ err }, 'gateway limits poll failed');
+      return undefined;
+    }
+  }
+
+  private async writeGatewayLimits(limits: GatewayLimits | undefined): Promise<void> {
+    if (!limits) return;
+    try {
       const bucket = hourBucket(this.now());
       await this.deps.metrics.writePoints(
         [
@@ -538,9 +565,9 @@ export class MetricsCollector {
         this.deps.fleet,
       );
     } catch (err) {
-      // Never fatal to the tick: the counters that follow matter more than
-      // these do, and an unwritten gauge is a gap rather than a wrong number.
-      this.deps.logger.warn({ err }, 'gateway limits poll failed');
+      // Never fatal to the tick, same as the poll above: an unwritten gauge is a
+      // gap rather than a wrong number.
+      this.deps.logger.warn({ err }, 'gateway limits write failed');
     }
   }
 

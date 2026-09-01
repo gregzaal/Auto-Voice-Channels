@@ -1,4 +1,4 @@
-import { desc, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
 import type { Fleet } from '../domain/fleets.js';
 import { opsAudit } from '../db/schema.js';
@@ -47,6 +47,37 @@ export class OpsAuditRepository {
   /** Returns the most recent audit entries (newest first). */
   async recent(limit = 50): Promise<(typeof opsAudit.$inferSelect)[]> {
     return this.db.select().from(opsAudit).orderBy(desc(opsAudit.createdAt)).limit(limit);
+  }
+
+  /**
+   * Whether a specific action was recorded against a specific target since
+   * `since`.
+   *
+   * **Exists because reading `recent(50)` and filtering in JS is a rate limit
+   * that fails open.** `GatewaySupervisor` used this table as the durable
+   * once-per-hour brake on restarting a machine, and asked for it that way:
+   * those 50 slots are shared with every other writer, both bot fleets and the
+   * web app, and `transitionAuth` writes one row per guild it moves. A busy
+   * hour therefore pushes the restart record off the page, the guard concludes
+   * "no recent restart", and the only thing bounding a restart loop is gone. The
+   * failure direction of a row-count window is always "act again".
+   *
+   * Bounded by `created_at` first so the existing `ops_audit_created_idx` does
+   * the work, rather than a sequential scan over a year of rows.
+   */
+  async hasActionSince(action: string, target: string, since: Date): Promise<boolean> {
+    const rows = await this.db
+      .select({ one: sql<number>`1` })
+      .from(opsAudit)
+      .where(
+        and(
+          gt(opsAudit.createdAt, since),
+          eq(opsAudit.action, action),
+          eq(opsAudit.target, target),
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
   }
 
   /**

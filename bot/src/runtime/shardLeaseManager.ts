@@ -214,10 +214,33 @@ export class ShardLeaseManager {
     return claimed;
   }
 
-  /** Starts the periodic heartbeat keeping owned leases alive. */
+  /**
+   * Starts the periodic heartbeat keeping owned leases alive.
+   *
+   * **Fires one beat immediately**, which is not a nicety. `leasesProven` accepts
+   * the claim itself as proof for one TTL, so with a bare `setInterval` the first
+   * refresh landed a full interval after this was called, and this used to be
+   * called after `client.login()` resolved. A boot whose gateway connect took
+   * longer than the 30s TTL therefore spent the rest of its boot unable to prove
+   * ownership it genuinely held: `/health` reporting down at the moment Fly's
+   * grace period ends, and every ownership-scoped path declining.
+   */
   startHeartbeat(): void {
     if (this.heartbeatTimer) return;
+    void this.heartbeatOnce();
     this.heartbeatTimer = this.setIntervalFn(() => {
+      /**
+       * The age test runs on every tick, whatever the last beat did.
+       *
+       * A beat that REJECTS reaches the catch below. A beat that never settles
+       * at all (a pool client that never checks out, a socket the network
+       * blackholed) rejects nothing, so before this the stand-aside happened
+       * silently: `ownsGuild` went false and `/health` reported leases down with
+       * no alert from the component that detected it. `watchChecks.ts` documents
+       * the same split at `HEARTBEAT_STALE_MS`, and the hung case is the one this
+       * deployment has actually had, 28 times in 4.5 hours.
+       */
+      if (!this.leasesProven()) this.noticeStandAside('the heartbeat has not completed');
       void this.heartbeatOnce();
     }, this.heartbeatIntervalMs);
     // Don't keep the event loop alive solely for the heartbeat.
@@ -225,12 +248,22 @@ export class ShardLeaseManager {
   }
 
   async heartbeatOnce(): Promise<void> {
+    /**
+     * Stamped from BEFORE the query, not after it.
+     *
+     * The database row's own expiry is computed when the statement executes, so
+     * measuring our proof from when the answer got back here makes this instance
+     * assert ownership for longer than any peer considers the lease alive. The
+     * error is however long the round trip took, which is exactly the quantity
+     * that grows in the incident this guard exists for.
+     */
+    const startedAt = Date.now();
     try {
       // Filtered to what we currently believe we own — see the repo method's
       // own doc for why an unfiltered heartbeat would let a stale claim on a
       // shard we no longer serve refresh itself forever.
       const owned = await this.repo.heartbeat(this.instanceId, [...this.owned]);
-      this.lastHeartbeatOkAt = Date.now();
+      this.lastHeartbeatOkAt = startedAt;
       this.consecutiveHeartbeatFailures = 0;
       if (this.standingAside) {
         this.standingAside = false;
