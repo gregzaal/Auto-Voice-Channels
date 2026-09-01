@@ -62,6 +62,7 @@ import {
 import { ServerLogger } from './ops/serverLog.js';
 import { PermissionProblemNotifier } from './ops/permissionProblemNotifier.js';
 import { buildGatewayClient } from './gateway/client.js';
+import { createGatewayHealth } from './gateway/gatewayHealth.js';
 import {
   DiscordVoiceActions,
   DiscordVoiceView,
@@ -781,7 +782,18 @@ async function main(): Promise<void> {
       })
     : undefined;
 
-  let gatewayStatus: SubsystemStatus = 'unknown';
+  /**
+   * The gateway subsystem, derived per shard rather than latched.
+   *
+   * See `gatewayHealth.ts` for why: the variable this replaced reported `up`
+   * for 3h37m while shard 0 was wedged in `Connecting`, because it was set once
+   * on ready and cleared only by a client-level `error` that a stuck shard
+   * never fires.
+   */
+  const currentGatewayStatus = createGatewayHealth({
+    readyAt: () => client.readyAt,
+    shardStatuses: () => [...client.ws.shards.values()].map((shard) => shard.status),
+  });
   // After READY, a `guildCreate` means either a brand-new guild join or a guild
   // re-delivered on reconnect — reconcile it to catch up on missed events. The
   // *initial* batch (cold cache before READY) is handled once by the READY
@@ -913,7 +925,6 @@ async function main(): Promise<void> {
     logger.info({ guildId: guild.id }, 'removed from guild');
   });
   client.once('clientReady', () => {
-    gatewayStatus = 'up';
     logger.info({ shards: leaseManager.ownedShards }, 'gateway ready');
     // Reconcile everything already in cache at ready, then start the sweep.
     void reconciler
@@ -1006,13 +1017,18 @@ async function main(): Promise<void> {
     }
   });
   client.on('error', (err) => {
-    gatewayStatus = 'down';
     logger.error({ err }, 'gateway error');
     errorReporter.report('gateway.error', 'Gateway error', { error: String(err) });
   });
-  client.on('shardDisconnect', (_e, shardId) => {
-    logger.warn({ shardId }, 'shard disconnected');
+  client.on('shardDisconnect', (event, shardId) => {
+    // Logged with the close code, which is the first thing anyone reading a
+    // gateway incident wants and which used to be dropped.
+    logger.warn({ shardId, code: event?.code, reason: event?.reason }, 'shard disconnected');
   });
+  client.on('shardReady', (shardId) => logger.info({ shardId }, 'shard ready'));
+  client.on('shardResume', (shardId, replayed) =>
+    logger.info({ shardId, replayed }, 'shard resumed'),
+  );
 
   const health = new HealthServer({
     port: config.httpPort,
@@ -1020,20 +1036,23 @@ async function main(): Promise<void> {
     // Undefined only on a self-host: the config schema refuses to boot a
     // hosted instance without one, so the fleet cannot fail open.
     diagnosticsToken: config.diagnosticsToken,
-    health: (): HealthReport => ({
-      status:
-        dbStatus === 'up' && leaseManager.ownedShards.length > 0 && gatewayStatus !== 'down'
-          ? 'up'
-          : 'down',
-      subsystems: {
-        gateway: gatewayStatus,
-        leases: leaseManager.ownedShards.length > 0 ? 'up' : 'down',
-        db: dbStatus,
-      },
-      version: VERSION,
-      commit: COMMIT,
-      instanceId: config.instanceId,
-    }),
+    health: (): HealthReport => {
+      const gateway = currentGatewayStatus();
+      return {
+        status:
+          dbStatus === 'up' && leaseManager.ownedShards.length > 0 && gateway !== 'down'
+            ? 'up'
+            : 'down',
+        subsystems: {
+          gateway,
+          leases: leaseManager.ownedShards.length > 0 ? 'up' : 'down',
+          db: dbStatus,
+        },
+        version: VERSION,
+        commit: COMMIT,
+        instanceId: config.instanceId,
+      };
+    },
     diagnostics: async () => {
       // Surface the live control-plane state so the agent can debug by query.
       const runtimeFlags = await flags.getAll().catch((): Record<string, unknown> => ({}));
