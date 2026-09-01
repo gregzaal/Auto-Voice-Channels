@@ -11,7 +11,14 @@ const logger = {
 } as never;
 
 /** Records what was raised and resolved, standing in for the repository. */
+interface FakeOpenAlert {
+  severity: string;
+  lastSeenAt: Date;
+}
+
 function fakeAlerts() {
+  let openRows: FakeOpenAlert[] = [];
+  let openFails = false;
   const raised: { key: string; target: string; severity: string; instance: unknown }[] = [];
   const resolved: { key: string; keep: string[]; instance?: string }[] = [];
   const claimable: {
@@ -37,7 +44,22 @@ function fakeAlerts() {
     get prunedBefore() {
       return prunedBefore;
     },
+    setOpen(rows: FakeOpenAlert[]) {
+      openRows = rows;
+    },
+    failOpenRead() {
+      openFails = true;
+    },
     repo: {
+      /**
+       * The fleet-wide critical read. Absent from this fake at first, which
+       * meant the read threw into its own fail-open catch and the tests below
+       * passed while exercising none of it.
+       */
+      open: async () => {
+        if (openFails) throw new Error('database unreachable');
+        return openRows;
+      },
       raise: async (input: {
         key: string;
         target?: string;
@@ -611,5 +633,114 @@ describe('AlertScheduler', () => {
 
     await Promise.all([scheduler.tick(), scheduler.tick(), scheduler.tick()]);
     expect(overlapped).toBe(false);
+  });
+  /**
+   * The 2026-09-01 outage lasted 3 hours 37 minutes because of this.
+   *
+   * Shard 0's gateway was dead. The instance holding it correctly confirmed a
+   * critical and correctly withheld its own ping. The other three were healthy,
+   * kept pinging every minute, and the heartbeat monitor stayed green all night.
+   * The switch is documented as making "a bot that is running and not working
+   * read as down", which was only ever true of a single-instance fleet.
+   */
+  describe('the watchdog sees the whole fleet, not just this machine', () => {
+    const healthy: WatchCheck[] = [
+      { key: 'fine', severity: 'critical', audience: 'both', run: () => [] },
+    ];
+
+    it('withholds the ping for a critical raised by another instance', async () => {
+      const pinged: string[] = [];
+      const { scheduler, alerts } = build(healthy, {
+        url: 'https://hb.example/ping',
+        fetchFn: (async (url: string) => {
+          pinged.push(url);
+          return { ok: true } as Response;
+        }) as never,
+      });
+      alerts.setOpen([{ severity: 'critical', lastSeenAt: new Date() }]);
+
+      await scheduler.tick();
+
+      expect(pinged).toEqual([]);
+      expect(scheduler.stats.watchdog.suppressed).toBe(true);
+    });
+
+    /**
+     * The anti-latch, which is not optional: a polled condition re-stamps every
+     * tick, so an untouched row belongs to an instance that vanished. Without
+     * the window one such row withholds the ping forever and the monitor is
+     * permanently red, which is worse than no monitor.
+     */
+    it('ignores a critical nobody has re-confirmed', async () => {
+      const pinged: string[] = [];
+      const { scheduler, alerts } = build(healthy, {
+        url: 'https://hb.example/ping',
+        fetchFn: (async (url: string) => {
+          pinged.push(url);
+          return { ok: true } as Response;
+        }) as never,
+      });
+      alerts.setOpen([{ severity: 'critical', lastSeenAt: new Date(Date.now() - 20 * 60_000) }]);
+
+      await scheduler.tick();
+
+      expect(pinged).toHaveLength(1);
+      expect(scheduler.stats.watchdog.suppressed).toBe(false);
+    });
+
+    /** A warn is a guild in trouble, not a fleet down. It must never suppress. */
+    it('ignores a warning from anywhere', async () => {
+      const pinged: string[] = [];
+      const { scheduler, alerts } = build(healthy, {
+        url: 'https://hb.example/ping',
+        fetchFn: (async (url: string) => {
+          pinged.push(url);
+          return { ok: true } as Response;
+        }) as never,
+      });
+      alerts.setOpen([{ severity: 'warn', lastSeenAt: new Date() }]);
+
+      await scheduler.tick();
+
+      expect(pinged).toHaveLength(1);
+    });
+
+    /**
+     * Fails OPEN. A failed read means the database is in trouble, which is
+     * itself a locally-evaluated critical that has already suppressed. Treating
+     * the error as a suppression would make a database blip read as a fleet-wide
+     * outage on the one signal that has to stay trustworthy.
+     */
+    it('still pings when the fleet read fails', async () => {
+      const pinged: string[] = [];
+      const { scheduler, alerts } = build(healthy, {
+        url: 'https://hb.example/ping',
+        fetchFn: (async (url: string) => {
+          pinged.push(url);
+          return { ok: true } as Response;
+        }) as never,
+      });
+      alerts.failOpenRead();
+
+      await scheduler.tick();
+
+      expect(pinged).toHaveLength(1);
+    });
+
+    it('pings normally when the whole fleet is healthy', async () => {
+      const pinged: string[] = [];
+      const { scheduler } = build(healthy, {
+        url: 'https://hb.example/ping',
+        fetchFn: (async (url: string) => {
+          pinged.push(url);
+          return { ok: true } as Response;
+        }) as never,
+      });
+
+      await scheduler.tick();
+
+      expect(pinged).toHaveLength(1);
+      expect(scheduler.stats.watchdog.suppressed).toBe(false);
+    });
   });
 });

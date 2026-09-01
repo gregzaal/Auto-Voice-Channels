@@ -125,6 +125,14 @@ export interface AlertSchedulerStats {
 
 const DEFAULT_INTERVAL_MS = 60_000;
 const DEFAULT_STALE_AFTER_MS = 24 * 3_600_000;
+/**
+ * How recently a critical must have been re-confirmed to withhold the ping.
+ *
+ * Polled conditions re-stamp every tick, so anything older belongs to an
+ * instance that vanished without resolving it. Matches `/api/watch`.
+ */
+const FLEET_CRITICAL_WINDOW_MS = 15 * 60_000;
+
 const PING_TIMEOUT_MS = 10_000;
 
 /**
@@ -344,8 +352,24 @@ export class AlertScheduler {
     await this.deliverPending();
     await this.prune();
 
-    this.pingSuppressed = criticalOpen;
-    if (!criticalOpen) await this.ping();
+    /**
+     * Withheld for a critical anywhere in this FLEET, not only on this machine.
+     *
+     * **This is why the 2026-09-01 outage lasted 3 hours 37 minutes.** Shard 0's
+     * gateway was dead and the instance holding it correctly confirmed a
+     * critical and correctly withheld its own ping. The other three instances
+     * were healthy, kept pinging every minute, and the heartbeat monitor stayed
+     * green throughout. The switch is documented as making "a bot that is
+     * running and not working read as down", and that was only ever true of a
+     * single-instance fleet: on four machines, one dead shard is invisible.
+     *
+     * Reading the shared table is what makes a partial-fleet failure visible,
+     * and it keeps the redundancy that matters: every instance still pings, so
+     * one machine dying does not blind the monitor by itself.
+     */
+    const suppress = criticalOpen || (await this.fleetCriticalOpen());
+    this.pingSuppressed = suppress;
+    if (!suppress) await this.ping();
   }
 
   /**
@@ -550,6 +574,35 @@ export class AlertScheduler {
       });
 
     return confirmed.length > 0;
+  }
+
+  /**
+   * Whether any instance of this fleet is currently confirming a critical.
+   *
+   * **Anti-latched on `last_seen_at`, which is not optional.** A polled
+   * condition is re-stamped every tick and resolves itself when it clears, so a
+   * row nobody has touched belongs to an instance that went away without
+   * cleaning up. Without the window, one such row would withhold the ping
+   * forever and the monitor would be permanently red, which this file's own
+   * header calls alert fatigue with a URL and worse than no monitor. The window
+   * matches the one `/api/watch` uses for the same reason.
+   *
+   * Fails OPEN. If this read throws, the database is in trouble, and that is
+   * itself a locally-evaluated critical which has already set `criticalOpen`.
+   * Suppressing again on the error would mean a database blip silently reads as
+   * a fleet-wide outage on the one signal that is supposed to be trustworthy.
+   */
+  private async fleetCriticalOpen(): Promise<boolean> {
+    if (!this.deps.alerts) return false;
+    try {
+      const cutoff = Date.now() - FLEET_CRITICAL_WINDOW_MS;
+      const open = await this.deps.alerts.open(50);
+      return open.some((row) => row.severity === 'critical' && row.lastSeenAt.getTime() > cutoff);
+    } catch (err) {
+      this.lastError = (err as Error).message;
+      this.deps.logger.warn({ err }, 'could not read fleet alerts for the watchdog');
+      return false;
+    }
   }
 
   private async ping(): Promise<void> {
