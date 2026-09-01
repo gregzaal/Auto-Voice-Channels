@@ -69,4 +69,60 @@ describe('RuntimeCreationGate', () => {
     await gate.allowCreate('g1');
     expect(getAll).toHaveBeenCalledTimes(1);
   });
+  /**
+   * `plans/scaling.md` §6.1's live half, which `ownsGuild` does not cover.
+   *
+   * `ownsGuild` is consulted by the reconcile sweep and by nothing on the join
+   * path, so an instance whose lease had aged out stopped pruning rows and
+   * carried on creating them. Discord delivers the same VOICE_STATE_UPDATE to
+   * every open session for a shard, so once a peer claims the same shard both
+   * instances create a room on the same join.
+   */
+  describe('the shard lease', () => {
+    it('declines creation when the lease cannot be proven', async () => {
+      const gate = new RuntimeCreationGate({
+        flags: fakeFlags({}),
+        logger: fakeLogger(),
+        leasesProven: () => false,
+      });
+      const decision = await gate.allowCreate('g1');
+      expect(decision.allowed).toBe(false);
+      expect(decision.reason).toContain('lease');
+    });
+
+    it('allows creation once the lease is provable again', async () => {
+      let proven = false;
+      const gate = new RuntimeCreationGate({
+        flags: fakeFlags({}),
+        logger: fakeLogger(),
+        leasesProven: () => proven,
+      });
+      expect((await gate.allowCreate('g1')).allowed).toBe(false);
+      proven = true;
+      expect((await gate.allowCreate('g1')).allowed).toBe(true);
+    });
+
+    /** Absent means one instance holding every shard, where it is never in doubt. */
+    it('is unaffected when no lease check is supplied', async () => {
+      const gate = new RuntimeCreationGate({ flags: fakeFlags({}), logger: fakeLogger() });
+      expect((await gate.allowCreate('g1')).allowed).toBe(true);
+    });
+
+    /**
+     * Checked before the flag read, so an unprovable lease needs no database
+     * round trip to decline. That matters because the likeliest reason the lease
+     * cannot be refreshed is the database being unreachable.
+     */
+    it('declines without reading the flags at all', async () => {
+      const flags = fakeFlags({});
+      const spy = vi.spyOn(flags, 'getAll');
+      const gate = new RuntimeCreationGate({
+        flags,
+        logger: fakeLogger(),
+        leasesProven: () => false,
+      });
+      await gate.allowCreate('g1');
+      expect(spy).not.toHaveBeenCalled();
+    });
+  });
 });

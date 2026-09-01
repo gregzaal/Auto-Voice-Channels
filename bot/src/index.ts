@@ -271,7 +271,14 @@ async function main(): Promise<void> {
         })
       : new PersistentErrorReporter({ alerts: alertRepo, logger });
   opsReport.report = (kind, message, context) => errorReporter.report(kind, message, context);
-  const creationGate = new RuntimeCreationGate({ flags, logger });
+  const creationGate = new RuntimeCreationGate({
+    // The live half of §6.1: `ownsGuild` scopes the sweep and nothing else, so
+    // without this an instance with a stale lease keeps creating rooms while a
+    // peer that legitimately claimed the shard creates them too.
+    leasesProven: () => leaseManager.leasesProven(),
+    flags,
+    logger,
+  });
   // Guild settings cache: avoids a Postgres read/write on every voice event, with
   // cross-instance invalidation over LISTEN/NOTIFY (the DB stays source of truth).
   // Reads on the hot path go through it; writes (settings/auth) route through it so
