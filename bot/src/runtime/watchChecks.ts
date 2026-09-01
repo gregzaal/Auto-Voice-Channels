@@ -30,6 +30,13 @@ export interface WatchCheckDeps {
   /** Lease heartbeat health, from `ShardLeaseManager`. */
   heartbeat: () => { lastOkAt: number | null; consecutiveFailures: number };
   selfHosted: boolean;
+  /**
+   * How many shards this fleet runs, and how many Discord currently recommends.
+   *
+   * Undefined until the first gateway poll lands, which is why the check below
+   * treats absence as "nothing to say" rather than as a problem.
+   */
+  shardHeadroom?: () => { running: number; recommended: number } | undefined;
   /** Guilds with a live permission incident. Self-host only, see below. */
   permissionProblems?: (sinceMs: number) => PermissionProblemSummary[];
   /** Injectable clock, for the trip hold-down and the heartbeat age test. */
@@ -290,6 +297,42 @@ export function buildWatchChecks(deps: WatchCheckDeps): WatchCheck[] {
    * irrelevant alert in the only channel they have.
    */
   if (!deps.selfHosted) {
+    checks.push({
+      /**
+       * Discord recommends more shards than this fleet runs.
+       *
+       * **The one wall in this system that arrives on someone else's schedule.**
+       * `recommended_shards` grows with the install base, and when it passes what
+       * a fleet runs, Discord starts refusing identifies with 4011 and the fleet
+       * cannot connect at all. It is not gradual and there is no degraded mode.
+       *
+       * On 2026-09-01 prod ran 4 shards against a recommendation of 6. The number
+       * was already in the metric store, on `/admin/ops`, and nothing looked at
+       * it, so the first anyone would have known is a fleet that would not boot.
+       *
+       * `warn`, deliberately, so it never suppresses the watchdog ping: this is
+       * weeks of notice, not an outage, and waking someone at 3am for it would
+       * teach them to ignore the channel. It resolves itself the moment
+       * `TOTAL_SHARDS` catches up.
+       */
+      key: 'shard.headroom',
+      severity: 'warn',
+      audience: 'hosted',
+      confirmations: 2,
+      run: () => {
+        const headroom = deps.shardHeadroom?.();
+        if (!headroom || headroom.recommended <= headroom.running) return [];
+        return [
+          {
+            message:
+              `Discord recommends ${headroom.recommended} shards and this fleet runs ` +
+              `${headroom.running}. Raise TOTAL_SHARDS before Discord starts refusing identifies.`,
+            details: { running: headroom.running, recommended: headroom.recommended },
+          },
+        ];
+      },
+    });
+
     checks.push({
       key: 'shard.heartbeat',
       severity: 'critical',

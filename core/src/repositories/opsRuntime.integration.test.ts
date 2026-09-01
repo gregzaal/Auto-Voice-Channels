@@ -66,6 +66,44 @@ describe('RuntimeFlags + OpsAudit (integration)', () => {
     });
   });
 
+  /**
+   * The table had no retention at all, while `metrics_hourly` has had a prune
+   * since it existed. Survivable while every writer was an operator action, and
+   * not once `/import` made it grow with a customer action.
+   */
+  describe('audit retention', () => {
+    it('drops entries past the window and keeps the rest', async () => {
+      await env.handle.db.execute('DELETE FROM ops_audit');
+      const now = new Date('2026-09-01T00:00:00Z');
+      const old = new Date('2025-08-01T00:00:00Z');
+      await env.handle.db.execute(
+        `INSERT INTO ops_audit (actor, action, target, created_at) VALUES
+           ('t', 'old.action', 'a', '${old.toISOString()}'),
+           ('t', 'new.action', 'b', '${now.toISOString()}')`,
+      );
+
+      const removed = await audit.prune(now);
+
+      expect(removed).toBe(1);
+      const left = await audit.recent(10);
+      expect(left.map((r) => r.action)).toEqual(['new.action']);
+    });
+
+    it('is a no-op when nothing is old enough', async () => {
+      await env.handle.db.execute('DELETE FROM ops_audit');
+      await audit.record({ actor: 't', action: 'fresh', target: 'x' });
+      expect(await audit.prune(new Date())).toBe(0);
+      expect(await audit.recent(10)).toHaveLength(1);
+    });
+
+    it('honours a shorter window when one is asked for', async () => {
+      await env.handle.db.execute('DELETE FROM ops_audit');
+      await audit.record({ actor: 't', action: 'fresh', target: 'x' });
+      // Everything is older than a zero-day window.
+      expect(await audit.prune(new Date(Date.now() + 86_400_000), 0)).toBe(1);
+    });
+  });
+
   it('overwrites an existing flag value', async () => {
     await flags.set('throttle.create', 5, { actor: 'agent' });
     await flags.set('throttle.create', 10, { actor: 'agent' });

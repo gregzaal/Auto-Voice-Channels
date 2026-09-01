@@ -55,6 +55,13 @@ export interface GatewayLimits {
 
 export interface MetricsCollectorDeps {
   metrics: MetricsRepository;
+  /**
+   * The audit log, whose retention runs alongside the metrics prune.
+   *
+   * Optional so a self-host and every existing test stay valid without it, and
+   * because nothing else here needs it.
+   */
+  opsAudit?: { prune: (now: Date) => Promise<number> };
   /** Durable spacing + the cluster-singleton lock for the rollup half. */
   runs: BillingRunRepository;
   flags: RuntimeFlagsRepository;
@@ -654,11 +661,29 @@ export class MetricsCollector {
       fail('prune', err);
     }
 
+    /**
+     * The audit log's retention rides along here.
+     *
+     * Same reason it is not its own scheduler: this job is already the cluster
+     * singleton for "tidy the tables once an hour", it already holds the
+     * reservation, and a second timer for one DELETE would be a second thing to
+     * forget. Its own try, so a failure here cannot cost the metrics prune, and
+     * counted separately so the log does not conflate the two.
+     */
+    let auditPruned = 0;
+    if (this.deps.opsAudit) {
+      try {
+        auditPruned = await this.deps.opsAudit.prune(at);
+      } catch (err) {
+        fail('audit-prune', err);
+      }
+    }
+
     try {
       const freshness = await this.deps.metrics.freshness();
       this.lastBucket = freshness.lastHourlyBucket;
       this.deps.logger.info(
-        { gauges, rolled, pruned, hourlyRows: freshness.hourlyRows, failures },
+        { gauges, rolled, pruned, auditPruned, hourlyRows: freshness.hourlyRows, failures },
         'metrics rollup complete',
       );
     } catch (err) {

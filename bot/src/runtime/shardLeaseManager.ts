@@ -79,6 +79,15 @@ export class ShardLeaseManager {
   private owned = new Set<number>();
   private lastHeartbeatOkAt: number | null = null;
   private consecutiveHeartbeatFailures = 0;
+  /**
+   * When this instance last successfully claimed, which is proof of ownership in
+   * its own right until the first heartbeat lands. Without it a machine that has
+   * claimed but not yet beaten looks unproven and refuses to serve for its first
+   * heartbeat interval.
+   */
+  private claimedAt: number | null = null;
+  /** So the stand-aside is reported once per episode, not once per beat. */
+  private standingAside = false;
 
   constructor(options: ShardLeaseManagerOptions) {
     this.repo = options.repo;
@@ -114,8 +123,40 @@ export class ShardLeaseManager {
    * itself correctly.
    */
   ownsGuild(guildId: string): boolean {
+    if (!this.leasesProven()) return false;
     const shardId = Number((BigInt(guildId) >> 22n) % BigInt(this.totalShards));
     return this.owned.has(shardId);
+  }
+
+  /**
+   * Whether this instance can still PROVE it owns the shards it is serving.
+   *
+   * **This is `plans/scaling.md` §6.1, and it is the difference between an alert
+   * and the process stepping aside.** A heartbeat that fails or hangs used to
+   * increment a counter and log. The lease row then ages past its 30s TTL, a
+   * booting peer legitimately claims the same shard, and this instance keeps its
+   * gateway session and keeps serving it. Two instances then act on one guild:
+   * duplicate rooms, duplicate renames, and the only trace is a log line on a
+   * fleet running at info.
+   *
+   * Ownership is a claim with an expiry, so once the claim is older than the TTL
+   * this instance has to stop asserting it. Everything scoped by
+   * {@link ownsGuild} then declines on its own, `/health` reports leases down,
+   * and it all comes back on the next successful beat.
+   *
+   * **Deliberately NOT an exit.** The most likely cause of a failing heartbeat is
+   * the database being unreachable, and that hits every instance at once. Exiting
+   * would restart the whole fleet into a boot that needs the database for
+   * migrations, burn Fly's ten restart retries, and leave nothing running when
+   * the database came back. Standing aside is recoverable, and during a database
+   * outage there is nothing to serve anyway.
+   */
+  leasesProven(now = Date.now()): boolean {
+    if (this.owned.size === 0) return false;
+    // Never heartbeated since the claim: the claim itself is the proof, and it
+    // is only as old as this process.
+    const since = this.lastHeartbeatOkAt ?? this.claimedAt;
+    return since !== null && now - since <= this.leaseTtlMs;
   }
 
   /**
@@ -142,6 +183,8 @@ export class ShardLeaseManager {
       this.maxShards,
     );
     this.owned = new Set(claimed);
+    // Proof of ownership until the first heartbeat lands.
+    if (claimed.length > 0) this.claimedAt = Date.now();
     this.logger.info({ claimed, cap: this.maxShards }, 'claimed shard leases');
     return claimed;
   }
@@ -189,6 +232,14 @@ export class ShardLeaseManager {
       const owned = await this.repo.heartbeat(this.instanceId, [...this.owned]);
       this.lastHeartbeatOkAt = Date.now();
       this.consecutiveHeartbeatFailures = 0;
+      if (this.standingAside) {
+        this.standingAside = false;
+        this.logger.info({ owned: [...this.owned] }, 'shard ownership proven again, serving');
+        this.report?.('shard.lease_recovered', 'Shard lease refreshed, instance is serving again', {
+          owned: [...this.owned].join(', '),
+          instanceId: this.instanceId,
+        });
+      }
       const ownedSet = new Set(owned);
       const lost = [...this.owned].filter((shardId) => !ownedSet.has(shardId));
       this.owned = ownedSet;
@@ -211,7 +262,41 @@ export class ShardLeaseManager {
         { err, consecutiveFailures: this.consecutiveHeartbeatFailures },
         'heartbeat failed',
       );
+      /**
+       * Reported, which it never was.
+       *
+       * The class doc above says a failing heartbeat was "a `logger.error` and
+       * nothing else", and the `report` hook was added for it and then not
+       * called from here. So the one condition that leads to two instances
+       * serving one shard produced no alert from the component that detects it.
+       */
+      this.noticeStandAside('heartbeat failed');
     }
+  }
+
+  /**
+   * Says once, per episode, that this instance has stopped asserting ownership.
+   *
+   * Once per episode rather than once per beat: at a 10s interval a database
+   * blip would otherwise post six times a minute to the alert channel, which is
+   * how an alert channel stops being read.
+   */
+  private noticeStandAside(reason: string): void {
+    if (this.leasesProven() || this.standingAside) return;
+    this.standingAside = true;
+    this.logger.error(
+      { reason, owned: [...this.owned], instanceId: this.instanceId },
+      'cannot prove shard ownership, standing aside until the heartbeat recovers',
+    );
+    this.report?.(
+      'shard.lease_unproven',
+      'Shard lease could not be refreshed, instance has stopped serving its shards',
+      {
+        reason,
+        owned: [...this.owned].join(', '),
+        instanceId: this.instanceId,
+      },
+    );
   }
 
   /** Stops heartbeating and releases all owned leases (graceful drain). */

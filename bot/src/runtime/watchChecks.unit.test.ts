@@ -398,4 +398,57 @@ describe('buildWatchChecks', () => {
     const watcherKeys = buildWatchChecks(deps()).map((c) => c.key);
     expect(watcherKeys.filter((k) => eventKeys.has(k))).toEqual([]);
   });
+  /**
+   * The one wall in this system that arrives on somebody else's schedule.
+   *
+   * `recommended_shards` grows with the install base, and when it passes what a
+   * fleet runs Discord starts refusing identifies with 4011 and the fleet cannot
+   * connect at all. On 2026-09-01 prod ran 4 shards against a recommendation of
+   * 6: the number was already in the metric store and on `/admin/ops`, and
+   * nothing looked at it, so the first anyone would have known is a fleet that
+   * would not boot.
+   */
+  describe('shard.headroom', () => {
+    it('says nothing while the fleet has enough shards', () => {
+      const d = deps({ shardHeadroom: () => ({ running: 4, recommended: 4 }) });
+      expect(find(d, 'shard.headroom').run()).toEqual([]);
+    });
+
+    it('says nothing when the fleet runs more than recommended', () => {
+      const d = deps({ shardHeadroom: () => ({ running: 8, recommended: 6 }) });
+      expect(find(d, 'shard.headroom').run()).toEqual([]);
+    });
+
+    it('warns, with both numbers, once the recommendation passes the fleet', () => {
+      const d = deps({ shardHeadroom: () => ({ running: 4, recommended: 6 }) });
+      const raised = find(d, 'shard.headroom').run();
+      expect(raised).toHaveLength(1);
+      expect(raised[0]?.message).toContain('6');
+      expect(raised[0]?.message).toContain('4');
+      expect(raised[0]?.details).toEqual({ running: 4, recommended: 6 });
+    });
+
+    /**
+     * `warn`, so it never withholds the watchdog ping. This is weeks of notice,
+     * not an outage, and paging on it would teach everyone to ignore the channel.
+     */
+    it('is a warning rather than a critical', () => {
+      const d = deps({ shardHeadroom: () => ({ running: 4, recommended: 6 }) });
+      expect(find(d, 'shard.headroom').severity).toBe('warn');
+    });
+
+    /** Absent before the first gateway poll lands, which is not a problem. */
+    it('says nothing when the numbers are not known yet', () => {
+      expect(find(deps(), 'shard.headroom').run()).toEqual([]);
+      expect(find(deps({ shardHeadroom: () => undefined }), 'shard.headroom').run()).toEqual([]);
+    });
+
+    /** A self-hoster has one shard and no fleet, so it would be noise forever. */
+    it('is not offered to a self-hoster', () => {
+      const built = buildWatchChecks(
+        deps({ selfHosted: true, shardHeadroom: () => ({ running: 1, recommended: 4 }) }),
+      );
+      expect(built.some((c) => c.key === 'shard.headroom')).toBe(false);
+    });
+  });
 });

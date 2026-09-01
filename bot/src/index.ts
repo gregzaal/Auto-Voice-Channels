@@ -44,6 +44,7 @@ import { runIdle } from './runtime/idle.js';
 import { PgIdentifyThrottler } from './runtime/identifyThrottler.js';
 import { installShutdown } from './runtime/shutdown.js';
 import { AlertScheduler } from './runtime/alertScheduler.js';
+import { GatewaySupervisor } from './runtime/gatewaySupervisor.js';
 import { BackupScheduler } from './runtime/backupScheduler.js';
 import { TopggScheduler } from './runtime/topggScheduler.js';
 import { SupporterRoles } from './features/support/supporterRoles.js';
@@ -128,6 +129,8 @@ async function main(): Promise<void> {
   });
 
   let dbStatus: SubsystemStatus = 'unknown';
+  /** Last gateway limits seen, for the supervisor's identify-budget guard. */
+  let lastGatewayLimits: GatewayLimits | undefined;
   try {
     await runMigrations(db);
     dbStatus = 'up';
@@ -589,6 +592,9 @@ async function main(): Promise<void> {
    */
   const metricsCollector = new MetricsCollector({
     metrics: new MetricsRepository(db),
+    // Retention for the audit log rides on this job: it is already the cluster
+    // singleton for hourly table tidying and already holds the reservation.
+    opsAudit: new OpsAuditRepository(db, config.fleet),
     runs: new BillingRunRepository(db),
     flags,
     fleet: config.fleet ?? DEFAULT_FLEET,
@@ -605,7 +611,14 @@ async function main(): Promise<void> {
      * would be waste. Uses the client's own REST handler (existing token,
      * existing rate-limit bucket), so no second credential anywhere.
      */
-    pollGateway: () => fetchGatewayLimits(client, logger),
+    pollGateway: async () => {
+      const limits = await fetchGatewayLimits(client, logger);
+      // Cached rather than re-fetched: the supervisor needs the identify budget
+      // to decide whether it may spend one, and the collector is already asking
+      // hourly. A second caller would be a second REST call for the same answer.
+      if (limits) lastGatewayLimits = limits;
+      return limits;
+    },
   });
   countError.record = (err) => metricsCollector.increment(METRICS.ERRORS, categorizeError(err));
   /**
@@ -739,6 +752,10 @@ async function main(): Promise<void> {
       snapshot: () => dispatcher.snapshot(),
       dbStatus: () => dbStatus,
       heartbeat: () => leaseManager.heartbeatHealth,
+      shardHeadroom: () =>
+        lastGatewayLimits
+          ? { running: config.totalShards, recommended: lastGatewayLimits.recommendedShards }
+          : undefined,
       selfHosted: config.selfHosted,
       /**
        * Read by the self-host check only. Passed unconditionally because the
@@ -1040,12 +1057,22 @@ async function main(): Promise<void> {
       const gateway = currentGatewayStatus();
       return {
         status:
-          dbStatus === 'up' && leaseManager.ownedShards.length > 0 && gateway !== 'down'
+          dbStatus === 'up' &&
+          leaseManager.ownedShards.length > 0 &&
+          leaseManager.leasesProven() &&
+          gateway !== 'down'
             ? 'up'
             : 'down',
         subsystems: {
           gateway,
-          leases: leaseManager.ownedShards.length > 0 ? 'up' : 'down',
+          /**
+           * Held AND provable. An instance whose heartbeat has not landed inside
+           * the lease TTL has stopped serving those shards (`scaling.md` §6.1),
+           * so reporting the leases up would be the same lie `gateway` used to
+           * tell: a machine that looks healthy and is doing nothing.
+           */
+          leases:
+            leaseManager.ownedShards.length > 0 && leaseManager.leasesProven() ? 'up' : 'down',
           db: dbStatus,
         },
         version: VERSION,
@@ -1106,6 +1133,7 @@ async function main(): Promise<void> {
          * actually does, so this field answers "can anyone import right now"
          * rather than "is the row for my fleet set".
          */
+        gatewaySupervisor: { ...gatewaySupervisor.stats },
         configImport: {
           disabled: await flags.getBoolAnyFleet(RUNTIME_FLAGS.IMPORT_DISABLED).catch(() => null),
           announceDisabled: runtimeFlags[RUNTIME_FLAGS.IMPORT_ANNOUNCE_DISABLED] === true,
@@ -1222,6 +1250,30 @@ async function main(): Promise<void> {
    * handler existed would leave a window where that guarantee does not hold.
    */
   alertScheduler.start();
+
+  /**
+   * Restarts this machine when its gateway is confirmed dead and nothing else
+   * will (2026-09-01: shard 0 wedged for 3h37m, and peers never poach a live
+   * lease, so nothing was going to take it).
+   *
+   * Built here, after the drain handler exists, because that is what it asks
+   * for: the same drain-and-exit path a lease loss already uses. Its guards are
+   * in `gatewaySupervisor.ts` and every one of them is there because the
+   * unguarded version is worse than the bug.
+   */
+  const gatewaySupervisor = new GatewaySupervisor({
+    gatewayStatus: currentGatewayStatus,
+    leasesProven: () => leaseManager.leasesProven(),
+    sessionBudget: () =>
+      lastGatewayLimits
+        ? { used: lastGatewayLimits.sessionUsed, total: lastGatewayLimits.sessionTotal }
+        : undefined,
+    opsAudit: new OpsAuditRepository(db, config.fleet),
+    instanceId: config.instanceId,
+    requestRestart: (reason) => (shutdown.request ?? ((_r, code) => process.exit(code)))(reason, 1),
+    report: (kind, message, context) => errorReporter.report(kind, message, context),
+    logger,
+  });
   /**
    * Started with the others, after the drain handler. Nothing here is
    * latency-critical and the first tick is deliberate: a deploy that changed the
@@ -1229,6 +1281,7 @@ async function main(): Promise<void> {
    */
   topggScheduler?.start();
   leaseManager.startHeartbeat();
+  gatewaySupervisor.start();
 }
 
 /**
