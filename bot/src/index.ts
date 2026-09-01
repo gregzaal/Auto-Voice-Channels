@@ -36,6 +36,7 @@ import {
   SUPPORTER_SYNC_CHANNEL,
   type Logger,
 } from '@avc/core';
+import v8 from 'node:v8';
 import { REST, Routes, type Client } from 'discord.js';
 import { GuildDispatcher } from './runtime/dispatcher.js';
 import { RuntimeCreationGate } from './runtime/creationGate.js';
@@ -763,6 +764,17 @@ async function main(): Promise<void> {
         lastGatewayLimits
           ? { running: config.totalShards, recommended: lastGatewayLimits.recommendedShards }
           : undefined,
+      /**
+       * `heap_size_limit` is what `--max-old-space-size` sets, which is
+       * deliberately below the container's memory so V8 collects harder instead
+       * of the container being OOM-killed. That makes it the wall worth
+       * measuring against, and it makes the number climb visibly before
+       * anything dies.
+       */
+      heapUsage: () => {
+        const stats = v8.getHeapStatistics();
+        return { usedBytes: stats.used_heap_size, limitBytes: stats.heap_size_limit };
+      },
       selfHosted: config.selfHosted,
       /**
        * Read by the self-host check only. Passed unconditionally because the

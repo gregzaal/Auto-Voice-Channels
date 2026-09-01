@@ -37,11 +37,26 @@ export interface WatchCheckDeps {
    * treats absence as "nothing to say" rather than as a problem.
    */
   shardHeadroom?: () => { running: number; recommended: number } | undefined;
+  /**
+   * Heap in use against the ceiling V8 will not grow past.
+   *
+   * Injected rather than read here so the check is testable without allocating
+   * a gigabyte.
+   */
+  heapUsage?: () => { usedBytes: number; limitBytes: number } | undefined;
   /** Guilds with a live permission incident. Self-host only, see below. */
   permissionProblems?: (sinceMs: number) => PermissionProblemSummary[];
   /** Injectable clock, for the trip hold-down and the heartbeat age test. */
   now?: () => number;
 }
+
+/**
+ * Heap fraction at which the machine is worth a warning.
+ *
+ * 85%: V8 is collecting hard by then and the trend is what matters, not the
+ * instant. Below this a healthy fleet would warn on every ordinary peak.
+ */
+const MEMORY_WARN_FRACTION = 0.85;
 
 /**
  * Consecutive lease heartbeat failures before this is worth waking someone.
@@ -315,6 +330,49 @@ export function buildWatchChecks(deps: WatchCheckDeps): WatchCheck[] {
        * teach them to ignore the channel. It resolves itself the moment
        * `TOTAL_SHARDS` catches up.
        */
+      /**
+       * Heap approaching the ceiling V8 will not grow past.
+       *
+       * **The other wall, and AGENTS.md calls it the single term that decides
+       * how this scales.** Memory here tracks the MEMBER count of the install
+       * base rather than the guild count, at a measured ~1.28 KB per cached
+       * member, and the caches that drive it are deliberately unbounded because
+       * naming a channel after a game needs the joiner's presence at the instant
+       * they join. There is no lever that reduces it.
+       *
+       * It has already bitten: beta OOM-looped at 512MB around 1,000 guilds,
+       * which is why prod runs `performance-1x:2gb` with
+       * `--max-old-space-size=1700`. That flag is what makes this measurable
+       * rather than fatal: V8 collects harder as it approaches the limit instead
+       * of the container being killed, so the number climbs visibly first.
+       *
+       * `warn`, so it never withholds the watchdog ping. The answer is a bigger
+       * machine, which is a purchase and a deploy, not a 3am action, and paging
+       * for something with weeks of notice teaches people to ignore the channel.
+       */
+      key: 'memory.headroom',
+      severity: 'warn',
+      audience: 'hosted',
+      confirmations: 3,
+      run: () => {
+        const heap = deps.heapUsage?.();
+        if (!heap || heap.limitBytes <= 0) return [];
+        const used = heap.usedBytes / heap.limitBytes;
+        if (used < MEMORY_WARN_FRACTION) return [];
+        const mb = (bytes: number): number => Math.round(bytes / 1024 / 1024);
+        return [
+          {
+            message:
+              `Heap is at ${Math.round(used * 100)}% of its limit ` +
+              `(${mb(heap.usedBytes)}MB of ${mb(heap.limitBytes)}MB). ` +
+              'Memory here scales with member count, and no runtime flag reduces it.',
+            details: { usedMb: mb(heap.usedBytes), limitMb: mb(heap.limitBytes) },
+          },
+        ];
+      },
+    });
+
+    checks.push({
       key: 'shard.headroom',
       severity: 'warn',
       audience: 'hosted',

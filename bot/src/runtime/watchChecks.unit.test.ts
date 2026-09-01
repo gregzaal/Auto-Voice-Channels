@@ -451,4 +451,57 @@ describe('buildWatchChecks', () => {
       expect(built.some((c) => c.key === 'shard.headroom')).toBe(false);
     });
   });
+  /**
+   * The other wall, and AGENTS.md calls it the single term that decides how this
+   * scales: memory tracks the MEMBER count of the install base, at a measured
+   * ~1.28 KB per cached member, and the caches driving it are deliberately
+   * unbounded because naming a channel after a game needs the joiner's presence
+   * at the instant they join. Beta already OOM-looped at 512MB.
+   */
+  describe('memory.headroom', () => {
+    const mb = (n: number) => n * 1024 * 1024;
+
+    it('says nothing at ordinary usage', () => {
+      const d = deps({ heapUsage: () => ({ usedBytes: mb(400), limitBytes: mb(1700) }) });
+      expect(find(d, 'memory.headroom').run()).toEqual([]);
+    });
+
+    it('warns once the heap is near its ceiling, with both numbers', () => {
+      const d = deps({ heapUsage: () => ({ usedBytes: mb(1500), limitBytes: mb(1700) }) });
+      const raised = find(d, 'memory.headroom').run();
+      expect(raised).toHaveLength(1);
+      expect(raised[0]?.details).toEqual({ usedMb: 1500, limitMb: 1700 });
+    });
+
+    it('does not warn just below the threshold', () => {
+      const d = deps({ heapUsage: () => ({ usedBytes: mb(1400), limitBytes: mb(1700) }) });
+      expect(find(d, 'memory.headroom').run()).toEqual([]);
+    });
+
+    /**
+     * `warn`, so it never withholds the watchdog ping. The answer is a bigger
+     * machine, which is a purchase and a deploy, not a 3am action.
+     */
+    it('is a warning rather than a critical', () => {
+      const d = deps({ heapUsage: () => ({ usedBytes: mb(1690), limitBytes: mb(1700) }) });
+      expect(find(d, 'memory.headroom').severity).toBe('warn');
+    });
+
+    it('says nothing when the numbers are unavailable or nonsense', () => {
+      expect(find(deps(), 'memory.headroom').run()).toEqual([]);
+      const zero = deps({ heapUsage: () => ({ usedBytes: mb(100), limitBytes: 0 }) });
+      expect(find(zero, 'memory.headroom').run()).toEqual([]);
+    });
+
+    /** A self-hoster picks their own box and cannot be told to buy a bigger one. */
+    it('is not offered to a self-hoster', () => {
+      const built = buildWatchChecks(
+        deps({
+          selfHosted: true,
+          heapUsage: () => ({ usedBytes: mb(1690), limitBytes: mb(1700) }),
+        }),
+      );
+      expect(built.some((c) => c.key === 'memory.headroom')).toBe(false);
+    });
+  });
 });
