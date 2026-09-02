@@ -29,7 +29,7 @@ const AUTH_STATUSES = ['trial', 'active', 'grace', 'expired', 'blocked'] as cons
  * migration additive: rows written before fleets existed, and every row a
  * self-host will ever write, are production rows.
  */
-const FLEETS = ['prod', 'beta'] as const;
+const FLEETS = ['prod', 'beta', 'gold'] as const;
 
 /** A fleet-scoping column. See `plans/fleets.md` §2 for what gets one and why. */
 const fleet = () => text('fleet', { enum: FLEETS }).notNull().default('prod');

@@ -15,6 +15,15 @@ describe('fleets', () => {
   it('pins the ordinals', () => {
     expect(fleetOrdinal('prod')).toBe(0);
     expect(fleetOrdinal('beta')).toBe(1);
+    expect(fleetOrdinal('gold')).toBe(2);
+  });
+
+  /**
+   * Every ordinal above is pinned individually, which says nothing about an
+   * entry added in the middle. This is the assertion that catches an insert.
+   */
+  it('is append-only', () => {
+    expect([...FLEETS]).toEqual(['prod', 'beta', 'gold']);
   });
 });
 

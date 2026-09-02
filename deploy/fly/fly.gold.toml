@@ -1,0 +1,112 @@
+# Fly.io deployment config for the GOLD fleet.
+#
+# The third sibling of `fly.toml` (`avc-beta`) and `fly.prod.toml` (`avc-prod`).
+# Everything not listed below is deliberately identical to prod's file, which is
+# itself deliberately identical to beta's -- the configuration validated against
+# a real userbase since 2026-08-19. Read beta's file for the reasoning behind the
+# region, the VM class, the memory and the DATABASE_URL rule.
+#
+# This app carries the legacy patron bot's own application id, so the two can
+# never run at once (one token, one gateway session). `plans/migration.md` 7.
+#
+# What differs from prod, and why:
+#   app                = "avc-gold"
+#   FLEET              = "gold"
+#   TOTAL_SHARDS       = "1"   (prod: 4)
+#   EXPECTED_INSTANCES = "1"   (prod: 4)
+#   no SUPPORT_* group         -- prod owns supporter roles. Both bots are in the
+#                                 support guild and two writers would fight over
+#                                 one member's roles. Config is the whole
+#                                 election, so this file must never carry them.
+#
+# Secrets (`fly secrets set -a avc-gold ...`):
+#   DISCORD_TOKEN, CLIENT_ID  -> application 676755909468225577 (AVC Gold)
+#   DATABASE_URL              -> the shared cluster, `direct.`, never `pgbouncer.`
+#   DIAGNOSTICS_TOKEN         -> its OWN, not prod's or beta's
+#   ADMIN_CHANNEL_ID          -> the same #admin in the support guild
+#   AVC_AI_API_KEY            -> shared with prod and beta (plans/fleets.md decision 2)
+#   WATCHDOG_PING_URL         -> its OWN monitor when one exists. A shared URL
+#                                lets a healthy fleet keep the monitor green
+#                                while this one is dead, which is the dead-man's
+#                                switch failing silently. Better unset than
+#                                shared.
+#
+# Deliberately NOT set here:
+#   BACKUP_S3_* / BACKUP_ENCRYPTION_KEY / BACKUP_PREFIX / BACKUP_DRILL_DATABASE_URL
+#                             -> prod owns backups. `withBackupLock` uses
+#                                `fleetAdvisoryKey`, so leader election is PER
+#                                FLEET: a second configured fleet backs the same
+#                                database up twice and runs a second weekly drill
+#                                into the one scratch database.
+#   TOPGG_TOKEN               -> prod alone. `@me` resolves the project from the
+#                                token while the count comes from this fleet's
+#                                own `guild_fleet_presence` rows, so the same
+#                                secret here would publish 173 guilds to the
+#                                production listing, undetectably.
+app = "avc-gold"
+
+# See prod's file: Fly's default is 5s and the drain releases shard leases last.
+kill_timeout = "30s"
+
+primary_region = "iad"
+
+[build]
+  dockerfile = "../../Dockerfile"
+
+[env]
+  SELF_HOSTED = "false"
+  FLEET = "gold"
+  HTTP_PORT = "8080"
+  LOG_LEVEL = "info"
+  NODE_ENV = "production"
+  # One shard on one machine (cap = ceil(1/1) = 1).
+  #
+  # 173 guilds and 94,306 members measured 2026-09-02, against Discord's own
+  # floor of one shard per 2500 guilds. The member total is what actually
+  # decides this (~118MB of member cache at the measured 1.28 KB/member), not
+  # the guild count, and it leaves the fleet an order of magnitude inside its
+  # memory. A shard-count change later is a full stop-and-start of the fleet
+  # rather than a rolling deploy (plans/scaling.md 2.2), which is why it is
+  # settled here rather than raised when it hurts.
+  TOTAL_SHARDS = "1"
+  EXPECTED_INSTANCES = "1"
+  # Keep V8 the thing that reports a memory problem, rather than the kernel.
+  NODE_OPTIONS = "--max-old-space-size=1700"
+  AVC_AI_BASE_URL = "https://api.openai.com/v1"
+  AVC_AI_MODEL = "gpt-5.4-mini"
+  AVC_AI_PRICE_INPUT_PER_MTOK = "0.75"
+  AVC_AI_PRICE_OUTPUT_PER_MTOK = "4.50"
+
+[deploy]
+  strategy = "rolling"
+
+[[restart]]
+  policy = "on-failure"
+  max_retries = 10
+
+# INSTANCE_ID is deliberately unset: config falls back to Fly's per-machine
+# FLY_MACHINE_ID, which is unique and stable, and is the shard-lease identity.
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/health"
+    interval = "10s"
+    timeout = "2s"
+    grace_period = "30s"
+
+[[vm]]
+  # A DEDICATED core, matching both live fleets. Not a cost optimisation to
+  # revisit: beta's fleet-wide outage on 2026-08-20 was a shared-cpu burst
+  # balance hitting zero, and the dominant consumer is the gateway presence
+  # firehose, which is per MEMBER and which no runtime flag controls. 2gb is
+  # also Fly's floor for a performance vCPU, so there is no smaller dedicated
+  # shape to drop to.
+  size = "performance-1x"
+  memory = "2gb"

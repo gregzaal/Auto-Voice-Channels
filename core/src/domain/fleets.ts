@@ -1,8 +1,10 @@
 /**
  * Hosted fleets (`plans/fleets.md`).
  *
- * Two live bots share one database: production and an opt-in beta that is
- * deliberately indistinguishable from production to the people using it.
+ * Three live bots share one database: production, an opt-in beta that is
+ * deliberately indistinguishable from production to the people using it, and
+ * gold, which carries the legacy patron bot's own application id
+ * (`plans/migration.md` 7).
  *
  * The split follows one rule: **anything about the customer is shared, anything
  * about the bot's own operation is per fleet.** So entitlement, subscriptions,
@@ -13,7 +15,13 @@
  * Self-host is always `prod`, is the only fleet in its own database, and never
  * notices any of this.
  */
-export const FLEETS = ['prod', 'beta'] as const;
+/**
+ * **Append only, never insert or reorder.** {@link fleetOrdinal} is the array
+ * index and is packed into advisory-lock keys that are already live, so moving
+ * an existing entry repoints a running fleet's locks at another fleet's
+ * namespace.
+ */
+export const FLEETS = ['prod', 'beta', 'gold'] as const;
 
 export type Fleet = (typeof FLEETS)[number];
 
