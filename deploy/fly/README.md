@@ -31,6 +31,18 @@ the **same image**.
 fly deploy --config deploy/fly/fly.toml --build-arg GIT_COMMIT="$(git rev-parse HEAD)"
 ```
 
+**There are three configs here, one per hosted fleet**, differing only in the app
+name, `FLEET`, the shard counts, and which single-fleet secrets they carry:
+`fly.toml` (beta), `fly.prod.toml` (production) and `fly.gold.toml` (the legacy
+patron identity). Each file's header comment says what it does not carry and
+why. A self-hoster needs none of them: `docker-compose.yml` at the repo root
+runs the same image.
+
+**Deploy a single-machine fleet with `--ha=false`.** Fly creates a second machine
+on the first deploy of a process group, and against `EXPECTED_INSTANCES=1` the
+extra one claims no shards, serves nothing, and logs an error-level "cannot
+prove shard ownership" line every ten seconds while it does it.
+
 **Pass `GIT_COMMIT`.** It is what `/health` and `/diagnostics` report as `commit`,
 and it is how you tie an incident to a build. The Dockerfile defaults it to `dev`
 so a self-host `docker compose up` needs no flags — which means a deploy without

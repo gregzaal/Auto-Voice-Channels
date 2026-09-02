@@ -24,12 +24,27 @@
 #   DATABASE_URL              -> the shared cluster, `direct.`, never `pgbouncer.`
 #   DIAGNOSTICS_TOKEN         -> its OWN, not prod's or beta's
 #   ADMIN_CHANNEL_ID          -> the same #admin in the support guild
-#   AVC_AI_API_KEY            -> shared with prod and beta (plans/fleets.md decision 2)
-#   WATCHDOG_PING_URL         -> its OWN monitor when one exists. A shared URL
-#                                lets a healthy fleet keep the monitor green
-#                                while this one is dead, which is the dead-man's
-#                                switch failing silently. Better unset than
-#                                shared.
+#   AVC_AI_API_KEY            -> shared with prod and beta (plans/fleets.md decision 2).
+#                                NOTE the ceiling behind it is NOT per fleet in
+#                                practice: `ai_usage` has no fleet column and
+#                                `monthTotals` sums the whole table, so
+#                                `ai.monthly_budget_usd` compares CLUSTER spend
+#                                against THIS fleet's number.
+#
+# NOT SET, and this fleet is worse off for it than the comment above the others
+# suggests:
+#   WATCHDOG_PING_URL         -> gold has NO outside-in down detection of its
+#                                own. A shared URL would be worse (a healthy
+#                                fleet keeps the monitor green while this one is
+#                                dead), but unset is not safe either: this is a
+#                                ONE-SHARD fleet, and `/api/watch`'s
+#                                `shard_coverage` check skips any fleet with
+#                                zero covered rows -- so gold going completely
+#                                dark reads as "not currently running", not as
+#                                an outage. Its `shard_leases` sibling filters
+#                                `instance_id IS NOT NULL` and its zero-row
+#                                fallback needs EVERY fleet dark, which prod's
+#                                four leases prevent. Give this fleet a monitor.
 #
 # Deliberately NOT set here:
 #   BACKUP_S3_* / BACKUP_ENCRYPTION_KEY / BACKUP_PREFIX / BACKUP_DRILL_DATABASE_URL
@@ -78,6 +93,11 @@ primary_region = "iad"
   AVC_AI_PRICE_OUTPUT_PER_MTOK = "4.50"
 
 [deploy]
+  # Nominal on a one-machine fleet: rolling is stop-then-start with no peer left
+  # serving, so `[[http_service.checks]]` gates nothing here and a bad image
+  # means 173 guilds dark until `[[restart]]` burns its retries. Kept so the
+  # three fleets read alike, and so it is already right if gold ever grows a
+  # second machine. Verify a gold deploy by reading /health yourself.
   strategy = "rolling"
 
 [[restart]]
