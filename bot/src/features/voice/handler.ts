@@ -1434,7 +1434,54 @@ export class VoiceFeature {
     const empty: EditorFieldState = { effectiveTemplate: '', preview: '' };
     const secondary = await this.deps.secondaries.get(channelId);
     if (!secondary || secondary.guildId !== guildId) {
-      return { found: false, scope, name: empty, status: empty };
+      /**
+       * `/template` aimed at the CREATOR CHANNEL ITSELF, which has no secondary
+       * row. The template being edited is that primary's, so resolve it
+       * directly instead of reporting the channel unmanaged.
+       *
+       * Without this the caller falls through to the adopt prompt, whose button
+       * then correctly refuses ("that's a creator channel, edit it with
+       * `/template` directly") and the admin is in a loop between two correct
+       * messages. Reported by a customer 2026-09-02.
+       *
+       * `/name` is deliberately NOT given the same fallback: it edits a
+       * per-channel override that only a secondary has.
+       */
+      if (scope !== 'primary') return { found: false, scope, name: empty, status: empty };
+      const own = await this.deps.autoChannels.get(channelId);
+      if (!own || own.guildId !== guildId) {
+        return { found: false, scope, name: empty, status: empty };
+      }
+      // Preview the FIRST room this creator spawns: empty, and index 0, which
+      // the `##` family renders as 1. Rendering against whoever is sitting in
+      // the creator right now would preview a channel that never exists.
+      const previewCtx = {
+        index: 0,
+        members: [],
+        aliases: settings.aliases,
+        general: settings.general,
+      };
+      const ownName = own.template.name ?? settings.channelNameTemplate;
+      const ownStatus = own.template.status ?? settings.channelStatusTemplate;
+      return {
+        found: true,
+        scope,
+        name: {
+          ...(own.template.name !== undefined ? { currentTemplate: own.template.name } : {}),
+          effectiveTemplate: ownName,
+          preview: renderChannelName(ownName, previewCtx),
+        },
+        status: {
+          ...(own.template.status !== undefined ? { currentTemplate: own.template.status } : {}),
+          effectiveTemplate: ownStatus,
+          preview: renderChannelName(ownStatus, previewCtx, {
+            maxLength: MAX_STATUS_LENGTH,
+            allowEmpty: true,
+          }),
+        },
+        ownerId: null,
+        primaryChannelId: channelId,
+      };
     }
     const primary = await this.deps.autoChannels.get(secondary.primaryChannelId);
     const members = this.deps.voice.membersInChannel(channelId);

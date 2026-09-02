@@ -236,6 +236,29 @@ describe('GuildSettingsService (integration)', () => {
     expect((await settings.setTemplate(GUILD, 'not-a-channel', 'x')).ok).toBe(false);
   });
 
+  /**
+   * The write half of the 2026-09-02 report. Fixing only `getEditorState` would
+   * have shown the admin a working panel and then refused the save with "you
+   * need to be in a bot-managed voice channel", for a creator channel AVC
+   * plainly manages.
+   */
+  it('sets a primary template when aimed at the creator channel itself', async () => {
+    await settings.createPrimary(GUILD);
+    const primaryId = actions.ofType('create')[0]!.channelId;
+
+    // No secondary exists at all: this is the creator channel, targeted directly.
+    const set = await settings.setTemplate(GUILD, primaryId, 'Direct [@@game_name@@]');
+    expect(set.ok).toBe(true);
+    expect((await autoChannels.get(primaryId))!.template.name).toBe('Direct [@@game_name@@]');
+
+    const status = await settings.setStatusTemplate(GUILD, primaryId, 'Playing @@game_name@@');
+    expect(status.ok).toBe(true);
+    expect((await autoChannels.get(primaryId))!.template.status).toBe('Playing @@game_name@@');
+
+    // A channel that is neither a primary nor a secondary is still refused.
+    expect((await settings.setTemplate(GUILD, 'not-a-channel', 'x')).ok).toBe(false);
+  });
+
   it('sets and resets a primary status template', async () => {
     await settings.createPrimary(GUILD);
     const primaryId = actions.ofType('create')[0]!.channelId;

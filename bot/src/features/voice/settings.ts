@@ -582,14 +582,27 @@ export class GuildSettingsService {
     });
   }
 
+  /**
+   * The primary whose template a `/template` edit targets.
+   *
+   * Usually the caller is in a SECONDARY and the template belongs to its
+   * primary. But the editor can also be aimed at the creator channel itself,
+   * which has no secondary row, and resolving only through `secondary_channels`
+   * made that save fail with "you need to be in a bot-managed voice channel"
+   * for a channel AVC plainly manages. Same gap as `getEditorState`, and fixing
+   * only the read side would have shown the panel and then refused the write.
+   */
   private async primaryFor(
     guildId: string,
-    secondaryChannelId: string,
+    channelId: string,
   ): Promise<AutoChannelRow | undefined> {
-    const secondary = await this.deps.secondaries.get(secondaryChannelId);
-    if (!secondary || secondary.guildId !== guildId) return undefined;
-    const primary = await this.deps.autoChannels.get(secondary.primaryChannelId);
-    return primary && primary.guildId === guildId ? primary : undefined;
+    const secondary = await this.deps.secondaries.get(channelId);
+    if (secondary && secondary.guildId === guildId) {
+      const primary = await this.deps.autoChannels.get(secondary.primaryChannelId);
+      return primary && primary.guildId === guildId ? primary : undefined;
+    }
+    const own = await this.deps.autoChannels.get(channelId);
+    return own && own.guildId === guildId ? own : undefined;
   }
 }
 

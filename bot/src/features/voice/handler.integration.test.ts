@@ -743,6 +743,32 @@ describe('VoiceFeature (integration)', () => {
     expect((await feature.getEditorState('channel', GUILD, 'missing')).found).toBe(false);
   });
 
+  /**
+   * `/template` aimed at the creator channel itself. Reported by a customer on
+   * 2026-09-02, who was stuck between two individually correct messages:
+   * `/template` said the channel was not managed and offered an adopt button,
+   * and the adopt button said "that's a creator channel, edit it with
+   * `/template` directly".
+   *
+   * The cause was that both the read and the write path resolved the primary
+   * ONLY through `secondary_channels`, so a creator channel with no live rooms
+   * looked unmanaged to both.
+   */
+  it('getEditorState resolves a creator channel targeted directly, with no secondary', async () => {
+    const pr = await feature.getEditorState('primary', GUILD, PRIMARY);
+    expect(pr.found).toBe(true);
+    expect(pr.primaryChannelId).toBe(PRIMARY);
+    expect(pr.name.currentTemplate).toBe('## [@@game_name@@]');
+    // Previews the FIRST room this creator spawns: empty, so `@@game_name@@`
+    // falls back to "General", and `##` renders index 0 as 1.
+    expect(pr.name.preview).toBe('#1 [General]');
+    expect(pr.ownerId).toBeNull();
+  });
+
+  it('/name is NOT given the creator-channel fallback: it edits a secondary override', async () => {
+    expect((await feature.getEditorState('channel', GUILD, PRIMARY)).found).toBe(false);
+  });
+
   it('rerenderSecondary sets the voice status from the status template, and clears it when idle', async () => {
     await secondaries.create({
       channelId: 'st',
