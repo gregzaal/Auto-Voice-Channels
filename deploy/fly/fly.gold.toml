@@ -31,20 +31,17 @@
 #                                `ai.monthly_budget_usd` compares CLUSTER spend
 #                                against THIS fleet's number.
 #
-# NOT SET, and this fleet is worse off for it than the comment above the others
-# suggests:
-#   WATCHDOG_PING_URL         -> gold has NO outside-in down detection of its
-#                                own. A shared URL would be worse (a healthy
-#                                fleet keeps the monitor green while this one is
-#                                dead), but unset is not safe either: this is a
-#                                ONE-SHARD fleet, and `/api/watch`'s
-#                                `shard_coverage` check skips any fleet with
-#                                zero covered rows -- so gold going completely
-#                                dark reads as "not currently running", not as
-#                                an outage. Its `shard_leases` sibling filters
-#                                `instance_id IS NOT NULL` and its zero-row
-#                                fallback needs EVERY fleet dark, which prod's
-#                                four leases prevent. Give this fleet a monitor.
+#   WATCHDOG_PING_URL         -> its OWN monitor, and on a one-shard fleet this
+#                                is the ONLY thing that reports an outage, not a
+#                                second opinion. `/api/watch`'s `shard_coverage`
+#                                skips any fleet with zero covered rows, and gold
+#                                contributes exactly one row: covered, or
+#                                skipped. Its `shard_leases` sibling filters
+#                                `instance_id IS NOT NULL`, which a graceful
+#                                drain NULLs, and the zero-row fallback needs
+#                                EVERY fleet dark, which prod's four leases
+#                                prevent. Do not unset this thinking /api/watch
+#                                is behind it.
 #
 # Deliberately NOT set here:
 #   BACKUP_S3_* / BACKUP_ENCRYPTION_KEY / BACKUP_PREFIX / BACKUP_DRILL_DATABASE_URL
