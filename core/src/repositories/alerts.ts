@@ -1,4 +1,4 @@
-import { and, count, desc, eq, gte, isNull, lt, sql } from 'drizzle-orm';
+import { and, count, desc, eq, gt, gte, isNull, lt, sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
 import { alerts } from '../db/schema.js';
 
@@ -439,6 +439,39 @@ export class AlertRepository {
       )
       .returning({ id: alerts.id });
     return rows.length;
+  }
+
+  /**
+   * Is any CRITICAL condition open and freshly stamped, for this fleet?
+   *
+   * **Bounded existence, not a page filtered in JS**, and that distinction is
+   * the whole reason this method exists next to {@link open}. The watchdog used
+   * to answer this by reading `open(50)` and filtering `severity` in
+   * TypeScript, which fails OPEN exactly when it matters: `alerts` is shared by
+   * every check on every instance, `MAX_TARGETS_PER_CHECK` lets one instance
+   * re-stamp up to 50 `warn` rows a minute during a breaker storm, and
+   * `ORDER BY last_seen_at DESC` then pushes the one `critical` row off the
+   * page. The healthy peers read no critical, keep pinging, and the dead-man's
+   * switch stays green through the incident that is re-stamping those rows.
+   *
+   * Same shape and same reasoning as `opsAudit.hasActionSince`, which was given
+   * this treatment for the identical bug one file over. Put the predicates in
+   * SQL and let the index do the work.
+   */
+  async criticalOpenSince(since: Date): Promise<boolean> {
+    const rows = await this.db
+      .select({ one: sql<number>`1` })
+      .from(alerts)
+      .where(
+        and(
+          eq(alerts.fleet, this.fleet),
+          isNull(alerts.resolvedAt),
+          eq(alerts.severity, 'critical'),
+          gt(alerts.lastSeenAt, since),
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
   }
 
   /** Everything still open, for the console and the digest. */

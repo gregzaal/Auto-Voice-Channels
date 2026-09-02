@@ -55,10 +55,25 @@ function fakeAlerts() {
        * The fleet-wide critical read. Absent from this fake at first, which
        * meant the read threw into its own fail-open catch and the tests below
        * passed while exercising none of it.
+       *
+       * Models the SQL: both predicates applied to EVERY open row, no page.
        */
-      open: async () => {
+      criticalOpenSince: async (since: Date) => {
         if (openFails) throw new Error('database unreachable');
-        return openRows;
+        return openRows.some(
+          (r) => r.severity === 'critical' && r.lastSeenAt.getTime() > since.getTime(),
+        );
+      },
+      /**
+       * Deliberately truncated to the real repository's `LIMIT 50`, ordered
+       * newest first, so that anything going back to "read a page and filter
+       * in TypeScript" fails the burial test below instead of passing.
+       */
+      open: async (limit = 50) => {
+        if (openFails) throw new Error('database unreachable');
+        return [...openRows]
+          .sort((a, b) => b.lastSeenAt.getTime() - a.lastSeenAt.getTime())
+          .slice(0, limit);
       },
       raise: async (input: {
         key: string;
@@ -647,6 +662,43 @@ describe('AlertScheduler', () => {
     const healthy: WatchCheck[] = [
       { key: 'fine', severity: 'critical', audience: 'both', run: () => [] },
     ];
+
+    /**
+     * A page of the newest rows filtered in TypeScript fails OPEN exactly when
+     * it matters, which is why `criticalOpenSince` puts both predicates in SQL.
+     *
+     * `alerts` is shared by every check on every instance and
+     * `MAX_TARGETS_PER_CHECK` lets ONE instance re-stamp up to 50 `warn` rows a
+     * minute during a breaker storm. `ORDER BY last_seen_at DESC LIMIT 50` then
+     * pushes the single `critical` row off the page, every healthy peer reads
+     * no critical, and the heartbeat stays green through the incident that is
+     * generating those rows. The correlation is the wrong way round: the
+     * busier the fleet's failure, the more certainly the switch is blind.
+     */
+    it('still withholds when 60 fresher warn rows would bury the critical on one page', async () => {
+      const pinged: string[] = [];
+      const { scheduler, alerts } = build(healthy, {
+        url: 'https://hb.example/ping',
+        fetchFn: (async (url: string) => {
+          pinged.push(url);
+          return { ok: true } as Response;
+        }) as never,
+      });
+      const now = Date.now();
+      alerts.setOpen([
+        // The one that matters, stamped a second ago and therefore 61st.
+        { severity: 'critical', lastSeenAt: new Date(now - 1_000) },
+        ...Array.from({ length: 60 }, () => ({
+          severity: 'warn' as const,
+          lastSeenAt: new Date(now),
+        })),
+      ]);
+
+      await scheduler.tick();
+
+      expect(pinged).toEqual([]);
+      expect(scheduler.stats.watchdog.suppressed).toBe(true);
+    });
 
     it('withholds the ping for a critical raised by another instance', async () => {
       const pinged: string[] = [];

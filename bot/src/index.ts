@@ -1183,6 +1183,18 @@ async function main(): Promise<void> {
         totalShards: config.totalShards,
         expectedInstances: config.expectedInstances,
         /**
+         * Whether this instance can currently PROVE it owns its shards, which
+         * is a different question from holding them.
+         *
+         * `leasesProven` gates the creation gate, live voice intake, presence
+         * narrowing and `/health` all at once, so an instance that is up,
+         * connected and holding leases can still be serving nothing. Without
+         * this field that state is invisible from outside the process and
+         * reads as an unexplained drop in room creation on a quarter of the
+         * fleet.
+         */
+        leasesProven: leaseManager.leasesProven(),
+        /**
          * Heartbeat round trip to the gateway node actually serving us: the
          * one latency number that can't be measured from outside the
          * process, and the one that decides whether this app belongs in its

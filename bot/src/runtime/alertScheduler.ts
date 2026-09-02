@@ -595,9 +595,18 @@ export class AlertScheduler {
   private async fleetCriticalOpen(): Promise<boolean> {
     if (!this.deps.alerts) return false;
     try {
-      const cutoff = Date.now() - FLEET_CRITICAL_WINDOW_MS;
-      const open = await this.deps.alerts.open(50);
-      return open.some((row) => row.severity === 'critical' && row.lastSeenAt.getTime() > cutoff);
+      /**
+       * `criticalOpenSince`, never `open(50)` filtered here.
+       *
+       * A page of the newest rows filtered in TypeScript fails OPEN precisely
+       * during an incident: `MAX_TARGETS_PER_CHECK` lets one instance re-stamp
+       * up to 50 `warn` rows a minute, `ORDER BY last_seen_at DESC` pushes the
+       * `critical` off the page, and every healthy peer then keeps pinging
+       * while a machine is dead. That is the 2026-09-01 masking failure
+       * reappearing inside its own fix.
+       */
+      const cutoff = new Date(Date.now() - FLEET_CRITICAL_WINDOW_MS);
+      return await this.deps.alerts.criticalOpenSince(cutoff);
     } catch (err) {
       this.lastError = (err as Error).message;
       this.deps.logger.warn({ err }, 'could not read fleet alerts for the watchdog');

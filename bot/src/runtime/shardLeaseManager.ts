@@ -263,7 +263,14 @@ export class ShardLeaseManager {
       // own doc for why an unfiltered heartbeat would let a stale claim on a
       // shard we no longer serve refresh itself forever.
       const owned = await this.repo.heartbeat(this.instanceId, [...this.owned]);
-      this.lastHeartbeatOkAt = startedAt;
+      /**
+       * Monotonic. `startedAt` is deliberately taken BEFORE the query (see
+       * above), so two beats in flight together can land out of order and a
+       * slow one returning late would otherwise REWIND the proof clock — the
+       * one direction that turns a healthy instance into an unproven one and
+       * stops it serving. Keep the newest proof we have.
+       */
+      this.lastHeartbeatOkAt = Math.max(this.lastHeartbeatOkAt ?? startedAt, startedAt);
       this.consecutiveHeartbeatFailures = 0;
       if (this.standingAside) {
         this.standingAside = false;
