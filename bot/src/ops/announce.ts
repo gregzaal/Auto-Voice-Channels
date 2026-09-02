@@ -542,7 +542,12 @@ export async function main(rawArgv: string[]): Promise<number> {
     console.log(`targets    ${targets.length}  ${JSON.stringify(byPolicy)}`);
     console.log(
       `skipped    ${skipped.alreadySent} already sent, ${skipped.optedOut} opted out, ` +
-        `${skipped.otherFleet} not this fleet, ${skipped.notEntitled} blocked, ` +
+        `${skipped.otherFleet} not this fleet, ` +
+        // Not "blocked": this counter is blocked PLUS grace PLUS expired, and
+        // the grace ones are the common case. Calling the total "blocked" sends
+        // whoever reads the summary hunting for a blocked guild that does not
+        // exist.
+        `${skipped.notEntitled} not entitled (blocked, grace or expired), ` +
         `${skipped.noMemberCount} no member count, ${skipped.hardGate.length} XXL`,
     );
     if (skipped.hardGate.length) {
