@@ -2,10 +2,14 @@ import {
   DEFAULT_LENIENCY_CONFIG,
   evaluateLeniency,
   ENTITLED_STATUSES,
+  guildDepartedLongEnough,
   guildFloor,
   isCountDiscrepant,
   parseBillingMeta,
+  poolExitTransition,
+  removeGuildFromAnyPoolAtomically,
   RUNTIME_FLAGS,
+  shouldGrantPoolExit,
   subscriptionInGoodStanding,
   tierFor,
   trialDurationMs,
@@ -13,7 +17,9 @@ import {
   utcDayKey,
   type BillingNotificationRepository,
   type BillingRunRepository,
+  type Database,
   type Fleet,
+  type GuildFleetPresenceRepository,
   type GuildRepository,
   type GuildRow,
   type GuildSettingsStore,
@@ -85,6 +91,18 @@ export interface BillingReconcilerDeps {
   flags: RuntimeFlagsRepository;
   memberPools: MemberPoolRepository;
   memberPoolGuilds: MemberPoolGuildRepository;
+  /**
+   * Cross-fleet presence, for deciding whether a pool member has actually
+   * left (§5.6) — a plain query, not scoped to this instance's own fleet
+   * (`presentFleets`/`fullyAbsentSince` read every fleet's row regardless).
+   */
+  presence: GuildFleetPresenceRepository;
+  /**
+   * Raw handle, needed only for `removeGuildFromAnyPoolAtomically` (a
+   * standalone transaction helper, not a repository method) when a pool
+   * member's departure grace window has elapsed.
+   */
+  db: Database;
   /** The Discord snowflake behind an Auth.js user id, for purchaser DMs (§6.6). */
   resolveDiscordUserId: (authUserId: string) => Promise<string | null>;
   opsAudit: OpsAuditRepository;
@@ -416,7 +434,19 @@ export class BillingReconciler {
     const memberGuilds: GuildRow[] = [];
     for (const membership of liveMemberships) {
       const guild = await this.deps.guilds.get(membership.guildId);
-      if (guild) memberGuilds.push(guild);
+      if (!guild) continue;
+      try {
+        if (await this.evictIfDeparted(pool, guild, now)) continue;
+      } catch (err) {
+        // Per-guild isolation (golden rule 2): one bad member's eviction must
+        // never stop the rest of the pool from being evaluated this tick.
+        this.stats.errors += 1;
+        this.deps.logger.error(
+          { err, poolId: pool.id, guildId: guild.guildId },
+          'pool departure check failed for one member (isolated)',
+        );
+      }
+      memberGuilds.push(guild);
     }
     /**
      * §5.3: a guild whose OWN count is still free-forever is entitled
@@ -522,6 +552,84 @@ export class BillingReconciler {
       state.pooledMemberCount ?? 0,
       landed,
     );
+  }
+
+  /**
+   * Evicts one pool member whose absence from EVERY fleet has passed the
+   * grace window (`guildDepartedLongEnough`, §5.6), and returns whether it
+   * did, so the caller excludes an evicted guild from this tick's pooled sum.
+   *
+   * This is the ONLY place a pool exit is decided now. It used to be decided
+   * synchronously in the bot's `guildDelete` handler, at the exact instant a
+   * fleet's bot left — which is precisely wrong for a bot swap, since the new
+   * fleet is invited days later, not at the same instant. Checking on a
+   * grace window, fresh on every tick, is what lets a swap complete without
+   * ever tripping this at all, while a guild that never gets a replacement
+   * bot still converges within `POOL_EXIT_GRACE_MS` of its last fleet leaving.
+   *
+   * Mirrors the dashboard's own `removeGuildFromPool` action exactly (a
+   * live subscription grants the published fresh grace window; a dead one
+   * gives the floor instead, which lifts a free-sized or unconsumed-trial
+   * server rather than leaving it gated) — this path has no authorization at
+   * all, so it must never do more, or less, than the purchaser's own button.
+   */
+  private async evictIfDeparted(pool: MemberPoolRow, guild: GuildRow, now: Date): Promise<boolean> {
+    const absentSince = await this.deps.presence.fullyAbsentSince(guild.guildId);
+    if (!guildDepartedLongEnough(absentSince, now)) return false;
+
+    const poolId = await removeGuildFromAnyPoolAtomically(this.deps.db, guild.guildId, now);
+    // Raced with another remover (the dashboard, or a concurrent advance
+    // pass) between `listLive` and here — nothing left for this call to do.
+    if (!poolId) return false;
+    // Reset, not reinterpret (§5.2a): the pool's sample history was recorded
+    // under a membership this guild is no longer part of.
+    await this.deps.memberPools.resetSamples(poolId);
+
+    // `blocked` outranks billing everywhere, and a kick-then-reinvite must
+    // never launder the abuse kill-switch into `grace` (`plans/refunds.md` §2.3).
+    if (guild.authStatus === 'blocked') return true;
+
+    const current = { authStatus: guild.authStatus, graceUntil: guild.graceUntil };
+    if (pool.status === 'expired') {
+      const floor = guildFloor(
+        {
+          authStatus: current.authStatus,
+          memberCount: guild.memberCount,
+          authExpiresAt: guild.authExpiresAt,
+          createdAt: guild.createdAt,
+        },
+        now,
+      );
+      if (floor) {
+        await this.deps.store.transitionAuth({
+          guildId: guild.guildId,
+          toStatus: floor.toStatus,
+          reason: floor.reason,
+          actor: 'billing-reconciler',
+          skipIfUnchanged: true,
+          ...(floor.expiresAtIfNull ? { expiresAtIfNull: floor.expiresAtIfNull } : {}),
+        });
+      }
+      return true;
+    }
+
+    if (!shouldGrantPoolExit(current, pool, now)) {
+      this.deps.logger.info(
+        { guildId: guild.guildId, poolId },
+        'pool exit: membership removed after its grace window, entitlement grant skipped',
+      );
+      return true;
+    }
+
+    const exit = poolExitTransition(guild.memberCount, now);
+    await this.deps.store.transitionAuth({
+      guildId: guild.guildId,
+      toStatus: exit.toStatus,
+      reason: exit.reason,
+      actor: 'billing-reconciler',
+      graceUntil: exit.graceUntil,
+    });
+    return true;
   }
 
   private poolLeniencyState(

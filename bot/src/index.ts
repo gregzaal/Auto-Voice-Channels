@@ -18,12 +18,7 @@ import {
   MetricsRepository,
   OpsAuditRepository,
   DEFAULT_FLEET,
-  guildFloor,
-  guildLeftEveryFleet,
-  poolExitTransition,
-  shouldGrantPoolExit,
   probeForManifest,
-  removeGuildFromAnyPoolAtomically,
   resolveDiscordUserId,
   PgNotifier,
   runMigrations,
@@ -709,6 +704,8 @@ async function main(): Promise<void> {
         flags,
         memberPools: memberPoolsRepo,
         memberPoolGuilds: memberPoolGuildsRepo,
+        presence: presenceRepo,
+        db,
         resolveDiscordUserId: (userId) => resolveDiscordUserId(db, userId),
         opsAudit: new OpsAuditRepository(db, config.fleet),
         notifier: billingNotifier,
@@ -925,6 +922,17 @@ async function main(): Promise<void> {
    * someone still being charged. `guildDelete` also fires on an
    * outage-driven unavailability, so ignore those - `guild.available ===
    * false` means Discord lost the guild, not that we were removed.
+   *
+   * **Deliberately does nothing else.** A pooled guild's exit used to be
+   * decided right here, immediately, which is exactly what broke it: a bot
+   * swap invites the new fleet's identity days after removing the old one,
+   * not at the same instant, so any decision made at THIS moment can only
+   * ever see the old fleet gone and the new one not yet arrived. The billing
+   * reconciler's pool-advance pass (`features/billing/reconciler.ts`) is the
+   * only place that decides a pool exit now, on a grace window
+   * (`guildDepartedLongEnough`, `member-based-pricing.md` §5.6) long enough
+   * to cover a deliberate swap, checked fresh on every tick rather than once
+   * at the moment of departure.
    */
   client.on('guildDelete', (guild) => {
     if (guild.available === false) return;
@@ -935,106 +943,6 @@ async function main(): Promise<void> {
     void presenceRepo.markRemoved(guild.id, removedAt).catch((err: unknown) => {
       logger.warn({ err, guildId: guild.id }, 'failed to record fleet removal');
     });
-    /**
-     * A pooled guild the bot is kicked from must not silently keep consuming
-     * the purchaser's budget forever, and it must never be left stranded
-     * (`plans/member-based-pricing.md` §5.6). Marks the membership removed
-     * from wherever it is (the dashboard's own remove action does this
-     * synchronously too; this is the path for a kick nobody clicked a button
-     * for), clears the denormalized pointer, and recomputes the guild's own
-     * entitlement as if it had never pooled — landing on `grace` with a fresh
-     * window rather than the `expired` the machine would otherwise strand it
-     * on, because under-charging is the acceptable failure direction here.
-     */
-    void (async () => {
-      try {
-        /**
-         * A guild running more than one of our fleets side by side
-         * (`fleets.md` §3) is now the ordinary case, not an edge case: pools
-         * may span fleets (`member-based-pricing.md` §11 q4), and a customer
-         * moving from one of our bot identities to another is a routine
-         * swap, not a departure. Losing THIS fleet's bot must only be read as
-         * "the guild left AVC" when no sibling fleet is still present -
-         * otherwise a fleet swap silently floors a paying pool member the
-         * instant the old bot is removed, before the new one is even invited.
-         */
-        const present = await presenceRepo.presentFleets(guild.id);
-        if (!guildLeftEveryFleet(present, config.fleet ?? DEFAULT_FLEET)) {
-          logger.info(
-            { guildId: guild.id, present },
-            'bot removed from guild, but another fleet still serves it: pool membership left untouched',
-          );
-          return;
-        }
-
-        const row = await guildsRepo.get(guild.id);
-        const poolId = await removeGuildFromAnyPoolAtomically(db, guild.id, removedAt);
-        if (!poolId) return;
-        // Reset, not reinterpret (§5.2a): the pool's sample history was
-        // recorded under a membership this guild is no longer part of, and
-        // must not be allowed to decide a breach/drop verdict for the new
-        // one. The dashboard's own removeGuildFromPool does this too; this is
-        // the parallel path for a kick nobody clicked a button for (§5.6).
-        await memberPoolsRepo.resetSamples(poolId);
-
-        /**
-         * `blocked` outranks billing, and this path had no guard for it, so a
-         * kick and a re-invite laundered the abuse kill-switch into `grace`
-         * (`plans/refunds.md` §2.3).
-         */
-        if (row?.authStatus === 'blocked') return;
-
-        /**
-         * Identical to the dashboard's own remove action, deliberately: this
-         * path has no authorization at all, so it must never be able to do more,
-         * or less, than the purchaser's own button. A live subscription gives the
-         * published fresh grace window; a dead one gives the floor, which lifts a
-         * free-sized or unconsumed-trial server rather than leaving it gated.
-         */
-        const pool = await memberPoolsRepo.get(poolId);
-        const current = row ?? { authStatus: 'trial' as const, graceUntil: null };
-        if (pool?.status === 'expired') {
-          const floor = guildFloor(
-            {
-              authStatus: current.authStatus,
-              memberCount: row?.memberCount ?? null,
-              authExpiresAt: row?.authExpiresAt ?? null,
-              createdAt: row?.createdAt ?? null,
-            },
-            removedAt,
-          );
-          if (floor) {
-            await settingsCache.transitionAuth({
-              guildId: guild.id,
-              toStatus: floor.toStatus,
-              reason: floor.reason,
-              actor: 'system',
-              skipIfUnchanged: true,
-              ...(floor.expiresAtIfNull ? { expiresAtIfNull: floor.expiresAtIfNull } : {}),
-            });
-          }
-          return;
-        }
-        if (!shouldGrantPoolExit(current, pool, removedAt)) {
-          logger.info(
-            { guildId: guild.id, poolId },
-            'pool exit: membership removed, entitlement grant skipped',
-          );
-          return;
-        }
-
-        const exit = poolExitTransition(row?.memberCount ?? null, removedAt);
-        await settingsCache.transitionAuth({
-          guildId: guild.id,
-          toStatus: exit.toStatus,
-          reason: exit.reason,
-          actor: 'system',
-          graceUntil: exit.graceUntil,
-        });
-      } catch (err) {
-        logger.warn({ err, guildId: guild.id }, 'failed to exit pool on bot removal');
-      }
-    })();
     logger.info({ guildId: guild.id }, 'removed from guild');
   });
   client.once('clientReady', () => {

@@ -3,6 +3,7 @@ import {
   BillingNotificationRepository,
   BillingRunRepository,
   GuildAlreadyPooledError,
+  GuildFleetPresenceRepository,
   GuildRepository,
   MemberPoolGuildRepository,
   MemberPoolRepository,
@@ -70,6 +71,8 @@ describe('BillingReconciler pool pass (integration)', () => {
       flags,
       memberPools: pools,
       memberPoolGuilds: poolGuilds,
+      presence: new GuildFleetPresenceRepository(env.handle.db, 'prod'),
+      db: env.handle.db,
       resolveDiscordUserId: async () => null,
       opsAudit: new OpsAuditRepository(env.handle.db),
       notifier,
@@ -122,6 +125,115 @@ describe('BillingReconciler pool pass (integration)', () => {
       expect(row.authStatus).toBe('active');
       expect(row.tier).toBe('m');
     }
+  });
+
+  /**
+   * The incident this whole mechanism exists to fix: a bot swap invites the
+   * new fleet identity DAYS after removing the old one, not at the same
+   * instant. A same-tick "is a sibling fleet present right now" check is
+   * never true mid-swap (the new fleet has no presence row yet), which is
+   * exactly what silently evicted a paying customer's guild from its pool
+   * before this fix. The grace window is what lets the swap complete with no
+   * transition ever firing.
+   */
+  it('does not evict a guild mid bot-swap, however many ticks pass before the new fleet arrives', async () => {
+    const poolId = 'pool-swap-1';
+    const guildId = 'pool-swap-g1';
+    const removedAt = new Date('2026-08-27T17:27:07.363Z');
+
+    await pools.create({ id: poolId, ownerUserId: 'user-swap', name: 'Swap', billedTier: 's' });
+    await subscriptions.upsertForPool({
+      poolId,
+      paddleSubscriptionId: `sub_${poolId}`,
+      paddleCustomerId: 'ctm_swap',
+      purchaserUserId: 'user-swap',
+      tier: 's',
+      status: 'active',
+    });
+    await guilds.ensure(guildId);
+    await guilds.recordMemberCountSample(guildId, 406, { at: removedAt, authoritative: true });
+    await poolGuilds.add(poolId, guildId);
+    await guilds.setPoolId(guildId, poolId, 's');
+
+    const presence = new GuildFleetPresenceRepository(env.handle.db, 'beta');
+    await presence.markPresent(guildId, new Date('2026-08-25T20:45:49.870Z'));
+    await presence.markRemoved(guildId, removedAt);
+
+    // A tick the same day the old bot left: obviously inside the window.
+    const sameDay = new Date('2026-08-27T18:00:00.000Z');
+    await makeReconciler(() => sameDay).reconciler.runOnce();
+    expect(await poolGuilds.livePoolFor(guildId)).toBe(poolId);
+    expect((await guilds.getOrThrow(guildId)).authStatus).toBe('active');
+
+    // A tick 5.7 days later, matching the real gap before gold was invited —
+    // still short of the 7-day grace window, so still untouched.
+    const midSwap = new Date(removedAt.getTime() + 5.7 * 24 * 60 * 60 * 1000);
+    await makeReconciler(() => midSwap).reconciler.runOnce();
+    expect(await poolGuilds.livePoolFor(guildId)).toBe(poolId);
+    expect((await guilds.getOrThrow(guildId)).authStatus).toBe('active');
+
+    // The new fleet is invited: presence resumes before the window closes.
+    const goldPresence = new GuildFleetPresenceRepository(env.handle.db, 'gold');
+    await goldPresence.markPresent(guildId, new Date(midSwap.getTime() + 1000));
+
+    // A tick well past what would have been the grace deadline: the swap
+    // already completed, so this must never evict either.
+    const wellAfter = new Date(removedAt.getTime() + 30 * 24 * 60 * 60 * 1000);
+    await makeReconciler(() => wellAfter).reconciler.runOnce();
+    expect(await poolGuilds.livePoolFor(guildId)).toBe(poolId);
+    const row = await guilds.getOrThrow(guildId);
+    expect(row.authStatus).toBe('active');
+    expect(row.poolId).toBe(poolId);
+  });
+
+  it('evicts a member once it has been absent from every fleet past the grace window', async () => {
+    const poolId = 'pool-departed-1';
+    const stayed = 'pool-departed-stayed';
+    const left = 'pool-departed-left';
+    const removedAt = new Date('2026-08-27T00:00:00.000Z');
+
+    await pools.create({ id: poolId, ownerUserId: 'user-left', name: 'Departed', billedTier: 'm' });
+    await subscriptions.upsertForPool({
+      poolId,
+      paddleSubscriptionId: `sub_${poolId}`,
+      paddleCustomerId: 'ctm_left',
+      purchaserUserId: 'user-left',
+      tier: 'm',
+      status: 'active',
+    });
+    for (const guildId of [stayed, left]) {
+      await guilds.ensure(guildId);
+      await guilds.recordMemberCountSample(guildId, 5_000, { at: removedAt, authoritative: true });
+      await poolGuilds.add(poolId, guildId);
+      await guilds.setPoolId(guildId, poolId, 'm');
+    }
+    const presence = new GuildFleetPresenceRepository(env.handle.db, 'prod');
+    await presence.markPresent(stayed, removedAt);
+    await presence.markPresent(left, removedAt);
+    await presence.markRemoved(left, removedAt);
+
+    // One millisecond short of the grace window: not evicted yet.
+    const justBefore = new Date(removedAt.getTime() + 7 * 24 * 60 * 60 * 1000 - 1);
+    await makeReconciler(() => justBefore).reconciler.runOnce();
+    expect(await poolGuilds.livePoolFor(left)).toBe(poolId);
+
+    // Past the grace window: evicted, and granted the published fresh
+    // 60-day grace window rather than left stranded (§5.6).
+    const afterGrace = new Date(removedAt.getTime() + 7 * 24 * 60 * 60 * 1000 + 1000);
+    await makeReconciler(() => afterGrace).reconciler.runOnce();
+
+    expect(await poolGuilds.livePoolFor(left)).toBeNull();
+    const leftRow = await guilds.getOrThrow(left);
+    expect(leftRow.poolId).toBeNull();
+    expect(leftRow.authStatus).toBe('grace');
+    expect(leftRow.graceUntil).not.toBeNull();
+
+    // The rest of the pool is unaffected, and no longer counts the departed
+    // member in its own sum.
+    expect(await poolGuilds.livePoolFor(stayed)).toBe(poolId);
+    expect((await guilds.getOrThrow(stayed)).authStatus).toBe('active');
+    const poolRow = await pools.get(poolId);
+    expect(poolRow?.memberCount).toBe(5_000);
   });
 
   it('never writes over a blocked member, but still keeps its billed tier in step', async () => {

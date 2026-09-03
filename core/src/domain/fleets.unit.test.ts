@@ -4,7 +4,8 @@ import {
   FLEETS,
   fleetAdvisoryKey,
   fleetOrdinal,
-  guildLeftEveryFleet,
+  guildDepartedLongEnough,
+  POOL_EXIT_GRACE_MS,
 } from './fleets.js';
 
 describe('fleets', () => {
@@ -76,27 +77,51 @@ describe('fleetAdvisoryKey', () => {
   });
 });
 
-describe('guildLeftEveryFleet', () => {
-  it('is a real departure when the departing fleet is the only one present', () => {
-    expect(guildLeftEveryFleet(['beta'], 'beta')).toBe(true);
+describe('guildDepartedLongEnough', () => {
+  const NOW = new Date('2026-09-03T00:00:00Z');
+
+  it('is never a departure while a fleet is still present (null)', () => {
+    expect(guildDepartedLongEnough(null, NOW)).toBe(false);
   });
 
-  it('is a real departure when nothing is present at all', () => {
-    expect(guildLeftEveryFleet([], 'beta')).toBe(true);
+  it('is not a departure the instant absence starts', () => {
+    expect(guildDepartedLongEnough(NOW, NOW)).toBe(false);
+  });
+
+  it('is not a departure part-way through the grace window', () => {
+    const absentSince = new Date(NOW.getTime() - POOL_EXIT_GRACE_MS / 2);
+    expect(guildDepartedLongEnough(absentSince, NOW)).toBe(false);
+  });
+
+  it('is not a departure one millisecond short of the grace window', () => {
+    const absentSince = new Date(NOW.getTime() - POOL_EXIT_GRACE_MS + 1);
+    expect(guildDepartedLongEnough(absentSince, NOW)).toBe(false);
+  });
+
+  it('is a departure exactly at the grace window', () => {
+    const absentSince = new Date(NOW.getTime() - POOL_EXIT_GRACE_MS);
+    expect(guildDepartedLongEnough(absentSince, NOW)).toBe(true);
+  });
+
+  it('is a departure well past the grace window', () => {
+    const absentSince = new Date(NOW.getTime() - POOL_EXIT_GRACE_MS * 3);
+    expect(guildDepartedLongEnough(absentSince, NOW)).toBe(true);
   });
 
   /**
-   * The bot-swap case this exists for: beta's row has not necessarily flipped
-   * to `removedAt` yet (a sibling fire-and-forget write with no ordering
-   * guarantee against this check), but gold is already present, so this is
-   * not a departure regardless of whether beta's own row shows up here.
+   * The actual incident this exists for: beta removed, gold not invited for
+   * another ~5.7 days. Under the grace window that swap completes with no
+   * transition ever firing; a genuine departure of the same shape (nothing
+   * re-invited by day 7) still gets floored.
    */
-  it('is not a departure while a sibling fleet is present, whether or not the departing one still shows', () => {
-    expect(guildLeftEveryFleet(['gold'], 'beta')).toBe(false);
-    expect(guildLeftEveryFleet(['beta', 'gold'], 'beta')).toBe(false);
+  it('covers the swap gap that caused the original incident', () => {
+    const sixDaysAgo = new Date(NOW.getTime() - 5.7 * 24 * 60 * 60 * 1000);
+    expect(guildDepartedLongEnough(sixDaysAgo, NOW)).toBe(false);
   });
 
-  it('is not a departure with multiple sibling fleets present', () => {
-    expect(guildLeftEveryFleet(['prod', 'gold'], 'beta')).toBe(false);
+  it('respects a caller-supplied grace window', () => {
+    const oneHourAgo = new Date(NOW.getTime() - 60 * 60 * 1000);
+    expect(guildDepartedLongEnough(oneHourAgo, NOW, 30 * 60 * 1000)).toBe(true);
+    expect(guildDepartedLongEnough(oneHourAgo, NOW, 2 * 60 * 60 * 1000)).toBe(false);
   });
 });

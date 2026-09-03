@@ -167,6 +167,32 @@ export class GuildFleetPresenceRepository {
   }
 
   /**
+   * When every fleet that has ever seen this guild most recently left, or
+   * `null` if at least one is still present (or none has ever seen it at
+   * all — not a real answer either way, but the guild cannot be a pool
+   * member without having been seen by something first).
+   *
+   * This is a POINT IN TIME, not a duration: a caller measuring how long the
+   * guild has been fully absent takes `now - fullyAbsentSince`. It is the
+   * MAX across every fleet's row, not the min or any single one's — a guild
+   * with one fleet gone for a month and another gone for an hour has been
+   * fully absent for an hour, not a month.
+   */
+  async fullyAbsentSince(guildId: string): Promise<Date | null> {
+    const rows = await this.db
+      .select({ removedAt: guildFleetPresence.removedAt })
+      .from(guildFleetPresence)
+      .where(eq(guildFleetPresence.guildId, guildId));
+    if (rows.length === 0) return null;
+    let latest: Date | null = null;
+    for (const row of rows) {
+      if (row.removedAt === null) return null;
+      if (latest === null || row.removedAt > latest) latest = row.removedAt;
+    }
+    return latest;
+  }
+
+  /**
    * Reconciles this fleet's presence against the guilds it can actually see.
    *
    * Events are missable, so the guild list is the truth and the event stream

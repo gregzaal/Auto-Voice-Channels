@@ -65,21 +65,34 @@ export function fleetAdvisoryKey(base: number, fleet: Fleet, slot = 0): bigint {
 }
 
 /**
- * Whether losing `departing` from a guild means the guild left AVC entirely,
- * given every fleet the guild is *currently* present in.
+ * How long a guild may be fully absent from every one of our fleets before a
+ * pool membership loss is treated as real (`member-based-pricing.md` §5.6).
  *
- * Two bots in one guild needs no gating for two fleets (`fleets.md` §3), and
- * that now extends to pool membership (`member-based-pricing.md` §11 q4): a
- * customer swapping from one of our bot identities to another is a routine
- * move, not a departure, and a subscription bound to that guild must survive
- * it. Only a genuine last-fleet-out counts as leaving.
- *
- * `currentlyPresent` may still include `departing` itself — the removal that
- * triggered this check is written by a sibling fire-and-forget call with no
- * ordering guarantee against this one, so a caller must not wait on it having
- * landed first. Filtering it out here, rather than relying on the timing, is
- * what makes the answer correct either way.
+ * A bot swap invites the new fleet's identity DAYS after removing the old
+ * one, not at the same instant — a paying customer's guild lost its pool
+ * membership the moment the old bot left, five days before the new one was
+ * even invited, because the first version of this check only asked "is a
+ * sibling fleet present RIGHT NOW", which is never true mid-swap (the new
+ * fleet has no presence row yet). Long enough to cover a deliberate swap
+ * taken at a customer's own pace; short enough that a genuine departure is
+ * still noticed well inside the pool's own sample windows (§5.2a).
  */
-export function guildLeftEveryFleet(currentlyPresent: readonly Fleet[], departing: Fleet): boolean {
-  return currentlyPresent.every((fleet) => fleet === departing);
+export const POOL_EXIT_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Whether a guild that has been fully absent from every fleet since
+ * `fullyAbsentSince` has been gone long enough to treat as a real departure,
+ * rather than a bot swap still in progress.
+ *
+ * `fullyAbsentSince` is `null` while at least one fleet is still present
+ * (`GuildFleetPresenceRepository.fullyAbsentSince`), which this correctly
+ * reads as "not a departure" too — there is nothing to time yet.
+ */
+export function guildDepartedLongEnough(
+  fullyAbsentSince: Date | null,
+  now: Date,
+  graceMs: number = POOL_EXIT_GRACE_MS,
+): boolean {
+  if (fullyAbsentSince === null) return false;
+  return now.getTime() - fullyAbsentSince.getTime() >= graceMs;
 }

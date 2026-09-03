@@ -234,9 +234,10 @@ export class BillingNotificationRepository {
   /**
    * The pool-axis sibling of {@link claimForFleet}: deliverable means this
    * fleet is present in at least one of the pool's LIVE member guilds — the
-   * bot must share a server with the purchaser to DM them at all, and under
-   * the single-fleet-only enforcement on adding a guild to a pool (§6.1 q4),
-   * every live member shares the same fleet, so any one of them suffices.
+   * bot must share a server with the purchaser to DM them at all. A pool may
+   * cover guilds on different fleets (§6.1 q4, resolved), so members do not
+   * all share one fleet; the `EXISTS` below already asks the right question
+   * either way — any ONE reachable member is enough to deliver.
    */
   async claimPoolForFleet(
     fleet: Fleet,

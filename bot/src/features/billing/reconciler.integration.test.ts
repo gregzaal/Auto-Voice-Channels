@@ -125,6 +125,8 @@ describe('BillingReconciler (integration)', () => {
       flags,
       memberPools: new MemberPoolRepository(env.handle.db),
       memberPoolGuilds: new MemberPoolGuildRepository(env.handle.db),
+      presence: new GuildFleetPresenceRepository(env.handle.db, opts.fleet ?? 'prod'),
+      db: env.handle.db,
       resolveDiscordUserId: async () => null,
       opsAudit: new OpsAuditRepository(env.handle.db),
       notifier,
