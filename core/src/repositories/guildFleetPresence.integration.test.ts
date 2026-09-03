@@ -86,6 +86,46 @@ describe('GuildFleetPresenceRepository (integration)', () => {
     expect(await beta.isPresent(A)).toBe(false);
   });
 
+  describe('fullyAbsentSince', () => {
+    it('is null while at least one fleet is still present', async () => {
+      await prod.markPresent(A);
+      await beta.markPresent(A);
+      await beta.markRemoved(A);
+      expect(await prod.fullyAbsentSince(A)).toBeNull();
+    });
+
+    it('is null for a guild no fleet has ever seen', async () => {
+      expect(await prod.fullyAbsentSince(A)).toBeNull();
+    });
+
+    /**
+     * The MAX, not the MIN, and not "whichever fleet's repo instance asks":
+     * fully absent means every fleet is gone, so the answer is when the LAST
+     * one left, not the first. Getting this backwards would evict a guild
+     * the moment its first bot left, exactly the bug this whole mechanism
+     * exists to fix.
+     */
+    it('is the LATEST removal, not the earliest, across different fleets', async () => {
+      const goldRemovedAt = new Date('2026-08-01T00:00:00.000Z');
+      const prodRemovedAt = new Date('2026-08-20T00:00:00.000Z'); // 19 days later
+      const gold = new GuildFleetPresenceRepository(env.handle.db, 'gold');
+
+      await gold.markPresent(A, new Date('2026-07-01T00:00:00.000Z'));
+      await gold.markRemoved(A, goldRemovedAt);
+      await prod.markPresent(A, new Date('2026-07-01T00:00:00.000Z'));
+      await prod.markRemoved(A, prodRemovedAt);
+
+      expect(await prod.fullyAbsentSince(A)).toEqual(prodRemovedAt);
+    });
+
+    it('reports the single removal time for a guild only one fleet ever saw', async () => {
+      const removedAt = new Date('2026-08-15T00:00:00.000Z');
+      await prod.markPresent(A, new Date('2026-08-01T00:00:00.000Z'));
+      await prod.markRemoved(A, removedAt);
+      expect(await prod.fullyAbsentSince(A)).toEqual(removedAt);
+    });
+  });
+
   /**
    * The number the top.gg listing publishes, so a wrong one is public.
    */

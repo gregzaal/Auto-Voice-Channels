@@ -168,9 +168,17 @@ export class GuildFleetPresenceRepository {
 
   /**
    * When every fleet that has ever seen this guild most recently left, or
-   * `null` if at least one is still present (or none has ever seen it at
-   * all — not a real answer either way, but the guild cannot be a pool
-   * member without having been seen by something first).
+   * `null` if at least one is still present.
+   *
+   * Also `null` when no fleet has ever seen the guild at all — not a real
+   * answer, but not a departure either. This is reachable for a live pool
+   * member: `addGuildToPool` reads a guild's member count from the
+   * purchaser's own Discord OAuth guild list, not from bot presence, so a
+   * guild can be pooled before any of our bots have ever joined it. Such a
+   * guild is inert rather than a leak (`memberCount` reads null and is
+   * excluded from the pooled sum as free-tier), but it can never be evicted
+   * by this mechanism either, for the same reason `guildDelete` never fires
+   * for a guild the bot was never in.
    *
    * This is a POINT IN TIME, not a duration: a caller measuring how long the
    * guild has been fully absent takes `now - fullyAbsentSince`. It is the
