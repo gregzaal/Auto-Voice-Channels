@@ -10,6 +10,8 @@ export class FakeVoiceView implements GuildVoiceView {
   private readonly existing = new Set<string>();
   /** channelId → parent category id (or null = server root). Unset → undefined. */
   private readonly parents = new Map<string, string | null>();
+  /** channelId → raw position. Unset → ordering is not knowable for it. */
+  private readonly positions = new Map<string, number>();
   /** Whether Discord has handed us this guild. True unless a test says otherwise. */
   private available = true;
 
@@ -23,6 +25,26 @@ export class FakeVoiceView implements GuildVoiceView {
 
   categoryOf(channelId: string): string | null | undefined {
     return this.parents.get(channelId);
+  }
+
+  /**
+   * Ordering is opt-in: a test that sets no positions gets `undefined`, i.e.
+   * "cannot say", which is what every test that predates channel ordering wants.
+   */
+  displayOrderOf(channelIds: string[]): string[] | undefined {
+    const known = channelIds.filter((id) => this.positions.has(id));
+    if (known.length === 0) return undefined;
+    // Position only, and the sort is stable, so channels sharing a position keep
+    // the order they were asked about in. That models Discord's id tie-break
+    // rather than dodging it: callers ask in creation order, ids ascend with
+    // creation, and a primary is always older than its own rooms. Test ids are
+    // rarely snowflakes, so comparing them directly would model nothing.
+    return known.sort((a, b) => this.positions.get(a)! - this.positions.get(b)!);
+  }
+
+  /** Sets a channel's raw position, enabling {@link displayOrderOf} for it. */
+  setPosition(channelId: string, position: number): void {
+    this.positions.set(channelId, position);
   }
 
   guildAvailable(): boolean {

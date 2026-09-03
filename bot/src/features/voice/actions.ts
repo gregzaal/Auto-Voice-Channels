@@ -22,6 +22,13 @@ export interface CreateVoiceChannelInput {
   nearChannelId?: string;
   above?: boolean;
   /**
+   * The primary's existing rooms. The new channel is created at the bottom-most
+   * position any of them holds, rather than at the primary's own, so it lands
+   * below them however their positions have drifted. Ignored for `above`, which
+   * reorders explicitly. See `bottomOfBlock` for why this matters.
+   */
+  afterChannelIds?: string[];
+  /**
    * Copy permission overwrites onto the new channel from a source resolved
    * relative to `nearChannelId`: `primary` (the near channel), `category` (its
    * parent category), or a specific channel id.
@@ -115,6 +122,7 @@ export type RecordedAction =
       channelId: string;
       name: string;
       parentId?: string;
+      afterChannelIds?: string[];
     }
   | { type: 'delete'; guildId: string; channelId: string }
   | { type: 'rename'; guildId: string; channelId: string; name: string }
@@ -191,6 +199,7 @@ export class RecordingVoiceActions implements VoiceActions {
       channelId,
       name: input.name,
       ...(input.parentId ? { parentId: input.parentId } : {}),
+      ...(input.afterChannelIds ? { afterChannelIds: input.afterChannelIds } : {}),
     });
     return Promise.resolve(channelId);
   }

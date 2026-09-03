@@ -293,6 +293,92 @@ describe('VoiceFeature (integration)', () => {
     expect([...action.channelIds].sort()).toEqual(['a', 'b', 'c']);
   });
 
+  describe('room ordering', () => {
+    /** Two existing rooms of PRIMARY, oldest first, with distinct creation times. */
+    const seedRooms = async (): Promise<void> => {
+      for (const [i, id] of ['room-1', 'room-2'].entries()) {
+        await secondaries.create({
+          channelId: id,
+          guildId: GUILD,
+          primaryChannelId: PRIMARY,
+          state: {},
+          createdAt: new Date(1_700_000_000_000 + i * 1000),
+        });
+      }
+    };
+
+    const join = async (): Promise<void> => {
+      const alice = member('alice');
+      voice.put(PRIMARY, alice);
+      await feature.handleVoiceStateUpdate({
+        guildId: GUILD,
+        member: alice,
+        afterChannelId: PRIMARY,
+      });
+    };
+
+    it('places a new room below the primary’s existing rooms, not below the primary', async () => {
+      await seedRooms();
+      await join();
+      // Creating at the primary's own position is only correct while the whole
+      // block still shares it; the adapter ties with the bottom-most of these.
+      expect(actions.ofType('create')[0]!.afterChannelIds).toEqual(['room-1', 'room-2']);
+    });
+
+    it('does not reorder a block that is already in order', async () => {
+      await seedRooms();
+      voice.setPosition(PRIMARY, 60);
+      voice.setPosition('room-1', 61);
+      voice.setPosition('room-2', 62);
+      await join();
+      expect(actions.ofType('reposition')).toHaveLength(0);
+    });
+
+    it('does not reorder a block that shares one position (the steady state)', async () => {
+      await seedRooms();
+      for (const id of [PRIMARY, 'room-1', 'room-2']) voice.setPosition(id, 60);
+      await join();
+      expect(actions.ofType('reposition')).toHaveLength(0);
+    });
+
+    it('does not reorder when positions are unknowable', async () => {
+      await seedRooms();
+      await join();
+      expect(actions.ofType('reposition')).toHaveLength(0);
+    });
+
+    it('repairs a block whose rooms have drifted out of order', async () => {
+      await seedRooms();
+      // The reported shape: the newer room sits directly under the primary,
+      // above the older one, because it was created at the primary's position
+      // after the category had been renumbered.
+      voice.setPosition(PRIMARY, 60);
+      voice.setPosition('room-2', 61);
+      voice.setPosition('room-1', 62);
+      await join();
+
+      const repairs = actions.ofType('reposition');
+      expect(repairs).toHaveLength(1);
+      expect(repairs[0]!.above).toBe(false);
+      // Oldest first, with the room this join created at the bottom.
+      expect(repairs[0]!.channelIds).toEqual(['room-1', 'room-2', 'sec-1']);
+    });
+
+    it('repairs against the primary’s own above/below setting', async () => {
+      await autoChannels.upsert(GUILD, PRIMARY, { name: '## [@@game_name@@]', above: true });
+      await seedRooms();
+      // Correct for "below", and therefore wrong for this primary.
+      voice.setPosition(PRIMARY, 60);
+      voice.setPosition('room-1', 61);
+      voice.setPosition('room-2', 62);
+      await join();
+
+      const repairs = actions.ofType('reposition');
+      expect(repairs).toHaveLength(1);
+      expect(repairs[0]!.above).toBe(true);
+    });
+  });
+
   it('repositionSecondaries is a no-op when the primary has no secondaries', async () => {
     const moved = await feature.repositionSecondaries(GUILD, PRIMARY, false);
     expect(moved).toBe(0);

@@ -405,9 +405,18 @@ export class VoiceFeature {
     // category's primaries) and append at the bottom; otherwise number per-primary.
     const categoryKey = groupKeyFor(this.deps.voice.categoryOf?.(channelId));
     const group = readGroups(guild.settings)[categoryKey];
+    // This primary's existing rooms, oldest first. Their count is the new room's
+    // index, their ids place it at the bottom of the block, and their current
+    // display order says whether the block needs repairing (see below). A grouped
+    // category is positioned wholesale by `repositionGroup`, so it needs none of it.
+    const siblings = group ? [] : await this.orderedSecondaryIds(channelId);
+    const above = primary?.template.above === true;
+    // Checked BEFORE the create, so it describes the block we inherited rather
+    // than one this create has just added to.
+    const misordered = !group && this.blockMisordered(channelId, siblings, above);
     const index = group
       ? (await this.groupMembers(guildId, categoryKey)).secondaries.length
-      : await this.deps.secondaries.countByPrimary(channelId);
+      : siblings.length;
     const template = primary?.template.name ?? settings.channelNameTemplate;
     // Generate the per-channel random seed once, here, so `[[random]]` picks are
     // fixed for this channel's lifetime and never trigger a later rename.
@@ -432,7 +441,9 @@ export class VoiceFeature {
         // Place the secondary in the primary's category, above/below per config.
         nearChannelId: channelId,
         // Default is below the primary; only `above: true` positions above it.
-        above: primary?.template.above === true,
+        above,
+        // Below the primary means below its existing rooms too, not between them.
+        afterChannelIds: siblings,
         // Inherit permissions from the primary by default (matching the legacy bot);
         // `/inheritpermissions` can switch the source to the category or a specific
         // channel. Unset must NOT fall through to Discord's category-sync.
@@ -543,6 +554,17 @@ export class VoiceFeature {
         await this.companionBlock(secondaries.map((s) => s.channelId)),
         group.above,
       );
+    } else if (misordered) {
+      // The block we inherited was already in the wrong order, which create-time
+      // placement cannot undo on its own — it can only put THIS room in the right
+      // slot. One bulk reorder puts the whole block back, and because it also
+      // gives every room a unique position, the check above passes from now on:
+      // this costs one call on the create that finds the damage, and none after.
+      this.deps.logger.info(
+        { guildId, primaryId: channelId, secondaryId: newChannelId },
+        'repairing out-of-order secondaries',
+      );
+      await this.repositionSecondaries(guildId, channelId, above);
     }
 
     this.deps.logger.info(
@@ -1197,16 +1219,51 @@ export class VoiceFeature {
     primaryChannelId: string,
     above: boolean,
   ): Promise<number> {
-    const rows = await this.deps.secondaries.listByPrimary(primaryChannelId);
-    if (rows.length === 0) return 0;
-    const ordered = [...rows].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
-    const channelBlock = await this.companionBlock(ordered.map((r) => r.channelId));
+    const ordered = await this.orderedSecondaryIds(primaryChannelId);
+    if (ordered.length === 0) return 0;
+    const channelBlock = await this.companionBlock(ordered);
     await this.deps.actions.repositionSecondaries(guildId, primaryChannelId, channelBlock, above);
     this.deps.logger.info(
       { guildId, primaryChannelId, above, count: ordered.length },
       'repositioned secondaries',
     );
     return ordered.length;
+  }
+
+  /** A primary's rooms, oldest first: the order they are meant to be stacked in. */
+  private async orderedSecondaryIds(primaryChannelId: string): Promise<string[]> {
+    const rows = await this.deps.secondaries.listByPrimary(primaryChannelId);
+    return [...rows]
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+      .map((r) => r.channelId);
+  }
+
+  /**
+   * Whether a primary's rooms have drifted out of the order Discord renders them
+   * in: `creator` then oldest-to-newest, or the reverse of that for `above`.
+   *
+   * This is the one case create-time placement cannot fix. Placing a new room at
+   * the bottom of the block is enough for every room created from here on, but it
+   * cannot move a room that is ALREADY in the wrong slot, so a block reordered
+   * underneath us stays wrong until its rooms happen to turn over. The repair is
+   * a bulk reorder, so it is worth spending only when the order is knowably
+   * wrong: an unknowable position answers false, never "repair".
+   */
+  private blockMisordered(
+    primaryChannelId: string,
+    orderedSecondaryIds: string[],
+    above: boolean,
+  ): boolean {
+    if (orderedSecondaryIds.length === 0) return false;
+    const displayed = this.deps.voice.displayOrderOf?.([primaryChannelId, ...orderedSecondaryIds]);
+    if (!displayed) return false;
+    const visible = new Set(displayed);
+    // Without the primary there is no anchor to be above or below.
+    if (!visible.has(primaryChannelId)) return false;
+    const rooms = orderedSecondaryIds.filter((id) => visible.has(id));
+    if (rooms.length === 0) return false;
+    const expected = above ? [...rooms, primaryChannelId] : [primaryChannelId, ...rooms];
+    return expected.join(',') !== displayed.join(',');
   }
 
   /**

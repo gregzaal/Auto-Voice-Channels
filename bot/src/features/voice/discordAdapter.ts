@@ -202,18 +202,21 @@ export class DiscordVoiceActions implements VoiceActions {
       ? await this.client.channels.fetch(input.nearChannelId).catch(() => null)
       : null;
     const placeAbove = input.above === true;
-    // Create the channel *at the primary's own position*: Discord breaks position
-    // ties by id, and the new channel always has the largest id, so it lands
-    // directly below the primary in a single call. For the default "below" that
-    // is already correct, so we do no extra work (no reorder → no flicker). For
-    // "above" we then bulk-reorder it up one slot (Discord can't place a new
-    // channel above an existing one at create time — the id tie-break forbids it).
+    // Create the channel at the bottom of the primary's block: Discord breaks
+    // position ties by id, and the new channel always has the largest id, so it
+    // lands directly below whatever it shares a position with, in a single call.
+    // For the default "below" that is already correct, so we do no extra work
+    // (no reorder → no flicker). For "above" we then bulk-reorder it up one slot
+    // (Discord can't place a new channel above an existing one at create time —
+    // the id tie-break forbids it).
     let createPosition: number | undefined;
     let reorderAboveIndex: number | undefined;
     if (near?.isVoiceBased()) {
       parentId ??= near.parent?.id;
       createPosition = near.rawPosition;
-      if (placeAbove) reorderAboveIndex = near.position; // captured before create
+      if (placeAbove)
+        reorderAboveIndex = near.position; // captured before create
+      else createPosition = this.bottomOfBlock(near, input.afterChannelIds);
     }
 
     // Resolve the permission overwrites to create the channel with:
@@ -278,6 +281,33 @@ export class DiscordVoiceActions implements VoiceActions {
       await this.placeAboveSibling(channel, reorderAboveIndex);
     }
     return channel.id;
+  }
+
+  /**
+   * The position to create a "below" secondary at: the primary's own, or the
+   * bottom-most one any of its existing rooms holds.
+   *
+   * Creating at the primary's position relies on the id tie-break to drop the new
+   * channel one slot down, which is only correct while the primary and every one
+   * of its rooms still SHARE that one position value. They do not always: any
+   * bulk reorder gives them unique ascending positions instead — ours for
+   * `/position` and `/group`, an admin dragging a channel, or Discord itself
+   * renumbering a category — and from then on a channel created at the primary's
+   * position lands ABOVE every room that already existed, which is how a block
+   * ends up rendering as `creator, 5, 6, 1, 2, 3, 4`. Tying with the bottom-most
+   * room instead is correct in both states and costs no extra call. It is also
+   * worth not relying on that tie any harder than we have to: two Discord clients
+   * were observed rendering one tied trio in two different orders.
+   */
+  private bottomOfBlock(primary: VoiceBasedChannel, blockIds: string[] | undefined): number {
+    let position = primary.rawPosition;
+    for (const id of blockIds ?? []) {
+      const sibling = this.client.channels.cache.get(id);
+      // A room in another category is not part of this block's ordering.
+      if (!sibling?.isVoiceBased() || sibling.parentId !== primary.parentId) continue;
+      if (sibling.rawPosition > position) position = sibling.rawPosition;
+    }
+    return position;
   }
 
   /**
@@ -682,6 +712,16 @@ export class DiscordVoiceView implements GuildVoiceView {
     const channel = this.client.channels.cache.get(channelId);
     if (!channel || !('parentId' in channel)) return undefined;
     return channel.parentId ?? null;
+  }
+
+  displayOrderOf(channelIds: string[]): string[] | undefined {
+    const known = channelIds
+      .map((id) => this.client.channels.cache.get(id))
+      .filter((c): c is VoiceBasedChannel => !!c && c.isVoiceBased());
+    if (known.length === 0) return undefined;
+    return known
+      .sort((a, b) => a.rawPosition - b.rawPosition || (BigInt(a.id) < BigInt(b.id) ? -1 : 1))
+      .map((c) => c.id);
   }
 }
 

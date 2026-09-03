@@ -62,6 +62,17 @@ export interface GuildVoiceView {
    */
   categoryOf?(channelId: string): string | null | undefined;
   /**
+   * Those of `channelIds` this instance can see, in the order Discord renders
+   * them (position, then id). `undefined` when none of them are knowable.
+   *
+   * Optional like {@link categoryOf}, and read the same way: absent, or
+   * `undefined`, means "cannot say", which callers must treat as "leave it
+   * alone" rather than as "it is wrong". The only caller repairs channel order
+   * with a bulk reorder, and reordering a guild's channels on a guess is far
+   * worse than leaving them as they are.
+   */
+  displayOrderOf?(channelIds: string[]): string[] | undefined;
+  /**
    * Whether Discord has actually given us this guild's data, i.e. whether
    * {@link channelExists} means anything for it.
    *

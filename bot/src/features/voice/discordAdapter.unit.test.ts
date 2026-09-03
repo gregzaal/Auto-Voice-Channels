@@ -568,3 +568,111 @@ describe('DiscordVoiceActions.setPrivacy', () => {
     ).resolves.toBeUndefined();
   });
 });
+
+describe('DiscordVoiceActions create-time placement', () => {
+  /**
+   * A primary at `primaryPos` in category `cat`, plus whatever sibling rooms the
+   * case needs in the channel cache.
+   */
+  function makeClient(
+    primaryPos: number,
+    siblings: { id: string; rawPosition: number; parentId?: string | null }[] = [],
+  ) {
+    const created = { id: 'new', setPosition: vi.fn() };
+    const guild = {
+      channels: { create: vi.fn().mockResolvedValue(created) },
+      members: { me: { permissions: { bitfield: FULL_BOT_PERMS } } },
+    };
+    const primary = {
+      id: 'prim',
+      isVoiceBased: () => true,
+      parent: { id: 'cat' },
+      parentId: 'cat',
+      rawPosition: primaryPos,
+      position: primaryPos,
+    };
+    const cache = new Map<string, unknown>(
+      siblings.map((s) => [
+        s.id,
+        { ...s, isVoiceBased: () => true, parentId: s.parentId ?? 'cat' },
+      ]),
+    );
+    const client = {
+      user: { id: BOT },
+      guilds: { fetch: vi.fn().mockResolvedValue(guild) },
+      channels: {
+        fetch: vi.fn(() => Promise.resolve(primary)),
+        cache,
+      },
+    } as unknown as Client;
+    return { client, guild, created };
+  }
+  const positionOf = (guild: { channels: { create: ReturnType<typeof vi.fn> } }) =>
+    (guild.channels.create.mock.calls[0][0] as { position?: number }).position;
+
+  it('creates at the primary’s position when it has no rooms yet', async () => {
+    const { client, guild } = makeClient(60);
+    await new DiscordVoiceActions(client).createVoiceChannel({
+      guildId: 'g1',
+      name: 'x',
+      nearChannelId: 'prim',
+    });
+    expect(positionOf(guild)).toBe(60);
+  });
+
+  it('creates at the bottom of the block once positions have drifted', async () => {
+    // The reported guild: the primary and two rooms tied at 60, the rest given
+    // unique positions by an earlier renumber. Creating at 60 would land the new
+    // room above rooms 1-4, which is the bug.
+    const { client, guild } = makeClient(60, [
+      { id: 'r5', rawPosition: 60 },
+      { id: 'r6', rawPosition: 60 },
+      { id: 'r1', rawPosition: 62 },
+      { id: 'r4', rawPosition: 66 },
+    ]);
+    await new DiscordVoiceActions(client).createVoiceChannel({
+      guildId: 'g1',
+      name: 'x',
+      nearChannelId: 'prim',
+      afterChannelIds: ['r1', 'r4', 'r5', 'r6'],
+    });
+    expect(positionOf(guild)).toBe(66);
+  });
+
+  it('ignores a room that has been moved to another category', async () => {
+    const { client, guild } = makeClient(60, [{ id: 'r1', rawPosition: 99, parentId: 'other' }]);
+    await new DiscordVoiceActions(client).createVoiceChannel({
+      guildId: 'g1',
+      name: 'x',
+      nearChannelId: 'prim',
+      afterChannelIds: ['r1'],
+    });
+    expect(positionOf(guild)).toBe(60);
+  });
+
+  it('ignores a room that is no longer in cache', async () => {
+    const { client, guild } = makeClient(60);
+    await new DiscordVoiceActions(client).createVoiceChannel({
+      guildId: 'g1',
+      name: 'x',
+      nearChannelId: 'prim',
+      afterChannelIds: ['gone'],
+    });
+    expect(positionOf(guild)).toBe(60);
+  });
+
+  it('still creates at the primary’s position for “above”, then reorders', async () => {
+    // "Above" hops the new channel over the primary by sorted index, which is
+    // drift-proof on its own, so the block bottom is not what it wants.
+    const { client, guild, created } = makeClient(60, [{ id: 'r1', rawPosition: 66 }]);
+    await new DiscordVoiceActions(client).createVoiceChannel({
+      guildId: 'g1',
+      name: 'x',
+      nearChannelId: 'prim',
+      above: true,
+      afterChannelIds: ['r1'],
+    });
+    expect(positionOf(guild)).toBe(60);
+    expect(created.setPosition).toHaveBeenCalledWith(60);
+  });
+});
