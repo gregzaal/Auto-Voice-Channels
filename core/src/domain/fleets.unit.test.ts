@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_FLEET, FLEETS, fleetAdvisoryKey, fleetOrdinal } from './fleets.js';
+import {
+  DEFAULT_FLEET,
+  FLEETS,
+  fleetAdvisoryKey,
+  fleetOrdinal,
+  guildLeftEveryFleet,
+} from './fleets.js';
 
 describe('fleets', () => {
   it('defaults to prod, which is what self-host and every pre-fleet row is', () => {
@@ -67,5 +73,30 @@ describe('fleetAdvisoryKey', () => {
   it('rejects a slot that would overflow into the fleet bits', () => {
     expect(() => fleetAdvisoryKey(1, 'prod', 0x1_0000)).toThrow(RangeError);
     expect(() => fleetAdvisoryKey(1, 'prod', -1)).toThrow(RangeError);
+  });
+});
+
+describe('guildLeftEveryFleet', () => {
+  it('is a real departure when the departing fleet is the only one present', () => {
+    expect(guildLeftEveryFleet(['beta'], 'beta')).toBe(true);
+  });
+
+  it('is a real departure when nothing is present at all', () => {
+    expect(guildLeftEveryFleet([], 'beta')).toBe(true);
+  });
+
+  /**
+   * The bot-swap case this exists for: beta's row has not necessarily flipped
+   * to `removedAt` yet (a sibling fire-and-forget write with no ordering
+   * guarantee against this check), but gold is already present, so this is
+   * not a departure regardless of whether beta's own row shows up here.
+   */
+  it('is not a departure while a sibling fleet is present, whether or not the departing one still shows', () => {
+    expect(guildLeftEveryFleet(['gold'], 'beta')).toBe(false);
+    expect(guildLeftEveryFleet(['beta', 'gold'], 'beta')).toBe(false);
+  });
+
+  it('is not a departure with multiple sibling fleets present', () => {
+    expect(guildLeftEveryFleet(['prod', 'gold'], 'beta')).toBe(false);
   });
 });

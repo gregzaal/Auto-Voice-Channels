@@ -63,3 +63,23 @@ export function fleetAdvisoryKey(base: number, fleet: Fleet, slot = 0): bigint {
   }
   return (BigInt(base) << 32n) | (BigInt(fleetOrdinal(fleet)) << 16n) | BigInt(slot);
 }
+
+/**
+ * Whether losing `departing` from a guild means the guild left AVC entirely,
+ * given every fleet the guild is *currently* present in.
+ *
+ * Two bots in one guild needs no gating for two fleets (`fleets.md` §3), and
+ * that now extends to pool membership (`member-based-pricing.md` §11 q4): a
+ * customer swapping from one of our bot identities to another is a routine
+ * move, not a departure, and a subscription bound to that guild must survive
+ * it. Only a genuine last-fleet-out counts as leaving.
+ *
+ * `currentlyPresent` may still include `departing` itself — the removal that
+ * triggered this check is written by a sibling fire-and-forget call with no
+ * ordering guarantee against this one, so a caller must not wait on it having
+ * landed first. Filtering it out here, rather than relying on the timing, is
+ * what makes the answer correct either way.
+ */
+export function guildLeftEveryFleet(currentlyPresent: readonly Fleet[], departing: Fleet): boolean {
+  return currentlyPresent.every((fleet) => fleet === departing);
+}

@@ -19,6 +19,7 @@ import {
   OpsAuditRepository,
   DEFAULT_FLEET,
   guildFloor,
+  guildLeftEveryFleet,
   poolExitTransition,
   shouldGrantPoolExit,
   probeForManifest,
@@ -947,6 +948,25 @@ async function main(): Promise<void> {
      */
     void (async () => {
       try {
+        /**
+         * A guild running more than one of our fleets side by side
+         * (`fleets.md` §3) is now the ordinary case, not an edge case: pools
+         * may span fleets (`member-based-pricing.md` §11 q4), and a customer
+         * moving from one of our bot identities to another is a routine
+         * swap, not a departure. Losing THIS fleet's bot must only be read as
+         * "the guild left AVC" when no sibling fleet is still present -
+         * otherwise a fleet swap silently floors a paying pool member the
+         * instant the old bot is removed, before the new one is even invited.
+         */
+        const present = await presenceRepo.presentFleets(guild.id);
+        if (!guildLeftEveryFleet(present, config.fleet ?? DEFAULT_FLEET)) {
+          logger.info(
+            { guildId: guild.id, present },
+            'bot removed from guild, but another fleet still serves it: pool membership left untouched',
+          );
+          return;
+        }
+
         const row = await guildsRepo.get(guild.id);
         const poolId = await removeGuildFromAnyPoolAtomically(db, guild.id, removedAt);
         if (!poolId) return;
