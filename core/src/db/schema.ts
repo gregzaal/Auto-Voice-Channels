@@ -1165,6 +1165,28 @@ export const opsAudit = pgTable(
   (t) => [index('ops_audit_created_idx').on(t.createdAt)],
 );
 
+/**
+ * Hand-entered monthly infrastructure cost figures
+ * (`plans/admin-dashboard.md` §4.5, "unit economics").
+ *
+ * Fly, Postgres, model spend and Paddle fees are real dollar costs that live in
+ * those providers' own billing, not ours, and none of them has an API this
+ * project pulls from. This is the tiny bridge that lets `/admin` divide a real
+ * total by guild counts per band: a five-minutes-a-month hand entry rather
+ * than a live feed. One row per calendar month; all four figures are whole USD
+ * cents.
+ */
+export const costsMonthly = pgTable('costs_monthly', {
+  /** UTC calendar month, `YYYY-MM`, same convention as `ai_usage.month`. */
+  month: text('month').primaryKey(),
+  flyCents: integer('fly_cents').notNull().default(0),
+  postgresCents: integer('postgres_cents').notNull().default(0),
+  modelSpendCents: integer('model_spend_cents').notNull().default(0),
+  paddleFeesCents: integer('paddle_fees_cents').notNull().default(0),
+  updatedBy: text('updated_by'),
+  updatedAt: updatedAt(),
+});
+
 // ---------------------------------------------------------------------------
 // Metric store (plans/admin-dashboard.md §3.4). Two narrow tables hold every
 // operational time series; `domain/metrics.ts` owns what each name means.

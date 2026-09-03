@@ -274,6 +274,13 @@
       "when": 1788172561955,
       "tag": "0038_gigantic_ulik",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1788441067365,
+      "tag": "0039_late_strong_guy",
+      "breakpoints": true
     }
   ]
 }

@@ -24,6 +24,7 @@ export * from './repositories/legacyCustomers.js';
 export * from './repositories/runtimeFlags.js';
 export * from './repositories/alerts.js';
 export * from './repositories/opsAudit.js';
+export * from './repositories/costs.js';
 export * from './repositories/metrics.js';
 export * from './repositories/shardLeases.js';
 export * from './repositories/autoChannels.js';
