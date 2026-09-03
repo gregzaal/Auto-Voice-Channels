@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { SQL } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
@@ -183,6 +183,29 @@ export class SecondaryChannelRepository {
   }
 
   /** Number of secondaries currently spawned from a primary. */
+  /**
+   * Just the channel ids of a primary's rooms, oldest first.
+   *
+   * Deliberately not {@link listByPrimary}: this runs on the join path, where a
+   * full row means every sibling's `state` jsonb over the wire plus a zod parse
+   * each, and where one corrupt `state` would block room creation for the whole
+   * primary rather than for the one room it belongs to.
+   *
+   * Ordered in SQL, including the id tie-break, because more than one caller
+   * decides something from this order and `created_at` is only millisecond
+   * precision: two rooms created inside one millisecond (the importer derives
+   * both from a snowflake) would otherwise fall back to Postgres heap order,
+   * which moves whenever a row is rewritten.
+   */
+  async listIdsByPrimary(primaryChannelId: string): Promise<string[]> {
+    const rows = await this.db
+      .select({ channelId: secondaryChannels.channelId })
+      .from(secondaryChannels)
+      .where(this.scoped(eq(secondaryChannels.primaryChannelId, primaryChannelId)))
+      .orderBy(asc(secondaryChannels.createdAt), asc(secondaryChannels.channelId));
+    return rows.map((r) => r.channelId);
+  }
+
   async countByPrimary(primaryChannelId: string): Promise<number> {
     const [row] = await this.db
       .select({ n: sql<number>`count(*)::int` })

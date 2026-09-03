@@ -3,6 +3,7 @@ import type { Client, GuildMember, VoiceState } from 'discord.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DiscordVoiceActions,
+  DiscordVoiceView,
   everyoneViewDenied,
   maskOverwrites,
   normalizeVoiceState,
@@ -571,37 +572,37 @@ describe('DiscordVoiceActions.setPrivacy', () => {
 
 describe('DiscordVoiceActions create-time placement', () => {
   /**
-   * A primary at `primaryPos` in category `cat`, plus whatever sibling rooms the
-   * case needs in the channel cache.
+   * A category whose voice channels are given in display order. Each entry is
+   * `[id, rawPosition]`, and `100` is the primary. `parent` lets a case put a
+   * channel in another category.
+   *
+   * Ids are snowflake-shaped on purpose: the position tie-break is a real
+   * `BigInt(id)` comparison, so a readable id like `prim` does not merely read
+   * oddly, it throws.
    */
-  function makeClient(
-    primaryPos: number,
-    siblings: { id: string; rawPosition: number; parentId?: string | null }[] = [],
-  ) {
+  function makeClient(entries: [string, number, string?][]) {
     const created = { id: 'new', setPosition: vi.fn() };
+    const cache = new Map<string, unknown>();
     const guild = {
-      channels: { create: vi.fn().mockResolvedValue(created) },
+      channels: { create: vi.fn().mockResolvedValue(created), cache },
       members: { me: { permissions: { bitfield: FULL_BOT_PERMS } } },
     };
-    const primary = {
-      id: 'prim',
-      isVoiceBased: () => true,
-      parent: { id: 'cat' },
-      parentId: 'cat',
-      rawPosition: primaryPos,
-      position: primaryPos,
-    };
-    const cache = new Map<string, unknown>(
-      siblings.map((s) => [
-        s.id,
-        { ...s, isVoiceBased: () => true, parentId: s.parentId ?? 'cat' },
-      ]),
-    );
+    for (const [id, rawPosition, parent] of entries) {
+      cache.set(id, {
+        id,
+        isVoiceBased: () => true,
+        parentId: parent ?? 'cat',
+        parent: { id: parent ?? 'cat' },
+        rawPosition,
+        position: rawPosition,
+        guild,
+      });
+    }
     const client = {
       user: { id: BOT },
       guilds: { fetch: vi.fn().mockResolvedValue(guild) },
       channels: {
-        fetch: vi.fn(() => Promise.resolve(primary)),
+        fetch: vi.fn((id: string) => Promise.resolve(cache.get(id) ?? null)),
         cache,
       },
     } as unknown as Client;
@@ -610,69 +611,120 @@ describe('DiscordVoiceActions create-time placement', () => {
   const positionOf = (guild: { channels: { create: ReturnType<typeof vi.fn> } }) =>
     (guild.channels.create.mock.calls[0][0] as { position?: number }).position;
 
-  it('creates at the primary’s position when it has no rooms yet', async () => {
-    const { client, guild } = makeClient(60);
-    await new DiscordVoiceActions(client).createVoiceChannel({
+  const create = async (client: Client, afterChannelIds?: string[], above?: boolean) =>
+    new DiscordVoiceActions(client).createVoiceChannel({
       guildId: 'g1',
       name: 'x',
-      nearChannelId: 'prim',
+      nearChannelId: '100',
+      ...(afterChannelIds ? { afterChannelIds } : {}),
+      ...(above ? { above } : {}),
     });
+
+  it('creates at the primary position when it has no rooms yet', async () => {
+    const { client, guild } = makeClient([['100', 60]]);
+    await create(client);
     expect(positionOf(guild)).toBe(60);
   });
 
   it('creates at the bottom of the block once positions have drifted', async () => {
     // The reported guild: the primary and two rooms tied at 60, the rest given
     // unique positions by an earlier renumber. Creating at 60 would land the new
-    // room above rooms 1-4, which is the bug.
-    const { client, guild } = makeClient(60, [
-      { id: 'r5', rawPosition: 60 },
-      { id: 'r6', rawPosition: 60 },
-      { id: 'r1', rawPosition: 62 },
-      { id: 'r4', rawPosition: 66 },
+    // room above rooms 1 and 4, which is the bug.
+    const { client, guild } = makeClient([
+      ['100', 60],
+      ['150', 60],
+      ['160', 60],
+      ['110', 62],
+      ['140', 66],
+      ['170', 67],
     ]);
-    await new DiscordVoiceActions(client).createVoiceChannel({
-      guildId: 'g1',
-      name: 'x',
-      nearChannelId: 'prim',
-      afterChannelIds: ['r1', 'r4', 'r5', 'r6'],
-    });
+    await create(client, ['110', '140', '150', '160']);
     expect(positionOf(guild)).toBe(66);
   });
 
+  it('stops at a foreign channel instead of anchoring below it', async () => {
+    // A room dragged to the bottom of the category, past another creator channel
+    // and ITS room. Taking the largest position any room holds would create every
+    // future room below that whole block, and nothing would ever undo it.
+    const { client, guild } = makeClient([
+      ['100', 60],
+      ['110', 61],
+      ['130', 62],
+      ['135', 63],
+      ['120', 64],
+    ]);
+    await create(client, ['110', '120']);
+    expect(positionOf(guild)).toBe(61);
+  });
+
+  it('walks past a join companion, which is not one of the rooms', async () => {
+    // A private room's companion sits directly above it and is not in the list.
+    // Stopping there would fall back to the primary position on every join for
+    // any guild using private rooms.
+    const { client, guild } = makeClient([
+      ['100', 60],
+      ['115', 61],
+      ['110', 62],
+      ['120', 63],
+    ]);
+    await create(client, ['110', '120']);
+    expect(positionOf(guild)).toBe(63);
+  });
+
   it('ignores a room that has been moved to another category', async () => {
-    const { client, guild } = makeClient(60, [{ id: 'r1', rawPosition: 99, parentId: 'other' }]);
-    await new DiscordVoiceActions(client).createVoiceChannel({
-      guildId: 'g1',
-      name: 'x',
-      nearChannelId: 'prim',
-      afterChannelIds: ['r1'],
-    });
+    const { client, guild } = makeClient([
+      ['100', 60],
+      ['110', 99, 'other'],
+    ]);
+    await create(client, ['110']);
     expect(positionOf(guild)).toBe(60);
   });
 
   it('ignores a room that is no longer in cache', async () => {
-    const { client, guild } = makeClient(60);
-    await new DiscordVoiceActions(client).createVoiceChannel({
-      guildId: 'g1',
-      name: 'x',
-      nearChannelId: 'prim',
-      afterChannelIds: ['gone'],
-    });
+    const { client, guild } = makeClient([['100', 60]]);
+    await create(client, ['gone']);
     expect(positionOf(guild)).toBe(60);
   });
 
-  it('still creates at the primary’s position for “above”, then reorders', async () => {
+  it('still creates at the primary position for above, then reorders', async () => {
     // "Above" hops the new channel over the primary by sorted index, which is
     // drift-proof on its own, so the block bottom is not what it wants.
-    const { client, guild, created } = makeClient(60, [{ id: 'r1', rawPosition: 66 }]);
-    await new DiscordVoiceActions(client).createVoiceChannel({
-      guildId: 'g1',
-      name: 'x',
-      nearChannelId: 'prim',
-      above: true,
-      afterChannelIds: ['r1'],
-    });
+    const { client, guild, created } = makeClient([
+      ['100', 60],
+      ['110', 66],
+    ]);
+    await create(client, ['110'], true);
     expect(positionOf(guild)).toBe(60);
     expect(created.setPosition).toHaveBeenCalledWith(60);
+  });
+});
+
+describe('DiscordVoiceView.displayOrderOf', () => {
+  const view = (entries: [string, number][]) => {
+    const cache = new Map<string, unknown>();
+    for (const [id, rawPosition] of entries) {
+      cache.set(id, { id, isVoiceBased: () => true, rawPosition });
+    }
+    return new DiscordVoiceView({ channels: { cache } } as unknown as Client);
+  };
+
+  it('sorts by position, then by id', async () => {
+    // Equal positions are the healthy steady state, and the id tie-break is what
+    // makes it render creator-then-oldest-to-newest without any reorder.
+    const v = view([
+      ['300', 60],
+      ['100', 60],
+      ['200', 59],
+    ]);
+    expect(v.displayOrderOf(['300', '100', '200'])).toEqual(['200', '100', '300']);
+  });
+
+  it('drops ids it cannot see rather than guessing at them', async () => {
+    const v = view([['100', 1]]);
+    expect(v.displayOrderOf(['100', 'missing'])).toEqual(['100']);
+  });
+
+  it('answers undefined when it knows none of them', async () => {
+    expect(view([]).displayOrderOf(['a', 'b'])).toBeUndefined();
   });
 });

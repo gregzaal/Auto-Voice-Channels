@@ -38,7 +38,9 @@ export class RuntimeCreationGate implements CreationGate {
   private readonly windowMs: number;
   private readonly flagCacheMs: number;
   private readonly events = new Map<string, number[]>();
-  private flagCache: { at: number; paused: boolean; limit: number } | undefined;
+  private flagCache:
+    | { at: number; paused: boolean; limit: number; orderRepairDisabled: boolean }
+    | undefined;
 
   constructor(private readonly opts: RuntimeCreationGateOptions) {
     this.windowMs = opts.windowMs ?? 60_000;
@@ -61,9 +63,12 @@ export class RuntimeCreationGate implements CreationGate {
       return { allowed: false, reason: 'shard lease could not be refreshed' };
     }
 
-    const { paused, limit } = await this.readFlags();
+    const { paused, limit, orderRepairDisabled } = await this.readFlags();
     if (paused) return { allowed: false, reason: 'global pause' };
-    if (limit <= 0) return { allowed: true };
+    // Carried on every allowed decision, so the caller reads one consistent
+    // snapshot rather than racing a second flag read against this one.
+    const extra = orderRepairDisabled ? { orderRepairDisabled: true } : {};
+    if (limit <= 0) return { allowed: true, ...extra };
 
     const now = Date.now();
     const recent = (this.events.get(guildId) ?? []).filter((t) => now - t < this.windowMs);
@@ -73,19 +78,25 @@ export class RuntimeCreationGate implements CreationGate {
     }
     recent.push(now);
     this.events.set(guildId, recent);
-    return { allowed: true };
+    return { allowed: true, ...extra };
   }
 
-  private async readFlags(): Promise<{ paused: boolean; limit: number }> {
+  private async readFlags(): Promise<{
+    paused: boolean;
+    limit: number;
+    orderRepairDisabled: boolean;
+  }> {
     const now = Date.now();
     if (this.flagCache && now - this.flagCache.at < this.flagCacheMs) {
-      return { paused: this.flagCache.paused, limit: this.flagCache.limit };
+      const { paused, limit, orderRepairDisabled } = this.flagCache;
+      return { paused, limit, orderRepairDisabled };
     }
     const all = await this.opts.flags.getAll();
     const paused = all[RUNTIME_FLAGS.GLOBAL_PAUSE] === true;
     const rawLimit = all[RUNTIME_FLAGS.CREATE_RATE_LIMIT];
     const limit = typeof rawLimit === 'number' && rawLimit > 0 ? rawLimit : 0;
-    this.flagCache = { at: now, paused, limit };
-    return { paused, limit };
+    const orderRepairDisabled = all[RUNTIME_FLAGS.VOICE_ORDER_REPAIR_DISABLED] === true;
+    this.flagCache = { at: now, paused, limit, orderRepairDisabled };
+    return { paused, limit, orderRepairDisabled };
   }
 }

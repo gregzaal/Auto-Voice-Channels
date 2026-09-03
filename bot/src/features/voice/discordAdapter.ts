@@ -300,12 +300,34 @@ export class DiscordVoiceActions implements VoiceActions {
    * were observed rendering one tied trio in two different orders.
    */
   private bottomOfBlock(primary: VoiceBasedChannel, blockIds: string[] | undefined): number {
+    const block = new Set(blockIds ?? []);
+    if (block.size === 0) return primary.rawPosition;
+    const siblings = [...primary.guild.channels.cache.values()]
+      .filter((c): c is VoiceBasedChannel => c.isVoiceBased() && c.parentId === primary.parentId)
+      .sort((a, b) => a.rawPosition - b.rawPosition || (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
+    const start = siblings.findIndex((c) => c.id === primary.id);
+    if (start === -1) return primary.rawPosition;
+
+    // Walk DOWN from the primary and stop at the first channel that is not part
+    // of this block, rather than taking the largest position any room holds.
+    // An unbounded maximum reads a single room somebody dragged to the bottom of
+    // the category as the end of the block, and then anchors every future room
+    // below everything in between, including other creator channels and their
+    // rooms. That would be a new fault, in a state the misorder check cannot see.
     let position = primary.rawPosition;
-    for (const id of blockIds ?? []) {
-      const sibling = this.client.channels.cache.get(id);
-      // A room in another category is not part of this block's ordering.
-      if (!sibling?.isVoiceBased() || sibling.parentId !== primary.parentId) continue;
-      if (sibling.rawPosition > position) position = sibling.rawPosition;
+    for (let i = start + 1; i < siblings.length; i += 1) {
+      if (block.has(siblings[i]!.id)) {
+        position = siblings[i]!.rawPosition;
+        continue;
+      }
+      // A private room's "join" companion sits directly above the room it fronts
+      // and is not in `blockIds`, so tolerate exactly that shape: one foreign
+      // channel whose successor is ours again. Without this, any guild with a
+      // private room in the block falls back to the primary's own position, the
+      // new room lands above its elders, and the misorder check then buys a bulk
+      // reorder on every single join.
+      if (block.has(siblings[i + 1]?.id ?? '')) continue;
+      break;
     }
     return position;
   }

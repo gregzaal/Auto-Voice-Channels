@@ -307,6 +307,15 @@ describe('VoiceFeature (integration)', () => {
       }
     };
 
+    /**
+     * The misorder check refuses to act without a category, because it cannot
+     * otherwise tell a room somebody moved elsewhere from one that is genuinely
+     * out of order, and the repair could not move it either way.
+     */
+    const inOneCategory = (): void => {
+      for (const id of [PRIMARY, 'room-1', 'room-2']) voice.setParent(id, 'cat');
+    };
+
     const join = async (): Promise<void> => {
       const alice = member('alice');
       voice.put(PRIMARY, alice);
@@ -319,6 +328,7 @@ describe('VoiceFeature (integration)', () => {
 
     it('places a new room below the primary’s existing rooms, not below the primary', async () => {
       await seedRooms();
+      inOneCategory();
       await join();
       // Creating at the primary's own position is only correct while the whole
       // block still shares it; the adapter ties with the bottom-most of these.
@@ -327,6 +337,7 @@ describe('VoiceFeature (integration)', () => {
 
     it('does not reorder a block that is already in order', async () => {
       await seedRooms();
+      inOneCategory();
       voice.setPosition(PRIMARY, 60);
       voice.setPosition('room-1', 61);
       voice.setPosition('room-2', 62);
@@ -336,6 +347,7 @@ describe('VoiceFeature (integration)', () => {
 
     it('does not reorder a block that shares one position (the steady state)', async () => {
       await seedRooms();
+      inOneCategory();
       for (const id of [PRIMARY, 'room-1', 'room-2']) voice.setPosition(id, 60);
       await join();
       expect(actions.ofType('reposition')).toHaveLength(0);
@@ -343,12 +355,14 @@ describe('VoiceFeature (integration)', () => {
 
     it('does not reorder when positions are unknowable', async () => {
       await seedRooms();
+      inOneCategory();
       await join();
       expect(actions.ofType('reposition')).toHaveLength(0);
     });
 
     it('repairs a block whose rooms have drifted out of order', async () => {
       await seedRooms();
+      inOneCategory();
       // The reported shape: the newer room sits directly under the primary,
       // above the older one, because it was created at the primary's position
       // after the category had been renumbered.
@@ -364,9 +378,94 @@ describe('VoiceFeature (integration)', () => {
       expect(repairs[0]!.channelIds).toEqual(['room-1', 'room-2', 'sec-1']);
     });
 
+    it('never repairs a room that has been moved to another category', async () => {
+      // Positions in two categories are separate number spaces, so comparing
+      // across them means nothing, and repositionSecondaries would not move it
+      // anyway. Reading it as misordered buys a bulk reorder on every join and
+      // never once fixes anything.
+      await seedRooms();
+      voice.setParent(PRIMARY, 'cat');
+      voice.setParent('room-1', 'cat');
+      voice.setParent('room-2', 'elsewhere');
+      voice.setPosition(PRIMARY, 60);
+      voice.setPosition('room-1', 61);
+      voice.setPosition('room-2', 0);
+      await join();
+      expect(actions.ofType('reposition')).toHaveLength(0);
+    });
+
+    it('does not repair when the category is unknowable', async () => {
+      await seedRooms();
+      voice.setPosition(PRIMARY, 60);
+      voice.setPosition('room-2', 61);
+      voice.setPosition('room-1', 62);
+      await join();
+      expect(actions.ofType('reposition')).toHaveLength(0);
+    });
+
+    it('honours voice.order_repair_disabled', async () => {
+      await seedRooms();
+      inOneCategory();
+      voice.setPosition(PRIMARY, 60);
+      voice.setPosition('room-2', 61);
+      voice.setPosition('room-1', 62);
+      const gated = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+        gate: { allowCreate: () => Promise.resolve({ allowed: true, orderRepairDisabled: true }) },
+      });
+      const alice = member('alice');
+      voice.put(PRIMARY, alice);
+      await gated.handleVoiceStateUpdate({
+        guildId: GUILD,
+        member: alice,
+        afterChannelId: PRIMARY,
+      });
+      expect(actions.ofType('create')).toHaveLength(1);
+      expect(actions.ofType('reposition')).toHaveLength(0);
+    });
+
+    it('still reports the room as created when the repair fails', async () => {
+      // The room exists and the member is already in it by this point, so a
+      // failure here must not cost the caller its result or trip the guild's
+      // circuit-breaker over a cosmetic reorder.
+      await seedRooms();
+      inOneCategory();
+      voice.setPosition(PRIMARY, 60);
+      voice.setPosition('room-2', 61);
+      voice.setPosition('room-1', 62);
+      const broken = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+        joinCompanionFor: () => Promise.reject(new Error('database is having a moment')),
+      });
+      const alice = member('alice');
+      voice.put(PRIMARY, alice);
+      // Resolving at all is the assertion: unguarded, the rejected companion
+      // lookup unwinds the whole create into the dispatcher's catch, which costs
+      // the guild's circuit-breaker a failure over a cosmetic reorder.
+      await expect(
+        broken.handleVoiceStateUpdate({ guildId: GUILD, member: alice, afterChannelId: PRIMARY }),
+      ).resolves.toBeDefined();
+      expect(await secondaries.get('sec-1')).toBeDefined();
+      expect(actions.ofType('move').map((m) => m.channelId)).toContain('sec-1');
+      expect(actions.ofType('reposition')).toHaveLength(0);
+    });
+
     it('repairs against the primary’s own above/below setting', async () => {
       await autoChannels.upsert(GUILD, PRIMARY, { name: '## [@@game_name@@]', above: true });
       await seedRooms();
+      inOneCategory();
       // Correct for "below", and therefore wrong for this primary.
       voice.setPosition(PRIMARY, 60);
       voice.setPosition('room-1', 61);

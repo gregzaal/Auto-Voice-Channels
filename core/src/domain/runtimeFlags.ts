@@ -10,6 +10,8 @@ export const RUNTIME_FLAGS = {
   GLOBAL_PAUSE: 'global.pause',
   /** Disable only the periodic safety-net sweep (reconcile-on-READY still runs). */
   SWEEP_DISABLED: 'sweep.disabled',
+  /** Stops repairing a primary's rooms when they render out of creation order. */
+  VOICE_ORDER_REPAIR_DISABLED: 'voice.order_repair_disabled',
   /** Throttle: max secondary creations per guild per minute (number; 0 = unlimited). */
   CREATE_RATE_LIMIT: 'create.rate_limit_per_min',
   /** Disable the billing/trial reconcile job entirely (sampling + ladder + notifications). */

@@ -48,6 +48,17 @@ export interface CreateGateDecision {
   allowed: boolean;
   /** Human-readable reason when not allowed (for logs/diagnostics). */
   reason?: string;
+  /**
+   * Whether to skip repairing a block whose rooms render out of order.
+   *
+   * Rides on this decision rather than being its own dependency because the gate
+   * is already consulted once per create and already caches its flag read, so
+   * the lever costs no extra database traffic. It exists at all because the
+   * repair is the only thing here that rewrites a guild's channel layout without
+   * anyone asking, and the alternative levers are `global.pause`, which stops
+   * rooms being created at all, and a deploy.
+   */
+  orderRepairDisabled?: boolean;
 }
 
 /**
@@ -385,8 +396,10 @@ export class VoiceFeature {
     // Runtime control plane: a global pause or per-guild throttle may suppress
     // creation without a deploy. Checked only for real creates (dry-run still
     // reports the drift a pause is hiding).
+    let gate: CreateGateDecision | undefined;
     if (this.deps.gate) {
       const decision = await this.deps.gate.allowCreate(guildId);
+      gate = decision;
       if (!decision.allowed) {
         this.deps.logger.warn(
           { guildId, reason: decision.reason },
@@ -409,11 +422,12 @@ export class VoiceFeature {
     // index, their ids place it at the bottom of the block, and their current
     // display order says whether the block needs repairing (see below). A grouped
     // category is positioned wholesale by `repositionGroup`, so it needs none of it.
-    const siblings = group ? [] : await this.orderedSecondaryIds(channelId);
+    const siblings = group ? [] : await this.deps.secondaries.listIdsByPrimary(channelId);
     const above = primary?.template.above === true;
     // Checked BEFORE the create, so it describes the block we inherited rather
     // than one this create has just added to.
-    const misordered = !group && this.blockMisordered(channelId, siblings, above);
+    const misordered =
+      !group && !gate?.orderRepairDisabled && this.blockMisordered(channelId, siblings, above);
     const index = group
       ? (await this.groupMembers(guildId, categoryKey)).secondaries.length
       : siblings.length;
@@ -560,11 +574,25 @@ export class VoiceFeature {
       // slot. One bulk reorder puts the whole block back, and because it also
       // gives every room a unique position, the check above passes from now on:
       // this costs one call on the create that finds the damage, and none after.
-      this.deps.logger.info(
-        { guildId, primaryId: channelId, secondaryId: newChannelId },
-        'repairing out-of-order secondaries',
-      );
-      await this.repositionSecondaries(guildId, channelId, above);
+      //
+      // Contained on its own, because by this point the room exists and the
+      // member is in it. `repositionSecondaries` reads the join companions from
+      // Postgres, so a database blip there would otherwise reject a create that
+      // has already succeeded: no `created` result, no `/logging` line, and a
+      // task failure counted against this guild's circuit-breaker, all for a
+      // cosmetic reorder.
+      try {
+        this.deps.logger.info(
+          { guildId, primaryId: channelId, secondaryId: newChannelId },
+          'repairing out-of-order secondaries',
+        );
+        await this.repositionSecondaries(guildId, channelId, above);
+      } catch (err) {
+        this.deps.logger.warn(
+          { guildId, primaryId: channelId, err },
+          'could not repair secondary order',
+        );
+      }
     }
 
     this.deps.logger.info(
@@ -1219,7 +1247,7 @@ export class VoiceFeature {
     primaryChannelId: string,
     above: boolean,
   ): Promise<number> {
-    const ordered = await this.orderedSecondaryIds(primaryChannelId);
+    const ordered = await this.deps.secondaries.listIdsByPrimary(primaryChannelId);
     if (ordered.length === 0) return 0;
     const channelBlock = await this.companionBlock(ordered);
     await this.deps.actions.repositionSecondaries(guildId, primaryChannelId, channelBlock, above);
@@ -1228,14 +1256,6 @@ export class VoiceFeature {
       'repositioned secondaries',
     );
     return ordered.length;
-  }
-
-  /** A primary's rooms, oldest first: the order they are meant to be stacked in. */
-  private async orderedSecondaryIds(primaryChannelId: string): Promise<string[]> {
-    const rows = await this.deps.secondaries.listByPrimary(primaryChannelId);
-    return [...rows]
-      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
-      .map((r) => r.channelId);
   }
 
   /**
@@ -1247,7 +1267,14 @@ export class VoiceFeature {
    * cannot move a room that is ALREADY in the wrong slot, so a block reordered
    * underneath us stays wrong until its rooms happen to turn over. The repair is
    * a bulk reorder, so it is worth spending only when the order is knowably
-   * wrong: an unknowable position answers false, never "repair".
+   * wrong: anything unknowable answers false, never "repair".
+   *
+   * **Only ever asks about rooms the repair could actually move**, which means
+   * the primary's own category and nothing else. Positions in two categories are
+   * separate number spaces, so comparing across them is meaningless, and
+   * `repositionSecondaries` filters to the primary's parent anyway: a room an
+   * admin dragged elsewhere would otherwise read as permanently misordered and
+   * buy a bulk reorder on every single join, forever, without ever moving it.
    */
   private blockMisordered(
     primaryChannelId: string,
@@ -1255,12 +1282,18 @@ export class VoiceFeature {
     above: boolean,
   ): boolean {
     if (orderedSecondaryIds.length === 0) return false;
-    const displayed = this.deps.voice.displayOrderOf?.([primaryChannelId, ...orderedSecondaryIds]);
+    const parent = this.deps.voice.categoryOf?.(primaryChannelId);
+    // `null` is the server root and is a real answer; `undefined` is "unknown",
+    // and without it a moved room cannot be told from a misordered one.
+    if (parent === undefined) return false;
+    const here = orderedSecondaryIds.filter((id) => this.deps.voice.categoryOf?.(id) === parent);
+    if (here.length === 0) return false;
+    const displayed = this.deps.voice.displayOrderOf?.([primaryChannelId, ...here]);
     if (!displayed) return false;
     const visible = new Set(displayed);
     // Without the primary there is no anchor to be above or below.
     if (!visible.has(primaryChannelId)) return false;
-    const rooms = orderedSecondaryIds.filter((id) => visible.has(id));
+    const rooms = here.filter((id) => visible.has(id));
     if (rooms.length === 0) return false;
     const expected = above ? [...rooms, primaryChannelId] : [primaryChannelId, ...rooms];
     return expected.join(',') !== displayed.join(',');
