@@ -73,6 +73,13 @@ export interface GuildVoiceView {
    */
   displayOrderOf?(channelIds: string[]): string[] | undefined;
   /**
+   * A primary's live bitrate/region/video-quality/age-restriction, for a
+   * spawned secondary to copy. Optional like {@link categoryOf}: `undefined`
+   * means "cannot say", and a caller must leave those properties unset rather
+   * than resetting a new channel to Discord's own defaults.
+   */
+  voicePropertiesOf?(channelId: string): VoiceChannelProperties | undefined;
+  /**
    * Whether Discord has actually given us this guild's data, i.e. whether
    * {@link channelExists} means anything for it.
    *
@@ -90,6 +97,21 @@ export interface GuildVoiceView {
    * nothing about hydration.
    */
   guildAvailable(guildId: string): boolean;
+}
+
+/**
+ * A primary channel's own Discord-set properties, read live so a spawned
+ * secondary can copy them the way the legacy bot always did. `rtcRegion` and
+ * `videoQualityMode` are `null` when the primary has no explicit override
+ * (Discord's "Automatic" / "Auto"), which callers should treat the same as
+ * "leave it unset" rather than copying the null itself.
+ */
+export interface VoiceChannelProperties {
+  bitrate: number;
+  rtcRegion: string | null;
+  /** 1 = Auto, 2 = Full (720p) — mirrors discord.js's `VideoQualityMode`. */
+  videoQualityMode: 1 | 2 | null;
+  nsfw: boolean;
 }
 
 /** A normalized voice-state transition (a member moved between channels). */

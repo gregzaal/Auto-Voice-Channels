@@ -728,3 +728,78 @@ describe('DiscordVoiceView.displayOrderOf', () => {
     expect(view([]).displayOrderOf(['a', 'b'])).toBeUndefined();
   });
 });
+
+describe('DiscordVoiceView.voicePropertiesOf', () => {
+  it('reads bitrate/region/video-quality/nsfw off a cached voice channel', () => {
+    const cache = new Map<string, unknown>([
+      [
+        '100',
+        {
+          id: '100',
+          isVoiceBased: () => true,
+          bitrate: 96000,
+          rtcRegion: 'us-east',
+          videoQualityMode: 2,
+          nsfw: true,
+        },
+      ],
+    ]);
+    const v = new DiscordVoiceView({ channels: { cache } } as unknown as Client);
+    expect(v.voicePropertiesOf('100')).toEqual({
+      bitrate: 96000,
+      rtcRegion: 'us-east',
+      videoQualityMode: 2,
+      nsfw: true,
+    });
+  });
+
+  it('answers undefined for an unknown or non-voice channel', () => {
+    const cache = new Map<string, unknown>([['t1', { id: 't1', isVoiceBased: () => false }]]);
+    const v = new DiscordVoiceView({ channels: { cache } } as unknown as Client);
+    expect(v.voicePropertiesOf('t1')).toBeUndefined();
+    expect(v.voicePropertiesOf('missing')).toBeUndefined();
+  });
+});
+
+describe('DiscordVoiceActions.createVoiceChannel bitrate/region/video-quality/nsfw', () => {
+  function makeClient() {
+    const created = { id: 'new', setPosition: vi.fn() };
+    const guild = {
+      channels: { create: vi.fn().mockResolvedValue(created) },
+      members: { me: { permissions: { bitfield: FULL_BOT_PERMS } } },
+    };
+    const client = {
+      user: { id: BOT },
+      guilds: { fetch: vi.fn().mockResolvedValue(guild) },
+      channels: { fetch: vi.fn().mockResolvedValue(null) },
+    } as unknown as Client;
+    return { client, guild };
+  }
+
+  it('passes bitrate, region, video-quality and nsfw through to Discord', async () => {
+    const { client, guild } = makeClient();
+    await new DiscordVoiceActions(client).createVoiceChannel({
+      guildId: 'g1',
+      name: 'x',
+      bitrate: 96000,
+      rtcRegion: 'us-east',
+      videoQualityMode: 2,
+      nsfw: true,
+    });
+    const arg = guild.channels.create.mock.calls[0][0] as Record<string, unknown>;
+    expect(arg.bitrate).toBe(96000);
+    expect(arg.rtcRegion).toBe('us-east');
+    expect(arg.videoQualityMode).toBe(2);
+    expect(arg.nsfw).toBe(true);
+  });
+
+  it('omits them entirely when unset, so Discord applies its own defaults', async () => {
+    const { client, guild } = makeClient();
+    await new DiscordVoiceActions(client).createVoiceChannel({ guildId: 'g1', name: 'x' });
+    const arg = guild.channels.create.mock.calls[0][0] as Record<string, unknown>;
+    expect(arg).not.toHaveProperty('bitrate');
+    expect(arg).not.toHaveProperty('rtcRegion');
+    expect(arg).not.toHaveProperty('videoQualityMode');
+    expect(arg).not.toHaveProperty('nsfw');
+  });
+});

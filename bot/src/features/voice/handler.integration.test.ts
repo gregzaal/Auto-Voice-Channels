@@ -83,6 +83,66 @@ describe('VoiceFeature (integration)', () => {
     expect(rows[0]!.primaryChannelId).toBe(PRIMARY);
   });
 
+  it('copies the primary bitrate, region, video-quality and nsfw onto the secondary', async () => {
+    voice.setVoiceProperties(PRIMARY, {
+      bitrate: 96000,
+      rtcRegion: 'us-east',
+      videoQualityMode: 2,
+      nsfw: true,
+    });
+    const alice = member('alice');
+    voice.put(PRIMARY, alice);
+    await feature.handleVoiceStateUpdate({
+      guildId: GUILD,
+      member: alice,
+      afterChannelId: PRIMARY,
+    });
+
+    const created = actions.ofType('create')[0]!;
+    expect(created.bitrate).toBe(96000);
+    expect(created.rtcRegion).toBe('us-east');
+    expect(created.videoQualityMode).toBe(2);
+    expect(created.nsfw).toBe(true);
+  });
+
+  it('leaves region and video-quality unset when the primary has no override ("Automatic"/"Auto")', async () => {
+    voice.setVoiceProperties(PRIMARY, {
+      bitrate: 64000,
+      rtcRegion: null,
+      videoQualityMode: null,
+      nsfw: false,
+    });
+    const alice = member('alice');
+    voice.put(PRIMARY, alice);
+    await feature.handleVoiceStateUpdate({
+      guildId: GUILD,
+      member: alice,
+      afterChannelId: PRIMARY,
+    });
+
+    const created = actions.ofType('create')[0]!;
+    expect(created.bitrate).toBe(64000);
+    expect(created.rtcRegion).toBeUndefined();
+    expect(created.videoQualityMode).toBeUndefined();
+    expect(created.nsfw).toBe(false);
+  });
+
+  it('sets none of bitrate/region/video-quality/nsfw when the primary is unknown to the view', async () => {
+    const alice = member('alice');
+    voice.put(PRIMARY, alice);
+    await feature.handleVoiceStateUpdate({
+      guildId: GUILD,
+      member: alice,
+      afterChannelId: PRIMARY,
+    });
+
+    const created = actions.ofType('create')[0]!;
+    expect(created.bitrate).toBeUndefined();
+    expect(created.rtcRegion).toBeUndefined();
+    expect(created.videoQualityMode).toBeUndefined();
+    expect(created.nsfw).toBeUndefined();
+  });
+
   it('is idempotent: a replayed join does not create a second channel', async () => {
     const alice = member('alice');
     voice.put(PRIMARY, alice);

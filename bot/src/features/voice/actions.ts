@@ -13,6 +13,12 @@ export interface CreateVoiceChannelInput {
   /** User limit (0 = unlimited). */
   userLimit?: number;
   bitrate?: number;
+  /** Voice region override (e.g. "us-east"). Omit for Discord's "Automatic". */
+  rtcRegion?: string;
+  /** 1 = Auto, 2 = Full (720p) — mirrors discord.js's `VideoQualityMode`. */
+  videoQualityMode?: 1 | 2;
+  /** Age-restricted ("NSFW") channel. */
+  nsfw?: boolean;
   /**
    * Position the new channel relative to this (primary) channel: inherit its
    * category, and sit just above (`above: true`) or below it (default). "Below"
@@ -123,6 +129,10 @@ export type RecordedAction =
       name: string;
       parentId?: string;
       afterChannelIds?: string[];
+      bitrate?: number;
+      rtcRegion?: string;
+      videoQualityMode?: 1 | 2;
+      nsfw?: boolean;
     }
   | { type: 'delete'; guildId: string; channelId: string }
   | { type: 'rename'; guildId: string; channelId: string; name: string }
@@ -200,6 +210,10 @@ export class RecordingVoiceActions implements VoiceActions {
       name: input.name,
       ...(input.parentId ? { parentId: input.parentId } : {}),
       ...(input.afterChannelIds ? { afterChannelIds: input.afterChannelIds } : {}),
+      ...(input.bitrate !== undefined ? { bitrate: input.bitrate } : {}),
+      ...(input.rtcRegion !== undefined ? { rtcRegion: input.rtcRegion } : {}),
+      ...(input.videoQualityMode !== undefined ? { videoQualityMode: input.videoQualityMode } : {}),
+      ...(input.nsfw !== undefined ? { nsfw: input.nsfw } : {}),
     });
     return Promise.resolve(channelId);
   }

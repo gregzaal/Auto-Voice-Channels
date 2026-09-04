@@ -12,7 +12,13 @@ import {
 } from 'discord.js';
 import type { Logger } from '@avc/core';
 import type { CreateVoiceChannelInput, RenameResult, VoiceActions } from './actions.js';
-import type { GuildVoiceView, MemberActivity, VoiceMember, VoiceStateEvent } from './types.js';
+import type {
+  GuildVoiceView,
+  MemberActivity,
+  VoiceChannelProperties,
+  VoiceMember,
+  VoiceStateEvent,
+} from './types.js';
 
 /** Discord API error code for "Unknown Channel" (already deleted). */
 const UNKNOWN_CHANNEL = 10003;
@@ -275,6 +281,9 @@ export class DiscordVoiceActions implements VoiceActions {
       ...(createPosition !== undefined ? { position: createPosition } : {}),
       ...(input.userLimit !== undefined ? { userLimit: input.userLimit } : {}),
       ...(input.bitrate !== undefined ? { bitrate: input.bitrate } : {}),
+      ...(input.rtcRegion !== undefined ? { rtcRegion: input.rtcRegion } : {}),
+      ...(input.videoQualityMode !== undefined ? { videoQualityMode: input.videoQualityMode } : {}),
+      ...(input.nsfw !== undefined ? { nsfw: input.nsfw } : {}),
       ...(permissionOverwrites ? { permissionOverwrites } : {}),
     });
     if (reorderAboveIndex !== undefined) {
@@ -744,6 +753,18 @@ export class DiscordVoiceView implements GuildVoiceView {
     return known
       .sort((a, b) => a.rawPosition - b.rawPosition || (BigInt(a.id) < BigInt(b.id) ? -1 : 1))
       .map((c) => c.id);
+  }
+
+  voicePropertiesOf(channelId: string): VoiceChannelProperties | undefined {
+    const channel = this.client.channels.cache.get(channelId);
+    if (!channel || !channel.isVoiceBased()) return undefined;
+    const voiceChannel = channel as VoiceBasedChannel;
+    return {
+      bitrate: voiceChannel.bitrate,
+      rtcRegion: voiceChannel.rtcRegion,
+      videoQualityMode: voiceChannel.videoQualityMode as 1 | 2 | null,
+      nsfw: voiceChannel.nsfw,
+    };
   }
 }
 

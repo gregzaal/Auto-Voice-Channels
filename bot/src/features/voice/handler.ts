@@ -446,12 +446,30 @@ export class VoiceFeature {
       userLimit: primary?.template.limit ?? 0,
     });
 
+    // Copy the primary's own bitrate/region/video-quality/nsfw, matching the
+    // legacy bot (`create_secondary`). `voicePropertiesOf` is "cannot say" when
+    // absent (cold cache), in which case none of these are set and Discord's
+    // own defaults apply, same as before this copy existed. A `null` region or
+    // video-quality mode means the primary itself has no override ("Automatic"
+    // / "Auto"), which is already what a freshly created channel gets, so it is
+    // left unset rather than copied literally.
+    const primaryProps = this.deps.voice.voicePropertiesOf?.(channelId);
     let newChannelId: string;
     try {
       newChannelId = await this.deps.actions.createVoiceChannel({
         guildId,
         name,
         userLimit: primary?.template.limit ?? 0,
+        ...(primaryProps
+          ? {
+              bitrate: primaryProps.bitrate,
+              nsfw: primaryProps.nsfw,
+              ...(primaryProps.rtcRegion !== null ? { rtcRegion: primaryProps.rtcRegion } : {}),
+              ...(primaryProps.videoQualityMode !== null
+                ? { videoQualityMode: primaryProps.videoQualityMode }
+                : {}),
+            }
+          : {}),
         // Place the secondary in the primary's category, above/below per config.
         nearChannelId: channelId,
         // Default is below the primary; only `above: true` positions above it.

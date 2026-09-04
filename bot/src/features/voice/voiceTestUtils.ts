@@ -1,4 +1,4 @@
-import type { GuildVoiceView, VoiceMember } from './types.js';
+import type { GuildVoiceView, VoiceChannelProperties, VoiceMember } from './types.js';
 
 /**
  * Mutable in-memory voice view for tests. Tracks channel *existence* separately
@@ -12,6 +12,8 @@ export class FakeVoiceView implements GuildVoiceView {
   private readonly parents = new Map<string, string | null>();
   /** channelId → raw position. Unset → ordering is not knowable for it. */
   private readonly positions = new Map<string, number>();
+  /** channelId → bitrate/region/video-quality/nsfw. Unset → "cannot say". */
+  private readonly voiceProperties = new Map<string, VoiceChannelProperties>();
   /** Whether Discord has handed us this guild. True unless a test says otherwise. */
   private available = true;
 
@@ -45,6 +47,15 @@ export class FakeVoiceView implements GuildVoiceView {
   /** Sets a channel's raw position, enabling {@link displayOrderOf} for it. */
   setPosition(channelId: string, position: number): void {
     this.positions.set(channelId, position);
+  }
+
+  voicePropertiesOf(channelId: string): VoiceChannelProperties | undefined {
+    return this.voiceProperties.get(channelId);
+  }
+
+  /** Sets a channel's live bitrate/region/video-quality/nsfw, enabling {@link voicePropertiesOf}. */
+  setVoiceProperties(channelId: string, props: VoiceChannelProperties): void {
+    this.voiceProperties.set(channelId, props);
   }
 
   guildAvailable(): boolean {
