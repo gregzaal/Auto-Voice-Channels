@@ -133,15 +133,37 @@ describe('renderChannelName', () => {
     expect(renderChannelName('$00#', { index: 8, members: [] })).toBe('009');
   });
 
-  it('renders member count and creator', () => {
+  it('renders member count and owner', () => {
     const members = [member({ id: 'a' }), member({ id: 'bot', bot: true })];
     expect(
-      renderChannelName('@@num@@ by @@creator@@', {
+      renderChannelName('@@num@@ by @@owner@@', {
         index: 0,
         members,
         creatorName: 'Alice',
       }),
     ).toBe('1 by Alice');
+  });
+
+  it('still accepts `@@creator@@`, the older name for `@@owner@@`, for existing templates', () => {
+    const members = [member({ id: 'a' })];
+    expect(
+      renderChannelName('@@owner@@ and @@creator@@', {
+        index: 0,
+        members,
+        creatorName: 'Alice',
+      }),
+    ).toBe('Alice and Alice');
+  });
+
+  it('does not re-substitute the literal text "@@creator@@" if it is inside a display name', () => {
+    const members = [member({ id: 'a' })];
+    expect(
+      renderChannelName('@@owner@@', {
+        index: 0,
+        members,
+        creatorName: 'xx@@creator@@yy',
+      }),
+    ).toBe('xx@@creator@@yy');
   });
 
   it('clamps the rendered name to Discord’s 100-character limit', () => {
@@ -408,7 +430,7 @@ describe('renderChannelName — rich tokens', () => {
       creatorName: 'Greg',
       seed: 42,
     });
-    expect(name).toMatch(/^.+ Greg's \w+$/u); // emoji + creator + word
+    expect(name).toMatch(/^.+ Greg's \w+$/u); // emoji + owner + word
   });
 });
 

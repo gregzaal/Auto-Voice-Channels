@@ -28,11 +28,11 @@ export function buildPositionModal(channelId: string, currentAbove: boolean): Mo
             .setMaxValues(1)
             .addOptions(
               new StringSelectMenuOptionBuilder()
-                .setLabel('Below primary')
+                .setLabel('Below the creator channel')
                 .setValue('below')
                 .setDefault(!currentAbove),
               new StringSelectMenuOptionBuilder()
-                .setLabel('Above primary')
+                .setLabel('Above the creator channel')
                 .setValue('above')
                 .setDefault(currentAbove),
             ),

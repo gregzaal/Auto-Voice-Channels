@@ -111,7 +111,7 @@ export interface VoiceFeatureDeps {
   joinCompanionFor?: (secondaryChannelId: string) => Promise<string | undefined>;
   /**
    * Applies the private treatment to a just-spawned secondary when its primary is
-   * `defaultPrivate` (mirrors `/private`, but grants Connect to the creator by id
+   * `defaultPrivate` (mirrors `/private`, but grants Connect to the owner by id
    * since their move may not be in the voice cache yet). Idempotent; no-op when
    * unset.
    */
@@ -312,7 +312,7 @@ export class VoiceFeature {
       ) {
         // Prune the leaver from the arrival roster, and if they owned the channel
         // hand it to the longest-present remainer before the re-render — so
-        // `@@creator@@` resolves to the new owner (not "Unknown") and a private
+        // `@@owner@@` resolves to the new owner (not "Unknown") and a private
         // channel's "⇩ Join" follows suit.
         await this.handleSecondaryLeave(guildId, beforeChannelId, event.member.id);
         this.deps.serverLog?.(guildId, 3, `🚪 <@${event.member.id}> left <#${beforeChannelId}>`);
@@ -500,12 +500,12 @@ export class VoiceFeature {
       guildId,
       primaryChannelId: channelId,
       ownerId: member.id,
-      // Seed the arrival roster with the creator (longest-present from birth).
+      // Seed the arrival roster with the owner (longest-present from birth).
       state: { name, index, seed, roster: [member.id] },
     });
     this.deps.countRoom?.('created');
 
-    // Default-private primaries: lock the new channel before the creator lands in
+    // Default-private primaries: lock the new channel before the owner lands in
     // it (granting Connect to them by id, since their move isn't cached yet).
     if (primary?.template.defaultPrivate) {
       try {
@@ -691,8 +691,8 @@ export class VoiceFeature {
   /**
    * Handles a member leaving a secondary that still has members: prunes them from
    * the arrival roster, and — if they owned the channel — hands ownership to the
-   * longest-present remaining member. Keeps `@@creator@@` resolvable after the
-   * creator leaves and re-points a private channel's "⇩ Join" companion at the
+   * longest-present remaining member. Keeps `@@owner@@` resolvable after the
+   * owner leaves and re-points a private channel's "⇩ Join" companion at the
    * new owner. The new owner is only a caretaker: `setOwner` preserves the
    * `originalCreator`, so the original creator can `/reclaim` the channel back on
    * return. Idempotent: a replayed leave sees the roster already pruned and
@@ -752,7 +752,7 @@ export class VoiceFeature {
   /**
    * A member joined an adopted managed channel: append them to the arrival roster
    * and, if the channel had no current owner (it was empty), make the
-   * longest-present member its owner — so `@@creator@@` resolves once occupied.
+   * longest-present member its owner — so `@@owner@@` resolves once occupied.
    * Idempotent: a replayed join writes nothing new.
    */
   private async handleManagedJoin(
@@ -1004,12 +1004,12 @@ export class VoiceFeature {
    */
   private adoptDefaultTemplate(originalName: string): string {
     const safe = originalName.replace(/\//g, '∕').replace(/_{2,}/g, '_').trim() || 'Voice';
-    return `__${safe}/@@creator@@'s room__`;
+    return `__${safe}/@@owner@@'s room__`;
   }
 
   /**
    * Adopts an otherwise-unmanaged voice channel so the bot manages its name. Seeds
-   * the roster/owner from who's currently in it (so `@@creator@@` resolves right
+   * the roster/owner from who's currently in it (so `@@owner@@` resolves right
    * away) and renders the default `__empty/occupied__` template once. Refuses a
    * primary, secondary, or already-adopted channel.
    */

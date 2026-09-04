@@ -17,7 +17,7 @@ export interface JoinRequestsDeps {
 }
 
 /**
- * Watches for members joining a "⇩ Join {creator}" companion channel and posts a
+ * Watches for members joining a "⇩ Join {owner}" companion channel and posts a
  * request to the private channel's owner (Approve / Deny / Block buttons, handled
  * in the interaction router). The requester simply waits in the join channel
  * until the owner decides. The owner re-entering their own join channel is
@@ -55,7 +55,7 @@ export function registerJoinRequests(deps: JoinRequestsDeps): () => void {
     }
 
     // The requester can't see the private channel, so confirm in the public
-    // "⇩ Join {creator}" companion's text chat (which they can see) that their
+    // "⇩ Join {owner}" companion's text chat (which they can see) that their
     // request was sent.
     const lobby = await deps.client.channels.fetch(joinChannelId).catch(() => null);
     if (lobby?.isTextBased() && 'send' in lobby) {

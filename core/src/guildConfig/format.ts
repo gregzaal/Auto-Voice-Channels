@@ -133,7 +133,7 @@ export const exportedManagedTemplateSchema = z
  *
  * `roster` is deliberately absent. It is live occupancy, not configuration, and
  * importing one guild's arrival order into a channel with different people in it
- * would reassign `@@creator@@` to somebody who is not there.
+ * would reassign `@@owner@@` to somebody who is not there.
  */
 export const exportedManagedStateSchema = z
   .object({

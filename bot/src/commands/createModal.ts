@@ -80,7 +80,7 @@ export function buildCreateModal(defaults: CreateDefaults, prefill?: CreatePrefi
     .addLabelComponents(
       new LabelBuilder().setLabel('Category').setChannelSelectMenuComponent(category),
       new LabelBuilder()
-        .setLabel('Primary (creation) channel name')
+        .setLabel('Creator channel name')
         .setTextInputComponent(
           new TextInputBuilder()
             .setCustomId('name')

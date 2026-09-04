@@ -80,7 +80,7 @@ export interface VoiceSettings {
   channelStatusTemplate: string;
   aliases: Record<string, string>;
   general: string;
-  /** Per-user custom display names for `@@creator@@` (set via `/nick`). */
+  /** Per-user custom display names for `@@owner@@` (set via `/nick`). */
   customNicks: Record<string, string>;
 }
 

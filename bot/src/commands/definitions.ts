@@ -117,7 +117,7 @@ export function buildCommandDefinitions(
     guildOnly(
       new SlashCommandBuilder()
         .setName('nick')
-        .setDescription('Set the name shown for you in @@creator@@ channels (or "reset").')
+        .setDescription('Set the name shown for you in @@owner@@ channels (or "reset").')
         .addStringOption((o) =>
           o
             .setName('name')

@@ -7,7 +7,7 @@ import type { VoiceMember } from './types.js';
  * `eval_expression`. Covers the index tokens, game name, member counts, the
  * `[[random]]` picker (resolved once per channel via a stored seed),
  * `@@nato@@`, the rich-presence party/stream tokens, `<<singular/plural>>`
- * (member / non-creator / party-size selectors), and `{{conditional}}`
+ * (member / non-owner / party-size selectors), and `{{conditional}}`
  * expressions.
  *
  * Tier gating from the legacy bot is gone (single standard bot), so every token
@@ -20,11 +20,11 @@ import type { VoiceMember } from './types.js';
 /**
  * The default channel-name template. Picks a stable random emoji (`@@random_emoji@@`)
  * + word per channel (resolved once, so it never triggers later renames) around
- * the creator's name — deliberately free of `##`/`@@game_name@@` so the default
+ * the owner's name — deliberately free of `##`/`@@game_name@@` so the default
  * experience generates almost no renames over a channel's life.
  */
 export const DEFAULT_CHANNEL_NAME_TEMPLATE =
-  "@@random_emoji@@ @@creator@@'s [[den/gang/crew/platoon/cave/room/party/hangout/lounge/lair/squad/club/nest/base/zone/spot]]";
+  "@@random_emoji@@ @@owner@@'s [[den/gang/crew/platoon/cave/room/party/hangout/lounge/lair/squad/club/nest/base/zone/spot]]";
 
 /**
  * The default voice-channel-status template: blank when nobody's playing, and
@@ -470,7 +470,12 @@ const CONDITION_VARIABLE_SET: Record<keyof ExpressionVars, true> = {
 
 export const CONDITION_VARIABLES = Object.keys(CONDITION_VARIABLE_SET) as (keyof ExpressionVars)[];
 
-/** Every `@@…@@` token the renderer substitutes. */
+/**
+ * Every `@@…@@` token the renderer substitutes. `@@creator@@` is `@@owner@@`'s
+ * older name, kept working forever so a template written before the rename
+ * never breaks; new templates (including the built-in default, above) should
+ * use `@@owner@@`.
+ */
 export const AT_TOKENS: readonly string[] = [
   '@@nato@@',
   '@@game_name@@',
@@ -480,6 +485,7 @@ export const AT_TOKENS: readonly string[] = [
   '@@party_size@@',
   '@@party_state@@',
   '@@party_details@@',
+  '@@owner@@',
   '@@creator@@',
   '@@stream_name@@',
   '@@random_emoji@@',
@@ -571,7 +577,7 @@ export function resolveConditionals(template: string, vars: ExpressionVars): str
   return name;
 }
 
-/** Builds the conditional variables from the channel's creator + party state. */
+/** Builds the conditional variables from the channel's owner + party state. */
 function buildExpressionVars(
   ctx: RenderContext,
   gameName: string,
@@ -594,7 +600,7 @@ function buildExpressionVars(
   };
 }
 
-/** The stream title from the creator's streaming activity, or `''`. */
+/** The stream title from the owner's streaming activity, or `''`. */
 function streamName(ctx: RenderContext): string {
   return (ctx.creator?.activities ?? []).find((a) => a.kind === 'streaming')?.name ?? '';
 }
@@ -638,10 +644,10 @@ export interface RenderContext {
   members: VoiceMember[];
   aliases?: Record<string, string>;
   general?: string;
-  /** Creator display name, for `@@creator@@`. */
+  /** Owner display name, for `@@owner@@` (and its older name, `@@creator@@`). */
   creatorName?: string;
   /**
-   * The resolved creator member, for tokens/conditionals that read their
+   * The resolved owner member, for tokens/conditionals that read their
    * presence (`@@stream_name@@`, `{{LIVE…}}`, `{{ROLE:…}}`).
    */
   creator?: VoiceMember;
@@ -662,15 +668,15 @@ export interface RenderContext {
  * - `##` / `$#` / `$0#`… / `+#`  → channel number (plain / hash / zero-padded / roman)
  * - `@@nato@@`                    → NATO phonetic word for the channel number
  * - `@@game_name@@`               → representative game (aliases / "General" fallback)
- * - `@@num@@` / `@@num_others@@`   → member count (all / excluding creator)
- * - `@@creator@@`                 → creator display name
- * - `@@stream_name@@`             → creator's stream title (or empty)
+ * - `@@num@@` / `@@num_others@@`   → member count (all / excluding owner)
+ * - `@@owner@@` (or the older `@@creator@@`) → owner display name
+ * - `@@stream_name@@`             → owner's stream title (or empty)
  * - `@@num_playing@@` / `@@party_size@@` / `@@party_state@@` / `@@party_details@@`
  *                                 → rich-presence party info for the channel's game
  * - `[[a/b/c]]`                   → random pick, fixed per channel (via `seed`)
  * - `__empty/occupied__`          → resting vs in-use name (adopted standalone channels)
  * - `<<one/many>>` / `<<one\\many>>` / `<<one|many>>` → singular/plural by member /
- *                                    non-creator / party-size (`@@num_playing@@`) count
+ *                                    non-owner / party-size (`@@num_playing@@`) count
  * - `{{cond ?? yes // no}}`        → conditional (see {@link evalExpression})
  * - `""mode:text""`                → string transform of the substituted text;
  *                                    case (`lower`/`upper`/`caps`/`title`/`swap`),
@@ -760,10 +766,15 @@ export function renderChannelName(
   // 8. Singular/plural selection.
   if (name.includes('<<')) name = resolveSingularPlural(name, num, numOthers, numPlaying);
 
-  // 9. Game name, creator, and stream title.
+  // 9. Game name, owner (@@owner@@, plus its older name @@creator@@), and stream title.
   if (name.includes('@@game_name@@')) name = name.split('@@game_name@@').join(gameName);
-  if (name.includes('@@creator@@')) {
-    name = name.split('@@creator@@').join(ctx.creatorName ?? 'Unknown');
+  if (name.includes('@@owner@@') || name.includes('@@creator@@')) {
+    // One pass over the ORIGINAL string via regex replace, not two chained
+    // split/joins: a custom nickname can itself contain the literal text
+    // "@@creator@@", and a second independent pass would re-match and
+    // re-substitute that inserted text instead of leaving it alone.
+    const ownerName = ctx.creatorName ?? 'Unknown';
+    name = name.replace(/@@owner@@|@@creator@@/g, () => ownerName);
   }
   if (name.includes('@@stream_name@@')) {
     name = name.split('@@stream_name@@').join(streamName(ctx));

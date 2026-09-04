@@ -50,7 +50,7 @@ export const MAX_ALIASES = 100;
 const has = (map: Record<string, string>, key: string): boolean =>
   Object.prototype.hasOwnProperty.call(map, key);
 
-/** The default name for a freshly-created primary ("creator") channel. */
+/** The default name for a freshly-created creator channel. */
 export const DEFAULT_PRIMARY_NAME = '➕ New Session';
 
 /** Options for creating a primary (the `/create` setup modal collects these). */
@@ -344,7 +344,7 @@ export class GuildSettingsService {
     );
   }
 
-  /** Sets (or resets) a member's custom display name for `@@creator@@`. `/nick`. */
+  /** Sets (or resets) a member's custom display name for `@@owner@@`. `/nick`. */
   async setNick(guildId: string, userId: string, name: string): Promise<CommandResult> {
     const guild = await this.deps.guilds.ensure(guildId);
     const nicks = isStringMap(guild.settings.custom_nicks)
@@ -358,7 +358,7 @@ export class GuildSettingsService {
     }
     nicks[userId] = value;
     await this.deps.guilds.updateSettings(guildId, { custom_nicks: nicks });
-    return ok(`Channels that show the creator will now call you **${value}**.`);
+    return ok(`Channels that show the owner will now call you **${value}**.`);
   }
 
   /** Reads whether the primary of the channel you're in spawns secondaries above. */
@@ -482,7 +482,9 @@ export class GuildSettingsService {
     if (!primary) return fail('You need to be in a bot-managed voice channel.');
     const normalized = INHERIT_MODES[mode.toLowerCase()] ?? (/^\d+$/.test(mode) ? mode : undefined);
     if (!normalized) {
-      return fail('Use `primary`, `category`, or a voice-channel id to copy permissions from.');
+      return fail(
+        'Use `/inheritpermissions` to pick the creator channel, its category, or a specific voice channel.',
+      );
     }
     await this.deps.autoChannels.upsert(guildId, primary.channelId, {
       ...primary.template,

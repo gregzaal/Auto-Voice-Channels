@@ -131,7 +131,7 @@ export function buildExportFile(
        * `status` are the last-rendered values, and carrying them is what stops
        * every adopted channel getting renamed on the first pass after an import
        * even when its name is already right. `roster` is live occupancy, and
-       * importing one moment's arrival order would reassign `@@creator@@` to
+       * importing one moment's arrival order would reassign `@@owner@@` to
        * somebody who is not in the channel.
        */
       state: asWireTemplate({

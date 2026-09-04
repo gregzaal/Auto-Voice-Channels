@@ -21,11 +21,11 @@ export interface PrivacyServiceDeps {
 }
 
 /**
- * The full private-channel + "⇩ Join {creator}" mechanism, ported from the
+ * The full private-channel + "⇩ Join {owner}" mechanism, ported from the
  * legacy `private`/`public` commands and join-request handling.
  *
  * `/private` locks the channel to @everyone (keeping current members), then
- * spawns an open "⇩ Join {creator}" companion channel. Joining that channel
+ * spawns an open "⇩ Join {owner}" companion channel. Joining that channel
  * raises a request to the owner (the discord glue posts the buttons); the owner
  * approves (grant Connect + pull them in), denies (disconnect), or blocks (deny
  * Connect on the join channel). `/public` reverses everything and deletes the
@@ -37,7 +37,7 @@ export interface PrivacyServiceDeps {
 export class PrivacyService {
   constructor(private readonly deps: PrivacyServiceDeps) {}
 
-  /** Locks the channel and creates its "⇩ Join {creator}" companion. */
+  /** Locks the channel and creates its "⇩ Join {owner}" companion. */
   async makePrivate(
     guildId: string,
     channelId: string | undefined,
@@ -58,10 +58,10 @@ export class PrivacyService {
     for (const m of members)
       await this.deps.actions.setMemberConnect(guildId, channelId, m.id, true);
 
-    const creatorName = members.find((m) => m.id === userId)?.displayName ?? 'owner';
+    const ownerName = members.find((m) => m.id === userId)?.displayName ?? 'owner';
     const joinChannelId = await this.deps.actions.createJoinChannel(
       guildId,
-      `⇩ Join ${creatorName}`,
+      `⇩ Join ${ownerName}`,
       channelId,
     );
     await this.deps.joinChannels.create({
@@ -81,9 +81,9 @@ export class PrivacyService {
 
   /**
    * Applies the private treatment to a freshly-spawned secondary whose primary is
-   * `defaultPrivate`. Unlike {@link makePrivate}, the creator's move into the new
+   * `defaultPrivate`. Unlike {@link makePrivate}, the owner's move into the new
    * channel may not have landed in the voice cache yet, so it grants Connect to
-   * the known creator id directly rather than reading the roster. Idempotent: a
+   * the known owner id directly rather than reading the roster. Idempotent: a
    * no-op when the secondary is gone or already private.
    */
   async makePrivateForCreation(
@@ -195,7 +195,7 @@ export class PrivacyService {
   }
 
   /**
-   * Ownership of a private secondary transferred (the creator left). Re-point its
+   * Ownership of a private secondary transferred (the owner left). Re-point its
    * "⇩ Join" companion at the new owner: rename it and update who may answer join
    * requests. No-ops when the channel has no companion (it isn't private).
    */

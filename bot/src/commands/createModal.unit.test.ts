@@ -33,7 +33,7 @@ describe('createModal', () => {
     const labels = (modal.components as { label?: string }[]).map((c) => c.label);
     expect(labels).toEqual([
       'Category',
-      'Primary (creation) channel name',
+      'Creator channel name',
       'Name template (/template to edit later)',
       'Status template (/template to edit later)',
       'Default privacy (/alwaysprivate later)',

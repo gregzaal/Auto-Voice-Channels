@@ -52,7 +52,7 @@ export const autoChannelRowSchema = z.object({
 
 export type AutoChannelRow = z.infer<typeof autoChannelRowSchema>;
 
-/** Repository for primary / creator ("auto") channels. */
+/** Repository for creator channels (called "primary" or "auto" internally). */
 export class AutoChannelRepository {
   constructor(
     private readonly db: Database,

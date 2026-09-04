@@ -251,7 +251,7 @@ export const managedChannels = pgTable(
     channelId: text('channel_id').primaryKey(),
     guildId: text('guild_id').notNull(),
     fleet: fleet(),
-    /** Current occupant-owner (longest-present), for `@@creator@@`. Null when empty. */
+    /** Current occupant-owner (longest-present), for `@@owner@@`. Null when empty. */
     ownerId: text('owner_id'),
     /** Name/status templates configured for this channel (the `/template` editor). */
     template: jsonb('template')

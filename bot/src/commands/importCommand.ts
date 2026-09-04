@@ -113,7 +113,7 @@ export interface ImportCommandDeps extends ConfigSnapshotDeps {
    * Who is in a voice channel right now, for seeding a first-time adopt.
    *
    * `adoptChannel` seeds `ownerId` and `roster` from the live occupants, and an
-   * import that adopts has to do the same or `@@creator@@` resolves to nothing
+   * import that adopts has to do the same or `@@owner@@` resolves to nothing
    * until the next time somebody joins or leaves.
    */
   membersInChannel: (channelId: string) => string[];
@@ -826,7 +826,7 @@ export async function applyImportWrites(
   // Adopted channels: create (which no-ops when already adopted and returns the
   // existing row), then setTemplate for the already-adopted case, then the
   // merged state. `create` is where owner and roster get seeded from the live
-  // occupants, matching `adoptChannel`, or `@@creator@@` resolves to nothing
+  // occupants, matching `adoptChannel`, or `@@owner@@` resolves to nothing
   // until the next occupancy change.
   for (const write of plan.adoptedWrites) {
     if (!stillWritable(write.channelId, facts, { needsRename: true })) {
@@ -838,7 +838,8 @@ export async function applyImportWrites(
        * Owner and roster from the LIVE occupants on a first-time adopt, matching
        * `adoptChannel`.
        *
-       * `roster` is arrival order and is what picks `@@creator@@` and the owner.
+       * `roster` is arrival order, which is what picks the owner (and therefore
+       * what `@@owner@@` resolves to).
        * The file deliberately does not carry it (importing one moment's arrival
        * order would name somebody who is not in the channel), so an adopt that
        * seeded neither left the channel with no owner until the next occupancy

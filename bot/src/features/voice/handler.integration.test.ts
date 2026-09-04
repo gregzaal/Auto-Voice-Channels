@@ -1205,7 +1205,7 @@ describe('VoiceFeature (integration)', () => {
 
       const row = (await managed.get(ADOPTED))!;
       expect(row.ownerId).toBe('alice');
-      expect(row.template.name).toBe("__General/@@creator@@'s room__");
+      expect(row.template.name).toBe("__General/@@owner@@'s room__");
       // Occupied → "Alice's room".
       expect(actions.ofType('rename').at(-1)).toMatchObject({
         channelId: ADOPTED,
@@ -1387,7 +1387,7 @@ describe('VoiceFeature (integration)', () => {
 
       const editor = await f.getManagedEditorState(GUILD, ADOPTED);
       expect(editor.found).toBe(true);
-      expect(editor.name.currentTemplate).toBe("__General/@@creator@@'s room__");
+      expect(editor.name.currentTemplate).toBe("__General/@@owner@@'s room__");
 
       expect((await f.setManagedName(GUILD, ADOPTED, '__Lobby/@@creator@@ is live__')).ok).toBe(
         true,

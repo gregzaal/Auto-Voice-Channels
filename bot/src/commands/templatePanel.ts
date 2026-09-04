@@ -87,7 +87,7 @@ export function buildAdoptPrompt(channelId: string, originalName: string): Inter
 const TEMPLATE_INPUT_MAX = 1000;
 const DOCS_LINK = 'https://auto-voice.io/docs/commands/template';
 const VARIABLES_HELP =
-  '`##` number · `@@game_name@@` game · `@@creator@@` owner · `@@num@@` members\n' +
+  '`##` number · `@@game_name@@` game · `@@owner@@` name · `@@num@@` members\n' +
   '`@@nato@@` Alpha/Bravo… · `[[a/b]]` random · `<<one/many>>` plural · `{{cond ?? a // b}}` if\n' +
   `_Plain text works too. **[Full documentation & variables ↗](${DOCS_LINK})**_`;
 

@@ -401,7 +401,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
           deps.settings.setNick(guildId, userId, interaction.options.getString('name', true)),
         );
         if (!res.ok) return replyResult(interaction, res);
-        // Re-render the user's channels so `@@creator@@` picks up the new name.
+        // Re-render the user's channels so `@@owner@@` picks up the new name.
         const summary = await run(guildId, 'cmd:nick:render', () =>
           deps.feature.rerenderByOwner(guildId, userId),
         );
@@ -2270,12 +2270,12 @@ function formatDebug(info: ChannelDebug, permissions: Record<string, boolean>): 
   const perms = Object.entries(permissions)
     .map(([k, v]) => `${v ? '✅' : '❌'} ${k}`)
     .join('  ');
-  const kind = info.isSecondary ? 'secondary' : info.isPrimary ? 'primary' : 'unmanaged';
+  const kind = info.isSecondary ? 'secondary' : info.isPrimary ? 'creator' : 'unmanaged';
   const lines = [
     `**Debug** <#${info.channelId}>  ·  _${kind}_`,
     info.renderedName !== undefined ? `**Rendered name:** \`${info.renderedName}\`` : null,
     `**Effective template:** \`${info.effectiveTemplate}\``,
-    info.primaryTemplate ? `**Primary template:** \`${info.primaryTemplate}\`` : null,
+    info.primaryTemplate ? `**Creator channel template:** \`${info.primaryTemplate}\`` : null,
     `**Server default:** \`${info.guildSettings.defaultTemplate}\``,
     `**Computed game:** ${info.computedGame}  ·  **enabled:** ${info.guildSettings.enabled}` +
       `  ·  **aliases:** ${info.guildSettings.aliasCount}  ·  **seed:** ${info.seed ?? '—'}`,
