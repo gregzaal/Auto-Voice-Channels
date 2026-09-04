@@ -762,9 +762,10 @@ describe('DiscordVoiceView.voicePropertiesOf', () => {
 });
 
 describe('DiscordVoiceActions.createVoiceChannel bitrate/region/video-quality/nsfw', () => {
-  function makeClient() {
+  function makeClient(maximumBitrate = 384_000) {
     const created = { id: 'new', setPosition: vi.fn() };
     const guild = {
+      maximumBitrate,
       channels: { create: vi.fn().mockResolvedValue(created) },
       members: { me: { permissions: { bitfield: FULL_BOT_PERMS } } },
     };
@@ -801,5 +802,58 @@ describe('DiscordVoiceActions.createVoiceChannel bitrate/region/video-quality/ns
     expect(arg).not.toHaveProperty('rtcRegion');
     expect(arg).not.toHaveProperty('videoQualityMode');
     expect(arg).not.toHaveProperty('nsfw');
+  });
+
+  /**
+   * Discord never retroactively clamps an EXISTING channel's bitrate when the
+   * guild's boost tier drops, so a primary set to 256kbps while boosted can
+   * keep reporting that forever. Copying it verbatim onto a FRESH create
+   * would get rejected the moment boosts lapse — silently and permanently,
+   * since there is no bot command to fix a primary's bitrate.
+   */
+  it("clamps a copied bitrate to the guild's current maximum", async () => {
+    const { client, guild } = makeClient(96_000); // guild has since dropped to no boost tier
+    await new DiscordVoiceActions(client).createVoiceChannel({
+      guildId: 'g1',
+      name: 'x',
+      bitrate: 256_000, // stale value from when the guild was boosted
+    });
+    const arg = guild.channels.create.mock.calls[0][0] as Record<string, unknown>;
+    expect(arg.bitrate).toBe(96_000);
+  });
+
+  it('retries without the copied properties when they make Discord reject the create', async () => {
+    const { client, guild } = makeClient();
+    const created = { id: 'new', setPosition: vi.fn() };
+    guild.channels.create
+      .mockReset()
+      .mockRejectedValueOnce(apiError(50035)) // Invalid Form Body, not a permission error
+      .mockResolvedValueOnce(created);
+    const id = await new DiscordVoiceActions(client).createVoiceChannel({
+      guildId: 'g1',
+      name: 'x',
+      rtcRegion: 'deprecated-region',
+    });
+    expect(id).toBe('new');
+    expect(guild.channels.create).toHaveBeenCalledTimes(2);
+    const secondArg = guild.channels.create.mock.calls[1]![0] as Record<string, unknown>;
+    expect(secondArg).not.toHaveProperty('rtcRegion');
+    expect(secondArg.name).toBe('x');
+  });
+
+  it('does not retry a permission error, and does not retry when nothing was copied', async () => {
+    const { client: permClient, guild: permGuild } = makeClient();
+    permGuild.channels.create.mockReset().mockRejectedValueOnce(apiError(50013));
+    await expect(
+      new DiscordVoiceActions(permClient).createVoiceChannel({ guildId: 'g1', name: 'x' }),
+    ).rejects.toThrow();
+    expect(permGuild.channels.create).toHaveBeenCalledTimes(1);
+
+    const { client: plainClient, guild: plainGuild } = makeClient();
+    plainGuild.channels.create.mockReset().mockRejectedValueOnce(apiError(50035));
+    await expect(
+      new DiscordVoiceActions(plainClient).createVoiceChannel({ guildId: 'g1', name: 'x' }),
+    ).rejects.toThrow();
+    expect(plainGuild.channels.create).toHaveBeenCalledTimes(1);
   });
 });

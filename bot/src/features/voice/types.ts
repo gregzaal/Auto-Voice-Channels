@@ -75,8 +75,9 @@ export interface GuildVoiceView {
   /**
    * A primary's live bitrate/region/video-quality/age-restriction, for a
    * spawned secondary to copy. Optional like {@link categoryOf}: `undefined`
-   * means "cannot say", and a caller must leave those properties unset rather
-   * than resetting a new channel to Discord's own defaults.
+   * means "cannot say" (e.g. a cold cache), which a caller must treat as
+   * "leave these properties unset on the new channel" rather than guessing at
+   * a value.
    */
   voicePropertiesOf?(channelId: string): VoiceChannelProperties | undefined;
   /**

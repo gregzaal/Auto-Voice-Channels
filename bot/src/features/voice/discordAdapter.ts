@@ -202,6 +202,15 @@ export class DiscordVoiceActions implements VoiceActions {
   async createVoiceChannel(input: CreateVoiceChannelInput): Promise<string> {
     const guild = await this.client.guilds.fetch(input.guildId);
 
+    // A copied bitrate can be stale relative to what a FRESH create currently
+    // allows: Discord never retroactively clamps an EXISTING channel when the
+    // guild's boost tier later drops, so a primary set to e.g. 256kbps while
+    // boosted keeps reporting that bitrate forever even after boosts lapse.
+    // Clamping here (rather than trusting the copied value) is what stops that
+    // ordinary boost churn from turning into a create failure.
+    const bitrate =
+      input.bitrate !== undefined ? Math.min(input.bitrate, guild.maximumBitrate) : undefined;
+
     // Resolve placement (category + position) relative to the primary channel.
     let parentId = input.parentId;
     const near = input.nearChannelId
@@ -274,18 +283,41 @@ export class DiscordVoiceActions implements VoiceActions {
       if (masked.length > 0) permissionOverwrites = masked;
     }
 
-    const channel = await guild.channels.create({
+    const baseOptions = {
       name: input.name,
-      type: ChannelType.GuildVoice,
+      type: ChannelType.GuildVoice as const,
       ...(parentId ? { parent: parentId } : {}),
       ...(createPosition !== undefined ? { position: createPosition } : {}),
       ...(input.userLimit !== undefined ? { userLimit: input.userLimit } : {}),
-      ...(input.bitrate !== undefined ? { bitrate: input.bitrate } : {}),
+      ...(permissionOverwrites ? { permissionOverwrites } : {}),
+    };
+    // Bitrate/region/video-quality/nsfw copied from a primary, kept separate
+    // from `baseOptions` so a create that fails because of one of THEM (a
+    // stale value Discord no longer accepts on a fresh channel) can be retried
+    // without them, rather than leaving the primary permanently unable to
+    // spawn rooms over a value Discord itself would silently default anyway.
+    const copiedProps = {
+      ...(bitrate !== undefined ? { bitrate } : {}),
       ...(input.rtcRegion !== undefined ? { rtcRegion: input.rtcRegion } : {}),
       ...(input.videoQualityMode !== undefined ? { videoQualityMode: input.videoQualityMode } : {}),
       ...(input.nsfw !== undefined ? { nsfw: input.nsfw } : {}),
-      ...(permissionOverwrites ? { permissionOverwrites } : {}),
-    });
+    };
+
+    let channel;
+    try {
+      channel = await guild.channels.create({ ...baseOptions, ...copiedProps });
+    } catch (err) {
+      const retryWithoutCopiedProps =
+        err instanceof DiscordAPIError &&
+        !isPermissionError(err) &&
+        Object.keys(copiedProps).length > 0;
+      if (!retryWithoutCopiedProps) throw err;
+      this.logger?.warn(
+        { guildId: input.guildId, err, dropped: Object.keys(copiedProps) },
+        'create failed with copied channel properties, retrying without them',
+      );
+      channel = await guild.channels.create(baseOptions);
+    }
     if (reorderAboveIndex !== undefined) {
       await this.placeAboveSibling(channel, reorderAboveIndex);
     }
@@ -759,10 +791,16 @@ export class DiscordVoiceView implements GuildVoiceView {
     const channel = this.client.channels.cache.get(channelId);
     if (!channel || !channel.isVoiceBased()) return undefined;
     const voiceChannel = channel as VoiceBasedChannel;
+    // Narrowed rather than cast, so a hypothetical future third Discord mode
+    // falls back to `null` (not copied) instead of silently mistyping it.
+    const videoQualityMode =
+      voiceChannel.videoQualityMode === 1 || voiceChannel.videoQualityMode === 2
+        ? voiceChannel.videoQualityMode
+        : null;
     return {
       bitrate: voiceChannel.bitrate,
       rtcRegion: voiceChannel.rtcRegion,
-      videoQualityMode: voiceChannel.videoQualityMode as 1 | 2 | null,
+      videoQualityMode,
       nsfw: voiceChannel.nsfw,
     };
   }
