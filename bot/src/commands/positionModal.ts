@@ -11,7 +11,7 @@ export const POSITION_MODAL_PREFIX = 'avc:position:';
 
 /**
  * Builds the `/position` modal — a single string select choosing whether new
- * channels appear above or below the creator channel. The channel being edited
+ * rooms appear above or below the creator channel. The channel being edited
  * is encoded in the custom id; the caller's current setting is pre-selected.
  */
 export function buildPositionModal(channelId: string, currentAbove: boolean): ModalBuilder {
@@ -20,7 +20,7 @@ export function buildPositionModal(channelId: string, currentAbove: boolean): Mo
     .setTitle('Channel position')
     .addLabelComponents(
       new LabelBuilder()
-        .setLabel('Where new channels appear')
+        .setLabel('Where new rooms appear')
         .setStringSelectMenuComponent(
           new StringSelectMenuBuilder()
             .setCustomId('position')

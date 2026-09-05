@@ -1258,7 +1258,7 @@ export class VoiceFeature {
   /**
    * Repositions every existing secondary of a primary to match a changed
    * above/below setting (after `/position`). Orders them by creation time so they
-   * stack the same way new channels do. Returns how many were moved.
+   * stack the same way new rooms do. Returns how many were moved.
    */
   async repositionSecondaries(
     guildId: string,

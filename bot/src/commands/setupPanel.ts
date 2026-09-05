@@ -308,7 +308,7 @@ export interface SetupPanelInput {
 
 const INTRO =
   '**Open-source and self-hostable.**\n' +
-  'Members join a **creator channel** and AVC spins up a personal voice channel for ' +
+  'Members join a **creator channel** and AVC spins up a personal room for ' +
   'them, auto-named, and cleaned up when empty.';
 
 function channelList(ids: { channelId: string }[], empty: string): string {

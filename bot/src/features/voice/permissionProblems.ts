@@ -148,7 +148,7 @@ export function permissionProblemMessage(
 ): string {
   if (operation === 'create') {
     return (
-      `⚠️ I could not create a channel from <#${channelId}>. I need **Manage Channels** on it ` +
+      `⚠️ I could not create a room from <#${channelId}>. I need **Manage Channels** on it ` +
       'or on its category. If my role has it server-wide, check the category for an override ' +
       'that takes it away again, because a channel override beats a server-wide role. ' +
       '**Manage Roles** too, if new rooms should inherit permissions rather than just match ' +

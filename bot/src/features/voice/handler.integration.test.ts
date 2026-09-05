@@ -624,7 +624,7 @@ describe('VoiceFeature (integration)', () => {
 
     expect(actions.ofType('create')).toHaveLength(0); // the create threw
     expect(problems.recent(GUILD).map((p) => p.channelId)).toContain(PRIMARY);
-    expect(logs.some((l) => l.level === 1 && l.message.includes('create a channel'))).toBe(true);
+    expect(logs.some((l) => l.level === 1 && l.message.includes('create a room'))).toBe(true);
   });
 
   it('clears the create incident once a create works again', async () => {

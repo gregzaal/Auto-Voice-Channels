@@ -265,13 +265,13 @@ export function gatedCreatorChannelNotice(guildId: string, shared = false): stri
   if (shared) {
     return (
       `🌙 AVC is paused on this server, because the subscription covering it has lapsed, so ` +
-      `this creator channel isn't spawning voice channels right now. Whoever manages that ` +
+      `this creator channel isn't spawning rooms right now. Whoever manages that ` +
       `subscription can switch it back on at ${subscribeUrl(guildId)}`
     );
   }
   return (
     `🌙 AVC is paused on this server, its trial or subscription has ended, so this creator ` +
-    `channel isn't spawning voice channels right now. An admin can reactivate at ` +
+    `channel isn't spawning rooms right now. An admin can reactivate at ` +
     `${subscribeUrl(guildId)}`
   );
 }

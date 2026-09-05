@@ -286,7 +286,7 @@ export class GuildSettingsService {
     await this.deps.autoChannels.upsert(guildId, channelId, template);
     this.deps.logger.info({ guildId, channelId, name }, 'created primary channel');
     return ok(
-      `Created **${name}**. Join it to spawn a voice channel.\n` +
+      `Created **${name}**. Join it to spawn a room.\n` +
         'Edit it anytime with `/template`, `/position`, `/defaultlimit`, …',
     );
   }
@@ -335,12 +335,12 @@ export class GuildSettingsService {
     next[field] = value;
     await this.deps.autoChannels.upsert(guildId, primary.channelId, next);
     if (field === 'status' && value === '') {
-      return ok('New channels from this creator will show no status (blank).');
+      return ok('New rooms from this creator channel will show no status (blank).');
     }
     return ok(
       field === 'name'
-        ? `New channels from this creator will be named:\n\`${value}\``
-        : `New channels from this creator will show the status:\n\`${value}\``,
+        ? `New rooms from this creator channel will be named:\n\`${value}\``
+        : `New rooms from this creator channel will show the status:\n\`${value}\``,
     );
   }
 
@@ -358,7 +358,7 @@ export class GuildSettingsService {
     }
     nicks[userId] = value;
     await this.deps.guilds.updateSettings(guildId, { custom_nicks: nicks });
-    return ok(`Channels that show the owner will now call you **${value}**.`);
+    return ok(`Rooms that show the owner will now call you **${value}**.`);
   }
 
   /** Reads whether the primary of the channel you're in spawns secondaries above. */
@@ -389,7 +389,7 @@ export class GuildSettingsService {
     else delete next.above;
     await this.deps.autoChannels.upsert(guildId, primary.channelId, next);
     return ok(
-      `New channels here will now be positioned **${above ? 'above' : 'below'}** the creator channel.`,
+      `New rooms here will now be positioned **${above ? 'above' : 'below'}** the creator channel.`,
     );
   }
 
@@ -427,13 +427,13 @@ export class GuildSettingsService {
     await this.deps.autoChannels.upsert(guildId, primary.channelId, next);
     return ok(
       enabled
-        ? '🔒 New channels from this creator will be created **private** automatically.'
-        : '🔓 New channels from this creator will be created **public** (the default).',
+        ? '🔒 New rooms from this creator channel will be created **private** automatically.'
+        : '🔓 New rooms from this creator channel will be created **public** (the default).',
     );
   }
 
   /**
-   * Sets the default user limit applied to channels this creator spawns.
+   * Sets the default user limit applied to rooms this creator channel spawns.
    * `/defaultlimit`.
    *
    * The plumbing already existed and had no writer: `handler.ts` passes
@@ -467,8 +467,8 @@ export class GuildSettingsService {
 
     return ok(
       limit > 0
-        ? `👥 New channels from this creator will hold **${limit}** ${limit === 1 ? 'person' : 'people'}. Existing channels keep their current limit.`
-        : '👥 New channels from this creator will have **no user limit**. Existing channels keep their current limit.',
+        ? `👥 New rooms from this creator channel will hold **${limit}** ${limit === 1 ? 'person' : 'people'}. Existing rooms keep their current limit.`
+        : '👥 New rooms from this creator channel will have **no user limit**. Existing rooms keep their current limit.',
     );
   }
 
@@ -490,7 +490,7 @@ export class GuildSettingsService {
       ...primary.template,
       inheritperms: normalized,
     });
-    return ok(`New channels here will inherit permissions from **${normalized}**.`);
+    return ok(`New rooms here will inherit permissions from **${normalized}**.`);
   }
 
   /** Reads the current logging configuration (for pre-filling the `/logging` modal). */

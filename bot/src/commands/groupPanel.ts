@@ -47,14 +47,14 @@ export function buildGroupEnablePanel(
 ): InteractionReplyOptions {
   const where = categoryLabel(categoryName);
   const embed: APIEmbed = new EmbedBuilder()
-    .setTitle("🧩 Group this category's channels?")
+    .setTitle("🧩 Group this category's rooms?")
     .setColor(0x5865f2)
     .setDescription(
-      `Right now, new voice channels in ${where} sit next to their own creator channel ` +
+      `Right now, new rooms in ${where} sit next to their own creator channel ` +
         'and are numbered separately, so with several creator channels they get tangled up ' +
         'between them.\n\n' +
-        '**Grouping** puts every channel here into **one block**, either below or above ' +
-        '**all** the creator channels, and numbers them **together** (a new channel always ' +
+        '**Grouping** puts every room here into **one block**, either below or above ' +
+        '**all** the creator channels, and numbers them **together** (a new room always ' +
         'lands at the bottom of the list).\n\n' +
         `This affects **${count}** creator channel${count === 1 ? '' : 's'} here. You can change ` +
         'the direction later with `/position`, or turn grouping off by running `/group` again.',
@@ -93,7 +93,7 @@ export function buildGroupDisablePanel(
     .setTitle('🧩 Grouping is on for this category')
     .setColor(0x5865f2)
     .setDescription(
-      `Channels in ${where} are grouped into one block **${above ? 'above' : 'below'}** the ` +
+      `Rooms in ${where} are grouped into one block **${above ? 'above' : 'below'}** the ` +
         'creator channels, numbered together.\n\n' +
         'Use `/position` to switch the direction, or turn grouping off below. Each creator ' +
         'channel then goes back to its own numbering and placement.',

@@ -117,7 +117,7 @@ export function buildCommandDefinitions(
     guildOnly(
       new SlashCommandBuilder()
         .setName('nick')
-        .setDescription('Set the name shown for you in @@owner@@ channels (or "reset").')
+        .setDescription('Set the name shown for you in @@owner@@ rooms (or "reset").')
         .addStringOption((o) =>
           o
             .setName('name')
@@ -147,7 +147,7 @@ export function buildCommandDefinitions(
     adminOnly(
       new SlashCommandBuilder()
         .setName('create')
-        .setDescription('Create a new "creator" voice channel members can join to spawn channels.'),
+        .setDescription('Create a new "creator" voice channel members can join to spawn rooms.'),
     ),
     adminOnly(
       new SlashCommandBuilder()
@@ -162,23 +162,21 @@ export function buildCommandDefinitions(
     adminOnly(
       new SlashCommandBuilder()
         .setName('position')
-        .setDescription('Choose whether new channels appear above or below the creator channel.'),
+        .setDescription('Choose whether new rooms appear above or below the creator channel.'),
     ),
     adminOnly(
       new SlashCommandBuilder()
         .setName('alwaysprivate')
-        .setDescription('Toggle whether this creator channel spawns private channels by default.'),
+        .setDescription('Toggle whether this creator channel spawns private rooms by default.'),
     ),
     adminOnly(
       new SlashCommandBuilder()
         .setName('defaultlimit')
-        .setDescription('Set the user limit new channels from this creator start with.')
+        .setDescription('Set the user limit new rooms from this creator channel start with.')
         .addIntegerOption((o) =>
           o
             .setName('limit')
-            .setDescription(
-              `Maximum members in new channels (0 to ${MAX_USER_LIMIT}, 0 = no limit).`,
-            )
+            .setDescription(`Maximum members in new rooms (0 to ${MAX_USER_LIMIT}, 0 = no limit).`)
             .setMinValue(0)
             .setMaxValue(MAX_USER_LIMIT)
             .setRequired(true),
@@ -187,12 +185,12 @@ export function buildCommandDefinitions(
     adminOnly(
       new SlashCommandBuilder()
         .setName('group')
-        .setDescription("Group this category's channels into one numbered block (or turn it off)."),
+        .setDescription("Group this category's rooms into one numbered block (or turn it off)."),
     ),
     adminOnly(
       new SlashCommandBuilder()
         .setName('inheritpermissions')
-        .setDescription('Choose where new channels copy their permissions from.'),
+        .setDescription('Choose where new rooms copy their permissions from.'),
     ),
     adminOnly(
       new SlashCommandBuilder()

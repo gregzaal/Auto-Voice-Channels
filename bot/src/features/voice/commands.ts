@@ -16,13 +16,13 @@ const fail = (message: string): CommandResult => ({ ok: false, message });
 export const MAX_USER_LIMIT = 99;
 
 /**
- * A note appended to a command reply when `count` channel renames were deferred
+ * A note appended to a command reply when `count` room renames were deferred
  * by Discord's per-channel rate limit (2 edits / 10 min), so users understand
  * why the new name hasn't shown up yet. Empty when nothing was rate-limited.
  */
 export function rateLimitNote(count: number): string {
   if (count <= 0) return '';
-  const what = count === 1 ? 'this channel' : `${count} channels`;
+  const what = count === 1 ? 'this room' : `${count} rooms`;
   return `\n⏳ Discord is rate-limiting renames on ${what}; the new name will apply within a few minutes.`;
 }
 

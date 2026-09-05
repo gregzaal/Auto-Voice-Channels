@@ -120,7 +120,7 @@ export function renderEditorPanel(
             'when occupied (the `__empty/occupied__` token).'
         : isChannel
           ? `Editing <#${channelId}>, just this channel.`
-          : `Editing the templates for **all** channels of <#${channelId}>'s creator channel.`,
+          : `Editing the templates for **all** rooms of <#${channelId}>'s creator channel.`,
     )
     .addFields(
       {

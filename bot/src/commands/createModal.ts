@@ -44,7 +44,7 @@ const DEFAULT_PRIMARY_NAME = '➕ New Session';
  * Builds the `/create` setup modal using the newer Label-component modals, so
  * Category is a real category picker and Default privacy a dropdown (the
  * templates + name stay text inputs). A modal is capped at 5 components; position
- * is intentionally left out (new channels default to below the creator — editable
+ * is intentionally left out (new rooms default to below the creator channel — editable
  * later with `/position`) so the 5th slot is the privacy selector. Field labels
  * point at `/template` / `/alwaysprivate` for editing later.
  *
@@ -109,8 +109,8 @@ export function buildCreateModal(defaults: CreateDefaults, prefill?: CreatePrefi
             .setMaxLength(TEMPLATE_INPUT_MAX)
             .setValue(statusTemplate),
         ),
-      // The 5th (final) slot: whether new channels are public or private by
-      // default. Editable per-creator later with `/alwaysprivate`.
+      // The 5th (final) slot: whether new rooms are public or private by
+      // default. Editable per creator channel later with `/alwaysprivate`.
       new LabelBuilder()
         .setLabel('Default privacy (/alwaysprivate later)')
         .setStringSelectMenuComponent(
@@ -153,8 +153,8 @@ export function readCreateModalRaw(fields: ModalSubmitFields): CreatePrefill {
  * Reads the submitted modal: text inputs via `getTextInputValue`, the category
  * via the channel select, and the public/private default via the `privacy`
  * select. Templates left at the guild default are dropped (so the primary
- * inherits rather than pins them). Position isn't collected here — new channels
- * default to below the creator (change later with `/position`).
+ * inherits rather than pins them). Position isn't collected here — new rooms
+ * default to below the creator channel (change later with `/position`).
  */
 export function parseCreateModal(
   fields: ModalSubmitFields,

@@ -62,8 +62,8 @@ export function buildLoggingModal(current: LoggingState): ModalBuilder {
               .setValue('off')
               .setDefault(!current.enabled),
             new StringSelectMenuOptionBuilder()
-              .setLabel('Channels created & deleted')
-              .setDescription('When a voice channel is spawned or removed')
+              .setLabel('Rooms created & deleted')
+              .setDescription('When a room is spawned or removed')
               .setValue('1')
               .setDefault(isLevel('1')),
             new StringSelectMenuOptionBuilder()

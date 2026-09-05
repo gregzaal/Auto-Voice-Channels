@@ -831,7 +831,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       });
       await interaction.reply({
         content:
-          `✅ This category's channels are now grouped **${above ? 'above' : 'below'}** the ` +
+          `✅ This category's rooms are now grouped **${above ? 'above' : 'below'}** the ` +
           `creator channels.${rateLimitNote(summary.rateLimited)}`,
         ephemeral: true,
       });
@@ -881,7 +881,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     await respond(interaction, { content: formatResult(res), ephemeral: true });
   }
 
-  /** `/defaultlimit` → the user limit new channels from this creator start with. */
+  /** `/defaultlimit` → the user limit new rooms from this creator channel start with. */
   async function handleDefaultLimit(interaction: ChatInputCommandInteraction): Promise<void> {
     // Read the option before the picker, so it can be carried in the custom id.
     const limit = interaction.options.getInteger('limit', true);
@@ -970,8 +970,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     });
     const note = rateLimitNote(summary.rateLimited);
     const message = enabling
-      ? `✅ Grouped this category's channels **${above ? 'above' : 'below'}** the creator ` +
-        `channels${summary.considered ? ` (${summary.considered} channel${summary.considered === 1 ? '' : 's'})` : ''}.${note}`
+      ? `✅ Grouped this category's rooms **${above ? 'above' : 'below'}** the creator ` +
+        `channels${summary.considered ? ` (${summary.considered} room${summary.considered === 1 ? '' : 's'})` : ''}.${note}`
       : `✅ Turned grouping off. Each creator channel goes back to its own numbering and ` +
         `placement.${note}`;
     await interaction.update({ content: message, embeds: [], components: [] });
