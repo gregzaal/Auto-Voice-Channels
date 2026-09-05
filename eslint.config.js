@@ -30,5 +30,17 @@ export default tseslint.config(
       'no-console': 'warn',
     },
   },
+  {
+    // Plain-JS CLI scripts (unlike .ts, not covered by typescript-eslint's
+    // suppression of `no-undef` in favor of the compiler), so Node's ambient
+    // globals need declaring here explicitly.
+    files: ['**/*.mjs'],
+    languageOptions: {
+      globals: {
+        process: 'readonly',
+        console: 'readonly',
+      },
+    },
+  },
   prettier,
 );

@@ -1,0 +1,47 @@
+name: Release
+
+# Deliberately its own workflow, not a step in ci.yml: this only runs when a
+# release tag is deliberately pushed, so it never blocks or interacts with the
+# normal push/PR test suite. See plans/versioning.md §5.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  validate-tag:
+    runs-on: ubuntu-latest
+    steps:
+      # Full history AND tags: `actions/checkout`'s `fetch-tags` defaults to
+      # false even with fetch-depth: 0, and the check needs every previous
+      # release tag to compare against, not just the one that triggered this.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # This workflow validates the tag's own consistency (below); it doesn't
+      # re-run typecheck/lint/build/test, so nothing here confirms the tagged
+      # commit ever passed ci.yml. A tag push doesn't trigger ci.yml on its
+      # own, so check it explicitly rather than assuming: golden rule 6 is
+      # "tests gate everything," and a release tag is the one artifact that's
+      # permanent on this public repo.
+      - name: Confirm the tagged commit is on origin/main
+        run: |
+          set -euo pipefail
+          git fetch origin main --quiet
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "This tag's commit isn't on origin/main — it may never have run through CI." >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate release tag
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: node scripts/checkReleaseTag.mjs

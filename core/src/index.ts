@@ -1,5 +1,6 @@
 export * from './config.js';
 export * from './logger.js';
+export * from './version.js';
 export * from './domain/auth.js';
 export * from './domain/tiers.js';
 export * from './domain/billing.js';

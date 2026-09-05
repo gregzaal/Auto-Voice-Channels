@@ -39,13 +39,13 @@ ENV NODE_ENV=production
 # refuses the dump outright. ~20MB, and it ships in both profiles so a
 # self-hoster gets backups from the same image with no extra moving parts.
 RUN apk add --no-cache postgresql16-client
-# Build/version stamps surfaced on /health and /diagnostics. Passed at build
-# time (e.g. --build-arg GIT_COMMIT="$(git rev-parse HEAD)"); default to dev so
-# self-host `docker compose up` still builds without extra flags.
+# Commit stamp surfaced on /health and /diagnostics. Passed at build time (e.g.
+# --build-arg GIT_COMMIT="$(git rev-parse HEAD)"); default to dev so self-host
+# `docker compose up` still builds without extra flags. The app version needs
+# no equivalent build-arg: core/src/version.ts reads it straight from the
+# package.json copied into this image below.
 ARG GIT_COMMIT=dev
-ARG APP_VERSION=0.1.0
 ENV GIT_COMMIT=$GIT_COMMIT
-ENV APP_VERSION=$APP_VERSION
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=prod-deps /app/core/node_modules ./core/node_modules
 COPY --from=prod-deps /app/bot/node_modules ./bot/node_modules

@@ -28,6 +28,7 @@ import {
   type RuntimeFlagsRepository,
 } from '@avc/core';
 import type { GuildDispatcher } from '../runtime/dispatcher.js';
+import { COMMIT, VERSION } from '../version.js';
 import {
   handleExport,
   handleImportButton,
@@ -1369,7 +1370,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     const rtt = sent.createdTimestamp - interaction.createdTimestamp;
     await interaction.editReply(
       `🏓 Pong! Round-trip ${rtt}ms · gateway ${ws < 0 ? '—' : `${ws}ms`}. ` +
-        `Status page: ${STATUS_PAGE_URL}`,
+        `v${VERSION} (${COMMIT.slice(0, 7)}) · Status page: ${STATUS_PAGE_URL}`,
     );
   }
 

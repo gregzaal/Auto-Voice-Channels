@@ -1,6 +1,6 @@
 {
   "name": "auto-voice-channels",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "private": true,
   "description": "Auto-Voice-Channels — a Discord bot that automatically creates and cleans up voice channels on demand.",
   "license": "AGPL-3.0-only",
@@ -21,7 +21,9 @@
     "db:generate": "pnpm --filter @avc/core run db:generate",
     "db:migrate": "pnpm --filter @avc/core run db:migrate",
     "start": "node bot/dist/index.js",
-    "dev": "pnpm --filter @avc/bot run dev"
+    "dev": "pnpm --filter @avc/bot run dev",
+    "verify:version-module": "node scripts/checkVersionModule.mjs",
+    "release:check": "node scripts/checkReleaseTag.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

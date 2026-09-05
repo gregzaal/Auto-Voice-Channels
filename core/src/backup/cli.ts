@@ -14,6 +14,7 @@
 import { sql } from 'drizzle-orm';
 import { loadConfig } from '../config.js';
 import { createDatabase } from '../db/client.js';
+import { COMMIT, VERSION } from '../version.js';
 import { BackupStorage } from './storage.js';
 import { probeForManifest, runBackup } from './runBackup.js';
 import { listBackups, restoreBackup, selectBackup, verifyBackup } from './restore.js';
@@ -70,8 +71,8 @@ async function main(): Promise<void> {
           retention: backupConfig.retention,
           encryptionKey: backupConfig.encryptionKey,
           instanceId: config.instanceId ?? 'cli',
-          appVersion: process.env.APP_VERSION ?? '0.0.0',
-          commit: process.env.GIT_COMMIT ?? 'dev',
+          appVersion: VERSION,
+          commit: COMMIT,
           probe: async () => {
             const handle = createDatabase({ connectionString: config.databaseUrl });
             try {
