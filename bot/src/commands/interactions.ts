@@ -19,6 +19,7 @@ import {
 } from 'discord.js';
 import {
   isEntitled,
+  RUNTIME_FLAGS,
   type AutoChannelRepository,
   type Database,
   type Fleet,
@@ -61,6 +62,12 @@ import {
   type VoteKickManager,
 } from '../features/voice/index.js';
 import { ALIAS_MODAL_ID, buildAliasModal, parseAliasModal } from './aliasModal.js';
+import {
+  buildChannelInfoView,
+  CHANNELINFO_PREFIX,
+  parseInfoId,
+  type ChannelInfoPanelInput,
+} from './channelInfoPanel.js';
 import {
   ALIAS_INPUT_MAX,
   ALIAS_PREFIX,
@@ -155,6 +162,16 @@ export interface InteractionDeps {
   /** Recent "I lost access to this channel" incidents, surfaced in `/setup`. */
   permissionProblems?: PermissionProblemTracker;
   /**
+   * This fleet's runtime flags, for `/channelinfo`'s kill-switch.
+   *
+   * Top level rather than inside {@link configTransfer}'s bundle, even though
+   * that bundle already carries a reader: a lever hidden behind another
+   * feature's optional dependency is a lever that silently does nothing in any
+   * deployment without that feature. Optional so a test fixture stays small,
+   * and absent means the switch is off.
+   */
+  flags?: RuntimeFlagsRepository;
+  /**
    * The natural-language template assistant. Absent when no model endpoint is
    * configured, which is the self-host default — the command isn't registered
    * in that case, so this only has to cover the "flag flipped after boot" path.
@@ -204,6 +221,22 @@ const VOTE_TIMEOUT_MS = 2 * 60 * 1000;
 const CREATE_RETRY_TTL_MS = 15 * 60 * 1000;
 /** How long a pending assistant proposal stays applicable (in memory). */
 const ASSISTANT_SESSION_TTL_MS = 15 * 60 * 1000;
+
+/**
+ * `/channelinfo`'s refusals, kept together so the two callers word them the
+ * same. Deliberately vague about WHY a channel cannot be shown: naming the
+ * difference between "no such channel" and "you cannot see that one" is how a
+ * refusal becomes a way to probe for hidden channels.
+ */
+const CANNOT_SEE_CHANNEL = "I can't show you that channel.";
+const CHANNELINFO_OFF = 'Channel info is switched off right now. Try again a bit later.';
+const CHANNELINFO_BUSY =
+  "I couldn't read that channel just now. AVC is backing off in this server after repeated " +
+  'errors, which usually clears on its own within a few minutes.';
+/** Shown above the panel in a hard-gated guild, so it reads as paused, not broken. */
+const GATED_INFO_NOTE =
+  'AVC is paused on this server, so it is not creating or renaming anything right now. ' +
+  'Everything below is still what it would use.';
 
 /** One admin's in-flight `/templateassistant` conversation. */
 interface AssistantSession {
@@ -285,8 +318,11 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       return;
     }
 
-    if (interaction.isChatInputCommand()) return handleCommand(interaction);
-    if (interaction.isButton()) return handleButton(interaction);
+    // `entitled` rides along rather than being re-derived: it cost a guild-row
+    // read here, and a handler that wants it would otherwise read the same row
+    // again (see `buildChannelInfoInput`).
+    if (interaction.isChatInputCommand()) return handleCommand(interaction, entitled);
+    if (interaction.isButton()) return handleButton(interaction, entitled);
     if (interaction.isChannelSelectMenu()) return handleChannelSelect(interaction);
     if (interaction.isStringSelectMenu()) return handleStringSelect(interaction);
     if (interaction.isModalSubmit()) return handleModal(interaction);
@@ -311,9 +347,23 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
        * Both are still refused in a `blocked` guild, which `route` handles
        * above this point, and that stays: `blocked` is the abuse switch.
        */
-      return ['setup', 'ping', 'invite', 'source', 'debug', 'logging', 'export'].includes(
-        interaction.commandName,
-      );
+      return [
+        'setup',
+        'ping',
+        'invite',
+        'source',
+        'debug',
+        'logging',
+        'export',
+        /**
+         * `/channelinfo` is on this list for `/export`'s reason: it is a read
+         * path that writes nothing and destroys nothing, and refusing to tell
+         * someone how their own server is configured because a payment lapsed
+         * is not what the hard gate is for. The panel says the server is paused
+         * rather than pretending the automation is running.
+         */
+        'channelinfo',
+      ].includes(interaction.commandName);
     }
     if (interaction.isButton()) {
       // The assistant writes a template, so it is a write path like `/create`
@@ -321,6 +371,9 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       // (It is free on every tier — see the assistant's own docs — but an
       // expired guild has no automation for a template to drive.)
       if (interaction.customId === `${SETUP_PREFIX}assistant`) return false;
+      // A `/channelinfo` view button, or the command's own exemption stops at
+      // the first click and the panel answers with the reactivation notice.
+      if (interaction.customId.startsWith(CHANNELINFO_PREFIX)) return true;
       return interaction.customId.startsWith(SETUP_PREFIX);
     }
     if (interaction.isModalSubmit()) {
@@ -329,7 +382,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     return false;
   }
 
-  async function handleCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  async function handleCommand(
+    interaction: ChatInputCommandInteraction,
+    entitled: boolean,
+  ): Promise<void> {
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
     const channelId = currentVoiceChannelId(interaction);
@@ -460,6 +516,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return handleSource(interaction);
       case 'debug':
         return handleDebug(interaction);
+      case 'channelinfo':
+        return handleChannelInfo(interaction, entitled);
       case 'create':
         return openCreateModal(interaction);
       case 'alias':
@@ -1453,8 +1511,21 @@ Already subscribed? Add the new server ` +
   /** Dev-only: dump the data behind a channel's name + config + permissions. */
   async function handleDebug(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
-    const channelId =
-      interaction.options.getChannel('channel')?.id ?? currentVoiceChannelId(interaction);
+    /**
+     * Re-gated in code, not only by `default_member_permissions`.
+     *
+     * That default is a DEFAULT: a server admin can re-open any command to any
+     * role in Server Settings > Integrations, and every sibling admin command
+     * here re-checks for exactly that reason. This one did not, which is one of
+     * the two things that made "just open `/debug` up" the wrong move.
+     */
+    if (!(await requireManageChannels(interaction))) return;
+    const requested = interaction.options.getChannel('channel')?.id;
+    if (requested && !callerCanSee(interaction, requested)) {
+      await interaction.reply({ content: CANNOT_SEE_CHANNEL, ephemeral: true });
+      return;
+    }
+    const channelId = requested ?? currentVoiceChannelId(interaction);
     if (!channelId) {
       await interaction.reply({
         content: 'Join a voice channel or pass one with the `channel` option to debug it.',
@@ -1473,7 +1544,7 @@ Already subscribed? Add the new server ` +
 
   /** The bot's relevant permissions on a channel, for the debug dump. */
   function botPermissions(
-    interaction: ChatInputCommandInteraction,
+    interaction: ChatInputCommandInteraction | ButtonInteraction,
     channelId: string,
   ): Record<string, boolean> {
     const me = interaction.guild?.members.me;
@@ -1488,6 +1559,217 @@ Already subscribed? Add the new server ` +
       ManageRoles: p.has('ManageRoles'),
       MoveMembers: p.has('MoveMembers'),
     };
+  }
+
+  // -- /channelinfo ----------------------------------------------------------
+
+  /**
+   * Whether the CALLER can see a channel they named by id.
+   *
+   * Discord's picker only offers channels the member can see, but the API does
+   * not enforce that, so a crafted interaction can name any channel in the
+   * guild. Both commands that take a channel id report who is sitting in it and
+   * what they are playing, so without this the option is a way to watch a
+   * private voice channel from outside it. Fails CLOSED on an unknown channel.
+   */
+  function callerCanSee(
+    interaction: ChatInputCommandInteraction | ButtonInteraction,
+    channelId: string,
+  ): boolean {
+    const channel = interaction.guild?.channels.cache.get(channelId);
+    if (!channel || !('permissionsFor' in channel)) return false;
+    /**
+     * The MEMBER, resolved the way `currentVoiceChannelId` does it, rather than
+     * `interaction.user`. `permissionsFor` accepts a user, but only by looking
+     * the member up in the guild cache, and it returns null on a miss - which
+     * this reads as "cannot see" and refuses. Correct, and the wrong answer:
+     * refusing a legitimate admin because a cache was cold. `interaction.member`
+     * is the member Discord sent with this very interaction.
+     */
+    const member =
+      interaction.member instanceof GuildMember
+        ? interaction.member
+        : (interaction.guild?.members.cache.get(interaction.user.id) ?? interaction.user);
+    return channel.permissionsFor(member)?.has(PermissionFlagsBits.ViewChannel) ?? false;
+  }
+
+  /**
+   * Gathers the panel input for one channel.
+   *
+   * Shared by the command and its buttons so a re-render cannot disagree with
+   * the first render about who the viewer is or what the channel looks like.
+   */
+  async function buildChannelInfoInput(
+    interaction: ChatInputCommandInteraction | ButtonInteraction,
+    channelId: string,
+    entitled: boolean,
+  ): Promise<ChannelInfoPanelInput> {
+    const guildId = interaction.guildId!;
+    const info = await run(guildId, 'cmd:channelinfo', () =>
+      deps.feature.channelInfo(guildId, channelId),
+    );
+    const isAdmin = hasManageChannels(interaction);
+    return {
+      info,
+      currentName: interaction.guild?.channels.cache.get(channelId)?.name ?? '',
+      isAdmin,
+      botPermissions: isAdmin ? botPermissions(interaction, channelId) : {},
+      problems: isAdmin
+        ? (deps.permissionProblems?.recent(guildId) ?? []).filter((p) => p.channelId === channelId)
+        : [],
+      /**
+       * `entitled` is threaded down from `route`, which already read the guild
+       * row to apply the hard gate. Calling `gateCheck` here would read the
+       * SAME row a second time per invocation, and every view button repeats
+       * it, on the one command any member can run.
+       */
+      ...(entitled ? {} : { gatedNote: GATED_INFO_NOTE }),
+    };
+  }
+
+  /**
+   * `/channelinfo` — what AVC thinks this voice channel is, and why it is named
+   * what it is named.
+   *
+   * Open to everyone for the channel they are standing in, which is the legacy
+   * `channelinfo` behaviour and the whole point: the person asking "why is my
+   * room called this" is usually not an admin. The `channel` option is the half
+   * that needs a permission, because it can name a channel the caller is not in.
+   */
+  async function handleChannelInfo(
+    interaction: ChatInputCommandInteraction,
+    entitled: boolean,
+  ): Promise<void> {
+    /**
+     * Every check that can answer WITHOUT a database read happens above the
+     * defer, and the kill-switch happens below it.
+     *
+     * The switch exists for load shedding, and reading it before acknowledging
+     * would spend an uncached `SELECT` on the interaction's three-second budget
+     * during exactly the incident it was added for: the member would get "The
+     * application did not respond" instead of the polite notice the flag is
+     * supposed to produce. `route` has already spent one read getting here.
+     */
+    const requested = interaction.options.getChannel('channel')?.id;
+    if (requested) {
+      // Manage Channels for the option itself, then the caller's own view of the
+      // target. Both are needed: the first is who may look elsewhere at all, the
+      // second binds the id they supplied to what they can already see.
+      if (!(await requireManageChannels(interaction))) return;
+      if (!callerCanSee(interaction, requested)) {
+        await interaction.reply({ content: CANNOT_SEE_CHANNEL, ephemeral: true });
+        return;
+      }
+    }
+    const channelId = requested ?? currentVoiceChannelId(interaction);
+    if (!channelId) {
+      await interaction.reply({
+        content: 'Join a voice channel first, and run this again to see what AVC knows about it.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    /**
+     * Deferred here rather than through `DEFERRED_COMMANDS`, whose documented
+     * reason is REST-bucket contention. This makes no REST calls. The hazard is
+     * the per-guild queue: `run()` is strictly serial per guild, so a reconcile
+     * or a rate-limited rename in flight can hold this past three seconds and
+     * the member sees "The application did not respond". Same reasoning as
+     * `openSetup`, different cause.
+     */
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    if (await channelInfoDisabled(interaction.guildId!)) {
+      await interaction.editReply({ content: CHANNELINFO_OFF });
+      return;
+    }
+    const input = await channelInfoInputOrExcuse(interaction, channelId, entitled);
+    if (!input) return;
+    const { embeds, components } = buildChannelInfoView('summary', input);
+    await interaction.editReply({ embeds: embeds ?? [], components: components ?? [] });
+  }
+
+  /** A view button: re-reads and re-renders in place. */
+  async function handleChannelInfoButton(
+    interaction: ButtonInteraction,
+    entitled: boolean,
+  ): Promise<void> {
+    const parsed = parseInfoId(interaction.customId);
+    if (!parsed) {
+      /**
+       * Answering matters: `handleButton` claimed this id on its prefix, so
+       * falling off the end leaves the interaction unacknowledged and Discord
+       * shows a bare "This interaction failed". Unreachable with today's three
+       * views, and it is the rolling-deploy path for a fourth (golden rule 4):
+       * a new instance publishes a view an older one cannot parse.
+       */
+      await safeReply(interaction, 'That button is out of date. Run the command again.');
+      return;
+    }
+    /**
+     * Re-checked on the button, not trusted from the panel that carried it.
+     * A panel is ephemeral but long-lived, and the caller's access can be taken
+     * away between opening it and clicking. The channel id rides in the custom
+     * id, so this is the same caller-supplied id the command already binds.
+     */
+    if (!callerCanSee(interaction, parsed.channelId)) {
+      await safeReply(interaction, CANNOT_SEE_CHANNEL);
+      return;
+    }
+    if (!interaction.deferred && !interaction.replied) await interaction.deferUpdate();
+    if (await channelInfoDisabled(interaction.guildId!)) {
+      await interaction.editReply({ content: CHANNELINFO_OFF, embeds: [], components: [] });
+      return;
+    }
+    const input = await channelInfoInputOrExcuse(interaction, parsed.channelId, entitled);
+    if (!input) return;
+    await interaction.editReply(toUpdate(buildChannelInfoView(parsed.view, input)));
+  }
+
+  /**
+   * The panel input, or `undefined` after answering with why there is none.
+   *
+   * A REFUSED dispatch is the case worth catching. `run()` rejects while the
+   * guild's circuit breaker is tripped or its queue is draining, and that is
+   * precisely the guild where somebody is running this command to find out what
+   * is wrong. Letting it fall into `route`'s catch would answer "something went
+   * wrong" to a question whose answer we know.
+   */
+  async function channelInfoInputOrExcuse(
+    interaction: ChatInputCommandInteraction | ButtonInteraction,
+    channelId: string,
+    entitled: boolean,
+  ): Promise<ChannelInfoPanelInput | undefined> {
+    try {
+      return await buildChannelInfoInput(interaction, channelId, entitled);
+    } catch (err) {
+      deps.logger.info(
+        { guildId: interaction.guildId, channelId, err },
+        'channelinfo could not read the channel',
+      );
+      await interaction.editReply({ content: CHANNELINFO_BUSY, embeds: [], components: [] });
+      return undefined;
+    }
+  }
+
+  /**
+   * The kill-switch, read on THIS fleet.
+   *
+   * A load lever rather than a safety one, and it exists because the two
+   * alternatives are both wrong shapes: `global.pause` stops no slash command at
+   * all, and withdrawing a global command means a deploy plus up to an hour of
+   * Discord propagation.
+   */
+  async function channelInfoDisabled(guildId: string): Promise<boolean> {
+    try {
+      return (await deps.flags?.getBool(RUNTIME_FLAGS.CHANNELINFO_DISABLED)) === true;
+    } catch (err) {
+      // A flag read that fails must not take the command with it: this switch
+      // guards load, and failing closed would turn a database blip into an
+      // outage of the command people run when something looks wrong.
+      deps.logger.debug({ guildId, err }, 'channelinfo flag read failed, treating as enabled');
+      return false;
+    }
   }
 
   /** `/create` (and the "Create another" button) → open the setup modal. */
@@ -2015,7 +2297,7 @@ Already subscribed? Add the new server ` +
     });
   }
 
-  async function handleButton(interaction: ButtonInteraction): Promise<void> {
+  async function handleButton(interaction: ButtonInteraction, entitled: boolean): Promise<void> {
     if (interaction.customId === CREATE_AGAIN_ID) return openCreateModal(interaction);
     if (interaction.customId.startsWith(CREATE_RETRY_PREFIX)) return handleCreateRetry(interaction);
     if (interaction.customId.startsWith(KICK_PREFIX)) return handleKickVote(interaction);
@@ -2023,6 +2305,8 @@ Already subscribed? Add the new server ` +
     if (interaction.customId.startsWith(ADOPT_PREFIX)) return handleAdoptButton(interaction);
     if (interaction.customId.startsWith(GROUP_PREFIX)) return handleGroupButton(interaction);
     if (interaction.customId.startsWith(ALIAS_PREFIX)) return handleAliasButton(interaction);
+    if (interaction.customId.startsWith(CHANNELINFO_PREFIX))
+      return handleChannelInfoButton(interaction, entitled);
     if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorButton(interaction);
     if (interaction.customId.startsWith(ASSISTANT_PREFIX))
       return handleAssistantButton(interaction);

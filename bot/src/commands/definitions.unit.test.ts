@@ -11,6 +11,7 @@ describe('buildCommandDefinitions', () => {
       [
         'alias',
         'alwaysprivate',
+        'channelinfo',
         'create',
         'defaultlimit',
         'export',
@@ -73,6 +74,23 @@ describe('buildCommandDefinitions', () => {
     for (const name of ['limit', 'nick', 'ping', 'invite', 'source']) {
       expect(byName.get(name)!.default_member_permissions ?? null).toBeNull();
     }
+  });
+
+  /**
+   * The assertion that keeps `/channelinfo` open to everyone.
+   *
+   * It looks admin-shaped, sits beside the admin commands in the source, and
+   * takes a channel option, so the tempting edit is to wrap it in `adminOnly`
+   * like its neighbours. That would silently remove the whole point: the person
+   * asking why their room is called something is usually not an admin. The
+   * option alone is gated, in `handleChannelInfo`, not here.
+   */
+  it('leaves /channelinfo open to every member', () => {
+    expect(byName.get('channelinfo')!.default_member_permissions ?? null).toBeNull();
+    expect(byName.get('channelinfo')!.options?.[0]).toMatchObject({
+      name: 'channel',
+      required: false,
+    });
   });
 
   it('includes /debug only when requested', () => {

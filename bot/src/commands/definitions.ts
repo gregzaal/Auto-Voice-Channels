@@ -144,6 +144,27 @@ export function buildCommandDefinitions(
         .setName('setup')
         .setDescription('Get started with Auto-Voice-Channels: status, setup, and quick actions.'),
     ),
+    /**
+     * Open to everyone, deliberately, and the one admin-shaped command that is
+     * not `adminOnly`.
+     *
+     * The question it answers ("why is my room called this") belongs to whoever
+     * is standing in the room, and the legacy bot's `channelinfo` was open to
+     * every member for the eight years it existed. The `channel` OPTION is
+     * gated to Manage Channels in `handleChannelInfo`, because that is the half
+     * that can name a channel the caller is not in.
+     */
+    guildOnly(
+      new SlashCommandBuilder()
+        .setName('channelinfo')
+        .setDescription("See what AVC knows about a voice channel, and why it's named what it is.")
+        .addChannelOption((o) =>
+          o
+            .setName('channel')
+            .setDescription('Another voice channel to look at (needs Manage Channels).')
+            .addChannelTypes(ChannelType.GuildVoice),
+        ) as SlashCommandBuilder,
+    ),
     adminOnly(
       new SlashCommandBuilder()
         .setName('create')
