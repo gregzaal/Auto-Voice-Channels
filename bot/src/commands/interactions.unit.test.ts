@@ -1,4 +1,7 @@
 import { EventEmitter } from 'node:events';
+import { readFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { DiscordAPIError, PermissionFlagsBits } from 'discord.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fakeLogger } from '../runtime/testUtils.js';
@@ -54,6 +57,10 @@ interface FakeInteractionOpts {
   locale?: string;
   /** True when a modal was opened from a component, so it can edit that message. */
   fromMessage?: boolean;
+  /** Slash-command option values, for the commands that take one. */
+  optionInteger?: number;
+  optionString?: string;
+  optionUserId?: string;
 }
 
 /** Builds a minimal interaction with the methods/getters the router touches. */
@@ -113,11 +120,25 @@ function fakeInteraction(opts: FakeInteractionOpts) {
     reply,
     followUp,
     editReply,
-    deferReply: vi.fn().mockResolvedValue(undefined),
+    // Flips `deferred`, because that is what `replyResult` branches on: a
+    // deferred interaction must be answered with `editReply`, and replying to
+    // one throws. A fake that never set it hid that distinction entirely.
+    deferReply: vi.fn().mockImplementation(() => {
+      interaction.deferred = true;
+      return Promise.resolve(undefined);
+    }),
     deferUpdate: vi.fn().mockResolvedValue(undefined),
     update: vi.fn().mockResolvedValue(undefined),
     showModal: vi.fn().mockResolvedValue(undefined),
     values: opts.values ?? [],
+    options: {
+      getInteger: () => opts.optionInteger ?? 2,
+      getString: () => opts.optionString ?? 'x',
+      getUser: () => ({ id: opts.optionUserId ?? 'u2' }),
+      getChannel: () => null,
+      getBoolean: () => null,
+      getAttachment: () => null,
+    },
     fields: {
       getStringSelectValues: (k: string) => (k === 'privacy' && opts.privacy ? [opts.privacy] : []),
       getSelectedChannels: () =>
@@ -337,13 +358,23 @@ describe('registerInteractionHandler (router)', () => {
     };
     const env = setup({ settings: settings as never });
     dispose = env.dispose;
-    const { interaction, reply } = fakeInteraction({ kind: 'command', commandName: 'setup' });
+    const { interaction, reply, followUp } = fakeInteraction({
+      kind: 'command',
+      commandName: 'setup',
+    });
     env.client.emit('interactionCreate', interaction);
     await flush();
     expect(env.reportError).toHaveBeenCalled();
-    expect(reply).toHaveBeenCalledWith(
+    /**
+     * `followUp`, not `reply`: `openSetup` defers before it does any work, so a
+     * handler that throws afterwards finds the interaction acknowledged and
+     * `safeReply` takes its deferred branch. This asserted `reply` only because
+     * the fake never set `deferred`, i.e. it pinned an unreachable branch.
+     */
+    expect(followUp).toHaveBeenCalledWith(
       expect.objectContaining({ content: '⚠️ Something went wrong handling that: boom' }),
     );
+    expect(reply).not.toHaveBeenCalled();
   });
 
   it('offers a channel picker when a config command is used outside a voice channel', async () => {
@@ -1104,5 +1135,86 @@ describe('registerInteractionHandler (/alias panel buttons)', () => {
     env.client.emit('interactionCreate', interaction);
     await flush();
     expect(env.settings.replaceAlias).toHaveBeenCalledWith('g1', long, long, 'Shorter');
+  });
+});
+
+/**
+ * Discord kills an interaction token after **3 seconds**, and these commands
+ * spend that budget on REST calls against the channel's bucket, which is the
+ * same one a rename uses (`PATCH /channels/{id}`). So AVC's own queued rename
+ * delays the next command's call and the reply lands on a dead token: the work
+ * succeeds and the user sees "The application did not respond".
+ *
+ * That was observed live on `/limit` sitting behind a rate-limited rename, and
+ * it is a feedback loop, because `/limit` is now one of the commands that
+ * causes a rename. Detaching the re-render was not enough: the blocking call
+ * was the command's OWN `setUserLimit`.
+ */
+describe('commands that talk to Discord acknowledge first', () => {
+  const deferring = ['limit', 'unlimit', 'private', 'public', 'reclaim', 'transfer', 'nick'];
+
+  it('defers, then answers with editReply rather than reply', async () => {
+    for (const commandName of deferring) {
+      const env = setup({
+        voiceCommands: {
+          setLimit: vi.fn().mockResolvedValue({ ok: true, message: 'done' }),
+          unlimit: vi.fn().mockResolvedValue({ ok: true, message: 'done' }),
+          claim: vi.fn().mockResolvedValue({ ok: true, message: 'done' }),
+          transfer: vi.fn().mockResolvedValue({ ok: true, message: 'done' }),
+        } as never,
+        privacy: {
+          makePrivate: vi.fn().mockResolvedValue({ ok: true, message: 'done' }),
+          makePublic: vi.fn().mockResolvedValue({ ok: true, message: 'done' }),
+        } as never,
+        settings: {
+          setNick: vi.fn().mockResolvedValue({ ok: true, message: 'done' }),
+        } as never,
+        feature: {
+          rerenderByOwner: vi.fn().mockResolvedValue({ considered: 0, renamed: 0, rateLimited: 0 }),
+        } as never,
+      });
+      const { interaction, reply, editReply } = fakeInteraction({
+        kind: 'command',
+        commandName,
+        voiceChannelId: 'v1',
+      });
+      env.client.emit('interactionCreate', interaction);
+      await flush();
+      expect(interaction.deferReply, `${commandName} did not defer`).toHaveBeenCalled();
+      expect(editReply, `${commandName} did not answer via editReply`).toHaveBeenCalled();
+      expect(
+        reply,
+        `${commandName} replied to an already-deferred interaction`,
+      ).not.toHaveBeenCalled();
+      env.dispose();
+    }
+  });
+
+  /**
+   * The list above is a claim about the router, so it is checked against the
+   * router's own source: any command answered with `replyResult` after awaiting
+   * `run(...)` has done REST work and must be in it. Without this, a new command
+   * added in the same shape gets the 3-second budget back by accident.
+   */
+  it('covers every command that awaits work before replying', async () => {
+    const source = await readFile(
+      join(dirname(fileURLToPath(import.meta.url)), 'interactions.ts'),
+      'utf8',
+    );
+    const switchBody = source.slice(
+      source.indexOf('switch (interaction.commandName) {'),
+      source.indexOf("case 'setup':"),
+    );
+    // Count guard: a scan that silently matches nothing passes every assertion.
+    const cases = [...switchBody.matchAll(/case '([a-z]+)':/g)].map((m) => m[1]!);
+    expect(cases.length).toBeGreaterThan(6);
+
+    for (const name of cases) {
+      const from = switchBody.indexOf(`case '${name}':`);
+      const next = switchBody.indexOf('case ', from + 6);
+      const branch = switchBody.slice(from, next === -1 ? undefined : next);
+      if (!branch.includes('replyResult') || !branch.includes('await run(')) continue;
+      expect(deferring, `${name} awaits work then replies, so it must defer`).toContain(name);
+    }
   });
 });

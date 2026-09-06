@@ -5,6 +5,7 @@ import {
   ButtonBuilder,
   ButtonStyle,
   GuildMember,
+  MessageFlags,
   PermissionFlagsBits,
   type ButtonInteraction,
   type ChannelSelectMenuInteraction,
@@ -340,6 +341,25 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
      * refusals into usage and make a gated guild look like an active one.
      */
     deps.countCommand?.(interaction.commandName);
+
+    /**
+     * Commands that talk to Discord before they can answer.
+     *
+     * **Discord kills an interaction token after 3 seconds**, and every one of
+     * these spends that budget on REST calls against the CHANNEL's bucket, which
+     * is the same bucket a rename uses (`PATCH /channels/{id}`). So AVC's own
+     * queued rename delays the next command's call and the reply arrives at a
+     * dead token: the work all succeeds, and the user sees "The application did
+     * not respond". Observed live on `/limit` behind a rate-limited rename.
+     *
+     * Deferring first buys 15 minutes, and it is done HERE rather than in each
+     * branch so a new command cannot be added without it. `/nick` is in the list
+     * for the same reason and is the worst of them: it awaits a re-render of
+     * every channel the caller owns.
+     */
+    if (DEFERRED_COMMANDS.has(interaction.commandName)) {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    }
 
     switch (interaction.commandName) {
       case 'limit':
@@ -2326,11 +2346,32 @@ function formatDebug(info: ChannelDebug, permissions: Record<string, boolean>): 
   return lines.join('\n').slice(0, 1900);
 }
 
+/**
+ * Commands routed through {@link replyResult} that make Discord REST calls
+ * before they can answer, so they must defer (see the note at the call site).
+ */
+const DEFERRED_COMMANDS = new Set([
+  'limit',
+  'unlimit',
+  'private',
+  'public',
+  'reclaim',
+  'transfer',
+  'nick',
+]);
+
 async function replyResult(
   interaction: ChatInputCommandInteraction,
   result: CommandResult,
 ): Promise<void> {
-  await interaction.reply({ content: formatResult(result), ephemeral: true });
+  const content = formatResult(result);
+  // `editReply` for a deferred command, `reply` for the rest. Not
+  // interchangeable: replying to a deferred interaction throws.
+  if (interaction.deferred || interaction.replied) {
+    await interaction.editReply({ content });
+    return;
+  }
+  await interaction.reply({ content, flags: MessageFlags.Ephemeral });
 }
 
 async function safeReply(interaction: Interaction, content: string): Promise<void> {
