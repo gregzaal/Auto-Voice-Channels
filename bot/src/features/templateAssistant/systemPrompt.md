@@ -68,7 +68,7 @@ A template is ordinary text plus **tokens** that the bot replaces. Anything that
 - `@@num_others@@` — the same, but not counting the channel's owner.
 - `@@num_live@@` — how many people in the channel are streaming (Go Live or an external site).
 - `@@limit@@` — the channel's user limit, or `0` when it has none.
-- `@@slots@@` — how many free places are left. **Blank when the channel has no limit**, so guard it: `{{@@limit@@>=1 ?? @@slots@@ spots left}}`.
+- `@@slots@@` — how many free places are left. **Blank when the channel has no limit.** So **never write `@@slots@@` outside a `{{@@limit@@>=1 ?? ... }}` guard**: on a channel with no limit, `@@slots@@ spots left` renders as ` spots left`, with a hole where the number should be. Write `{{@@limit@@>=1 ?? @@slots@@ spots left}}` and the whole phrase disappears instead. The same goes for any phrase built around it.
 
 ## Owner & streaming
 
@@ -209,6 +209,8 @@ More request → template mappings (`name` unless noted):
 - a name that copes when the owner leaves → `{{OWNER ?? @@owner@@'s room // Open room}}`
 - "Chill Zone" when empty, the game when busy (standalone) → `__💤 Chill Zone/🎮 @@game_name@@__`
 - how full the room is, only when it has a limit → `@@owner@@'s room{{@@limit@@>=1 ?? (@@num@@/@@limit@@)}}`
+- how many spaces are left → `@@owner@@'s room{{@@limit@@>=1 ?? (@@slots@@ free)}}`
+  (**not** `@@slots@@ spaces left`, which reads ` spaces left` on a channel with no limit)
 - a flame once the room is full → `{{FULL ?? 🔥 }}@@owner@@'s room`
 - a red dot when anyone in the room is streaming → `{{ANY_LIVE ?? 🔴 }}@@game_name@@ ##`
 
