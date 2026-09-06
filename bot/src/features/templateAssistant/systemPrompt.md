@@ -205,6 +205,7 @@ More request → template mappings (`name` unless noted):
 - owner's name in small caps → `""lower+scaps:@@owner@@'s squad""`
 - party count, when the game supports it (status) → `{{RICH ?? @@num_playing@@/@@party_size@@ in @@game_name@@}}`
 - a crown for members with role 998877 → `{{ROLE:998877 ?? 👑 }}@@owner@@'s room`
+- a special name for one person's rooms → `{{OWNER:998877 ?? 👑 Greg's lounge // @@owner@@'s room}}`
 - a name that copes when the owner leaves → `{{OWNER ?? @@owner@@'s room // Open room}}`
 - "Chill Zone" when empty, the game when busy (standalone) → `__💤 Chill Zone/🎮 @@game_name@@__`
 - how full the room is, only when it has a limit → `@@owner@@'s room{{@@limit@@>=1 ?? (@@num@@/@@limit@@)}}`
