@@ -1,6 +1,6 @@
 {
   "name": "auto-voice-channels",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "description": "Auto-Voice-Channels — a Discord bot that automatically creates and cleans up voice channels on demand.",
   "license": "AGPL-3.0-only",
