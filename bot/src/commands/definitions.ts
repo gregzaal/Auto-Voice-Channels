@@ -162,7 +162,9 @@ export function buildCommandDefinitions(
     adminOnly(
       new SlashCommandBuilder()
         .setName('position')
-        .setDescription('Choose whether new rooms appear above or below the creator channel.'),
+        .setDescription(
+          'Choose whether new rooms appear above or below the creator channel, and their start number.',
+        ),
     ),
     adminOnly(
       new SlashCommandBuilder()
