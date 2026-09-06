@@ -458,6 +458,21 @@ export interface ExpressionVars {
   ANY_ROLE: string[];
   MEMBER: string[];
   /**
+   * The owner's user id, as a one-element list so the existing `:` operator
+   * covers `{{OWNER:123 ?? …}}` with no new operator code.
+   *
+   * An ID rather than a name, deliberately. A display name is mutable, not
+   * unique, and set by the member themselves, so keying a template on one lets
+   * anybody who renames themselves inherit whatever it grants. There is no
+   * `OWNER_NAME` for that reason.
+   *
+   * Empty when the owner is not among the channel's current members, which is
+   * the same condition that makes `@@owner@@` render `Unknown`. So a bare
+   * `{{OWNER ?? …}}` reads as "this room has a known owner" and is the
+   * supported way to write a fallback for a room whose owner has left.
+   */
+  OWNER: string[];
+  /**
    * True only when the room has a limit AND is at or over it. Unlimited is
    * never full, which is the whole reason this is a variable rather than
    * `{{@@num@@>=@@limit@@}}`: with no limit that comparison reads `3>=0` and
@@ -498,6 +513,7 @@ const CONDITION_VARIABLE_SET: Record<keyof ExpressionVars, true> = {
   ANY_LIVE: true,
   ANY_ROLE: true,
   MEMBER: true,
+  OWNER: true,
   FULL: true,
   PRIVATE: true,
 };
@@ -778,6 +794,7 @@ function buildExpressionVars(
     // covers `{{ANY_ROLE:id}}` with no new operator code, mirroring `ROLE`.
     ANY_ROLE: [...new Set(nonBot.flatMap((m) => m.roleIds ?? []))],
     MEMBER: nonBot.map((m) => m.id),
+    OWNER: creator ? [creator.id] : [],
     // Unlimited is never full, and an unknown limit reads as unlimited, so this
     // fails open: it never claims a room is full on missing information.
     FULL: limit >= 1 && nonBot.length >= limit,

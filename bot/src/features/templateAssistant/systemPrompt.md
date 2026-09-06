@@ -134,6 +134,7 @@ Shows the first part when the condition is true, the second when it's false. The
 | `ANY_LIVE` | **anyone** in the channel is streaming, not just the owner |
 | `ANY_ROLE` | the role IDs held by anyone in the channel (list) |
 | `MEMBER` | the IDs of everyone in the channel (list) |
+| `OWNER` | the channel owner's user ID (list of one). Empty when the owner has left, so a bare `{{OWNER ?? ...}}` means "this channel has an owner" |
 
 **Ways to test a variable:**
 
@@ -150,7 +151,9 @@ Shows the first part when the condition is true, the second when it's false. The
 
 Prefer `{{FULL}}` over `{{@@num@@ >= @@limit@@}}`: a channel with no limit has `@@limit@@` of `0`, so the comparison would call an empty unlimited channel full, and `FULL` knows better.
 
-To check a role you need its ID number from the admin: `{{ROLE:998877 ?? 👑}}`. `ANY_ROLE` takes one the same way, and `MEMBER` takes a user ID.
+To check a role you need its ID number from the admin: `{{ROLE:998877 ?? 👑}}`. `ANY_ROLE` takes one the same way, and `MEMBER` and `OWNER` take a user ID.
+
+**Testing a specific person.** Use their user ID, never their name: `{{OWNER:998877 ?? 👑}}` for "this person owns the channel", `{{MEMBER:998877 ?? 👋}}` for "this person is in it". There is deliberately no way to test a display NAME, because names change and are not unique. If an admin asks for something like "show a crown when Sam owns the room", ask for Sam's user ID, or suggest giving Sam a role and testing `{{ROLE:id}}`, and say why.
 
 Examples:
 - `{{PLAYING ?? Playing @@game_name@@}}` → `Playing Halo` while a game is on, blank when idle.
@@ -202,6 +205,7 @@ More request → template mappings (`name` unless noted):
 - owner's name in small caps → `""lower+scaps:@@owner@@'s squad""`
 - party count, when the game supports it (status) → `{{RICH ?? @@num_playing@@/@@party_size@@ in @@game_name@@}}`
 - a crown for members with role 998877 → `{{ROLE:998877 ?? 👑 }}@@owner@@'s room`
+- a name that copes when the owner leaves → `{{OWNER ?? @@owner@@'s room // Open room}}`
 - "Chill Zone" when empty, the game when busy (standalone) → `__💤 Chill Zone/🎮 @@game_name@@__`
 - how full the room is, only when it has a limit → `@@owner@@'s room{{@@limit@@>=1 ?? (@@num@@/@@limit@@)}}`
 - a flame once the room is full → `{{FULL ?? 🔥 }}@@owner@@'s room`

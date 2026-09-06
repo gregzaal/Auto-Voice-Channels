@@ -797,3 +797,62 @@ describe('numberOffset (startAt)', () => {
     ).toBe('#? ? ? ?');
   });
 });
+
+describe('OWNER', () => {
+  const sam = member({ id: '111', displayName: 'Sam' });
+  const robin = member({ id: '222', displayName: 'Robin' });
+  const ctx = (creator?: VoiceMember): RenderContext => ({
+    index: 0,
+    members: [sam, robin],
+    ...(creator ? { creator, creatorName: creator.displayName } : {}),
+  });
+
+  it('matches the owner by id, and nobody else in the room', () => {
+    expect(renderChannelName('{{OWNER:111 ?? mine // theirs}}', ctx(sam))).toBe('mine');
+    // Robin is present, so MEMBER matches, but they do not own the room.
+    expect(renderChannelName('{{OWNER:222 ?? mine // theirs}}', ctx(sam))).toBe('theirs');
+    expect(renderChannelName('{{MEMBER:222 ?? here // away}}', ctx(sam))).toBe('here');
+  });
+
+  /**
+   * The distinction that makes it worth having: `MEMBER` answers "is this
+   * person in the room", `OWNER` answers "is this their room". They disagree
+   * exactly when the person is present but does not own it, which is the
+   * common case in any busy room.
+   */
+  it('is not the same question as MEMBER', () => {
+    // Robin is in the room and does not own it, so the two disagree.
+    expect(renderChannelName('{{OWNER:222 ?? yes // no}}', ctx(sam))).toBe('no');
+    expect(renderChannelName('{{MEMBER:222 ?? yes // no}}', ctx(sam))).toBe('yes');
+  });
+
+  /**
+   * `creator` is resolved from the channel's CURRENT members, so an owner who
+   * has left leaves it empty. That is the same condition that makes
+   * `@@owner@@` render `Unknown`, which is what makes this a usable fallback
+   * rather than a quirk.
+   */
+  it('is empty when the owner is not in the room, so a bare test is a fallback', () => {
+    expect(renderChannelName('{{OWNER ?? owned // ownerless}}', ctx(sam))).toBe('owned');
+    expect(renderChannelName('{{OWNER ?? owned // ownerless}}', ctx())).toBe('ownerless');
+    expect(renderChannelName("{{OWNER ?? @@owner@@'s room // Open room}}", ctx(sam))).toBe(
+      "Sam's room",
+    );
+    expect(renderChannelName("{{OWNER ?? @@owner@@'s room // Open room}}", ctx())).toBe(
+      'Open room',
+    );
+  });
+
+  /** A bot cannot own a room, and the roster the variables read excludes them. */
+  it('ignores bots in the room', () => {
+    const bot = member({ id: '999', bot: true });
+    const withBot: RenderContext = {
+      index: 0,
+      members: [sam, bot],
+      creator: sam,
+      creatorName: 'Sam',
+    };
+    expect(renderChannelName('{{MEMBER:999 ?? y // n}}', withBot)).toBe('n');
+    expect(renderChannelName('{{OWNER:999 ?? y // n}}', withBot)).toBe('n');
+  });
+});
