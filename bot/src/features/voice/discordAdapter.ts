@@ -178,6 +178,42 @@ function toVoiceMember(member: GuildMember): VoiceMember {
 }
 
 /**
+ * Gap left between channels by any reorder we perform.
+ *
+ * A reorder is the only chance to choose these numbers, and numbering them
+ * 0, 1, 2 leaves a category with nowhere to put the next room except on top of
+ * an existing position. Spacing them means a create takes a free slot instead,
+ * and needs no reorder at all.
+ *
+ * **The value is the headroom.** A block with something below it in its category
+ * (a divider, another creator channel) absorbs exactly `POSITION_STEP - 1`
+ * creates before the slot below its last room is taken and the next create has
+ * to tie. At a step of 2 that is ONE create, so a busy category would reorder
+ * every other join, which is barely better than reordering on every one. Sixteen
+ * buys fifteen. A block with nothing below it never runs out at all.
+ *
+ * Costs nothing to raise: positions are ordering values rather than indices,
+ * Discord already tolerates gaps (a deleted room leaves one), and each category
+ * is ordered independently, so the larger numbers do not collide with anything.
+ *
+ * Applied across the WHOLE list rather than inside the block, so the sequence
+ * stays strictly increasing. Spacing only the block would reorder it relative to
+ * the channels either side of it, which is the fault this is meant to prevent.
+ *
+ * **discord.js erases this whenever it repositions a channel by index.** Its
+ * `setPosition` helper remaps the entire category to consecutive integers
+ * (`Util.js`, `updatedItems.map((r, i) => ({ id: r.id, position: i }))`), which
+ * `placeAboveSibling` calls for every `above` room and every private room's join
+ * companion. Those categories therefore get no benefit from the spacing. They are
+ * not left wrong, because the same helper sorts by `rawPosition` then id
+ * ascending before renumbering, which is exactly the order intended here, so it
+ * resolves the tie correctly rather than baking in an arbitrary one. The result
+ * is that spacing is an optimisation for ordinary below-mode categories and inert
+ * elsewhere.
+ */
+const POSITION_STEP = 16;
+
+/**
  * How long to wait for a channel rename to apply before treating it as deferred
  * by a rate limit. A normal rename resolves well under this; Discord's per-channel
  * edit limit (2 / 10 min) makes a throttled one queue for far longer.
@@ -325,24 +361,26 @@ export class DiscordVoiceActions implements VoiceActions {
   }
 
   /**
-   * The position to create a "below" secondary at: the primary's own, or the
-   * bottom-most one any of its existing rooms holds.
+   * The position to create a "below" secondary at: the free slot immediately
+   * under the primary's block, or, when there is no free slot, the bottom-most
+   * position the block already holds.
    *
-   * Creating at the primary's position relies on the id tie-break to drop the new
-   * channel one slot down, which is only correct while the primary and every one
-   * of its rooms still SHARE that one position value. They do not always: any
-   * bulk reorder gives them unique ascending positions instead — ours for
-   * `/position` and `/group`, an admin dragging a channel, or Discord itself
-   * renumbering a category — and from then on a channel created at the primary's
-   * position lands ABOVE every room that already existed, which is how a block
-   * ends up rendering as `creator, 5, 6, 1, 2, 3, 4`. Tying with the bottom-most
-   * room instead is correct in both states and costs no extra call. It is also
-   * worth not relying on that tie any harder than we have to: two Discord clients
-   * were observed rendering one tied trio in two different orders.
+   * **A shared position is not a safe place to land, and this is measured.** The
+   * documented sort is position then id, so a tie should render oldest-first, and
+   * for a while this relied on that. It does not hold in the client: a guild with
+   * rooms 9, 10 and 11 all on position 81 rendered them `10, 9, 11`, which is not
+   * id order in any direction. Discord then normalises such a tie into unique
+   * positions at some later point and bakes that arbitrary order in, at which
+   * point the block is genuinely out of order rather than merely ambiguous. So a
+   * tie is not a harmless steady state, it is the thing that decays into the bug.
+   *
+   * Preferring a free slot costs nothing when one exists. When none does, the tie
+   * is unavoidable here and {@link positionCollides} is what tells the caller to
+   * spend one bulk reorder undoing it, which also re-spaces the block so the next
+   * create finds a slot again.
    */
   private bottomOfBlock(primary: VoiceBasedChannel, blockIds: string[] | undefined): number {
     const block = new Set(blockIds ?? []);
-    if (block.size === 0) return primary.rawPosition;
     const siblings = [...primary.guild.channels.cache.values()]
       .filter((c): c is VoiceBasedChannel => c.isVoiceBased() && c.parentId === primary.parentId)
       .sort((a, b) => a.rawPosition - b.rawPosition || (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
@@ -356,9 +394,11 @@ export class DiscordVoiceActions implements VoiceActions {
     // below everything in between, including other creator channels and their
     // rooms. That would be a new fault, in a state the misorder check cannot see.
     let position = primary.rawPosition;
+    let end = start;
     for (let i = start + 1; i < siblings.length; i += 1) {
       if (block.has(siblings[i]!.id)) {
         position = siblings[i]!.rawPosition;
+        end = i;
         continue;
       }
       // A private room's "join" companion sits directly above the room it fronts
@@ -370,7 +410,34 @@ export class DiscordVoiceActions implements VoiceActions {
       if (block.has(siblings[i + 1]?.id ?? '')) continue;
       break;
     }
-    return position;
+    // One clear position below the block, when nothing already sits there.
+    // `end` is the last channel that belongs to this block, so the gap is judged
+    // against whatever follows it rather than against the largest position any
+    // room holds, which a room dragged elsewhere would distort.
+    const next = siblings[end + 1];
+    return !next || next.rawPosition > position + 1 ? position + 1 : position;
+  }
+
+  positionCollides(guildId: string, channelId: string): Promise<boolean> {
+    // Cache only, never `guilds.fetch`. This runs on the join path after the room
+    // already exists and the member has been moved into it, so it must not be
+    // able to fail: a REST read here could reject and unwind a create that has
+    // already succeeded. A guild we cannot see answers "no collision", which
+    // leaves the order alone rather than reordering on a guess.
+    const guild = this.client.guilds.cache.get(guildId);
+    const channel = guild?.channels.cache.get(channelId);
+    if (!guild || !channel?.isVoiceBased()) return Promise.resolve(false);
+    // Read from the channel Discord actually created rather than predicting what
+    // it would assign: the whole reason a tie has to be undone is that Discord's
+    // own handling of one cannot be relied on.
+    const collides = [...guild.channels.cache.values()].some(
+      (c) =>
+        c.id !== channel.id &&
+        c.isVoiceBased() &&
+        c.parentId === channel.parentId &&
+        c.rawPosition === channel.rawPosition,
+    );
+    return Promise.resolve(collides);
   }
 
   /**
@@ -643,7 +710,9 @@ export class DiscordVoiceActions implements VoiceActions {
       // (minimal flicker; deterministic — no id tie-break).
       const insertAt = above ? pIdx : pIdx + 1;
       const desired = [...rest.slice(0, insertAt), ...secs, ...rest.slice(insertAt)];
-      await guild.channels.setPositions(desired.map((c, i) => ({ channel: c.id, position: i })));
+      await guild.channels.setPositions(
+        desired.map((c, i) => ({ channel: c.id, position: i * POSITION_STEP })),
+      );
     } catch (err) {
       this.logger?.warn({ err, primaryChannelId }, 'failed to reposition secondaries');
     }
@@ -692,7 +761,9 @@ export class DiscordVoiceActions implements VoiceActions {
       // Below → just under the bottommost primary; above → just over the topmost.
       const insertAt = above ? Math.min(...primaryIdxs) : Math.max(...primaryIdxs) + 1;
       const desired = [...rest.slice(0, insertAt), ...secs, ...rest.slice(insertAt)];
-      await guild.channels.setPositions(desired.map((c, i) => ({ channel: c.id, position: i })));
+      await guild.channels.setPositions(
+        desired.map((c, i) => ({ channel: c.id, position: i * POSITION_STEP })),
+      );
     } catch (err) {
       this.logger?.warn({ err, primaryChannelIds }, 'failed to reposition group');
     }

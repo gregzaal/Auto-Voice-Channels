@@ -39,10 +39,13 @@ export class FakeVoiceView implements GuildVoiceView {
     const known = channelIds.filter((id) => this.positions.has(id));
     if (known.length === 0) return undefined;
     // Position only, and the sort is stable, so channels sharing a position keep
-    // the order they were asked about in. That models Discord's id tie-break
-    // rather than dodging it: callers ask in creation order, ids ascend with
-    // creation, and a primary is always older than its own rooms. Test ids are
-    // rarely snowflakes, so comparing them directly would model nothing.
+    // the order they were asked about in.
+    //
+    // This models the ordering the misorder check reasons about, which is OUR
+    // intended one, and deliberately not what a client renders: a Discord client
+    // was measured rendering a tied trio out of id order entirely. That is why a
+    // tie cannot be detected here at all, and why `positionCollides` exists as a
+    // separate question rather than being folded into this one.
     return known.sort((a, b) => this.positions.get(a)! - this.positions.get(b)!);
   }
 

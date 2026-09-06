@@ -625,25 +625,43 @@ export class VoiceFeature {
         await this.companionBlock(secondaries.map((s) => s.channelId)),
         group.above,
       );
-    } else if (misordered) {
-      // The block we inherited was already in the wrong order, which create-time
-      // placement cannot undo on its own — it can only put THIS room in the right
-      // slot. One bulk reorder puts the whole block back, and because it also
-      // gives every room a unique position, the check above passes from now on:
-      // this costs one call on the create that finds the damage, and none after.
-      //
-      // Contained on its own, because by this point the room exists and the
-      // member is in it. `repositionSecondaries` reads the join companions from
-      // Postgres, so a database blip there would otherwise reject a create that
-      // has already succeeded: no `created` result, no `/logging` line, and a
-      // task failure counted against this guild's circuit-breaker, all for a
-      // cosmetic reorder.
+    } else if (!gate?.orderRepairDisabled) {
+      /**
+       * One bulk reorder, for either of two reasons, and never two.
+       *
+       * `misordered` is the block we INHERITED being wrong, which create-time
+       * placement cannot undo on its own: it can only put THIS room in the right
+       * slot. `tied` is this room having had nowhere unique to land, which decays
+       * into the first problem if left, because a client renders a tie in an
+       * order of its own and Discord eventually makes that order permanent.
+       *
+       * Asked in that order so the cheap answer settles it: a block already known
+       * to be wrong is getting the reorder regardless, and the collision check is
+       * a cache read that would change nothing.
+       *
+       * The reorder also re-spaces the block, so the next create finds a free slot
+       * and needs no reorder at all. That is what keeps this off the common path
+       * rather than on every join.
+       */
+      // Contained as ONE unit, the deciding included, because by this point the
+      // room exists and the member is in it. `repositionSecondaries` reads the
+      // join companions from Postgres, so a blip there would otherwise reject a
+      // create that has already succeeded: no `created` result, no `/logging`
+      // line, and a task failure counted against this guild's circuit-breaker,
+      // all for a cosmetic reorder. The collision check sits inside the same
+      // guard rather than above it for that reason, whatever its implementation
+      // happens to do today.
       try {
-        this.deps.logger.info(
-          { guildId, primaryId: channelId, secondaryId: newChannelId },
-          'repairing out-of-order secondaries',
-        );
-        await this.repositionSecondaries(guildId, channelId, above);
+        const tied =
+          misordered ||
+          ((await this.deps.actions.positionCollides?.(guildId, newChannelId)) ?? false);
+        if (tied) {
+          this.deps.logger.info(
+            { guildId, primaryId: channelId, secondaryId: newChannelId, misordered },
+            'repairing out-of-order secondaries',
+          );
+          await this.repositionSecondaries(guildId, channelId, above);
+        }
       } catch (err) {
         this.deps.logger.warn(
           { guildId, primaryId: channelId, err },

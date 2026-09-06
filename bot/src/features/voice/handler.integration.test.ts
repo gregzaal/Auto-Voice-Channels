@@ -522,6 +522,114 @@ describe('VoiceFeature (integration)', () => {
       expect(actions.ofType('reposition')).toHaveLength(0);
     });
 
+    it('repairs a block that was in order when the new room had to tie', async () => {
+      // A tie is not a harmless resting state: the client renders one in an order
+      // of its own, and Discord later makes that order permanent. So a create with
+      // nowhere unique to land buys the reorder even though nothing was wrong yet.
+      await seedRooms();
+      inOneCategory();
+      voice.setPosition(PRIMARY, 60);
+      voice.setPosition('room-1', 61);
+      voice.setPosition('room-2', 62);
+      actions.collidingChannels.add('sec-1');
+      await join();
+
+      const repairs = actions.ofType('reposition');
+      expect(repairs).toHaveLength(1);
+      expect(repairs[0]!.channelIds).toEqual(['room-1', 'room-2', 'sec-1']);
+    });
+
+    it('spends exactly one reorder when the block is BOTH misordered and tied', async () => {
+      await seedRooms();
+      inOneCategory();
+      voice.setPosition(PRIMARY, 60);
+      voice.setPosition('room-2', 61);
+      voice.setPosition('room-1', 62);
+      actions.collidingChannels.add('sec-1');
+      await join();
+
+      expect(actions.ofType('reposition')).toHaveLength(1);
+    });
+
+    it('does not reorder when the new room landed on a free slot', async () => {
+      await seedRooms();
+      inOneCategory();
+      voice.setPosition(PRIMARY, 60);
+      voice.setPosition('room-1', 61);
+      voice.setPosition('room-2', 62);
+      await join();
+      expect(actions.ofType('reposition')).toHaveLength(0);
+    });
+
+    it('honours voice.order_repair_disabled for a tie as well', async () => {
+      await seedRooms();
+      inOneCategory();
+      voice.setPosition(PRIMARY, 60);
+      voice.setPosition('room-1', 61);
+      voice.setPosition('room-2', 62);
+      actions.collidingChannels.add('sec-1');
+      const gated = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+        gate: { allowCreate: () => Promise.resolve({ allowed: true, orderRepairDisabled: true }) },
+      });
+      const alice = member('alice');
+      voice.put(PRIMARY, alice);
+      await gated.handleVoiceStateUpdate({
+        guildId: GUILD,
+        member: alice,
+        afterChannelId: PRIMARY,
+      });
+      expect(actions.ofType('create')).toHaveLength(1);
+      expect(actions.ofType('reposition')).toHaveLength(0);
+    });
+
+    it('still reports the room as created when the collision check throws', async () => {
+      // The check runs after the room exists and the member is in it, so it has
+      // to be inside the same guard as the reorder. It sat one line above it once.
+      await seedRooms();
+      inOneCategory();
+      const throwing = new RecordingVoiceActions();
+      throwing.positionCollides = () => Promise.reject(new Error('cache is having a moment'));
+      const feat = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        guilds,
+        actions: throwing,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+      });
+      const alice = member('alice');
+      voice.put(PRIMARY, alice);
+      await expect(
+        feat.handleVoiceStateUpdate({ guildId: GUILD, member: alice, afterChannelId: PRIMARY }),
+      ).resolves.toBeDefined();
+      expect(await secondaries.get('sec-1')).toBeDefined();
+      expect(throwing.ofType('move').map((m) => m.channelId)).toContain('sec-1');
+    });
+
+    it('repairs a tie on an above primary too', async () => {
+      await autoChannels.upsert(GUILD, PRIMARY, { name: '## [@@game_name@@]', above: true });
+      await seedRooms();
+      inOneCategory();
+      // Correct for "above", so only the tie can ask for the reorder.
+      voice.setPosition('room-1', 60);
+      voice.setPosition('room-2', 61);
+      voice.setPosition(PRIMARY, 62);
+      actions.collidingChannels.add('sec-1');
+      await join();
+
+      const repairs = actions.ofType('reposition');
+      expect(repairs).toHaveLength(1);
+      expect(repairs[0]!.above).toBe(true);
+    });
+
     it('repairs against the primary’s own above/below setting', async () => {
       await autoChannels.upsert(GUILD, PRIMARY, { name: '## [@@game_name@@]', above: true });
       await seedRooms();

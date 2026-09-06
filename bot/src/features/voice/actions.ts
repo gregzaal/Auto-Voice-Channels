@@ -63,6 +63,22 @@ export interface RenameResult {
 export interface VoiceActions {
   /** Creates a voice channel and returns its new id. */
   createVoiceChannel(input: CreateVoiceChannelInput): Promise<string>;
+  /**
+   * Whether `channelId` shares its position with another channel in its category.
+   *
+   * Asked after a create, because a shared position is not the harmless state the
+   * documented position-then-id sort implies: clients were measured rendering one
+   * tied trio out of id order, and Discord later normalises such a tie into unique
+   * positions that preserve whatever order it had rather than ours. Undoing it
+   * costs one bulk reorder, which is why the question is worth asking at all.
+   *
+   * Optional: absent means "cannot say", and a caller must then leave the order
+   * alone rather than reorder a guild's channels on an assumption. Implementations
+   * must answer from state they already hold: this is asked on the join path after
+   * the room exists and the member has been moved, so a call that can fail would
+   * be able to unwind a create that has already succeeded.
+   */
+  positionCollides?(guildId: string, channelId: string): Promise<boolean>;
   /** Deletes a channel. Must tolerate an already-deleted channel (idempotent). */
   deleteChannel(guildId: string, channelId: string): Promise<void>;
   /**
@@ -216,6 +232,13 @@ export class RecordingVoiceActions implements VoiceActions {
       ...(input.nsfw !== undefined ? { nsfw: input.nsfw } : {}),
     });
     return Promise.resolve(channelId);
+  }
+
+  /** Channel ids that {@link positionCollides} reports as sharing a position. */
+  readonly collidingChannels = new Set<string>();
+
+  positionCollides(_guildId: string, channelId: string): Promise<boolean> {
+    return Promise.resolve(this.collidingChannels.has(channelId));
   }
 
   deleteChannel(guildId: string, channelId: string): Promise<void> {
