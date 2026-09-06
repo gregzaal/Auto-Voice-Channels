@@ -529,6 +529,22 @@ export const AT_TOKENS: readonly string[] = [
 ];
 
 /**
+ * The tokens substituted at step 9, AFTER conditionals resolve.
+ *
+ * They can never be conditional operands, and the reason is different from the
+ * one that rules out `##`: at the moment a condition is evaluated these are
+ * still their own literal text, so the test never matches whatever the value
+ * would have been. The ordering is deliberate. All four carry free text written
+ * by a member or by a game, and substituting them earlier would let a nickname
+ * of `a ?? b // c` split the very conditional it sits inside, which is the
+ * defect `collapseMarkers` exists to stop for the party tokens.
+ *
+ * `GAME` is the supported way to test the first of them: a VARIABLE carries the
+ * value into the comparison without putting it into the template string, so it
+ * is safe by construction. The other three have no such counterpart
+ * (`plans/name-tokens.md` §5.1).
+ */
+/**
  * The tokens that can be used as a `{{…}}` conditional operand, i.e. those that
  * are substituted before conditionals resolve AND substitute a bare integer.
  *
@@ -539,6 +555,13 @@ export const AT_TOKENS: readonly string[] = [
  * because the assistant's validator lints against it and the system prompt is
  * tested against it (`plans/name-tokens.md` §5.1).
  */
+export const LATE_TOKENS: readonly string[] = [
+  '@@game_name@@',
+  '@@owner@@',
+  '@@creator@@',
+  '@@stream_name@@',
+];
+
 export const OPERAND_TOKENS: readonly string[] = [
   '@@num@@',
   '@@num_others@@',

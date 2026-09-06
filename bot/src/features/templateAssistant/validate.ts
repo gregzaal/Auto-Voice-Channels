@@ -2,6 +2,7 @@ import {
   AT_TOKENS,
   CONDITION_VARIABLES,
   MAX_CHANNEL_NAME_LENGTH,
+  LATE_TOKENS,
   MAX_STATUS_LENGTH,
   OPERAND_TOKENS,
 } from '../voice/nameTemplate.js';
@@ -181,12 +182,24 @@ export function lintTemplate(template: string, field: TemplateField): TemplateIs
      * its own with a message that names the ones that do work.
      */
     if (looksLikeToken(variable)) {
+      /**
+       * Two different reasons a token fails here, and conflating them sends the
+       * author looking for the wrong fix. `##` is substituted in time but is
+       * not a number; `@@owner@@` would be fine as text but is not substituted
+       * until after the condition has already been decided.
+       */
       add(
         'token-in-condition',
-        `\`${variable}\` cannot go on the left of a condition: it does not become a ` +
-          'plain number, so the test silently never matches. The tokens that can be ' +
-          `compared are: ${OPERAND_TOKENS.join(', ')}. (\`##\` renders \`#4\` and \`+#\` ` +
-          'renders `IV`, which is why neither works. Use `$#` for the bare number.)',
+        (LATE_TOKENS as string[]).includes(variable)
+          ? `\`${variable}\` cannot go on the left of a condition: it is filled in ` +
+              'after conditions are worked out, so the test never matches. Use the ' +
+              '`GAME` variable to test the game. There is no variable for the owner ' +
+              "or the stream title, so test the owner's role with `{{ROLE:id ?? …}}` " +
+              'instead.'
+          : `\`${variable}\` cannot go on the left of a condition: it does not become a ` +
+              'plain number, so the test silently never matches. The tokens that can be ' +
+              `compared are: ${OPERAND_TOKENS.join(', ')}. (\`##\` renders \`#4\` and ` +
+              '`+#` renders `IV`, which is why neither works. Use `$#` for the bare number.)',
       );
       continue;
     }
