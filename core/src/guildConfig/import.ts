@@ -50,6 +50,12 @@ export const IMPORT_LIMITS = {
   templateChars: 1000,
   /** `MAX_USER_LIMIT`. */
   userLimit: 99,
+  /**
+   * `MAX_START_AT`. Discord caps a guild at 500 channels, so a first-room
+   * number beyond this describes a set that cannot exist, and `+#` on a large
+   * number renders a wall of roman numerals into a 100-character name.
+   */
+  startAt: 9999,
 } as const;
 
 export type ChannelKind = 'voice' | 'text' | 'category' | 'other';
@@ -287,11 +293,12 @@ export interface ImportPlan {
 
 export type DiffResult = { ok: true; plan: ImportPlan } | { ok: false; refusals: ImportNote[] };
 
-/** The six fields of `primaryTemplateSchema`. */
+/** The seven fields of `primaryTemplateSchema`. */
 const PRIMARY_FIELDS = [
   'name',
   'status',
   'limit',
+  'startAt',
   'above',
   'defaultPrivate',
   'inheritperms',
@@ -1219,6 +1226,11 @@ function validateTemplateField(
     case 'limit':
       if (typeof value !== 'number' || !Number.isInteger(value)) return drop();
       return value < 0 || value > limits.userLimit ? drop() : value;
+    case 'startAt':
+      // Bounded so an imported file cannot push `##` into absurd territory or
+      // hand `toRoman` a number it would render as thousands of characters.
+      if (typeof value !== 'number' || !Number.isInteger(value)) return drop();
+      return value < 0 || value > limits.startAt ? drop() : value;
     case 'above':
     case 'defaultPrivate':
       return typeof value === 'boolean' ? value : drop();

@@ -96,7 +96,7 @@ export const exportedSettingsSchema = z.object({
 export type ExportedSettings = z.infer<typeof exportedSettingsSchema>;
 
 /**
- * A creator channel's template on the wire: all six fields of
+ * A creator channel's template on the wire: all seven fields of
  * `primaryTemplateSchema`, each nullable, unknown keys preserved.
  *
  * `passthrough` is load-bearing for expand/contract (golden rule 3): during a
@@ -109,6 +109,7 @@ export const exportedPrimaryTemplateSchema = z
     name: z.string().nullable(),
     status: z.string().nullable(),
     limit: z.number().int().nullable(),
+    startAt: z.number().int().nullable(),
     above: z.boolean().nullable(),
     defaultPrivate: z.boolean().nullable(),
     inheritperms: z.string().nullable(),

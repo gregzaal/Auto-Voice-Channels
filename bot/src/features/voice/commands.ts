@@ -60,9 +60,27 @@ export class VoiceCommands {
       return fail(`The limit must be a whole number between 0 and ${MAX_USER_LIMIT}.`);
     }
     await this.deps.actions.setUserLimit(guildId, secondary.row.channelId, limit);
+    // `@@limit@@`, `@@slots@@` and `{{FULL}}` read the LIVE limit, so the name
+    // has to be recomputed. Deliberately NOT awaited: the reply below has to
+    // land inside Discord's 3-second interaction window, and a rate-limited
+    // rename spends 2.5s in `renameChannel`'s probe before it returns. For the
+    // overwhelming majority of guilds, whose template mentions none of these
+    // tokens, the render is identical and no rename is issued at all.
+    this.rerenderDetached(guildId, secondary.row.channelId, 'limit');
     return ok(
       limit === 0 ? "Removed this channel's user limit." : `Set the user limit to ${limit}.`,
     );
+  }
+
+  /**
+   * Re-renders a channel without making the caller wait, and without letting a
+   * failure escape as an unhandled rejection (which would cross the per-guild
+   * boundary that exists to contain exactly this).
+   */
+  private rerenderDetached(guildId: string, channelId: string, reason: string): void {
+    void this.deps.feature.rerenderSecondary(guildId, channelId).catch((err: unknown) => {
+      this.deps.logger.warn({ err, guildId, channelId, reason }, 'detached re-render failed');
+    });
   }
 
   /** Removes the channel's user limit. Owner only. */

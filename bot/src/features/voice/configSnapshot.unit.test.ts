@@ -155,11 +155,13 @@ describe('buildExportFile', () => {
       'inheritperms',
       'limit',
       'name',
+      'startAt',
       'status',
     ]);
     // Stored row has no `status`, so the wire value is null, not `''`.
     expect(template.status).toBeNull();
     expect(template.inheritperms).toBeNull();
+    expect(template.startAt).toBeNull();
   });
 
   /**

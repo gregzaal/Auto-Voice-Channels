@@ -10,8 +10,19 @@ import type {
 import { isEntitled } from '@avc/core';
 import type { VoiceActions } from './actions.js';
 import type { GuildVoiceView, MemberActivity, VoiceMember, VoiceStateEvent } from './types.js';
-import { getGameName, MAX_STATUS_LENGTH, renderChannelName } from './nameTemplate.js';
-import { displayName, groupKeyFor, parseVoiceSettings, readGroups } from './guildSettings.js';
+import {
+  getGameName,
+  MAX_STATUS_LENGTH,
+  renderChannelName,
+  type RenderContext,
+} from './nameTemplate.js';
+import {
+  displayName,
+  groupKeyFor,
+  parseVoiceSettings,
+  readGroups,
+  type VoiceSettings,
+} from './guildSettings.js';
 import { isPermissionError } from './discordAdapter.js';
 import {
   permissionProblemMessage,
@@ -23,6 +34,23 @@ import type { CommandResult } from './commands.js';
 /** A fresh 31-bit random seed for a channel's `[[random]]` picks. */
 function randomSeed(): number {
   return Math.floor(Math.random() * 0x7fffffff);
+}
+
+/**
+ * Everything a render context needs that is not derivable from the settings.
+ *
+ * `channelId` is the LIVE channel, read for its user limit. `startAt` comes
+ * from the owning primary's template, and is absent for an adopted channel.
+ */
+export interface RenderContextInput {
+  channelId: string;
+  settings: VoiceSettings;
+  members: VoiceMember[];
+  index: number;
+  ownerId?: string | null;
+  seed?: number | undefined;
+  isPrivate?: boolean;
+  startAt?: number | undefined;
 }
 
 /** Whether two id lists are element-wise equal (to skip no-op roster writes). */
@@ -436,13 +464,24 @@ export class VoiceFeature {
     // fixed for this channel's lifetime and never trigger a later rename.
     const seed = randomSeed();
     const name = renderChannelName(template, {
-      index,
-      members: [member],
-      aliases: settings.aliases,
-      general: settings.general,
-      creatorName: displayName(settings, member),
-      creator: member,
-      seed,
+      ...this.buildRenderContext({
+        channelId,
+        settings,
+        members: [member],
+        index,
+        ownerId: member.id,
+        seed,
+        // The room does not exist yet, so `{{PRIVATE}}` has to come from the
+        // primary's intent. `makePrivateOnCreate` runs AFTER this render, so
+        // reading it back would render `false` and cost an immediate second
+        // rename on every default-private room.
+        isPrivate: primary?.template.defaultPrivate === true,
+        startAt: primary?.template.startAt,
+      }),
+      // `buildRenderContext` reads the LIVE channel's limit, and the live
+      // channel here is the CREATOR channel, which is not the room being made.
+      // The room is created with the primary's configured default, so that is
+      // the honest value for this one render.
       userLimit: primary?.template.limit ?? 0,
     });
 
@@ -826,15 +865,16 @@ export class VoiceFeature {
     const guild = await this.deps.guilds.ensure(guildId);
     const settings = parseVoiceSettings(guild.settings);
     const members = this.deps.voice.membersInChannel(channelId);
-    const owner = row.ownerId ? members.find((m) => m.id === row.ownerId) : undefined;
-    const renderCtx = {
-      index: 0,
+    // An adopted standalone channel has no privacy model and no owning primary,
+    // so `{{PRIVATE}}` is false and the numbering tokens keep rendering `?`.
+    const renderCtx = this.buildRenderContext({
+      channelId,
+      settings,
       members,
-      aliases: settings.aliases,
-      general: settings.general,
-      ...(row.state.seed !== undefined ? { seed: row.state.seed } : {}),
-      ...(owner ? { creatorName: displayName(settings, owner), creator: owner } : {}),
-    };
+      index: 0,
+      ownerId: row.ownerId,
+      seed: row.state.seed,
+    });
 
     const renderedName =
       row.template.name !== undefined ? renderChannelName(row.template.name, renderCtx) : undefined;
@@ -1118,15 +1158,14 @@ export class VoiceFeature {
     const guild = await this.deps.guilds.ensure(guildId);
     const settings = parseVoiceSettings(guild.settings);
     const members = this.deps.voice.membersInChannel(channelId);
-    const owner = row.ownerId ? members.find((m) => m.id === row.ownerId) : undefined;
-    const renderCtx = {
-      index: 0,
+    const renderCtx = this.buildRenderContext({
+      channelId,
+      settings,
       members,
-      aliases: settings.aliases,
-      general: settings.general,
-      ...(row.state.seed !== undefined ? { seed: row.state.seed } : {}),
-      ...(owner ? { creatorName: displayName(settings, owner), creator: owner } : {}),
-    };
+      index: 0,
+      ownerId: row.ownerId,
+      seed: row.state.seed,
+    });
     const nameTpl = row.template.name ?? '';
     const statusTpl = row.template.status ?? '';
     return {
@@ -1160,6 +1199,40 @@ export class VoiceFeature {
    * Returns the new name when a rename was (or, under dry-run, would be) applied,
    * plus whether a rate limit deferred it; an empty object when nothing changed.
    */
+  /**
+   * The ONE place a {@link RenderContext} is assembled.
+   *
+   * It exists because there were eight hand-assembled ones and they had already
+   * diverged: `userLimit` was passed on the create path and nowhere else, so
+   * `@@party_size@@`'s fallback worked exactly once per channel and silently
+   * degraded to `0` on every re-render afterwards. That is not "somebody forgot
+   * an argument", it is "there are eight places to forget", so
+   * `renderContextGuard.unit.test.ts` reads this file and fails if a new call
+   * site hand-rolls one (`plans/name-tokens.md` §5.3).
+   *
+   * The user limit is read LIVE rather than from `primary.template.limit`,
+   * which is the configured default: `/limit` writes straight through to
+   * Discord and stores nothing. An unknown limit reads as unlimited, so
+   * `{{FULL}}` fails open and never claims a room is full on missing data.
+   */
+  buildRenderContext(input: RenderContextInput): RenderContext {
+    const { settings, members, channelId } = input;
+    const owner = input.ownerId ? members.find((m) => m.id === input.ownerId) : undefined;
+    return {
+      index: input.index,
+      members,
+      aliases: settings.aliases,
+      general: settings.general,
+      userLimit: this.deps.voice.userLimitOf?.(channelId) ?? 0,
+      isPrivate: input.isPrivate ?? false,
+      // `startAt` is what the admin typed (the first room's number), so the
+      // offset is one less. Absent means the default, 1.
+      numberOffset: input.startAt === undefined ? 0 : input.startAt - 1,
+      ...(input.seed !== undefined ? { seed: input.seed } : {}),
+      ...(owner ? { creatorName: displayName(settings, owner), creator: owner } : {}),
+    };
+  }
+
   async rerenderSecondary(
     guildId: string,
     channelId: string,
@@ -1174,18 +1247,19 @@ export class VoiceFeature {
     const guild = await this.deps.guilds.ensure(guildId);
     const settings = parseVoiceSettings(guild.settings);
     const primary = await this.deps.autoChannels.get(secondary.primaryChannelId);
-    const owner = secondary.ownerId ? members.find((m) => m.id === secondary.ownerId) : undefined;
     // Reconciliation may pass a freshly-computed sibling position to renumber
     // `##` tokens after a middle channel was deleted; otherwise use the stored one.
     const index = opts.index ?? secondary.state.index ?? 0;
-    const renderCtx = {
-      index,
+    const renderCtx = this.buildRenderContext({
+      channelId,
+      settings,
       members,
-      aliases: settings.aliases,
-      general: settings.general,
-      ...(secondary.state.seed !== undefined ? { seed: secondary.state.seed } : {}),
-      ...(owner ? { creatorName: displayName(settings, owner), creator: owner } : {}),
-    };
+      index,
+      ownerId: secondary.ownerId,
+      seed: secondary.state.seed,
+      isPrivate: secondary.state.private === true,
+      startAt: primary?.template.startAt,
+    });
 
     // Name: per-channel `/name` override → primary template → server default.
     const nameTemplate =
@@ -1479,15 +1553,19 @@ export class VoiceFeature {
 
     let renderedName: string | undefined;
     if (inGuild) {
-      const owner = secondary.ownerId ? members.find((m) => m.id === secondary.ownerId) : undefined;
-      renderedName = renderChannelName(effectiveTemplate, {
-        index: secondary.state.index ?? 0,
-        members,
-        aliases: settings.aliases,
-        general: settings.general,
-        ...(secondary.state.seed !== undefined ? { seed: secondary.state.seed } : {}),
-        ...(owner ? { creatorName: displayName(settings, owner), creator: owner } : {}),
-      });
+      renderedName = renderChannelName(
+        effectiveTemplate,
+        this.buildRenderContext({
+          channelId,
+          settings,
+          members,
+          index: secondary.state.index ?? 0,
+          ownerId: secondary.ownerId,
+          seed: secondary.state.seed,
+          isPrivate: secondary.state.private === true,
+          startAt: primary?.template.startAt,
+        }),
+      );
     }
 
     return {
@@ -1593,15 +1671,16 @@ export class VoiceFeature {
     }
     const primary = await this.deps.autoChannels.get(secondary.primaryChannelId);
     const members = this.deps.voice.membersInChannel(channelId);
-    const owner = secondary.ownerId ? members.find((m) => m.id === secondary.ownerId) : undefined;
-    const renderCtx = {
-      index: secondary.state.index ?? 0,
+    const renderCtx = this.buildRenderContext({
+      channelId,
+      settings,
       members,
-      aliases: settings.aliases,
-      general: settings.general,
-      ...(secondary.state.seed !== undefined ? { seed: secondary.state.seed } : {}),
-      ...(owner ? { creatorName: displayName(settings, owner), creator: owner } : {}),
-    };
+      index: secondary.state.index ?? 0,
+      ownerId: secondary.ownerId,
+      seed: secondary.state.seed,
+      isPrivate: secondary.state.private === true,
+      startAt: primary?.template.startAt,
+    });
 
     // The current/effective template for a field depends on the editor's scope:
     // a `/name` panel edits the per-channel override; `/template` edits the primary.

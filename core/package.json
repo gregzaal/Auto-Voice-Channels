@@ -12,6 +12,10 @@
     "./db": {
       "types": "./dist/db/index.d.ts",
       "default": "./dist/db/index.js"
+    },
+    "./template": {
+      "types": "./dist/template/index.d.ts",
+      "default": "./dist/template/index.js"
     }
   },
   "main": "./dist/index.js",

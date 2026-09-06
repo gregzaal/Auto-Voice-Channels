@@ -379,6 +379,14 @@ async function main(): Promise<void> {
     actions,
     voice,
     logger,
+    // Deferred through a closure because `voiceFeature` is constructed below
+    // and already reaches back the other way (`makePrivateOnCreate`). Only ever
+    // called from a live command, long after both exist.
+    // The explicit return type is load-bearing: without it `privacy` and
+    // `voiceFeature` infer through each other (privacy -> rerender ->
+    // voiceFeature -> onSecondaryRemoved -> privacy) and both collapse to `any`.
+    rerender: (gid: string, cid: string): Promise<unknown> =>
+      voiceFeature.rerenderSecondary(gid, cid),
   });
   const voiceFeature = new VoiceFeature({
     autoChannels,

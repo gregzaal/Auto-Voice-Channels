@@ -5,37 +5,52 @@ import type { Database } from '../db/client.js';
 import { DEFAULT_FLEET, type Fleet } from '../domain/fleets.js';
 import { secondaryChannels } from '../db/schema.js';
 
-export const secondaryStateSchema = z.object({
-  /** Last rendered channel name. */
-  name: z.string().optional(),
-  /** Last rendered voice-channel status (for change detection; '' = cleared). */
-  status: z.string().optional(),
-  /** Per-channel voice-status template override (set via `/name` status edit). */
-  statusTemplate: z.string().optional(),
-  /** Whether the channel was created private (locked to @everyone). */
-  private: z.boolean().optional(),
-  /** Stable sibling index (`i`) captured at creation, for `##`-style tokens. */
-  index: z.number().int().min(0).optional(),
-  /**
-   * Per-channel name-template override set via `/name`. When present it replaces
-   * the primary's template for this channel only; `/name reset` clears it. It is
-   * still re-evaluated on game/membership changes (it may contain tokens).
-   */
-  template: z.string().optional(),
-  /**
-   * Stable random seed for `[[random]]` template picks, generated once at
-   * creation so a channel's random emoji/word never changes (no rename churn).
-   */
-  seed: z.number().int().optional(),
-  /**
-   * Member ids in voice-join (arrival) order, maintained as members come and go.
-   * Discord exposes no voice-join timestamp, so we track order ourselves to pick
-   * the longest-present member as the next owner when the owner leaves. Self-
-   * heals after a restart/gap (present-but-untracked members append in cache
-   * order). Stale ids (members who left) are pruned on the next leave.
-   */
-  roster: z.array(z.string()).optional(),
-});
+/**
+ * **`passthrough` is load-bearing for expand/contract (golden rule 3), and this
+ * is the fourth jsonb column schema to need it.** A bare `z.object` STRIPS
+ * unknown keys, so during a rolling deploy an old instance doing any
+ * read-modify-write on this column (a `/name` edit, a roster update, a privacy
+ * toggle) silently drops whatever a newer build wrote. `preseed.ts` already
+ * works around exactly this by spreading the raw object.
+ *
+ * It ships AHEAD of the first field that depends on it, deliberately: the
+ * stripper is the OLD image, which by definition does not carry this change, so
+ * adding a field in the same release would still lose it for the length of the
+ * rollout (`plans/name-tokens.md` §6.5).
+ */
+export const secondaryStateSchema = z
+  .object({
+    /** Last rendered channel name. */
+    name: z.string().optional(),
+    /** Last rendered voice-channel status (for change detection; '' = cleared). */
+    status: z.string().optional(),
+    /** Per-channel voice-status template override (set via `/name` status edit). */
+    statusTemplate: z.string().optional(),
+    /** Whether the channel was created private (locked to @everyone). */
+    private: z.boolean().optional(),
+    /** Stable sibling index (`i`) captured at creation, for `##`-style tokens. */
+    index: z.number().int().min(0).optional(),
+    /**
+     * Per-channel name-template override set via `/name`. When present it replaces
+     * the primary's template for this channel only; `/name reset` clears it. It is
+     * still re-evaluated on game/membership changes (it may contain tokens).
+     */
+    template: z.string().optional(),
+    /**
+     * Stable random seed for `[[random]]` template picks, generated once at
+     * creation so a channel's random emoji/word never changes (no rename churn).
+     */
+    seed: z.number().int().optional(),
+    /**
+     * Member ids in voice-join (arrival) order, maintained as members come and go.
+     * Discord exposes no voice-join timestamp, so we track order ourselves to pick
+     * the longest-present member as the next owner when the owner leaves. Self-
+     * heals after a restart/gap (present-but-untracked members append in cache
+     * order). Stale ids (members who left) are pruned on the next leave.
+     */
+    roster: z.array(z.string()).optional(),
+  })
+  .passthrough();
 
 export type SecondaryState = z.infer<typeof secondaryStateSchema>;
 

@@ -22,6 +22,17 @@ export const primaryTemplateSchema = z
     status: z.string().optional(),
     /** Default user limit applied to spawned secondaries (0 = unlimited). */
     limit: z.number().int().min(0).optional(),
+    /**
+     * The number the first room under this primary renders as. Absent = 1.
+     *
+     * A property of the channel SET, not of one token, so it shifts `##`,
+     * `$#`, `$0#…`, `+#` and `@@nato@@` together. Exists so a guild with
+     * permanent channels 1 to 3 can continue at 4, and it is a stored field
+     * rather than a `$#+2` token suffix precisely because a suffix would have
+     * to be parsed, documented and taught to every surface for what is one
+     * integer (`plans/name-tokens.md` §6.9).
+     */
+    startAt: z.number().int().min(0).optional(),
     /** Position secondaries above (`true`) or below (default — absent/`false`) the primary. */
     above: z.boolean().optional(),
     /**

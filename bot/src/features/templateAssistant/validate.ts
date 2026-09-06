@@ -3,6 +3,7 @@ import {
   CONDITION_VARIABLES,
   MAX_CHANNEL_NAME_LENGTH,
   MAX_STATUS_LENGTH,
+  OPERAND_TOKENS,
 } from '../voice/nameTemplate.js';
 import { isKnownStyleMode } from '../voice/stringTransforms.js';
 
@@ -88,6 +89,29 @@ function variableOf(condition: string): string {
 }
 
 /**
+ * Whether a condition's left side is something the engine can actually resolve:
+ * a variable, a token that substitutes a bare integer, or an integer literal.
+ *
+ * The token half is the part that changed. A token on the left used to be
+ * uniformly broken; now the numeric ones work and the rest still do not, so
+ * this reads {@link OPERAND_TOKENS} rather than restating the list
+ * (`plans/name-tokens.md` §5.1).
+ */
+function resolvableOperand(text: string): boolean {
+  const t = text.trim();
+  return (
+    (CONDITION_VARIABLES as string[]).includes(t) ||
+    (OPERAND_TOKENS as string[]).includes(t) ||
+    /^-?\d+$/.test(t)
+  );
+}
+
+/** Whether a left side is a token at all, resolvable or not. */
+function looksLikeToken(text: string): boolean {
+  return text.includes('@@') || text.includes('#');
+}
+
+/**
  * Structural lint of a template, before it is rendered.
  *
  * `channelKind` is advisory only: the numbering tokens render `?` on a
@@ -144,25 +168,34 @@ export function lintTemplate(template: string, field: TemplateField): TemplateIs
       );
       continue;
     }
-    // §9 finding 3 + finding 4: the model's most stubborn failure was putting a
-    // token on the left of a condition. It renders to nothing at all, so only a
-    // structural check catches it.
-    if (condition.includes('@@') || condition.includes('#')) {
+    const variable = variableOf(condition);
+    if (variable === '') continue;
+    if (resolvableOperand(variable)) continue;
+    /**
+     * §9 finding 3 + finding 4: the model's most stubborn failure was putting a
+     * token on the left of a condition, which rendered to nothing at all.
+     *
+     * Counting tokens is no longer the test, because the numeric ones now work.
+     * What is still broken is a token that substitutes something other than a
+     * bare integer, and it is broken the same silent way, so it keeps a lint of
+     * its own with a message that names the ones that do work.
+     */
+    if (looksLikeToken(variable)) {
       add(
         'token-in-condition',
-        'A token cannot go inside a `{{…}}` condition (it silently never matches). ' +
-          'Only the documented variables can be tested, and there is no variable for ' +
-          'the number of people in the channel.',
+        `\`${variable}\` cannot go on the left of a condition: it does not become a ` +
+          'plain number, so the test silently never matches. The tokens that can be ' +
+          `compared are: ${OPERAND_TOKENS.join(', ')}. (\`##\` renders \`#4\` and \`+#\` ` +
+          'renders `IV`, which is why neither works. Use `$#` for the bare number.)',
       );
+      continue;
     }
-    const variable = variableOf(condition);
-    if (variable !== '' && !(CONDITION_VARIABLES as string[]).includes(variable)) {
-      add(
-        'unknown-variable',
-        `\`${variable}\` is not a conditional variable. Use one of: ` +
-          `${CONDITION_VARIABLES.join(', ')}.`,
-      );
-    }
+    add(
+      'unknown-variable',
+      `\`${variable}\` is not a conditional variable. Use one of: ` +
+        `${CONDITION_VARIABLES.join(', ')}, a token from ${OPERAND_TOKENS.join(', ')}, ` +
+        'or a plain number.',
+    );
   }
 
   // -- tokens --------------------------------------------------------------

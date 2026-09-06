@@ -60,20 +60,29 @@
       "expect": { "contains": ["PLAYERS", "//"] }
     },
     {
-      "$comment": "§1's cautionary case: not expressible. Must decline honestly, never invent a lock/privacy token. The locale mirrors production, where Discord always supplies one.",
-      "group": "honesty",
+      "$comment": "Was §1's cautionary decline case. {{PRIVATE}} exists now (plans/name-tokens.md §6.4), so the honest answer inverted: the model must USE it rather than apologise. The locale mirrors production, where Discord always supplies one.",
+      "group": "conditionals",
       "locale": "en-GB",
       "request": "Make the name say 'private' when the channel is locked.",
-      "expect": {
-        "declinesFor": ["lock", "private", "not possible", "cannot", "can't", "no token"],
-        "language": "en"
-      }
+      "expect": { "field": "name", "contains": ["PRIVATE"], "language": "en" }
     },
     {
-      "$comment": "§9 finding 4: the model repeatedly emitted {{@@num@@ >= 5 ?? busy}}, which silently renders to nothing.",
-      "group": "honesty",
+      "$comment": "§9 finding 4 inverted: a member-count conditional works now, so the model must reach for it. The risk this case guards has moved to the case below.",
+      "group": "conditionals",
       "request": "Add the word busy to the name when 5 or more people are in the channel.",
-      "expect": { "field": "name", "notContains": ["{{@@num", "{{##"] }
+      "expect": { "field": "name", "contains": ["{{@@num@@"], "notContains": ["{{##", "{{+#"] }
+    },
+    {
+      "$comment": "The OVERSHOOT that replaced §9 finding 4. ## renders '#4' and +# renders 'IV', so neither parses as a number and a condition using one silently never matches. The model has to pick $# instead, which is the distinction the prompt now spends a paragraph on.",
+      "group": "conditionals",
+      "request": "Show a star only on room number 1 and nothing on the others.",
+      "expect": { "field": "name", "notContains": ["{{##", "{{+#", "{{@@nato@@"] }
+    },
+    {
+      "$comment": "@@slots@@ is blank on an unlimited room, so an unguarded use renders 'spots left' with a hole in it. The guarded idiom is what the prompt teaches.",
+      "group": "conditionals",
+      "request": "Show how many spaces are left in the room.",
+      "expect": { "field": "name", "contains": ["@@limit@@"] }
     },
     {
       "$comment": "This case caught §9 finding 1 live: with no locale the explanation came back in Spanish for an English request. Discord always sends a locale, and buildUserTurn now always emits the Reply language line, so the locale here mirrors production.",

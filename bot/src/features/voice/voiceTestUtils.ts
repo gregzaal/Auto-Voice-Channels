@@ -14,6 +14,8 @@ export class FakeVoiceView implements GuildVoiceView {
   private readonly positions = new Map<string, number>();
   /** channelId → bitrate/region/video-quality/nsfw. Unset → "cannot say". */
   private readonly voiceProperties = new Map<string, VoiceChannelProperties>();
+  /** channelId → live user limit. Unset → "cannot say", read as unlimited. */
+  private readonly userLimits = new Map<string, number>();
   /** Whether Discord has handed us this guild. True unless a test says otherwise. */
   private available = true;
 
@@ -47,6 +49,20 @@ export class FakeVoiceView implements GuildVoiceView {
   /** Sets a channel's raw position, enabling {@link displayOrderOf} for it. */
   setPosition(channelId: string, position: number): void {
     this.positions.set(channelId, position);
+  }
+
+  /**
+   * Opt-in like {@link displayOrderOf}: a test that sets no limit gets
+   * `undefined`, which every caller reads as unlimited, so `{{FULL}}` fails
+   * open and no test that predates the capacity tokens changes behaviour.
+   */
+  userLimitOf(channelId: string): number | undefined {
+    return this.userLimits.get(channelId);
+  }
+
+  /** Sets a channel's live user limit, for `@@limit@@`/`@@slots@@`/`{{FULL}}`. */
+  setUserLimit(channelId: string, limit: number): void {
+    this.userLimits.set(channelId, limit);
   }
 
   voicePropertiesOf(channelId: string): VoiceChannelProperties | undefined {

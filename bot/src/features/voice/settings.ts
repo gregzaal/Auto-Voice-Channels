@@ -365,12 +365,23 @@ export class GuildSettingsService {
   async getPosition(
     guildId: string,
     secondaryChannelId: string,
-  ): Promise<{ found: boolean; above: boolean; primaryChannelId?: string }> {
+  ): Promise<{
+    found: boolean;
+    above: boolean;
+    startAt?: number | undefined;
+    primaryChannelId?: string;
+  }> {
     const primary = await this.primaryFor(guildId, secondaryChannelId);
     if (!primary) return { found: false, above: false };
+    const startAt = primary.template.startAt;
     return {
       found: true,
       above: primary.template.above === true,
+      // `passthrough` types an unknown key as `unknown`, and this one has been
+      // through `primaryTemplateSchema` since it was added, so it is a number
+      // or absent. Narrowed rather than cast, so a hand-edited row cannot make
+      // the render offset `NaN`.
+      ...(typeof startAt === 'number' ? { startAt } : {}),
       primaryChannelId: primary.channelId,
     };
   }
@@ -380,6 +391,7 @@ export class GuildSettingsService {
     guildId: string,
     secondaryChannelId: string,
     above: boolean,
+    startAt?: number | undefined,
   ): Promise<CommandResult> {
     const primary = await this.primaryFor(guildId, secondaryChannelId);
     if (!primary) return fail('You need to be in a bot-managed voice channel.');
@@ -387,9 +399,14 @@ export class GuildSettingsService {
     // Below is the default, so store nothing for it; only persist an explicit "above".
     if (above) next.above = true;
     else delete next.above;
+    // Same rule for numbering: 1 is the default, so absent rather than stored.
+    if (startAt !== undefined) next.startAt = startAt;
+    else delete next.startAt;
     await this.deps.autoChannels.upsert(guildId, primary.channelId, next);
+    const numbering = startAt === undefined ? '' : ` Rooms here now count from **${startAt}**.`;
     return ok(
-      `New rooms here will now be positioned **${above ? 'above' : 'below'}** the creator channel.`,
+      `New rooms here will now be positioned **${above ? 'above' : 'below'}** the creator ` +
+        `channel.${numbering}`,
     );
   }
 

@@ -218,4 +218,72 @@ describe('VoiceCommands (integration)', () => {
     expect(row!.ownerId).toBe('alice');
     expect(row!.originalCreator).toBe('alice');
   });
+
+  /**
+   * The commands that change something a template can read now trigger a
+   * re-render, and the cost of that has to stay at zero for the guilds whose
+   * templates say nothing about it.
+   *
+   * Both halves matter. The first proves the feature works. **The second is what
+   * protects the property the whole design leans on**: `rerenderSecondary`
+   * compares the rendered name against the stored one and issues nothing when
+   * they match, so `/limit`, `/private` and `/public` cost no renames for the
+   * overwhelming majority of guilds. A refactor that weakened the no-op guard
+   * would spend a rename per command on every room in the install base, against
+   * a budget of two per ten minutes.
+   *
+   * The re-render is deliberately not awaited by the command (the reply has to
+   * land inside Discord's 3-second window and a rate-limited rename spends 2.5s
+   * in its probe), so these await a macrotask to let it settle.
+   */
+  describe('re-renders triggered by a command', () => {
+    /**
+     * Waits for the detached re-render to land. Polling rather than a fixed
+     * number of ticks: it does several awaited database round trips, and how
+     * many turns that takes is not something a test should hard-code.
+     */
+    const settle = async (done: () => boolean): Promise<void> => {
+      for (let i = 0; i < 200; i++) {
+        if (done()) return;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    };
+
+    it('renames once when the template reads the user limit, and never otherwise', async () => {
+      voice.setUserLimit(SEC, 0);
+      await autoChannels.upsert(GUILD, PRIMARY, {
+        name: 'room{{@@limit@@>=1 ?? @@slots@@ free}}',
+      });
+      await secondaries.updateState(SEC, { name: 'room', index: 0 });
+
+      const before = actions.ofType('rename').length;
+      // The recording action seam does not move the live view, so mirror what
+      // Discord's cache does after a successful edit.
+      voice.setUserLimit(SEC, 4);
+      await commands.setLimit(GUILD, SEC, 'alice', 4);
+      await settle(() => actions.ofType('rename').length > before);
+      const renames = actions.ofType('rename').slice(before);
+      expect(renames).toHaveLength(1);
+      expect(renames[0]).toMatchObject({ channelId: SEC, name: 'room 3 free' });
+    });
+
+    it('renames nothing when the template does not mention the limit', async () => {
+      await autoChannels.upsert(GUILD, PRIMARY, { name: '## [@@game_name@@]' });
+      await secondaries.updateState(SEC, { name: '#1 [General]', index: 0 });
+
+      const before = actions.ofType('rename').length;
+      voice.setUserLimit(SEC, 4);
+      await commands.setLimit(GUILD, SEC, 'alice', 4);
+      // Nothing to wait FOR here, so give the detached work a generous window
+      // and assert it still did nothing.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(actions.ofType('rename').slice(before)).toHaveLength(0);
+    });
+
+    it('still reports the limit change to the caller when the name is unchanged', async () => {
+      const res = await commands.setLimit(GUILD, SEC, 'alice', 7);
+      expect(res.ok).toBe(true);
+      expect(res.message).toContain('7');
+    });
+  });
 });

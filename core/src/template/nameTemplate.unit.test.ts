@@ -11,6 +11,7 @@ import {
   renderChannelName,
   resolveEmptyOccupied,
   toRoman,
+  type RenderContext,
 } from './nameTemplate.js';
 
 function member(partial: Partial<VoiceMember> & { id: string }): VoiceMember {
@@ -502,5 +503,297 @@ describe('resolveEmptyOccupied (__empty/occupied__)', () => {
   it('leaves a group without a slash, and plain "__" runs, untouched', () => {
     expect(resolveEmptyOccupied('__no slash__', true)).toBe('__no slash__');
     expect(resolveEmptyOccupied('plain text', false)).toBe('plain text');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Conditional operands (plans/name-tokens.md §5.1)
+// ---------------------------------------------------------------------------
+
+describe('conditional operands', () => {
+  const three = [member({ id: 'a' }), member({ id: 'b' }), member({ id: 'c' })];
+  const ctx = (extra: Partial<RenderContext> = {}): RenderContext => ({
+    index: 4,
+    members: three,
+    creator: three[0]!,
+    creatorName: 'a',
+    seed: 1,
+    ...extra,
+  });
+
+  it('compares a token on the left against a literal', () => {
+    expect(renderChannelName('{{@@num@@>=2 ?? Y // N}}', ctx())).toBe('Y');
+    expect(renderChannelName('{{@@num@@>=9 ?? Y // N}}', ctx())).toBe('N');
+    expect(renderChannelName('{{$#>=2 ?? Y // N}}', ctx())).toBe('Y');
+    expect(renderChannelName('{{@@num@@=3 ?? Y // N}}', ctx())).toBe('Y');
+  });
+
+  it('compares two tokens, and a variable against a variable', () => {
+    expect(renderChannelName('{{@@num@@>=@@limit@@ ?? Y // N}}', ctx({ userLimit: 3 }))).toBe('Y');
+    expect(renderChannelName('{{@@num@@>@@limit@@ ?? Y // N}}', ctx({ userLimit: 3 }))).toBe('N');
+    expect(renderChannelName('{{PLAYERS>=MAX ?? Y // N}}', ctx())).toBe('Y'); // 0 >= 0
+  });
+
+  /**
+   * `##` renders `#5` and `+#` renders `V`, so neither ever parses. This is the
+   * asymmetry the docs and the assistant's lint both have to carry, because
+   * `##` is the token people know.
+   */
+  it('leaves the number tokens that do not substitute a number falsy', () => {
+    expect(renderChannelName('{{##>=2 ?? Y // N}}', ctx())).toBe('N');
+    expect(renderChannelName('{{+#>=2 ?? Y // N}}', ctx())).toBe('N');
+    expect(renderChannelName('{{@@nato@@>=2 ?? Y // N}}', ctx())).toBe('N');
+  });
+
+  /**
+   * `in` walked the prototype chain and returned a FUNCTION, which is truthy,
+   * so every one of these rendered the TRUE branch.
+   */
+  it('does not resolve Object.prototype members as variables', () => {
+    for (const name of [
+      'constructor',
+      'toString',
+      'valueOf',
+      'hasOwnProperty',
+      'isPrototypeOf',
+      'propertyIsEnumerable',
+      'toLocaleString',
+      '__proto__',
+      '__defineGetter__',
+    ]) {
+      expect(renderChannelName('{{' + name + ' ?? Y // N}}', ctx()), name).toBe('N');
+    }
+  });
+
+  /** A typo has to keep failing safe: `assisted_templates.md` §9 leans on it. */
+  it('keeps an unknown name falsy rather than treating it as a string literal', () => {
+    expect(renderChannelName('{{PLAYERZ!=5 ?? Y // N}}', ctx())).toBe('N');
+    expect(renderChannelName('{{PLAYERZ ?? Y // N}}', ctx())).toBe('N');
+  });
+
+  it('leaves the ":" and "=" right sides as raw text', () => {
+    const withRole = [member({ id: 'a', roleIds: ['998877'] })];
+    const roleCtx = { index: 0, members: withRole, creator: withRole[0]!, creatorName: 'a' };
+    expect(renderChannelName('{{ROLE:998877 ?? Y // N}}', roleCtx)).toBe('Y');
+    expect(renderChannelName('{{GAME=General ?? Y // N}}', ctx())).toBe('Y');
+    expect(renderChannelName('{{GAME:Gen ?? Y // N}}', ctx())).toBe('Y');
+  });
+
+  it('is false when a comparison lands on a non-number', () => {
+    expect(renderChannelName('{{PLAYERS>=RICH ?? Y // N}}', ctx())).toBe('N');
+    expect(renderChannelName('{{PLAYERS>=GAME ?? Y // N}}', ctx())).toBe('N');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Member-controlled text (plans/name-tokens.md §5.2)
+// ---------------------------------------------------------------------------
+
+describe('substituted member text cannot form engine delimiters', () => {
+  const withDetails = (details: string): VoiceMember =>
+    member({
+      id: 'a',
+      playing: ['DRG'],
+      activities: [
+        {
+          kind: 'playing',
+          name: 'DRG',
+          state: 'Hazard 5',
+          details,
+          party: { id: 'p', size: [3, 4] },
+        },
+      ],
+    });
+  const render = (template: string, details: string): string => {
+    const owner = withDetails(details);
+    return renderChannelName(template, {
+      index: 4,
+      members: [owner],
+      creator: owner,
+      creatorName: 'a',
+      seed: 1,
+    });
+  };
+
+  it('does not let party text split the conditional it sits inside', () => {
+    expect(render('{{RICH ?? [@@party_details@@] // no}}', 'x ?? EVIL // y')).toBe(
+      '[x ? EVIL / y]',
+    );
+  });
+
+  /**
+   * Collapsing a run to ONE, not halving a pair. Replacing the doubled form
+   * once is bypassable: `????` would become `??`, re-creating the marker it
+   * just removed.
+   */
+  it('cannot be bypassed by doubling the marker', () => {
+    expect(render('{{RICH ?? [@@party_details@@] // no}}', 'x ???? EVIL //// y')).toBe(
+      '[x ? EVIL / y]',
+    );
+    expect(render('A @@party_details@@ B', '{{{{PLAYING ?? IN // no}}}}')).toBe(
+      'A {PLAYING ? IN / no} B',
+    );
+    expect(render('A @@party_details@@ B', '""""upper:shout""""')).toBe('A "upper:shout" B');
+  });
+
+  it('does not let party text introduce a construct the admin did not write', () => {
+    expect(render('A @@party_details@@ B', '{{PLAYING ?? IN // no}}')).toBe(
+      'A {PLAYING ? IN / no} B',
+    );
+    expect(render('A @@party_details@@ B', '""upper:shout""')).toBe('A "upper:shout" B');
+    expect(render('A @@party_details@@ B', '<<one/many>>')).toBe('A <one/many> B');
+    expect(render('A @@party_details@@ B', '@@owner@@')).toBe('A @owner@ B');
+  });
+
+  it('leaves ordinary party text readable', () => {
+    expect(render('A @@party_details@@ B', 'Salvage')).toBe('A Salvage B');
+    expect(render('A @@party_details@@ B', 'Co-op // Salvage')).toBe('A Co-op / Salvage B');
+  });
+
+  /**
+   * By step 9 only `""` is still unresolved, so an owner name keeps its
+   * slashes. Over-sanitising here would rename every room whose owner has a
+   * `//` in their nickname.
+   */
+  it('leaves an owner name with slashes untouched', () => {
+    const owner = member({ id: 'a', displayName: 'Greg // AVC' });
+    expect(
+      renderChannelName("@@owner@@'s room", {
+        index: 0,
+        members: [owner],
+        creator: owner,
+        creatorName: 'Greg // AVC',
+      }),
+    ).toBe("Greg // AVC's room");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The new vocabulary (plans/name-tokens.md §5.4)
+// ---------------------------------------------------------------------------
+
+describe('capacity tokens and FULL', () => {
+  const room = (n: number, userLimit?: number): RenderContext => {
+    const members = Array.from({ length: n }, (_, i) => member({ id: `m${i}` }));
+    return {
+      index: 0,
+      members,
+      creator: members[0]!,
+      creatorName: 'm0',
+      ...(userLimit !== undefined ? { userLimit } : {}),
+    };
+  };
+
+  it('renders the limit and the free places', () => {
+    expect(renderChannelName('@@num@@/@@limit@@ (@@slots@@ free)', room(3, 5))).toBe(
+      '3/5 (2 free)',
+    );
+    expect(renderChannelName('@@slots@@', room(5, 5))).toBe('0');
+    // Over the limit (an admin lowered it) floors at zero rather than going negative.
+    expect(renderChannelName('@@slots@@', room(7, 5))).toBe('0');
+  });
+
+  /** "0 spots left" is a lie; a visible gap is guardable and honest. */
+  it('renders slots empty, not zero, when the room is unlimited', () => {
+    expect(renderChannelName('x@@slots@@y', room(3))).toBe('xy');
+    expect(renderChannelName('@@limit@@', room(3))).toBe('0');
+    expect(renderChannelName('a{{@@limit@@>=1 ?? @@slots@@ spots}}', room(3))).toBe('a');
+    // The branch keeps the space after `??`, so this is `a` + ` 2 spots`.
+    expect(renderChannelName('a{{@@limit@@>=1 ?? @@slots@@ spots}}', room(3, 5))).toBe('a 2 spots');
+  });
+
+  /**
+   * The reason FULL is a variable at all: `{{@@num@@>=@@limit@@}}` reads `3>=0`
+   * on an unlimited room and calls it full.
+   */
+  it('knows an unlimited room is never full, where the arithmetic does not', () => {
+    expect(renderChannelName('{{FULL ?? full // open}}', room(3))).toBe('open');
+    expect(renderChannelName('{{@@num@@>=@@limit@@ ?? full // open}}', room(3))).toBe('full');
+    expect(renderChannelName('{{FULL ?? full // open}}', room(3, 3))).toBe('full');
+    expect(renderChannelName('{{FULL ?? full // open}}', room(2, 3))).toBe('open');
+  });
+});
+
+describe('room-scoped variables', () => {
+  const goLive = member({ id: 'b', selfStreaming: true });
+  const twitch = member({ id: 'c', activities: [{ kind: 'streaming', name: 'a stream' }] });
+  const quiet = member({ id: 'a', roleIds: ['1'] });
+  const ctx = (members: VoiceMember[]): RenderContext => ({
+    index: 0,
+    members,
+    creator: members[0]!,
+    creatorName: members[0]!.id,
+  });
+
+  it('asks about anyone in the room, where LIVE asks about the owner', () => {
+    expect(renderChannelName('{{ANY_LIVE ?? Y // N}}', ctx([quiet, goLive]))).toBe('Y');
+    expect(renderChannelName('{{LIVE ?? Y // N}}', ctx([quiet, goLive]))).toBe('N');
+    expect(renderChannelName('{{ANY_LIVE ?? Y // N}}', ctx([quiet]))).toBe('N');
+    expect(renderChannelName('@@num_live@@', ctx([quiet, goLive, twitch]))).toBe('2');
+  });
+
+  it('finds a role held by anyone, and a specific member', () => {
+    const mod = member({ id: 'd', roleIds: ['99'] });
+    expect(renderChannelName('{{ANY_ROLE:99 ?? Y // N}}', ctx([quiet, mod]))).toBe('Y');
+    expect(renderChannelName('{{ROLE:99 ?? Y // N}}', ctx([quiet, mod]))).toBe('N');
+    expect(renderChannelName('{{MEMBER:d ?? Y // N}}', ctx([quiet, mod]))).toBe('Y');
+    expect(renderChannelName('{{MEMBER:zz ?? Y // N}}', ctx([quiet, mod]))).toBe('N');
+  });
+
+  it('ignores bots', () => {
+    const bot = member({ id: 'bot', bot: true, selfStreaming: true, roleIds: ['99'] });
+    expect(renderChannelName('{{ANY_LIVE ?? Y // N}}', ctx([quiet, bot]))).toBe('N');
+    expect(renderChannelName('{{ANY_ROLE:99 ?? Y // N}}', ctx([quiet, bot]))).toBe('N');
+    expect(renderChannelName('@@num_live@@', ctx([quiet, bot]))).toBe('0');
+  });
+});
+
+describe('PRIVATE', () => {
+  const one = member({ id: 'a' });
+  const ctx = (isPrivate?: boolean): RenderContext => ({
+    index: 0,
+    members: [one],
+    creator: one,
+    creatorName: 'a',
+    ...(isPrivate !== undefined ? { isPrivate } : {}),
+  });
+
+  it('reflects the room being locked, and defaults to public', () => {
+    expect(renderChannelName('{{PRIVATE ?? L // U}}', ctx(true))).toBe('L');
+    expect(renderChannelName('{{PRIVATE ?? L // U}}', ctx(false))).toBe('U');
+    // An adopted channel passes nothing, and must read as public rather than
+    // rendering a padlock on a channel nobody locked.
+    expect(renderChannelName('{{PRIVATE ?? L // U}}', ctx())).toBe('U');
+  });
+});
+
+describe('numberOffset (startAt)', () => {
+  const one = member({ id: 'a' });
+  const at = (index: number, numberOffset: number): RenderContext => ({
+    index,
+    members: [one],
+    creator: one,
+    creatorName: 'a',
+    numberOffset,
+  });
+
+  it('shifts every index-derived token together', () => {
+    expect(renderChannelName('## $0# +# @@nato@@', at(0, 3))).toBe('#4 04 IV Delta');
+    expect(renderChannelName('## $0# +# @@nato@@', at(2, 3))).toBe('#6 06 VI Foxtrot');
+    expect(renderChannelName('## $0# +# @@nato@@', at(0, 0))).toBe('#1 01 I Alpha');
+  });
+
+  /**
+   * Numbering from zero puts the first room's shifted index at -1, which is
+   * also the standalone-channel sentinel. It must still be a real room, and
+   * the NATO alphabet has no zeroth word, so the words ignore a negative shift
+   * rather than clamping (which would name the first two rooms both Alpha).
+   */
+  it('handles numbering from zero without colliding with a standalone channel', () => {
+    expect(renderChannelName('## $0# @@nato@@', at(0, -1))).toBe('#0 00 Alpha');
+    expect(renderChannelName('## $0# @@nato@@', at(1, -1))).toBe('#1 01 Bravo');
+    expect(
+      renderChannelName('## $0# +# @@nato@@', { index: -1, members: [one], creator: one }),
+    ).toBe('#? ? ? ?');
   });
 });

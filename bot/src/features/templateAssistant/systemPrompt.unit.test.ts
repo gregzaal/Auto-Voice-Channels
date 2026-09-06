@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { AT_TOKENS, CONDITION_VARIABLES, NUMBER_TOKENS } from '../voice/nameTemplate.js';
+import {
+  AT_TOKENS,
+  CONDITION_VARIABLES,
+  NUMBER_TOKENS,
+  OPERAND_TOKENS,
+} from '../voice/nameTemplate.js';
 import { STYLE_MODES } from '../voice/stringTransforms.js';
 import { TEMPLATE_ASSISTANT_SYSTEM_PROMPT } from './systemPrompt.js';
 
@@ -66,8 +71,27 @@ describe('the assistant system prompt', () => {
     expect(TEMPLATE_ASSISTANT_SYSTEM_PROMPT).toContain('Reply language');
   });
 
-  // §9 finding 4: for this one, a concrete worked example beat a blunt rule.
-  it('keeps the worked example that stopped the member-count conditional', () => {
-    expect(TEMPLATE_ASSISTANT_SYSTEM_PROMPT).toContain('{{@@num@@ >= 5 ?? busy}}');
+  /**
+   * §9 finding 4: for this one, a concrete worked example beat a blunt rule.
+   *
+   * The example inverted when the operand fix landed — a member-count
+   * conditional works now — so the risk it guards against inverted with it. The
+   * failure to prevent is no longer the model reaching for `@@num@@`, it is the
+   * model OVERSHOOTING into `##` and `+#`, which still render `#4` and `IV` and
+   * so still never match (`plans/name-tokens.md` §5.1, §6.7).
+   */
+  it('shows a member-count conditional working', () => {
+    expect(TEMPLATE_ASSISTANT_SYSTEM_PROMPT).toContain('{{@@num@@ >= 5 ?? busy }}');
+  });
+
+  it('says which number token to compare against, and which never work', () => {
+    for (const operand of OPERAND_TOKENS) {
+      expect(TEMPLATE_ASSISTANT_SYSTEM_PROMPT, `${operand} is not named as comparable`).toContain(
+        operand,
+      );
+    }
+    // The two that look like they should work and never will.
+    expect(TEMPLATE_ASSISTANT_SYSTEM_PROMPT).toMatch(/`##` and `\+#`.{0,120}not a bare number/s);
+    expect(TEMPLATE_ASSISTANT_SYSTEM_PROMPT).toContain('Use `$#`');
   });
 });

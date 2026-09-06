@@ -117,6 +117,7 @@ import {
   parseInheritModal,
 } from './inheritModal.js';
 import { buildLoggingModal, LOGGING_MODAL_ID, parseLoggingModal } from './loggingModal.js';
+import { lintTemplate } from '../features/templateAssistant/validate.js';
 import {
   ASSISTANT_PREFIX,
   buildAssistantModal,
@@ -793,7 +794,14 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       deps.settings.getGroup(guildId, categoryKey),
     );
     if (group) {
-      await interaction.showModal(buildPositionModal(channelId, group.above));
+      // A grouped category numbers across every primary in it, so a per-primary
+      // start would be ambiguous. The field is still shown, prefilled from this
+      // primary, because the submit path below persists it per primary either
+      // way and an admin who ungroups later keeps what they set.
+      const grouped = await run(guildId, 'cmd:position:startat', () =>
+        deps.settings.getPosition(guildId, channelId),
+      );
+      await interaction.showModal(buildPositionModal(channelId, group.above, grouped.startAt));
       return;
     }
     const pos = await run(guildId, 'cmd:position', () =>
@@ -805,7 +813,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         ephemeral: true,
       });
     }
-    await interaction.showModal(buildPositionModal(channelId, pos.above));
+    await interaction.showModal(buildPositionModal(channelId, pos.above, pos.startAt));
   }
 
   /**
@@ -819,7 +827,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   ): Promise<void> {
     const guildId = interaction.guildId!;
     if (!(await requireManageChannels(interaction))) return;
-    const above = parsePositionModal(interaction.fields);
+    const { above, startAt } = parsePositionModal(interaction.fields);
 
     const categoryKey = categoryKeyForChannel(interaction, channelId);
     const group = await run(guildId, 'cmd:position:group:get', () =>
@@ -828,6 +836,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     if (group) {
       const summary = await run(guildId, 'cmd:position:group:set', async () => {
         await deps.settings.setGroup(guildId, categoryKey, above);
+        await deps.settings.setPosition(guildId, channelId, above, startAt);
         return deps.feature.resyncCategory(guildId, categoryKey);
       });
       await interaction.reply({
@@ -843,11 +852,16 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     // against other guild work (no interleaving between the read and the writes).
     const { res, moved } = await run(guildId, 'cmd:position', async () => {
       const before = await deps.settings.getPosition(guildId, channelId);
-      const result = await deps.settings.setPosition(guildId, channelId, above);
+      const result = await deps.settings.setPosition(guildId, channelId, above, startAt);
       const count =
         result.ok && before.primaryChannelId && before.above !== above
           ? await deps.feature.repositionSecondaries(guildId, before.primaryChannelId, above)
           : 0;
+      // A changed start renumbers every room under this primary. Repositioning
+      // does not, so this is a separate re-render rather than a wider one.
+      if (result.ok && before.primaryChannelId && before.startAt !== startAt) {
+        await deps.feature.rerenderSiblings(guildId, before.primaryChannelId);
+      }
       return { res: result, moved: count };
     });
     const message =
@@ -1251,6 +1265,19 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     }
     if (!result.ok) return { ok: false, message: result.message };
     /**
+     * Advise on a hand-typed template, never refuse one.
+     *
+     * `validate.ts` only ever ran inside the assistant's propose loop, so
+     * `/template` and `/name` accepted anything and an unknown `{{VARIABLE}}`
+     * silently rendered the false branch. The admin got a plausible wrong name
+     * with nothing telling them why, which is the harm class this whole release
+     * is about (`plans/name-tokens.md` §6.8). An admin with Manage Channels may
+     * still set any name they like, so this only ever appends to the note.
+     */
+    const advice = lintTemplate(value, field === 'name' ? 'name' : 'status')
+      .map((issue) => `⚠️ ${issue.message}`)
+      .join('\n');
+    /**
      * Record who set this up, for the two ADMIN scopes only.
      *
      * `scope === 'channel'` is `/name`, the per-channel override, and `nameCore`
@@ -1265,10 +1292,11 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     const state = await run(guildId, 'editor:refresh', () =>
       deps.feature.getEditorState(scope, guildId, channelId),
     );
+    const note = [result.message, advice].filter((part) => part !== '').join('\n');
     return {
       ok: true,
       state,
-      opts: { updated: true, ...(result.message ? { note: result.message } : {}) },
+      opts: { updated: true, ...(note ? { note } : {}) },
     };
   }
 

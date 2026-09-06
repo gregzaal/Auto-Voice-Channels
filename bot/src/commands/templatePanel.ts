@@ -89,6 +89,7 @@ const DOCS_LINK = 'https://auto-voice.io/docs/commands/template';
 const VARIABLES_HELP =
   '`##` number · `@@game_name@@` game · `@@owner@@` name · `@@num@@` members\n' +
   '`@@nato@@` Alpha/Bravo… · `[[a/b]]` random · `<<one/many>>` plural · `{{cond ?? a // b}}` if\n' +
+  '`@@slots@@` free places · `{{FULL ?? …}}` room is full · `{{PRIVATE ?? …}}` room is locked\n' +
   `_Plain text works too. **[Full documentation & variables ↗](${DOCS_LINK})**_`;
 
 function fieldValue(template: string | undefined, fallbackHint: string): string {

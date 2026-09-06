@@ -26,9 +26,30 @@ describe('lintTemplate', () => {
 
   // §9 finding 3/4: the model's most stubborn failure. It renders to nothing,
   // so only a structural check can see it.
-  it('rejects a token used inside a conditional', () => {
-    expect(codes(lintTemplate('{{@@num@@ >= 5 ?? busy}}', 'name'))).toContain('token-in-condition');
+  /**
+   * A token on the left of a condition used to be uniformly broken. The ones
+   * that substitute a bare integer now work, so the lint has to tell the two
+   * halves apart rather than counting `@@` (`plans/name-tokens.md` §5.1).
+   */
+  it('accepts a numeric token on the left of a conditional', () => {
+    expect(codes(lintTemplate('{{@@num@@ >= 5 ?? busy}}', 'name'))).not.toContain(
+      'token-in-condition',
+    );
+    expect(codes(lintTemplate('{{$# = 1 ?? first}}', 'name'))).not.toContain('token-in-condition');
+    expect(codes(lintTemplate('{{@@num@@ >= @@limit@@ ?? full // open}}', 'name'))).toEqual([]);
+  });
+
+  it('still rejects a token that does not substitute a plain number', () => {
+    // `##` renders `#4` and `+#` renders `IV`, so neither ever parses.
     expect(codes(lintTemplate('{{## = 1 ?? first}}', 'name'))).toContain('token-in-condition');
+    expect(codes(lintTemplate('{{+# = 1 ?? first}}', 'name'))).toContain('token-in-condition');
+    // Substituted after conditionals resolve, so it is still literal text here.
+    expect(codes(lintTemplate('{{@@owner@@ = Sam ?? hi}}', 'name'))).toContain(
+      'token-in-condition',
+    );
+    // The message has to name what DOES work, since it is fed back to the model.
+    const issues = lintTemplate('{{## = 1 ?? first}}', 'name');
+    expect(issues[0]!.message).toContain('$#');
   });
 
   it('rejects an invented conditional variable', () => {
@@ -122,9 +143,14 @@ describe('preview scenarios', () => {
       'playing',
       'streaming',
       'party',
+      'filling',
+      'private',
     ]);
-    // A standalone channel is the only kind that exists while empty.
-    expect(previewScenarios({ ...opts, standalone: true }).map((s) => s.key)).toContain('empty');
+    // A standalone channel is the only kind that exists while empty, and has no
+    // privacy model, so it gets `empty` and not `private`.
+    const standalone = previewScenarios({ ...opts, standalone: true }).map((s) => s.key);
+    expect(standalone).toContain('empty');
+    expect(standalone).not.toContain('private');
   });
 
   it('renders the same template differently across scenarios', () => {

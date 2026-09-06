@@ -777,6 +777,17 @@ export class DiscordVoiceView implements GuildVoiceView {
     return channel.parentId ?? null;
   }
 
+  /**
+   * The channel's live user limit. Fresh immediately after `/limit`, because
+   * `GuildChannelManager.edit` patches the cache from the PATCH response rather
+   * than waiting for the gateway echo.
+   */
+  userLimitOf(channelId: string): number | undefined {
+    const channel = this.client.channels.cache.get(channelId);
+    if (!channel || !channel.isVoiceBased()) return undefined;
+    return (channel as VoiceBasedChannel).userLimit;
+  }
+
   displayOrderOf(channelIds: string[]): string[] | undefined {
     const known = channelIds
       .map((id) => this.client.channels.cache.get(id))

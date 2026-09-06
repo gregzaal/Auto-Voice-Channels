@@ -5,9 +5,10 @@ import {
   managedStateSchema,
   managedTemplateSchema,
 } from './managedChannels.js';
+import { secondaryChannelRowSchema, secondaryStateSchema } from './secondaryChannels.js';
 
 /**
- * The three jsonb column schemas preserve fields they do not know about.
+ * The four jsonb column schemas preserve fields they do not know about.
  *
  * **This is golden rule 3 for these columns**, and it was not true before. A
  * `z.object` strips unknown keys, so during a rolling deploy an old instance
@@ -19,6 +20,33 @@ describe('template and state schemas preserve unknown fields', () => {
   it('keeps an unknown field on a primary template', () => {
     const parsed = primaryTemplateSchema.parse({ name: 'Room ##', someFutureField: 'keep me' });
     expect(parsed).toMatchObject({ name: 'Room ##', someFutureField: 'keep me' });
+  });
+
+  /**
+   * `secondary_channels.state` was the one this test did not cover, and it was
+   * a bare `z.object` for exactly as long. Every command that touches a room
+   * does a read-modify-write on it (`/name`, `/private`, `/public`, the roster
+   * update on every join and leave), so an old instance in a rolling deploy was
+   * the widest stripper of the four (`plans/name-tokens.md` §6.5).
+   */
+  it('keeps an unknown field on a room state', () => {
+    expect(secondaryStateSchema.parse({ seed: 7, index: 0, futureThing: 'x' })).toMatchObject({
+      futureThing: 'x',
+    });
+  });
+
+  it('keeps an unknown field on a room state through a whole row parse', () => {
+    const row = secondaryChannelRowSchema.parse({
+      channelId: 'c',
+      guildId: 'g',
+      primaryChannelId: 'p',
+      ownerId: null,
+      originalCreator: null,
+      state: { seed: 7, futureThing: 'x' },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    expect(row.state).toMatchObject({ futureThing: 'x' });
   });
 
   it('keeps an unknown field on an adopted template and its state', () => {
@@ -58,5 +86,6 @@ describe('template and state schemas preserve unknown fields', () => {
   it('still rejects a known field with the wrong type', () => {
     expect(primaryTemplateSchema.safeParse({ limit: 'four' }).success).toBe(false);
     expect(managedStateSchema.safeParse({ seed: 'seven' }).success).toBe(false);
+    expect(secondaryStateSchema.safeParse({ index: 'first' }).success).toBe(false);
   });
 });

@@ -5,33 +5,14 @@
  */
 
 /**
- * A single presence activity, carrying the rich-presence fields the richer name
- * templates consume (party size/state/details, stream title). Mirrors the
- * discord.js `Activity` shape but decoupled from it for testing.
+ * `MemberActivity` and `VoiceMember` are the engine's render inputs, so they
+ * moved to `@avc/core/template` with it (`plans/name-tokens.md` §6.1) and are
+ * re-exported here. Everything below this line is bot-only: it depends on a
+ * live discord.js cache, which `core` deliberately knows nothing about.
  */
-export interface MemberActivity {
-  /** Mapped from discord.js ActivityType: Playing / Streaming / everything else. */
-  kind: 'playing' | 'streaming' | 'other';
-  name: string;
-  state?: string;
-  details?: string;
-  /** Rich-presence party: `size` is `[current, max]`. */
-  party?: { id?: string; size?: [number, number] };
-}
+export type { MemberActivity, VoiceMember } from '@avc/core/template';
 
-export interface VoiceMember {
-  id: string;
-  displayName: string;
-  bot: boolean;
-  /** Names of "playing" activities (presence), for game-name templating. */
-  playing: string[];
-  /** Full presence activities (party/stream/details), for the rich tokens. */
-  activities?: MemberActivity[];
-  /** The member's role ids, for the `{{ROLE:id ?? …}}` conditional. */
-  roleIds?: string[];
-  /** Whether the member is screen-sharing in voice (Discord "Go Live"). */
-  selfStreaming?: boolean;
-}
+import type { VoiceMember } from '@avc/core/template';
 
 export interface VoiceChannelView {
   id: string;
@@ -80,6 +61,18 @@ export interface GuildVoiceView {
    * a value.
    */
   voicePropertiesOf?(channelId: string): VoiceChannelProperties | undefined;
+  /**
+   * The channel's LIVE user limit (0 = unlimited), for `@@limit@@`,
+   * `@@slots@@`, `{{FULL}}` and `@@party_size@@`'s fallback. `undefined` when
+   * the channel is not known, read the same way as {@link categoryOf}: "cannot
+   * say", which callers treat as unlimited so a room is never wrongly reported
+   * as full.
+   *
+   * The stored `primary.template.limit` is the configured DEFAULT, not this:
+   * `/limit` writes straight through to Discord and stores nothing, so only a
+   * live read tells the truth.
+   */
+  userLimitOf?(channelId: string): number | undefined;
   /**
    * Whether Discord has actually given us this guild's data, i.e. whether
    * {@link channelExists} means anything for it.

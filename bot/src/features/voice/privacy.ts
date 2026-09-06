@@ -18,6 +18,14 @@ export interface PrivacyServiceDeps {
   actions: VoiceActions;
   voice: GuildVoiceView;
   logger: Logger;
+  /**
+   * Recomputes a room's name after its privacy changed, for `{{PRIVATE}}`.
+   *
+   * A callback rather than a `VoiceFeature` handle, matching the direction the
+   * handler already reaches privacy (`deps.makePrivateOnCreate`): taking the
+   * feature here would close a cycle between the two modules.
+   */
+  rerender?: (guildId: string, channelId: string) => Promise<unknown>;
 }
 
 /**
@@ -74,6 +82,7 @@ export class PrivacyService {
       ...secondary.state,
       private: true,
     });
+    this.rerenderDetached(guildId, channelId, 'private');
 
     this.deps.logger.info({ guildId, channelId, joinChannelId }, 'channel made private');
     return ok('🔒 Your channel is now private. Others can ask to join via the **⇩ Join** channel.');
@@ -135,9 +144,26 @@ export class PrivacyService {
     await this.removeJoinChannel(guildId, channelId);
     const { private: _drop, ...rest } = secondary.state;
     await this.deps.secondaries.updateState(channelId, rest);
+    this.rerenderDetached(guildId, channelId, 'public');
 
     this.deps.logger.info({ guildId, channelId }, 'channel made public');
     return ok('🔓 Your channel is now public.');
+  }
+
+  /**
+   * Recomputes the room's name for `{{PRIVATE}}`, always AFTER the state write
+   * above (it reads the stored flag back) and never awaited.
+   *
+   * Not awaited because `/private` already spends a `setPrivacy`, one
+   * `setMemberConnect` per member and a channel creation before it can reply,
+   * and Discord closes the interaction window at 3 seconds. A rate-limited
+   * rename adds 2.5s to that on its own. For a guild whose template does not
+   * mention `{{PRIVATE}}` the render is unchanged and no rename is issued.
+   */
+  private rerenderDetached(guildId: string, channelId: string, reason: string): void {
+    void this.deps.rerender?.(guildId, channelId).catch((err: unknown) => {
+      this.deps.logger.warn({ err, guildId, channelId, reason }, 'detached re-render failed');
+    });
   }
 
   /** The join-request context for a channel id, if it is a "⇩ Join" channel. */

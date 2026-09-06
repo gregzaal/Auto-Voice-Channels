@@ -113,6 +113,36 @@ export function previewScenarios(opts: ScenarioOptions): PreviewScenario[] {
     },
   ];
 
+  /**
+   * A room with a limit, one place from full.
+   *
+   * Without it `@@limit@@` previews as `0`, `@@slots@@` as blank and
+   * `{{FULL}}` as false in every other scenario, so the grader cannot grade any
+   * of them and the admin sees a preview that reads like the tokens are broken
+   * (`plans/name-tokens.md` §6.7). One short of full rather than full, because
+   * a nearly-full room exercises both branches of the usual conditional.
+   */
+  scenarios.push({
+    key: 'filling',
+    label: 'a room with a limit, nearly full',
+    ctx: {
+      ...base,
+      members: [owner, member('m2', 'Robin'), member('m3', 'Sam')],
+      creator: owner,
+      userLimit: 4,
+    },
+  });
+
+  // A locked room, so `{{PRIVATE}}` has a state to show. Standalone channels
+  // have no privacy model, so this is meaningless there.
+  if (!standalone) {
+    scenarios.push({
+      key: 'private',
+      label: 'the room is locked',
+      ctx: { ...base, members: [owner, member('m2', 'Robin')], creator: owner, isPrivate: true },
+    });
+  }
+
   // Only meaningful for an adopted standalone channel, which is the one kind
   // that exists while empty (a secondary is deleted the moment it empties).
   if (standalone) {

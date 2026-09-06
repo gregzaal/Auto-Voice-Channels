@@ -199,6 +199,8 @@ describe('TemplateAssistant.propose', () => {
       '#1 - Halo',
       '#1 - Deep Rock Galactic',
       '#1 - Deep Rock Galactic',
+      '#1 - General',
+      '#1 - General',
     ]);
     // Silent below the notice threshold.
     expect(result.capNotice).toBeUndefined();
@@ -206,8 +208,9 @@ describe('TemplateAssistant.propose', () => {
 
   it('feeds a bad template back and accepts the correction', async () => {
     const client = scriptedClient([
-      // §9's stubborn failure: a token inside a condition renders to nothing.
-      '{"name":"{{@@num@@ >= 5 ?? busy}}","status":null,"explanation":"busy"}',
+      // §9's stubborn failure, narrowed: `@@num@@` on the left works now, but a
+      // token that does not substitute a bare integer still renders to nothing.
+      '{"name":"{{## = 1 ?? first}}","status":null,"explanation":"first"}',
       '{"name":"@@creator@@ room","status":null,"explanation":"owner room"}',
     ]);
     const assistant = build({ client });
@@ -218,7 +221,7 @@ describe('TemplateAssistant.propose', () => {
     expect(result.proposal.name).toBe('@@creator@@ room');
     expect(client.sent).toHaveLength(2);
     const correction = client.sent[1]!.at(-1) as { content: string };
-    expect(correction.content).toContain('token cannot go inside');
+    expect(correction.content).toContain('cannot go on the left of a condition');
     expect(assistant.stats.retries).toBe(1);
   });
 
