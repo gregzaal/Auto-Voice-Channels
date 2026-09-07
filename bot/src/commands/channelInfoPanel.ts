@@ -15,7 +15,7 @@ import {
 } from '../features/voice/index.js';
 import { permissionProblemSummary, type ProblemLike } from '../features/voice/index.js';
 import { previewScenarios, renderPair } from '../features/templateAssistant/preview.js';
-import { lintTemplate } from '../features/templateAssistant/validate.js';
+import { adviseTemplate, lintTemplate } from '../features/templateAssistant/validate.js';
 
 /**
  * The `/channelinfo` panel: what AVC thinks a voice channel is, why it is named
@@ -79,6 +79,10 @@ export const TOKEN_PROBES: readonly string[] = [
   '@@party_details@@',
   '@@stream_name@@',
   '@@random_emoji@@',
+  '@@original_creator@@',
+  '@@weekday@@',
+  '@@month@@',
+  '@@hour@@',
 ];
 
 /** Tokens deliberately not listed, each with the reason it would be noise. */
@@ -103,6 +107,9 @@ export const EXCLUDED_TOKENS: Record<string, string> = {
 export const VALUE_VARIABLES: Record<string, string> = {
   GAME: '@@game_name@@',
   PLAYERS: '@@num_playing@@',
+  WEEKDAY: '@@weekday@@',
+  MONTH: '@@month@@',
+  HOUR: '@@hour@@',
   MAX: '@@party_size@@',
 };
 
@@ -116,6 +123,7 @@ export const BOOLEAN_VARIABLES: readonly string[] = [
   'RICH',
   'FULL',
   'PRIVATE',
+  'WEEKEND',
 ];
 
 /**
@@ -323,14 +331,19 @@ export function buildTokenPanel(input: ChannelInfoPanelInput): InteractionReplyO
     });
   }
 
-  const advice = lintTemplate(nameTemplate, 'name');
+  const advice = [
+    ...lintTemplate(nameTemplate, 'name').map((issue) => issue.message),
+    // Read off the render context rather than the settings blob, because that
+    // is the zone and the pools this channel's own render actually used.
+    ...adviseTemplate(nameTemplate, {
+      timezone: ctx.timezone,
+      listNames: Object.keys(ctx.lists ?? {}),
+    }),
+  ];
   if (advice.length > 0) {
     embed.fields.push({
       name: '⚠️ Worth checking',
-      value: advice
-        .map((issue) => issue.message)
-        .join('\n')
-        .slice(0, 1024),
+      value: advice.join('\n').slice(0, 1024),
     });
   }
 
@@ -391,6 +404,11 @@ export function buildScenarioPanel(input: ChannelInfoPanelInput): InteractionRep
     // `@@owner@@` renders in the live panel beside this one.
     creatorName: ctx.creatorName ?? 'Someone',
     standalone: info.kind === 'managed',
+    // Same room, same server: the fixtures must render in this guild's zone and
+    // resolve this guild's `[[list:name]]` pools, or the "other situations"
+    // view would disagree with the live one for no reason the reader can see.
+    ...(ctx.lists ? { lists: ctx.lists } : {}),
+    timezone: ctx.timezone,
     // Same room, different situation. Without this the previews would carry the
     // fixture's number and random picks, so a room called "Bravo" would preview
     // as "Alpha" and read as a bug.

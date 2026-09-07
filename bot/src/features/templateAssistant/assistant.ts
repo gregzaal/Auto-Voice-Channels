@@ -18,6 +18,7 @@ import {
 import { previewScenarios, renderPair, type PreviewScenario } from './preview.js';
 import { TEMPLATE_ASSISTANT_SYSTEM_PROMPT } from './systemPrompt.js';
 import {
+  adviseTemplate,
   inspectRendered,
   lintTemplate,
   screenTemplate,
@@ -103,6 +104,24 @@ export interface AssistantContext {
   currentName?: string;
   currentStatus?: string;
   locale?: string;
+  /**
+   * The guild's IANA zone, or absent when it has never been set.
+   *
+   * Passed because the prompt tells the model to say so: a date token in an
+   * unset guild silently renders in UTC, which is the wrong day for most of the
+   * install base, and the model is the only thing in the loop that can warn
+   * before the template is saved (`plans/name-tokens.md` §10.1).
+   */
+  timezone?: string;
+  /**
+   * The guild's `[[list:name]]` pools.
+   *
+   * The prompt is told the NAMES, so the model only ever writes one that exists
+   * (an invented name renders literally). The full map is needed as well,
+   * because the preview fixtures render the proposal for real and a list the
+   * renderer cannot resolve would grade as a defect.
+   */
+  lists?: Record<string, string[]>;
 }
 
 export interface ProposedField {
@@ -362,6 +381,8 @@ export class TemplateAssistant {
       aliases: context.aliases,
       creatorName: context.creatorName,
       standalone: context.standalone,
+      ...(context.lists ? { lists: context.lists } : {}),
+      ...(context.timezone !== undefined ? { timezone: context.timezone } : {}),
     });
 
     const issues: TemplateIssue[] = [];
@@ -455,12 +476,26 @@ function dedupe(issues: TemplateIssue[]): TemplateIssue[] {
  * Advisory observations that are true but not defects, so they inform the admin
  * instead of triggering a re-prompt.
  */
+/** The guild's list names, in a stable order, for the prompt and the advice. */
+function listNamesOf(context: AssistantContext): string[] {
+  return Object.keys(context.lists ?? {});
+}
+
 function notesFor(
   template: string,
   context: AssistantContext,
   scenarios: PreviewScenario[],
 ): string[] {
   const notes: string[] = [];
+  // The guild-shaped advice, which is the same on this surface as it is on the
+  // hand-typed `/template` path: an unset zone and an invented list name are
+  // both things the proposal panel has to say out loud before it is saved.
+  notes.push(
+    ...adviseTemplate(template, {
+      timezone: context.timezone,
+      listNames: listNamesOf(context),
+    }),
+  );
   if (context.standalone && /##|\$0*#|\+#|@@nato@@/.test(template)) {
     notes.push('This channel has no sibling number, so the numbering tokens will show `?` here.');
   }
@@ -554,6 +589,12 @@ export function buildUserTurn(context: AssistantContext, request: string): strin
   // predictable English is strictly better there than a random language.
   const language = languageFor(context.locale) ?? 'English';
   lines.push(`- Reply language: ${language}`);
+  lines.push(
+    `- Server time zone: ${context.timezone ?? 'NOT SET (date and time tokens would render in UTC)'}`,
+  );
+  lines.push(
+    `- Named lists available for [[list:name]]: ${listNamesOf(context).join(', ') || '(none)'}`,
+  );
   lines.push(`- Current name template: ${context.currentName ?? '(none)'}`);
   lines.push(`- Current status template: ${context.currentStatus ?? '(none)'}`);
   lines.push('');

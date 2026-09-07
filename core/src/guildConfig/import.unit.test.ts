@@ -78,6 +78,8 @@ function nativeFile(over: Partial<GuildConfigFile> = {}): GuildConfigFile {
       groups: null,
       contact_user_id: null,
       problem_alerts: null,
+      timezone: null,
+      lists: null,
     },
     creator_channels: [],
     adopted_channels: [],
@@ -978,7 +980,23 @@ describe('the differ writes no auth state, by construction', () => {
   it('imports nothing that could write auth state', () => {
     const source = readFileSync(join(HERE, 'import.ts'), 'utf8');
     const imports = [...source.matchAll(/from\s+'([^']+)'/g)].map((m) => m[1]!);
-    expect(imports).toEqual(['./format.js']);
+    /**
+     * An allow-list, not a count, and every entry has to be a module that
+     * CANNOT reach auth state or the database:
+     *
+     * - `./format.js` is the wire schema, zod and nothing else.
+     * - `../template/nameTemplate.js` is the render engine, which is pure by
+     *   construction and asserted so by its own barrel: no repositories, no
+     *   `pg`, no node builtins. The differ borrows `isValidTimeZone` from it
+     *   rather than keeping a second copy, which is the lesson the shared
+     *   engine was extracted to learn (`plans/name-tokens.md` §4.1).
+     *
+     * Widening this list is a real decision. The forbidden-call checks below
+     * are the teeth and stay whatever it contains.
+     */
+    for (const from of imports) {
+      expect(['./format.js', '../template/nameTemplate.js']).toContain(from);
+    }
     for (const forbidden of [
       'mergeIntoExisting',
       'trialStartFor',

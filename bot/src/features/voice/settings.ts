@@ -8,7 +8,13 @@ import type {
   SecondaryChannelRepository,
 } from '@avc/core';
 import type { VoiceActions } from './actions.js';
-import { DEFAULT_CHANNEL_NAME_TEMPLATE } from './nameTemplate.js';
+import {
+  canonicalTimeZone,
+  DEFAULT_CHANNEL_NAME_TEMPLATE,
+  isValidListName,
+  LIST_NAME_MAX,
+  MAX_CHANNEL_NAME_LENGTH,
+} from './nameTemplate.js';
 import { MAX_USER_LIMIT } from './commands.js';
 import {
   SETTINGS_KEYS,
@@ -20,6 +26,7 @@ import {
   readLogging,
   readProblemAlerts,
   problemAlertConfirmation,
+  timeZoneConfirmation,
 } from './guildSettings.js';
 import type { GroupConfig, ProblemAlertMode } from './guildSettings.js';
 import { type CommandResult } from './commands.js';
@@ -40,6 +47,27 @@ const fail = (message: string): CommandResult => ({ ok: false, message });
 export const MAX_ALIASES = 100;
 
 /**
+ * Most named `[[list:name]]` pools one guild may hold.
+ *
+ * 25 because that is what one Discord select menu shows, so the `/setup` panel
+ * needs no pagination and can never present a list an admin cannot reach.
+ * Raising it means adding paging, not raising the number.
+ */
+export const MAX_LISTS = 25;
+
+/**
+ * Most options one list may hold, and the longest one option may be.
+ *
+ * The whole point of a named list is holding more choices than fit in a
+ * template, so the ceiling is about memory rather than about the feature: every
+ * instance that has served the guild keeps the settings blob resident. 25 lists
+ * of 100 options at 100 characters is a ~250 KB worst case, which is the same
+ * order as the `customNicks` cap already allows.
+ */
+export const MAX_LIST_OPTIONS = 100;
+export const MAX_LIST_OPTION_LENGTH = 100;
+
+/**
  * Own-property test for a user-typed key.
  *
  * `in` walks the prototype chain, and an alias key is a game name, so a guild
@@ -48,6 +76,10 @@ export const MAX_ALIASES = 100;
  * The same trap is documented in the importer's `unionKeepingExisting`.
  */
 const has = (map: Record<string, string>, key: string): boolean =>
+  Object.prototype.hasOwnProperty.call(map, key);
+
+/** The same own-property test for the lists map, whose keys are admin-typed too. */
+const hasList = (map: Record<string, string[]>, key: string): boolean =>
   Object.prototype.hasOwnProperty.call(map, key);
 
 /** The default name for a freshly-created creator channel. */
@@ -72,6 +104,10 @@ export interface GuildConfig {
   defaultTemplate: string;
   defaultStatus: string;
   aliases: Record<string, string>;
+  /** Named `[[list:name]]` pools. */
+  lists: Record<string, string[]>;
+  /** The guild's IANA zone, absent when never set (date tokens then use UTC). */
+  timezone?: string;
   primaries: { channelId: string; template: string; limit: number }[];
 }
 
@@ -142,7 +178,9 @@ export class GuildSettingsService {
       defaultTemplate: s.channelNameTemplate,
       defaultStatus: s.channelStatusTemplate,
       aliases: s.aliases,
+      lists: s.lists,
       primaries: primaries.map((p) => toPrimaryView(p)),
+      ...(s.timezone !== undefined ? { timezone: s.timezone } : {}),
     };
   }
 
@@ -160,6 +198,127 @@ export class GuildSettingsService {
     if (!value) return fail('Provide a word to use when no game is detected.');
     await this.deps.guilds.updateSettings(guildId, { general: value });
     return ok(`The "no game" label is now **${value}**.`);
+  }
+
+  /**
+   * Sets, or clears, the zone the date and time tokens render in.
+   *
+   * Stored canonicalised, so `europe/amsterdam` reads back as
+   * `Europe/Amsterdam` and the deprecated alias `Japan` reads back as
+   * `Asia/Tokyo`. An empty submit REMOVES the key rather than writing `'UTC'`:
+   * the two are the same render and a different fact, and `/setup` says "not
+   * set" only for the absent one (`plans/name-tokens.md` §10.1).
+   */
+  async setTimeZone(guildId: string, raw: string, now = new Date()): Promise<CommandResult> {
+    const value = raw.trim();
+    if (value === '') {
+      return this.deps.guilds.mergeSettings(guildId, () => ({
+        patch: {},
+        remove: [SETTINGS_KEYS.timezone],
+        result: ok('Time zone cleared. Date and time tokens will use UTC until one is set again.'),
+      }));
+    }
+    const zone = canonicalTimeZone(value);
+    if (zone === null) {
+      return fail(
+        `**${value}** is not a time zone I recognise. Use a region and city, like ` +
+          '`Europe/Amsterdam` or `America/New_York`. A plain offset like `+02:00` will not ' +
+          'work, because it cannot follow daylight saving.',
+      );
+    }
+    await this.deps.guilds.updateSettings(guildId, { [SETTINGS_KEYS.timezone]: zone });
+    return ok(timeZoneConfirmation(zone, now));
+  }
+
+  /**
+   * Read-modify-write on the named lists, under the row lock, for the same
+   * reason `editAliases` is: the panel reads and writes the same map, and two
+   * fleets already share 35 guilds.
+   */
+  private editLists(
+    guildId: string,
+    decide: (
+      current: Record<string, string[]>,
+    ) => { lists: Record<string, string[]> } | CommandResult,
+  ): Promise<CommandResult> {
+    return this.deps.guilds.mergeSettings(guildId, (existing) => {
+      const current = parseVoiceSettings(existing?.settings ?? {}).lists;
+      const decided = decide(current);
+      if ('lists' in decided) return { patch: { lists: decided.lists }, result: ok('') };
+      return { patch: {}, result: decided };
+    });
+  }
+
+  /** Every named list this guild has. A COPY, for the reason `listAliases` documents. */
+  async listNamedLists(guildId: string): Promise<Record<string, string[]>> {
+    const guild = await this.deps.guilds.ensure(guildId);
+    const lists = parseVoiceSettings(guild.settings).lists;
+    return Object.fromEntries(Object.entries(lists).map(([name, options]) => [name, [...options]]));
+  }
+
+  /**
+   * Adds or replaces one named list, renaming it when the name changed.
+   *
+   * A rename is a delete plus a set in ONE write, so the old name can never be
+   * left behind by a failure between two writes. `previousName` is the exact
+   * stored key the panel opened, absent when this is a new list.
+   */
+  async setNamedList(
+    guildId: string,
+    name: string,
+    options: readonly string[],
+    previousName?: string,
+  ): Promise<CommandResult> {
+    if (!isValidListName(name)) {
+      return fail(
+        `**${name || 'That'}** cannot be a list name. Up to ${LIST_NAME_MAX} characters, and ` +
+          'no `[`, `]`, `/` or `:`, because those are what a template uses to find the list.',
+      );
+    }
+    if (options.length === 0) return fail('Give the list at least one option, one per line.');
+    if (options.length > MAX_LIST_OPTIONS) {
+      return fail(
+        `A list can hold up to ${MAX_LIST_OPTIONS} options. That one has ${options.length}.`,
+      );
+    }
+    const tooLong = options.find((o) => o.length > MAX_LIST_OPTION_LENGTH);
+    if (tooLong !== undefined) {
+      return fail(
+        `Each option can be up to ${MAX_LIST_OPTION_LENGTH} characters, and a room name is ` +
+          `capped at ${MAX_CHANNEL_NAME_LENGTH}. This one is longer: **${tooLong.slice(0, 60)}**`,
+      );
+    }
+    let message = '';
+    const res = await this.editLists(guildId, (current) => {
+      const renaming = previousName !== undefined && previousName !== name;
+      const replacing = hasList(current, name);
+      // Counted against the cap only when this add would really be a new entry:
+      // a rename or a replace leaves the count the same or lower.
+      const adding = !replacing && !renaming;
+      if (adding && Object.keys(current).length >= MAX_LISTS) {
+        return fail(`This server already has ${MAX_LISTS} lists. Remove one to add another.`);
+      }
+      const lists = { ...current, [name]: [...options] };
+      if (renaming) delete lists[previousName!];
+      message = renaming
+        ? `Renamed to **${name}**, with ${options.length} options.`
+        : replacing
+          ? `Updated **${name}**: ${options.length} options.`
+          : `Added **${name}**: ${options.length} options. Use it as \`[[list:${name}]]\`.`;
+      return { lists };
+    });
+    return res.ok ? ok(message) : res;
+  }
+
+  /** Deletes one named list by its exact stored name. */
+  async removeNamedList(guildId: string, name: string): Promise<CommandResult> {
+    const res = await this.editLists(guildId, (current) => {
+      if (!hasList(current, name)) return fail('That list is no longer there.');
+      const lists = { ...current };
+      delete lists[name];
+      return { lists };
+    });
+    return res.ok ? ok(`Removed the list **${name}**.`) : res;
   }
 
   /**

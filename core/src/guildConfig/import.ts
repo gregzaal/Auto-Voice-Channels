@@ -1,4 +1,5 @@
 import { EXPORT_SETTINGS_KEYS, type ExportSettingsKey, type GuildConfigFile } from './format.js';
+import { isValidListName, isValidTimeZone } from '../template/nameTemplate.js';
 
 /**
  * The pure differ behind `/import`: a file plus the guild's current state in, a
@@ -56,6 +57,16 @@ export const IMPORT_LIMITS = {
    * number renders a wall of roman numerals into a 100-character name.
    */
   startAt: 9999,
+  /**
+   * Named `[[list:name]]` pools: `MAX_LISTS` and `MAX_LIST_OPTIONS` on the
+   * interactive path. Bounded for the same reason `customNicks` is: the whole
+   * blob is resident in `SettingsCache` on every instance that ever served the
+   * guild, so its size is a memory question, not a file one.
+   */
+  lists: 25,
+  listNameChars: 40,
+  listOptions: 100,
+  listOptionChars: 100,
 } as const;
 
 export type ChannelKind = 'voice' | 'text' | 'category' | 'other';
@@ -909,6 +920,44 @@ function validateSetting(
       if (typeof value !== 'string' || !PROBLEM_ALERT_VALUES.has(value))
         return drop('setting_invalid');
       return value;
+
+    case 'timezone':
+      // `readTimeZone` already ignores a zone Intl does not know, so a bad one
+      // is inert rather than dangerous. Dropped here anyway, so the importer
+      // REPORTS it: silently storing a zone that will never take effect is the
+      // shape of bug this file exists to make visible.
+      if (typeof value !== 'string' || !isValidTimeZone(value)) return drop('setting_invalid');
+      return value;
+
+    case 'lists': {
+      const record = asRecord(value);
+      if (!record) return drop('setting_invalid');
+      const entries = Object.entries(record);
+      if (entries.length > limits.lists)
+        return drop('setting_over_limit', { limit: limits.lists, count: entries.length });
+      const out: Record<string, string[]> = {};
+      for (const [name, options] of entries) {
+        // A pool with no options renders as literal `[[list:name]]`, so an
+        // empty one is a silent dead template rather than a smaller pool.
+        // The same rule the panel enforces, not merely a length: a name
+        // carrying `]` or `/` would break the very `[[list:name]]` syntax it is
+        // looked up through, so an imported one has to clear the same bar.
+        if (!isValidListName(name) || name.length > limits.listNameChars) {
+          return drop('setting_invalid');
+        }
+        if (!Array.isArray(options) || options.length === 0) return drop('setting_invalid');
+        if (options.length > limits.listOptions) return drop('setting_invalid');
+        if (
+          !options.every(
+            (o) => typeof o === 'string' && o !== '' && o.length <= limits.listOptionChars,
+          )
+        ) {
+          return drop('setting_invalid');
+        }
+        out[name] = options;
+      }
+      return out;
+    }
   }
 }
 

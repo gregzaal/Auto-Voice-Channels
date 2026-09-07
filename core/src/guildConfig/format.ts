@@ -60,6 +60,8 @@ export const EXPORT_SETTINGS_KEYS = [
   'groups',
   'contact_user_id',
   'problem_alerts',
+  'timezone',
+  'lists',
 ] as const;
 
 export type ExportSettingsKey = (typeof EXPORT_SETTINGS_KEYS)[number];
@@ -91,6 +93,10 @@ export const exportedSettingsSchema = z.object({
   groups: z.record(z.string(), groupConfig).nullable(),
   contact_user_id: z.string().nullable(),
   problem_alerts: z.string().nullable(),
+  /** An IANA zone name, for the date and time tokens. Absent means UTC. */
+  timezone: z.string().nullable(),
+  /** Named `[[list:name]]` pools: a name to its options. */
+  lists: z.record(z.string(), z.array(z.string())).nullable(),
 });
 
 export type ExportedSettings = z.infer<typeof exportedSettingsSchema>;

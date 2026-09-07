@@ -6,9 +6,18 @@ import { fakeLogger } from '../../runtime/testUtils.js';
 import { RecordingVoiceActions } from './actions.js';
 import { DEFAULT_CHANNEL_NAME_TEMPLATE } from './nameTemplate.js';
 import { readContact } from './guildSettings.js';
-import { GuildSettingsService, MAX_ALIASES } from './settings.js';
+import {
+  GuildSettingsService,
+  MAX_ALIASES,
+  MAX_LISTS,
+  MAX_LIST_OPTIONS,
+  MAX_LIST_OPTION_LENGTH,
+} from './settings.js';
 
 const GUILD = 'guild-settings-test';
+
+/** A fixed instant, so the time-zone confirmation is assertable. 21:30 in Amsterdam. */
+const FRIDAY = new Date('2026-09-04T19:30:00Z');
 
 describe('GuildSettingsService (integration)', () => {
   let env: PgTestEnv;
@@ -174,6 +183,124 @@ describe('GuildSettingsService (integration)', () => {
     const first = await settings.listAliases(GUILD);
     first['Injected'] = 'nope';
     expect(await settings.listAliases(GUILD)).toEqual({ 'Counter-Strike 2': 'CS2' });
+  });
+
+  it('sets a time zone, canonicalising what was typed', async () => {
+    const res = await settings.setTimeZone(GUILD, ' europe/amsterdam ', FRIDAY);
+    expect(res.ok).toBe(true);
+    // The current local time is the confirmation: a real but wrong zone is easy
+    // to type and impossible to spot from the name alone.
+    expect(res.message).toContain('Europe/Amsterdam');
+    expect(res.message).toContain('21:30');
+    expect((await settings.getConfig(GUILD)).timezone).toBe('Europe/Amsterdam');
+  });
+
+  it('refuses a zone it does not recognise, and an offset, without writing', async () => {
+    await settings.setTimeZone(GUILD, 'Europe/Amsterdam', FRIDAY);
+    for (const bad of ['Amsterdam', '+02:00', 'Etc/GMT+2']) {
+      const res = await settings.setTimeZone(GUILD, bad, FRIDAY);
+      expect(res.ok, `${bad} should be refused`).toBe(false);
+    }
+    expect((await settings.getConfig(GUILD)).timezone).toBe('Europe/Amsterdam');
+  });
+
+  /**
+   * The key is REMOVED rather than set to `UTC`. Both render the same, and only
+   * the absent one lets `/setup` and the template editor say "not set", which is
+   * the whole point of the setting.
+   */
+  it('clears the zone by removing the key, not by writing UTC', async () => {
+    await settings.setTimeZone(GUILD, 'Europe/Amsterdam', FRIDAY);
+    const res = await settings.setTimeZone(GUILD, '   ', FRIDAY);
+    expect(res.ok).toBe(true);
+    expect((await settings.getConfig(GUILD)).timezone).toBeUndefined();
+    const row = await guilds.ensure(GUILD);
+    expect(Object.keys(row.settings)).not.toContain('timezone');
+  });
+
+  it('adds, replaces and removes a named list', async () => {
+    const added = await settings.setNamedList(GUILD, 'animals', ['otter', 'badger']);
+    expect(added.ok).toBe(true);
+    expect(added.message).toContain('[[list:animals]]');
+    expect(await settings.listNamedLists(GUILD)).toEqual({ animals: ['otter', 'badger'] });
+
+    const replaced = await settings.setNamedList(GUILD, 'animals', ['heron'], 'animals');
+    expect(replaced.ok).toBe(true);
+    expect(await settings.listNamedLists(GUILD)).toEqual({ animals: ['heron'] });
+
+    const removed = await settings.removeNamedList(GUILD, 'animals');
+    expect(removed.ok).toBe(true);
+    expect(await settings.listNamedLists(GUILD)).toEqual({});
+    expect((await settings.removeNamedList(GUILD, 'animals')).ok).toBe(false);
+  });
+
+  /** A rename is one write, so the old name can never be left behind by a failure. */
+  it('renames a list without leaving the old name behind', async () => {
+    await settings.setNamedList(GUILD, 'animals', ['otter']);
+    const res = await settings.setNamedList(GUILD, 'beasts', ['otter'], 'animals');
+    expect(res.ok).toBe(true);
+    expect(await settings.listNamedLists(GUILD)).toEqual({ beasts: ['otter'] });
+  });
+
+  it('refuses a name no template could reach, and an empty list', async () => {
+    for (const bad of ['a:b', 'a/b', 'x]]', ' spaced', '']) {
+      const res = await settings.setNamedList(GUILD, bad, ['one']);
+      expect(res.ok, `${bad} should be refused`).toBe(false);
+    }
+    expect((await settings.setNamedList(GUILD, 'animals', [])).ok).toBe(false);
+    expect(await settings.listNamedLists(GUILD)).toEqual({});
+  });
+
+  it('refuses past the list cap, but still lets an existing list be replaced', async () => {
+    for (let i = 0; i < MAX_LISTS; i++) {
+      const res = await settings.setNamedList(GUILD, `list${i}`, ['one']);
+      expect(res.ok, `list ${i} should be accepted`).toBe(true);
+    }
+    expect((await settings.setNamedList(GUILD, 'one-too-many', ['one'])).ok).toBe(false);
+    // Replacing is not adding, so it stays available at the cap.
+    expect((await settings.setNamedList(GUILD, 'list0', ['two'], 'list0')).ok).toBe(true);
+    // And so is renaming, which leaves the count the same.
+    expect((await settings.setNamedList(GUILD, 'renamed', ['two'], 'list0')).ok).toBe(true);
+    expect(Object.keys(await settings.listNamedLists(GUILD))).toHaveLength(MAX_LISTS);
+  });
+
+  it('refuses too many options, and one that could never fit a name', async () => {
+    const tooMany = Array.from({ length: MAX_LIST_OPTIONS + 1 }, (_, i) => `o${i}`);
+    expect((await settings.setNamedList(GUILD, 'animals', tooMany)).ok).toBe(false);
+    const tooLong = ['x'.repeat(MAX_LIST_OPTION_LENGTH + 1)];
+    expect((await settings.setNamedList(GUILD, 'animals', tooLong)).ok).toBe(false);
+    expect(await settings.listNamedLists(GUILD)).toEqual({});
+  });
+
+  it('treats an inherited property name as an ordinary list name', async () => {
+    expect((await settings.setNamedList(GUILD, 'constructor', ['one'])).ok).toBe(true);
+    expect(await settings.listNamedLists(GUILD)).toEqual({ constructor: ['one'] });
+    // The cap counts it, which a prototype-walking `in` check would not.
+    expect((await settings.removeNamedList(GUILD, 'toString')).ok).toBe(false);
+    expect((await settings.removeNamedList(GUILD, 'constructor')).ok).toBe(true);
+  });
+
+  it('does not hand out the lists map by reference', async () => {
+    await settings.setNamedList(GUILD, 'animals', ['otter']);
+    const first = await settings.listNamedLists(GUILD);
+    first['injected'] = ['nope'];
+    first['animals']!.push('nope');
+    expect(await settings.listNamedLists(GUILD)).toEqual({ animals: ['otter'] });
+  });
+
+  it('loses no list when concurrent writers touch the map at once', async () => {
+    await settings.setNamedList(GUILD, 'seed', ['s']);
+    await Promise.all([
+      settings.setNamedList(GUILD, 'a', ['1']),
+      settings.setNamedList(GUILD, 'b', ['2']),
+      settings.setNamedList(GUILD, 'c', ['3']),
+    ]);
+    expect(await settings.listNamedLists(GUILD)).toEqual({
+      seed: ['s'],
+      a: ['1'],
+      b: ['2'],
+      c: ['3'],
+    });
   });
 
   it('creates a primary (real channel + registration) and lists it', async () => {

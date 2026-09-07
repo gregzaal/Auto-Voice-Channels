@@ -49,6 +49,21 @@ export const secondaryStateSchema = z
      * order). Stale ids (members who left) are pruned on the next leave.
      */
     roster: z.array(z.string()).optional(),
+    /**
+     * The RAW display name of whoever created the room, for
+     * `@@original_creator@@`.
+     *
+     * Cached because the original creator has usually left by the time the
+     * token is rendered, and a member fetch on the render path is not an
+     * option. Raw, not resolved: `displayName()` applies the per-user `/nick`
+     * override, so storing its output would freeze a nickname the server can
+     * still change (`plans/name-tokens.md` §10.4).
+     *
+     * Only safe to write because this schema is `passthrough` (above), which
+     * shipped a release earlier for exactly this reason: the stripper during a
+     * rolling deploy is the OLD image.
+     */
+    originalCreatorName: z.string().optional(),
   })
   .passthrough();
 
@@ -260,10 +275,35 @@ export class SecondaryChannelRepository {
    * deliberate takeover via `/transfer` or `/reclaim`. Moving `originalCreator` too
    * means the previous holder can't later `/reclaim` it back; the handover sticks.
    */
-  async setOwnerAndCreator(channelId: string, memberId: string): Promise<void> {
+  async setOwnerAndCreator(
+    channelId: string,
+    memberId: string,
+    displayName?: string,
+  ): Promise<void> {
+    /**
+     * The cached name moves with the creator, in ONE statement.
+     *
+     * Two writes would leave a crash between them naming the wrong person,
+     * which is worse than not having the token: `/transfer` and `/reclaim`
+     * deliberately move `originalCreator`, so a stale cached name would keep
+     * showing whoever used to own the room after a handover the users saw
+     * happen. `||` rather than `merge` so a row with no `state` yet still gets
+     * the key.
+     */
     await this.db
       .update(secondaryChannels)
-      .set({ ownerId: memberId, originalCreator: memberId, updatedAt: new Date() })
+      .set({
+        ownerId: memberId,
+        originalCreator: memberId,
+        ...(displayName === undefined
+          ? {}
+          : {
+              state: sql`coalesce(${secondaryChannels.state}, '{}'::jsonb) || ${JSON.stringify({
+                originalCreatorName: displayName,
+              })}::jsonb`,
+            }),
+        updatedAt: new Date(),
+      })
       .where(this.scoped(eq(secondaryChannels.channelId, channelId)));
   }
 }

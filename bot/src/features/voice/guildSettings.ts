@@ -1,4 +1,8 @@
-import { DEFAULT_CHANNEL_NAME_TEMPLATE, DEFAULT_STATUS_TEMPLATE } from './nameTemplate.js';
+import {
+  DEFAULT_CHANNEL_NAME_TEMPLATE,
+  DEFAULT_STATUS_TEMPLATE,
+  isValidTimeZone,
+} from './nameTemplate.js';
 
 /**
  * Single source of truth for reading the guild `settings` jsonb blob. The blob is
@@ -18,6 +22,8 @@ export const SETTINGS_KEYS = {
   groups: 'groups',
   contact: 'contact_user_id',
   problemAlerts: 'problem_alerts',
+  timezone: 'timezone',
+  lists: 'lists',
 } as const;
 
 /**
@@ -82,6 +88,16 @@ export interface VoiceSettings {
   general: string;
   /** Per-user custom display names for `@@owner@@` (set via `/nick`). */
   customNicks: Record<string, string>;
+  /**
+   * IANA zone for the date and time tokens. `undefined` means UTC.
+   *
+   * Undefined rather than defaulted to `'UTC'` so a caller can tell "never
+   * configured" from "deliberately UTC", which is what lets `/setup` and the
+   * template editor point out that a date token is rendering in UTC.
+   */
+  timezone: string | undefined;
+  /** Named `[[list:name]]` random pools. */
+  lists: Record<string, string[]>;
 }
 
 /** True only when `value` is a plain object whose values are ALL strings. */
@@ -102,6 +118,27 @@ function stringMap(value: unknown): Record<string, string> {
   return isStringMap(value) ? value : {};
 }
 
+/**
+ * True only when `value` is a plain object whose values are all arrays of
+ * strings, which is the shape of `lists`.
+ *
+ * Own-property enumeration via `Object.entries`, and the KEYS are not validated
+ * here: `randomOptions` looks a name up with `hasOwnProperty`, so a stored
+ * `constructor` key is inert rather than dangerous.
+ */
+export function isStringArrayMap(value: unknown): value is Record<string, string[]> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.values(value).every((v) => Array.isArray(v) && v.every((e) => typeof e === 'string'))
+  );
+}
+
+function stringArrayMap(value: unknown): Record<string, string[]> {
+  return isStringArrayMap(value) ? value : {};
+}
+
 /** Parses the voice-relevant settings, applying defaults for missing/invalid fields. */
 export function parseVoiceSettings(settings: Record<string, unknown>): VoiceSettings {
   return {
@@ -117,7 +154,18 @@ export function parseVoiceSettings(settings: Record<string, unknown>): VoiceSett
     aliases: stringMap(settings[SETTINGS_KEYS.aliases]),
     general: asString(settings[SETTINGS_KEYS.general], 'General'),
     customNicks: stringMap(settings[SETTINGS_KEYS.customNicks]),
+    // Validated on the way out as well as in: the blob is `record(unknown)` at
+    // the repository boundary and `/import` fills it from a file, so a zone
+    // Intl does not know could otherwise reach the render path.
+    timezone: readTimeZone(settings),
+    lists: stringArrayMap(settings[SETTINGS_KEYS.lists]),
   };
+}
+
+/** The stored zone, or `undefined` when absent or unrecognised. */
+export function readTimeZone(settings: Record<string, unknown>): string | undefined {
+  const raw = settings[SETTINGS_KEYS.timezone];
+  return typeof raw === 'string' && isValidTimeZone(raw) ? raw : undefined;
 }
 
 /** The display name to use for a member, honouring their `/nick` override. */
@@ -201,6 +249,28 @@ export function problemAlertConfirmation(mode: ProblemAlertMode): string {
     return '🔔 If AVC stops working I will say so in the server, without mentioning anyone.';
   }
   return '🔔 If AVC stops working I will say so in the server, and mention whoever set it up.';
+}
+
+/**
+ * The line confirming a time zone, quoting the current local time in it.
+ *
+ * The time is the confirmation. A zone name is easy to mistype into a real but
+ * wrong zone (`America/Indiana/Indianapolis` against `America/Indianapolis`),
+ * and an admin who can see it is 19:30 there knows immediately whether they got
+ * the one they meant.
+ *
+ * Lives here beside {@link problemAlertConfirmation} so the copy-rules test can
+ * reach it without a hand-copied list of literals.
+ */
+export function timeZoneConfirmation(zone: string, now: Date): string {
+  const clock = new Intl.DateTimeFormat('en-GB', {
+    timeZone: zone,
+    weekday: 'long',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).format(now);
+  return `🕓 Time zone set to **${zone}**. It is ${clock} there now.`;
 }
 
 /**

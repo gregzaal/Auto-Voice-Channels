@@ -73,6 +73,7 @@ A template is ordinary text plus **tokens** that the bot replaces. Anything that
 ## Owner & streaming
 
 - `@@owner@@` — the display name of whoever owns the channel (`Unknown` if not known). `@@creator@@` is an older name for the same token, still supported for editing existing templates — always write `@@owner@@` in anything new.
+- `@@original_creator@@` — the display name of whoever MADE the room, which stays put when the owner changes. `@@owner@@` follows whoever is in charge now (it moves when the owner leaves and someone else stays), so use `@@original_creator@@` when the admin wants a name that does not change hands. It falls back to the current owner when the room is too old to know.
 - `@@stream_name@@` — the title of the owner's stream if they're live-streaming, otherwise empty.
 
 ## Party info
@@ -84,12 +85,23 @@ A template is ordinary text plus **tokens** that the bot replaces. Anything that
 - `@@party_state@@` — the party's status line (e.g. `Hazard 5`).
 - `@@party_details@@` — the party's detail line (e.g. `Salvage`).
 
+## Date and time
+
+*In the server's own time zone, set with `/setup`. Unset means UTC, which is wrong for most servers, so if an admin asks for anything here and the context says the zone is unset, tell them to set it.*
+
+**Everything here is deliberately coarse. There is no minute or second, and asking for one is not possible** — a name that changed every minute would use up Discord's rename limit and stop the name reacting to anything else. For anything finer than an hour, there is nothing to offer.
+
+- `@@weekday@@` — the day, in English: `Monday`.
+- `@@month@@` — the month, in English: `September`.
+- `@@hour@@` — the hour, 0 to 23. Better in a **status** than a name: in a name it spends a rename every hour.
+
 ## Random (picked once, then fixed)
 
 Each channel gets its own random pick that never changes afterwards, so the name stays stable.
 
 - `@@random_emoji@@` — a random emoji.
 - `[[a/b/c]]` — picks one of your `/`-separated options at random. You supply the list; it needs at least one `/`.
+- `[[list:name]]` — picks from a **named list** the server saved with `/setup`. Use it only when the context tells you a list of that name exists, because an unknown name is printed literally. It is how a server keeps forty options without spending the whole 100 characters on them.
 
 ---
 
@@ -134,6 +146,10 @@ Shows the first part when the condition is true, the second when it's false. The
 | `ANY_LIVE` | **anyone** in the channel is streaming, not just the owner |
 | `ANY_ROLE` | the role IDs held by anyone in the channel (list) |
 | `MEMBER` | the IDs of everyone in the channel (list) |
+| `WEEKDAY` | the day's English name (text), e.g. `{{WEEKDAY=Saturday ?? ...}}` |
+| `MONTH` | the month's English name (text) |
+| `WEEKEND` | it is Saturday or Sunday |
+| `HOUR` | the hour, 0 to 23 (number), e.g. `{{HOUR>=18 ?? evening}}` |
 | `OWNER` | the channel owner's user ID (list of one). Empty when the owner has left, so a bare `{{OWNER ?? ...}}` means "this channel has an owner" |
 
 **Ways to test a variable:**
@@ -145,9 +161,9 @@ Shows the first part when the condition is true, the second when it's false. The
 | `{{VAR=value ?? ...}}` and `{{VAR!=value ?? ...}}` | equals / not-equals (compared as numbers only for `PLAYERS`/`MAX`, otherwise as text) |
 | `{{VAR>=value ?? ...}}` (also `>`, `<`, `<=`) | numeric comparison — only meaningful for `PLAYERS` and `MAX` |
 
-**What can go on the left of a condition.** Any variable in the table above, a plain number, or one of these counting tokens: `@@num@@`, `@@num_others@@`, `@@num_playing@@`, `@@num_live@@`, `@@party_size@@`, `@@limit@@`, `@@slots@@`, `$#` (and its padded forms `$0#`, `$00#`, ...). So `{{@@num@@ >= 5 ?? busy}}` works, and so does comparing two of them: `{{@@num@@ >= @@limit@@ ?? full}}`.
+**What can go on the left of a condition.** Any variable in the table above, a plain number, or one of these counting tokens: `@@num@@`, `@@num_others@@`, `@@num_playing@@`, `@@num_live@@`, `@@party_size@@`, `@@limit@@`, `@@slots@@`, `@@hour@@`, `$#` (and its padded forms `$0#`, `$00#`, ...). So `{{@@num@@ >= 5 ?? busy}}` works, and so does comparing two of them: `{{@@num@@ >= @@limit@@ ?? full}}`.
 
-**What cannot.** `##` and `+#` render `#4` and `IV` rather than a bare number, so use `$#` instead. `@@owner@@`, `@@creator@@`, `@@game_name@@` and `@@stream_name@@` are filled in *after* conditions are worked out, so they never match on the left — use the `GAME` variable for the game, and there is no variable for the owner's name or the stream title. Anything unrecognised on the left counts as false, silently, so do not guess.
+**What cannot.** `##` and `+#` render `#4` and `IV` rather than a bare number, so use `$#` instead. `@@owner@@`, `@@creator@@`, `@@original_creator@@`, `@@game_name@@` and `@@stream_name@@` are filled in *after* conditions are worked out, so they never match on the left — use the `GAME` variable for the game, and there is no variable for the owner's name or the stream title. Anything unrecognised on the left counts as false, silently, so do not guess.
 
 Prefer `{{FULL}}` over `{{@@num@@ >= @@limit@@}}`: a channel with no limit has `@@limit@@` of `0`, so the comparison would call an empty unlimited channel full, and `FULL` knows better.
 
@@ -213,6 +229,9 @@ More request → template mappings (`name` unless noted):
   (**not** `@@slots@@ spaces left`, which reads ` spaces left` on a channel with no limit)
 - a flame once the room is full → `{{FULL ?? 🔥 }}@@owner@@'s room`
 - a red dot when anyone in the room is streaming → `{{ANY_LIVE ?? 🔴 }}@@game_name@@ ##`
+- a different name at the weekend → `{{WEEKEND ?? 🎉 Weekend // @@owner@@'s}} room`
+- something only in the evening → `@@owner@@'s room{{HOUR>=18 ?? 🌙}}`
+- the room named after whoever made it, even after it changes hands → `@@original_creator@@'s room`
 
 Request: *"Add the word 'busy' to the name when 5 or more people are in the channel."*
 `{"name": "{{@@num@@ >= 5 ?? busy }}@@owner@@'s room", "status": null, "explanation": "The word busy appears once five or more people are in the room, and the name stays the owner's room otherwise."}`

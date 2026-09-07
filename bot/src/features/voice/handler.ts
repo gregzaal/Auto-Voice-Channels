@@ -53,6 +53,18 @@ export interface RenderContextInput {
   seed?: number | undefined;
   isPrivate?: boolean;
   startAt?: number | undefined;
+  /**
+   * Whoever created the room, for `@@original_creator@@`: the id so the
+   * per-user `/nick` override can still be applied, and the RAW display name
+   * cached on the row.
+   *
+   * Both, because caching the resolved name would freeze a nickname the server
+   * can still change, and caching only the id would need a member fetch on the
+   * render path for somebody who has usually left
+   * (`plans/name-tokens.md` §10.4).
+   */
+  originalCreatorId?: string | null | undefined;
+  originalCreatorName?: string | undefined;
 }
 
 /** Whether two id lists are element-wise equal (to skip no-op roster writes). */
@@ -139,6 +151,13 @@ export interface VoiceFeatureDeps {
    * channels). Used by `/position` so a companion moves with its secondary.
    */
   joinCompanionFor?: (secondaryChannelId: string) => Promise<string | undefined>;
+  /**
+   * The clock, for the date and time tokens. Unset means the real one.
+   *
+   * Exists so a test can pin an instant: the engine takes `now` as an argument
+   * rather than reading it, and this is the seam that supplies it.
+   */
+  clock?: () => Date;
   /**
    * Applies the private treatment to a just-spawned secondary when its primary is
    * `defaultPrivate` (mirrors `/private`, but grants Connect to the owner by id
@@ -567,6 +586,10 @@ export class VoiceFeature {
         // rename on every default-private room.
         isPrivate: primary?.template.defaultPrivate === true,
         startAt: primary?.template.startAt,
+        // On the create path the joining member IS the original creator, so
+        // the token renders correctly on the very first name.
+        originalCreatorId: member.id,
+        originalCreatorName: member.displayName,
       }),
       // `buildRenderContext` reads the LIVE channel's limit, and the live
       // channel here is the CREATOR channel, which is not the room being made.
@@ -630,7 +653,15 @@ export class VoiceFeature {
       primaryChannelId: channelId,
       ownerId: member.id,
       // Seed the arrival roster with the owner (longest-present from birth).
-      state: { name, index, seed, roster: [member.id] },
+      // The RAW display name, not `displayName(settings, member)`: the `/nick`
+      // override is applied at render so a later change to it still takes.
+      state: {
+        name,
+        index,
+        seed,
+        roster: [member.id],
+        originalCreatorName: member.displayName,
+      },
     });
     this.deps.countRoom?.('created');
 
@@ -1323,9 +1354,27 @@ export class VoiceFeature {
    * Discord and stores nothing. An unknown limit reads as unlimited, so
    * `{{FULL}}` fails open and never claims a room is full on missing data.
    */
+  /**
+   * The clock, in one place and overridable.
+   *
+   * Injectable so an integration test can pin a Friday evening without waiting
+   * for one, and a method rather than a bare `new Date()` at the call site so
+   * every render in a single pass shares one instant.
+   */
+  private now(): Date {
+    return this.deps.clock?.() ?? new Date();
+  }
+
   buildRenderContext(input: RenderContextInput): RenderContext {
     const { settings, members, channelId } = input;
     const owner = input.ownerId ? members.find((m) => m.id === input.ownerId) : undefined;
+    const originalCreatorName =
+      input.originalCreatorName === undefined || !input.originalCreatorId
+        ? input.originalCreatorName
+        : displayName(settings, {
+            id: input.originalCreatorId,
+            displayName: input.originalCreatorName,
+          });
     return {
       index: input.index,
       members,
@@ -1336,8 +1385,23 @@ export class VoiceFeature {
       // `startAt` is what the admin typed (the first room's number), so the
       // offset is one less. Absent means the default, 1.
       numberOffset: input.startAt === undefined ? 0 : input.startAt - 1,
+      /**
+       * The clock is read HERE and injected, because the engine is pure and
+       * must stay so: it is imported by the marketing site's browser bundle and
+       * by every unit test, both of which need a render to be reproducible.
+       */
+      now: this.now(),
+      lists: settings.lists,
+      ...(settings.timezone !== undefined ? { timezone: settings.timezone } : {}),
       ...(input.seed !== undefined ? { seed: input.seed } : {}),
       ...(owner ? { creatorName: displayName(settings, owner), creator: owner } : {}),
+      /**
+       * Resolved from the cache, then from the live member, and left unset
+       * otherwise so the engine falls back to the current owner. A member fetch
+       * is not an option here: the original creator has usually left, which is
+       * the whole reason the name is cached at creation.
+       */
+      ...(originalCreatorName !== undefined ? { originalCreatorName } : {}),
     };
   }
 
@@ -1367,6 +1431,8 @@ export class VoiceFeature {
       seed: secondary.state.seed,
       isPrivate: secondary.state.private === true,
       startAt: primary?.template.startAt,
+      originalCreatorId: secondary.originalCreator,
+      originalCreatorName: secondary.state.originalCreatorName,
     });
 
     // Name: per-channel `/name` override → primary template → server default.
@@ -1403,10 +1469,29 @@ export class VoiceFeature {
     if (statusChanged) {
       await this.deps.actions.setVoiceStatus(guildId, channelId, status);
     }
+    /**
+     * Backfills the cached original-creator name, but ONLY on a write this
+     * method was going to make anyway.
+     *
+     * Rooms that predate the cache have no name stored, and neither do rooms
+     * whose key an older instance stripped before `passthrough` shipped. Both
+     * self-heal the first time the room is renamed while its creator happens to
+     * be present. Never a write of its own: a state write per render on every
+     * room in the install base, to fix a token most guilds do not use, is not a
+     * trade worth making (`plans/name-tokens.md` §10.4).
+     */
+    const creatorPresent = secondary.originalCreator
+      ? members.find((m) => m.id === secondary.originalCreator)
+      : undefined;
+    const backfill =
+      secondary.state.originalCreatorName === undefined && creatorPresent
+        ? { originalCreatorName: creatorPresent.displayName }
+        : {};
     // Persist both even if only one changed (and even if a rename was deferred —
     // the queued rename will still apply).
     await this.deps.secondaries.updateState(channelId, {
       ...secondary.state,
+      ...backfill,
       name,
       status,
       index,
@@ -1672,6 +1757,8 @@ export class VoiceFeature {
           seed: secondary.state.seed,
           isPrivate: secondary.state.private === true,
           startAt: primary?.template.startAt,
+          originalCreatorId: secondary.originalCreator,
+          originalCreatorName: secondary.state.originalCreatorName,
         }),
       );
     }
@@ -1754,6 +1841,8 @@ export class VoiceFeature {
         seed: secondary.state.seed,
         isPrivate: secondary.state.private === true,
         startAt: primary?.template.startAt,
+        originalCreatorId: secondary.originalCreator,
+        originalCreatorName: secondary.state.originalCreatorName,
       });
       return {
         ...base,
@@ -1945,6 +2034,8 @@ export class VoiceFeature {
       seed: secondary.state.seed,
       isPrivate: secondary.state.private === true,
       startAt: primary?.template.startAt,
+      originalCreatorId: secondary.originalCreator,
+      originalCreatorName: secondary.state.originalCreatorName,
     });
 
     // The current/effective template for a field depends on the editor's scope:

@@ -2,14 +2,20 @@ import { describe, expect, it } from 'vitest';
 import type { VoiceMember } from './types.js';
 import {
   applyStringTransforms,
+  canonicalTimeZone,
+  dateParts,
   DEFAULT_CHANNEL_NAME_TEMPLATE,
   DEFAULT_STATUS_TEMPLATE,
   getAlias,
   getChannelGames,
   getGameName,
+  isValidListName,
+  isValidTimeZone,
+  LIST_NAME_MAX,
   RANDOM_EMOJIS,
   renderChannelName,
   resolveEmptyOccupied,
+  resolveRandom,
   toRoman,
   type RenderContext,
 } from './nameTemplate.js';
@@ -854,5 +860,270 @@ describe('OWNER', () => {
     };
     expect(renderChannelName('{{MEMBER:999 ?? y // n}}', withBot)).toBe('n');
     expect(renderChannelName('{{OWNER:999 ?? y // n}}', withBot)).toBe('n');
+  });
+});
+
+describe('time zones', () => {
+  it('canonicalises the spelling, so a stored zone reads back properly', () => {
+    expect(canonicalTimeZone('europe/amsterdam')).toBe('Europe/Amsterdam');
+    expect(canonicalTimeZone('  Europe/Amsterdam  ')).toBe('Europe/Amsterdam');
+    // A deprecated backward-compat alias resolves to the modern name.
+    expect(canonicalTimeZone('Japan')).toBe('Asia/Tokyo');
+    expect(canonicalTimeZone('GMT')).toBe('UTC');
+  });
+
+  it('refuses nonsense and an empty value', () => {
+    expect(canonicalTimeZone('')).toBeNull();
+    expect(canonicalTimeZone('   ')).toBeNull();
+    expect(canonicalTimeZone('Amsterdam')).toBeNull();
+    expect(canonicalTimeZone('CEST')).toBeNull();
+  });
+
+  /**
+   * The reason this is not a bare try/catch. `Intl` accepts every one of these,
+   * so a guild that set one would render an hour out for half of every year with
+   * nothing to say so, and `Etc/GMT+2` means UTC-2 into the bargain.
+   */
+  it('refuses a fixed offset, which Intl itself accepts', () => {
+    expect(isValidTimeZone('+02:00')).toBe(false);
+    expect(canonicalTimeZone('+02:00')).toBeNull();
+    expect(canonicalTimeZone('-05:00')).toBeNull();
+    expect(canonicalTimeZone('+0200')).toBeNull();
+    expect(canonicalTimeZone('Etc/GMT+2')).toBeNull();
+    // The one Etc zone that is not an offset in disguise stays usable.
+    expect(canonicalTimeZone('Etc/UTC')).toBe('UTC');
+  });
+});
+
+describe('date and time parts', () => {
+  // A Friday evening in Amsterdam, which is already Saturday morning in Tokyo:
+  // one instant that lands on different sides of the weekend by zone.
+  const friday = new Date('2026-09-04T19:30:00Z');
+
+  it('reads the parts in the given zone', () => {
+    expect(dateParts(friday, 'Europe/Amsterdam')).toEqual({
+      weekday: 'Friday',
+      month: 'September',
+      hour: 21,
+      weekend: false,
+    });
+    expect(dateParts(friday, 'Asia/Tokyo')).toEqual({
+      weekday: 'Saturday',
+      month: 'September',
+      hour: 4,
+      weekend: true,
+    });
+  });
+
+  it('falls back to UTC for a missing or unusable zone, never to the host clock', () => {
+    const utc = { weekday: 'Friday', month: 'September', hour: 19, weekend: false };
+    expect(dateParts(friday, undefined)).toEqual(utc);
+    expect(dateParts(friday, 'Middle/Earth')).toEqual(utc);
+    // An offset is refused at the write end, so a stored one is corrupt data.
+    expect(dateParts(friday, '+09:00')).toEqual(utc);
+  });
+
+  /**
+   * No clock means no date, and it must not mean "now". The render path is the
+   * only caller that supplies one, so a surface that forgot to would otherwise
+   * produce a name that changed by itself an hour later.
+   */
+  it('renders nothing at all with no clock supplied', () => {
+    expect(dateParts(undefined, 'Europe/Amsterdam')).toEqual({
+      weekday: '',
+      month: '',
+      hour: 0,
+      weekend: false,
+    });
+    expect(dateParts(new Date(NaN), 'Europe/Amsterdam').weekday).toBe('');
+  });
+
+  it('substitutes the tokens, and compares HOUR as a number', () => {
+    const one = member({ id: '1', displayName: 'Sam' });
+    const ctx = (timezone?: string): RenderContext => ({
+      index: 0,
+      members: [one],
+      creator: one,
+      creatorName: 'Sam',
+      now: friday,
+      ...(timezone ? { timezone } : {}),
+    });
+    expect(renderChannelName('@@weekday@@ @@month@@ @@hour@@', ctx('Europe/Amsterdam'))).toBe(
+      'Friday September 21',
+    );
+    expect(renderChannelName('{{HOUR>=18 ?? Evening // Daytime}}', ctx('Europe/Amsterdam'))).toBe(
+      'Evening',
+    );
+    expect(renderChannelName('{{HOUR>=18 ?? Evening // Daytime}}', ctx('Asia/Tokyo'))).toBe(
+      'Daytime',
+    );
+    expect(renderChannelName('{{WEEKEND ?? Weekend // Weekday}}', ctx('Europe/Amsterdam'))).toBe(
+      'Weekday',
+    );
+    expect(renderChannelName('{{WEEKEND ?? Weekend // Weekday}}', ctx('Asia/Tokyo'))).toBe(
+      'Weekend',
+    );
+    expect(renderChannelName('{{WEEKDAY=Friday ?? Fry // Not}}', ctx('Europe/Amsterdam'))).toBe(
+      'Fry',
+    );
+  });
+
+  /**
+   * A template with no date token must not pay for the formatter, and must not
+   * behave differently for a guild that has a zone set.
+   */
+  it('renders a template without a date token identically either way', () => {
+    const one = member({ id: '1', displayName: 'Sam' });
+    const base: RenderContext = { index: 0, members: [one], creator: one, creatorName: 'Sam' };
+    expect(renderChannelName("@@owner@@'s room", base)).toBe(
+      renderChannelName("@@owner@@'s room", { ...base, now: friday, timezone: 'Asia/Tokyo' }),
+    );
+  });
+});
+
+describe('[[list:name]]', () => {
+  const lists = { animals: ['otter', 'badger', 'heron'], one: ['solo'] };
+
+  it('picks from the named pool, stably for a given seed', () => {
+    const picks = new Set<string>();
+    for (let seed = 0; seed < 40; seed++) {
+      const picked = resolveRandom('[[list:animals]]', seed, lists);
+      expect(lists.animals).toContain(picked);
+      // The same seed must always give the same answer, or a room renames itself.
+      expect(resolveRandom('[[list:animals]]', seed, lists)).toBe(picked);
+      picks.add(picked);
+    }
+    expect(picks.size).toBe(3);
+  });
+
+  it('trims the name and resolves several groups independently', () => {
+    expect(resolveRandom('[[list: animals ]]', 1, lists)).toBe(
+      resolveRandom('[[list:animals]]', 1, lists),
+    );
+    expect(resolveRandom('[[list:one]] [[list:one]]', 7, lists)).toBe('solo solo');
+  });
+
+  /**
+   * A visible mistake beats a silently missing word, which is the same rule a
+   * `[[…]]` with no `/` follows. An unknown name is what a typo produces, and an
+   * empty render would read as the feature being broken.
+   */
+  it('leaves an unknown name as literal text', () => {
+    expect(resolveRandom('[[list:nope]]', 3, lists)).toBe('[[list:nope]]');
+    expect(resolveRandom('[[list:animals]]', 3, undefined)).toBe('[[list:animals]]');
+    expect(resolveRandom('[[list:]]', 3, lists)).toBe('[[list:]]');
+  });
+
+  /** The `getAlias` trap, one layer along: a pool named after a prototype member. */
+  it('does not resolve Object.prototype members as pools', () => {
+    expect(resolveRandom('[[list:constructor]]', 3, lists)).toBe('[[list:constructor]]');
+    expect(resolveRandom('[[list:toString]]', 3, lists)).toBe('[[list:toString]]');
+  });
+
+  it('renders through the engine, once per channel', () => {
+    const one = member({ id: '1', displayName: 'Sam' });
+    const ctx: RenderContext = {
+      index: 0,
+      members: [one],
+      creator: one,
+      creatorName: 'Sam',
+      seed: 5,
+      lists,
+    };
+    const first = renderChannelName('The [[list:animals]] room', ctx);
+    expect(first).toBe(renderChannelName('The [[list:animals]] room', ctx));
+    expect(first).toMatch(/^The (otter|badger|heron) room$/);
+  });
+});
+
+describe('list names', () => {
+  it('accepts what an admin would type', () => {
+    expect(isValidListName('animals')).toBe(true);
+    expect(isValidListName('big animals')).toBe(true);
+    expect(isValidListName('Animals-2_v3')).toBe(true);
+    expect(isValidListName('動物')).toBe(true);
+  });
+
+  /**
+   * Every rejected character breaks the syntax the name is looked up through, so
+   * accepting one would store a list no template could ever reach.
+   */
+  it('refuses anything that would break [[list:name]] or a custom id', () => {
+    expect(isValidListName('')).toBe(false);
+    expect(isValidListName('a:b')).toBe(false);
+    expect(isValidListName('a/b')).toBe(false);
+    expect(isValidListName('a]]b')).toBe(false);
+    expect(isValidListName('[nope')).toBe(false);
+    expect(isValidListName('x'.repeat(LIST_NAME_MAX + 1))).toBe(false);
+  });
+
+  /** Trimmed rather than trimmable: the engine trims at lookup, so two would collide. */
+  it('refuses surrounding whitespace instead of trimming it', () => {
+    expect(isValidListName(' animals')).toBe(false);
+    expect(isValidListName('animals ')).toBe(false);
+  });
+
+  it('refuses a control character', () => {
+    expect(isValidListName(`a${String.fromCharCode(10)}b`)).toBe(false);
+    expect(isValidListName(`a${String.fromCharCode(0)}b`)).toBe(false);
+  });
+});
+
+describe('@@original_creator@@', () => {
+  const sam = member({ id: '111', displayName: 'Sam' });
+  const robin = member({ id: '222', displayName: 'Robin' });
+
+  /**
+   * The token exists for the case where the two differ: whoever made the room
+   * has gone, and a caretaker owner holds it. Nothing else on the render path can
+   * name them, because they are not in the room to be read off the roster.
+   */
+  it('names the original creator while @@owner@@ names the current one', () => {
+    const ctx: RenderContext = {
+      index: 0,
+      members: [robin],
+      creator: robin,
+      creatorName: 'Robin',
+      originalCreatorName: 'Sam',
+    };
+    expect(renderChannelName('@@original_creator@@ / @@owner@@', ctx)).toBe('Sam / Robin');
+  });
+
+  it('falls back to the current owner when nothing was stored', () => {
+    const ctx: RenderContext = {
+      index: 0,
+      members: [sam],
+      creator: sam,
+      creatorName: 'Sam',
+    };
+    expect(renderChannelName('@@original_creator@@', ctx)).toBe('Sam');
+  });
+
+  it('renders Unknown when neither is known, like @@owner@@ does', () => {
+    expect(renderChannelName('@@original_creator@@', { index: 0, members: [] })).toBe('Unknown');
+  });
+
+  /**
+   * Substituted at step 9 with the other late tokens, which is what makes a
+   * stored name carrying `??` or `//` harmless: by then the conditional it sits
+   * inside has already been decided, so the text cannot split it. `""` is the
+   * one marker still live at that point, so that one is collapsed.
+   */
+  it('is substituted after conditionals resolve, so its own text cannot split one', () => {
+    const ctx = (originalCreatorName: string): RenderContext => ({
+      index: 0,
+      members: [sam],
+      creator: sam,
+      creatorName: 'Sam',
+      originalCreatorName,
+    });
+    // The true branch was taken, and the marker text survived verbatim: over
+    // sanitising here would rewrite the name of anyone with a `//` in theirs.
+    expect(
+      renderChannelName('{{OWNER ?? @@original_creator@@ // nobody}}', ctx('a ?? b // c')),
+    ).toBe('a ?? b // c');
+    expect(renderChannelName('A @@original_creator@@ B', ctx('""upper:shout""'))).toBe(
+      'A "upper:shout" B',
+    );
   });
 });

@@ -166,14 +166,49 @@ function mixHash(a: number, b: number): number {
   return (h ^ (h >>> 16)) >>> 0;
 }
 
+/** The `[[list:name]]` marker introducing a named pool. */
+export const LIST_PREFIX = 'list:';
+
+/**
+ * The options a `[[…]]` group offers, or `undefined` when the group is
+ * malformed and should be left as literal text for the author to see.
+ *
+ * `[[list:animals]]` reads a NAMED pool from the guild's settings. It exists
+ * because a 100-character template cannot hold forty options inline: the
+ * built-in default already spends 130 characters, almost all of it one
+ * `[[…]]` group (`plans/name-tokens.md` §10.2). An unknown name is left
+ * literal rather than rendered empty, for the same reason a `[[…]]` with no
+ * `/` is: a visible mistake beats a silently missing word.
+ */
+function randomOptions(
+  inner: string,
+  lists: Record<string, string[]> | undefined,
+): string[] | undefined {
+  if (inner.startsWith(LIST_PREFIX)) {
+    const key = inner.slice(LIST_PREFIX.length).trim();
+    // Own-property, never `in` or a bare index: the name comes from a stored
+    // template, so `[[list:constructor]]` would otherwise reach up the
+    // prototype chain and hand back a function. Same trap `getAlias` and
+    // `operandValue` both document.
+    if (!lists || !Object.prototype.hasOwnProperty.call(lists, key)) return undefined;
+    const options = lists[key]!.filter((o) => o !== '');
+    return options.length > 0 ? options : undefined;
+  }
+  return inner.includes('/') ? inner.split('/') : undefined;
+}
+
 /**
  * Resolves every `[[a/b/c]]` group to a single option, chosen deterministically
  * from `seed` + the group's ordinal. Because the seed is fixed per channel (see
  * {@link RenderContext.seed}), a channel always renders the same pick — so the
  * random default never causes a rename. Groups are processed left-to-right; a
- * `[[…]]` with no `/` is left untouched (matching the legacy delimiter check).
+ * malformed `[[…]]` is left untouched (see {@link randomOptions}).
  */
-export function resolveRandom(template: string, seed: number): string {
+export function resolveRandom(
+  template: string,
+  seed: number,
+  lists?: Record<string, string[]>,
+): string {
   let name = template;
   let group = 0;
   // Bounded to avoid any pathological loop on malformed input.
@@ -183,8 +218,8 @@ export function resolveRandom(template: string, seed: number): string {
     const close = name.indexOf(']]', open + 2);
     if (close === -1) break;
     const inner = name.slice(open + 2, close);
-    if (!inner.includes('/')) break;
-    const options = inner.split('/');
+    const options = randomOptions(inner, lists);
+    if (!options) break;
     const choice = options[mixHash(seed, group) % options.length] ?? '';
     name = name.slice(0, open) + choice + name.slice(close + 2);
     group++;
@@ -488,6 +523,19 @@ export interface ExpressionVars {
    * privacy model.
    */
   PRIVATE: boolean;
+  /**
+   * Date and time, in the guild's zone, at hour-or-coarser granularity only.
+   *
+   * There is deliberately no minute or second here. A minute-granular value
+   * changes on nearly every 5-minute sweep tick, which is the whole rename
+   * budget spent on a clock, forever, on every managed channel in the guild
+   * (`plans/name-tokens.md` §2). `HOUR` is the finest thing admitted, and it
+   * flips a threshold condition at most twice a day.
+   */
+  WEEKDAY: string;
+  MONTH: string;
+  WEEKEND: boolean;
+  HOUR: number;
 }
 
 /** What a resolved conditional operand can be. */
@@ -516,6 +564,10 @@ const CONDITION_VARIABLE_SET: Record<keyof ExpressionVars, true> = {
   OWNER: true,
   FULL: true,
   PRIVATE: true,
+  WEEKDAY: true,
+  MONTH: true,
+  WEEKEND: true,
+  HOUR: true,
 };
 
 export const CONDITION_VARIABLES = Object.keys(CONDITION_VARIABLE_SET) as (keyof ExpressionVars)[];
@@ -542,6 +594,10 @@ export const AT_TOKENS: readonly string[] = [
   '@@random_emoji@@',
   '@@limit@@',
   '@@slots@@',
+  '@@original_creator@@',
+  '@@weekday@@',
+  '@@month@@',
+  '@@hour@@',
 ];
 
 /**
@@ -560,6 +616,14 @@ export const AT_TOKENS: readonly string[] = [
  * is safe by construction. The other three have no such counterpart
  * (`plans/name-tokens.md` §5.1).
  */
+export const LATE_TOKENS: readonly string[] = [
+  '@@game_name@@',
+  '@@owner@@',
+  '@@creator@@',
+  '@@original_creator@@',
+  '@@stream_name@@',
+];
+
 /**
  * The tokens that can be used as a `{{…}}` conditional operand, i.e. those that
  * are substituted before conditionals resolve AND substitute a bare integer.
@@ -571,13 +635,6 @@ export const AT_TOKENS: readonly string[] = [
  * because the assistant's validator lints against it and the system prompt is
  * tested against it (`plans/name-tokens.md` §5.1).
  */
-export const LATE_TOKENS: readonly string[] = [
-  '@@game_name@@',
-  '@@owner@@',
-  '@@creator@@',
-  '@@stream_name@@',
-];
-
 export const OPERAND_TOKENS: readonly string[] = [
   '@@num@@',
   '@@num_others@@',
@@ -586,12 +643,24 @@ export const OPERAND_TOKENS: readonly string[] = [
   '@@party_size@@',
   '@@limit@@',
   '@@slots@@',
+  '@@hour@@',
   '$#',
   '$0#',
   '$00#',
   '$000#',
   '$0000#',
 ];
+
+/**
+ * The tokens whose value comes from the clock, and which therefore depend on the
+ * guild having set a time zone.
+ *
+ * Exported because every surface that can see a guild's settings has to be able
+ * to say "this renders in UTC until you set a zone": with no zone the render
+ * still succeeds, silently, on the wrong day for most of the install base
+ * (`plans/name-tokens.md` §10.1).
+ */
+export const DATE_TOKENS: readonly string[] = ['@@weekday@@', '@@month@@', '@@hour@@'];
 
 /** The channel-number tokens (all meaningless on a standalone channel, where they render `?`). */
 export const NUMBER_TOKENS: readonly string[] = [
@@ -603,6 +672,149 @@ export const NUMBER_TOKENS: readonly string[] = [
   '$0000#',
   '+#',
 ];
+
+// ---------------------------------------------------------------------------
+// Date and time — coarse only, and injected rather than read from the clock
+// ---------------------------------------------------------------------------
+
+/**
+ * The canonical IANA name for a zone, or `null` when it is one we refuse.
+ *
+ * `Intl.DateTimeFormat` throws `RangeError` on an unknown zone, which is the
+ * only check that needs no bundled zone table, and `resolvedOptions` then hands
+ * back the canonical spelling: `europe/amsterdam` and the deprecated alias
+ * `Japan` become `Europe/Amsterdam` and `Asia/Tokyo`. Storing the canonical form
+ * is what makes the stored value readable back to the admin who typed it.
+ *
+ * **Fixed offsets are refused even though Intl accepts them**, and that is the
+ * whole reason this is not a bare try/catch. `+02:00` is a valid `timeZone`
+ * here, and a guild that set one would be an hour out for half of every year
+ * with nothing to say so: an offset cannot follow daylight saving, and a region
+ * name is the only input that can. `Etc/GMT+2` is refused for a second reason on
+ * top of that -- IANA's sign convention there is inverted, so it means UTC-2,
+ * which is a trap rather than a choice.
+ */
+export function canonicalTimeZone(zone: string): string | null {
+  if (zone.trim() === '') return null;
+  let resolved: string;
+  try {
+    resolved = new Intl.DateTimeFormat('en-US', { timeZone: zone.trim() }).resolvedOptions()
+      .timeZone;
+  } catch {
+    return null;
+  }
+  if (/^[+-]/.test(resolved) || /^Etc\/GMT[+-]/.test(resolved)) return null;
+  return resolved;
+}
+
+/**
+ * Whether a string is a zone the engine will render in.
+ *
+ * Exported because the value has to be validated at BOTH ends: the settings blob
+ * is `record(unknown)` at the repository boundary, and `/import` takes it from a
+ * file, so the render path cannot be the only thing that looks. Writers should
+ * use {@link canonicalTimeZone} instead, and store what it returns.
+ */
+export function isValidTimeZone(zone: string): boolean {
+  return canonicalTimeZone(zone) !== null;
+}
+
+/**
+ * Cap on a `[[list:name]]` name.
+ *
+ * Short enough that a name always fits inside a Discord custom id (100
+ * characters, shared with the panel's own prefix and action) and inside a select
+ * option's label, so the panel never has to hash a name the way `/alias` does.
+ */
+export const LIST_NAME_MAX = 40;
+
+/**
+ * Whether a string is usable as a `[[list:name]]` name.
+ *
+ * The characters excluded are the ones that would break the very syntax the name
+ * is used in: `]` closes the block early, `[` opens another, `/` is the choice
+ * separator every other `[[…]]` uses, and `:` is the field separator in every
+ * custom id this panel round-trips a name through. A leading or trailing space
+ * is refused rather than trimmed, because the engine trims the key at lookup and
+ * two names differing only in spacing would resolve to one pool.
+ */
+export function isValidListName(name: string): boolean {
+  if (name === '' || name.length > LIST_NAME_MAX) return false;
+  if (name !== name.trim()) return false;
+  if (/[[\]/:]/.test(name)) return false;
+  // Control characters, checked by code point rather than by a character class:
+  // the class would have to contain literal control bytes, which a formatter
+  // rewrites and a reviewer cannot see.
+  for (const ch of name) if (ch.codePointAt(0)! < 0x20) return false;
+  return true;
+}
+
+/**
+ * Formatters are expensive to build and are rebuilt per render otherwise, so
+ * they are memoised by zone.
+ *
+ * A pure memo, not state: the same zone always yields the same formatter, and
+ * nothing here observes anything outside its arguments. The map is bounded by
+ * the number of distinct zones the install base uses, which is at most the
+ * number of IANA zones and in practice a handful.
+ */
+const ZONE_FORMATTERS = new Map<string, Intl.DateTimeFormat>();
+
+function formatterFor(zone: string): Intl.DateTimeFormat {
+  let f = ZONE_FORMATTERS.get(zone);
+  if (!f) {
+    f = new Intl.DateTimeFormat('en-US', {
+      timeZone: zone,
+      weekday: 'long',
+      month: 'long',
+      // `h23` rather than `hour12: false`: the latter reports midnight as "24"
+      // in some environments, which would make `{{HOUR>=18}}` true at 00:00.
+      hourCycle: 'h23',
+      hour: '2-digit',
+    });
+    ZONE_FORMATTERS.set(zone, f);
+  }
+  return f;
+}
+
+/** The weekday name, month name and hour of `now` in `zone`. */
+export interface DateParts {
+  /** English weekday name, e.g. `Monday`. */
+  weekday: string;
+  /** English month name, e.g. `September`. */
+  month: string;
+  /** Hour of the day, 0 to 23. */
+  hour: number;
+  /** Saturday or Sunday. */
+  weekend: boolean;
+}
+
+const NO_DATE: DateParts = { weekday: '', month: '', hour: 0, weekend: false };
+
+/**
+ * Resolves the date parts a template needs.
+ *
+ * **English names, deliberately**, like `@@nato@@` and every other word the
+ * engine supplies: a template is a stored string an admin wrote, so a name that
+ * changed language when a viewer's client did would be a different bug.
+ *
+ * Weekend is Saturday or Sunday. That is wrong in the several countries whose
+ * weekend is Friday and Saturday, and it is stated in the docs rather than
+ * guessed at from the zone, because a zone does not carry a work week.
+ */
+export function dateParts(now: Date | undefined, timezone: string | undefined): DateParts {
+  if (!now || Number.isNaN(now.getTime())) return NO_DATE;
+  const zone = timezone && isValidTimeZone(timezone) ? timezone : 'UTC';
+  const parts = formatterFor(zone).formatToParts(now);
+  const pick = (type: string): string => parts.find((p) => p.type === type)?.value ?? '';
+  const weekday = pick('weekday');
+  return {
+    weekday,
+    month: pick('month'),
+    hour: Number.parseInt(pick('hour'), 10) || 0,
+    weekend: weekday === 'Saturday' || weekday === 'Sunday',
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Member-controlled text must not eat the engine's delimiters
@@ -772,6 +984,7 @@ function buildExpressionVars(
   ctx: RenderContext,
   gameName: string,
   party: PartyInfo,
+  clock: DateParts,
 ): ExpressionVars {
   const creator = ctx.creator;
   const liveExternal = (creator?.activities ?? []).some((a) => a.kind === 'streaming');
@@ -799,6 +1012,10 @@ function buildExpressionVars(
     // fails open: it never claims a room is full on missing information.
     FULL: limit >= 1 && nonBot.length >= limit,
     PRIVATE: ctx.isPrivate ?? false,
+    WEEKDAY: clock.weekday,
+    MONTH: clock.month,
+    WEEKEND: clock.weekend,
+    HOUR: clock.hour,
   };
 }
 
@@ -885,6 +1102,41 @@ export interface RenderContext {
    * (`plans/name-tokens.md` §6.9).
    */
   numberOffset?: number;
+  /**
+   * The moment to render date and time tokens against.
+   *
+   * **Injected, never read from the clock here**, which is the rule this whole
+   * module keeps: no `process`, no `crypto`, no `Date.now()`. That is what makes
+   * every render reproducible in a test and on the marketing site, and it is
+   * why the date family arrived without loosening it.
+   *
+   * Absent means the date tokens have nothing to render, so they resolve empty
+   * and their variables read as a Sunday midnight rather than throwing.
+   */
+  now?: Date;
+  /**
+   * The guild's IANA time zone for `now`. Absent, or unrecognised, means UTC.
+   *
+   * "Friday night" ends at 2pm Friday in Los Angeles, so a UTC-only date token
+   * is wrong for most of the install base. That is the whole reason this exists
+   * (`plans/name-tokens.md` §10.1).
+   */
+  timezone?: string;
+  /**
+   * Named `[[list:name]]` pools, from the guild's settings.
+   *
+   * A pool is picked with the same per-channel `seed` as an inline `[[a/b]]`,
+   * so a named list never causes a rename either.
+   */
+  lists?: Record<string, string[]>;
+  /**
+   * Display name of whoever created the room, for `@@original_creator@@`.
+   *
+   * Cached on the row at creation rather than resolved here, because the
+   * original creator has usually left by the time it matters and a member fetch
+   * on the render path is not an option (`plans/name-tokens.md` §10.4).
+   */
+  originalCreatorName?: string;
 }
 
 /**
@@ -937,13 +1189,14 @@ export function renderChannelName(
   const num = nonBot.length;
   const numOthers = ctx.creator ? nonBot.filter((m) => m.id !== ctx.creator!.id).length : num;
   const userLimit = ctx.userLimit ?? 0;
+  let clock: DateParts = NO_DATE;
 
   // 0. Empty/occupied selection for adopted standalone channels (__empty/occupied__).
   //    Resolved first, so the chosen branch's own tokens are still substituted below.
   if (name.includes('__')) name = resolveEmptyOccupied(name, num === 0);
 
   // 1. Random picks first, fixed per channel by the stored seed.
-  if (name.includes('[[')) name = resolveRandom(name, ctx.seed ?? 0);
+  if (name.includes('[[')) name = resolveRandom(name, ctx.seed ?? 0, ctx.lists);
   if (name.includes('@@random_emoji@@')) {
     name = name.split('@@random_emoji@@').join(pickRandomEmoji(ctx.seed ?? 0));
   }
@@ -988,6 +1241,20 @@ export function renderChannelName(
   if (name.includes('@@num_live@@')) {
     name = name.split('@@num_live@@').join(String(nonBot.filter(isLive).length));
   }
+  // Date and time, resolved lazily and only once. At step 5 rather than step 9
+  // so `@@hour@@` is a usable conditional operand, and coarse by construction:
+  // there is no minute token, for the reason ExpressionVars records.
+  if (
+    name.includes('@@weekday@@') ||
+    name.includes('@@month@@') ||
+    name.includes('@@hour@@') ||
+    name.includes('{{')
+  ) {
+    clock = dateParts(ctx.now, ctx.timezone);
+    if (name.includes('@@weekday@@')) name = name.split('@@weekday@@').join(clock.weekday);
+    if (name.includes('@@month@@')) name = name.split('@@month@@').join(clock.month);
+    if (name.includes('@@hour@@')) name = name.split('@@hour@@').join(String(clock.hour));
+  }
   if (name.includes('@@limit@@')) name = name.split('@@limit@@').join(String(userLimit));
   if (name.includes('@@slots@@')) {
     // Empty rather than `0` when unlimited: "0 spots left" is a lie, while an
@@ -1017,7 +1284,7 @@ export function renderChannelName(
     name = name.split('@@party_details@@').join(collapseMarkers(party.details, EARLY_MARKER_CHARS));
     // 7. Conditionals, which can read GAME/PLAYERS/MAX/RICH/LIVE/ROLE.
     if (name.includes('{{')) {
-      name = resolveConditionals(name, buildExpressionVars(ctx, gameName, party));
+      name = resolveConditionals(name, buildExpressionVars(ctx, gameName, party, clock));
     }
   }
 
@@ -1031,13 +1298,36 @@ export function renderChannelName(
   if (name.includes('@@game_name@@')) {
     name = name.split('@@game_name@@').join(collapseMarkers(gameName, LATE_MARKER_CHARS));
   }
-  if (name.includes('@@owner@@') || name.includes('@@creator@@')) {
+  if (
+    name.includes('@@owner@@') ||
+    name.includes('@@creator@@') ||
+    name.includes('@@original_creator@@')
+  ) {
     // One pass over the ORIGINAL string via regex replace, not two chained
     // split/joins: a custom nickname can itself contain the literal text
     // "@@creator@@", and a second independent pass would re-match and
     // re-substitute that inserted text instead of leaving it alone.
     const ownerName = collapseMarkers(ctx.creatorName ?? 'Unknown', LATE_MARKER_CHARS);
-    name = name.replace(/@@owner@@|@@creator@@/g, () => ownerName);
+    /**
+     * The original creator falls back to the CURRENT owner's name, not to
+     * `Unknown`: a room created before the cache existed, or one whose cached
+     * name an older instance stripped, still reads as somebody's room rather
+     * than nobody's. Rooms where the two differ are exactly the ones that have
+     * changed hands, which is what the token is for.
+     */
+    const originalName = collapseMarkers(
+      ctx.originalCreatorName ?? ctx.creatorName ?? 'Unknown',
+      LATE_MARKER_CHARS,
+    );
+    // ONE pass over the original string, longest alternative first. Two chained
+    // passes would re-substitute a name that itself contains `@@creator@@`,
+    // which is the trap this line has carried a comment about since `@@owner@@`
+    // was introduced; `@@original_creator@@` does not contain `@@creator@@`
+    // (the `c` is preceded by `_`), but ordering it first keeps that a fact
+    // about the regex rather than about the token's spelling.
+    name = name.replace(/@@original_creator@@|@@owner@@|@@creator@@/g, (m) =>
+      m === '@@original_creator@@' ? originalName : ownerName,
+    );
   }
   if (name.includes('@@stream_name@@')) {
     name = name.split('@@stream_name@@').join(collapseMarkers(streamName(ctx), LATE_MARKER_CHARS));

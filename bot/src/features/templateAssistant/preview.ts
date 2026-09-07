@@ -17,6 +17,23 @@ import { maxLengthFor, type TemplateField } from './validate.js';
 /** A stable seed, so `[[a/b]]` and `@@random_emoji@@` never wobble between renders. */
 const PREVIEW_SEED = 4;
 
+/**
+ * A fixed instant for the date and time tokens: Friday 4 September 2026, 19:30
+ * UTC.
+ *
+ * Fixed, not `new Date()`, for the same reason the seed is fixed: a preview that
+ * wobbled between two renders of the same template would make the propose loop
+ * non-deterministic and the fixtures untestable. A Friday evening because that
+ * is the one instant where `{{WEEKEND}}` and `{{HOUR>=18}}`, the two conditions
+ * an admin actually reaches for, disagree, so a template testing either shows
+ * something in ONE scenario instead of needing a second one.
+ *
+ * Rendered in the GUILD's zone, not in UTC, so what the admin is shown is what
+ * their server would show. A guild in Tokyo therefore previews the following
+ * Saturday morning, which is correct for them.
+ */
+const PREVIEW_NOW = new Date('2026-09-04T19:30:00Z');
+
 function member(
   id: string,
   displayName: string,
@@ -43,6 +60,13 @@ export interface ScenarioOptions {
    * tokens render `?` — previewing them as `#1` would be a lie.
    */
   standalone: boolean;
+  /** The guild's named `[[list:name]]` pools, so a proposal using one previews. */
+  lists?: Record<string, string[]>;
+  /**
+   * The guild's IANA zone. Absent previews in UTC, which is exactly what an
+   * unconfigured guild would render, so the preview is honest either way.
+   */
+  timezone?: string | undefined;
   /**
    * The identity of a REAL channel these scenarios describe, when there is one.
    *
@@ -60,7 +84,7 @@ export interface ScenarioOptions {
 
 /** The scenarios every proposal is rendered against, in display order. */
 export function previewScenarios(opts: ScenarioOptions): PreviewScenario[] {
-  const { general, aliases, creatorName, standalone, identity } = opts;
+  const { general, aliases, creatorName, standalone, identity, lists, timezone } = opts;
   const index = identity?.index ?? (standalone ? -1 : 0);
   const base = {
     index,
@@ -68,6 +92,11 @@ export function previewScenarios(opts: ScenarioOptions): PreviewScenario[] {
     general,
     creatorName,
     seed: identity?.seed ?? PREVIEW_SEED,
+    now: PREVIEW_NOW,
+    // Never the host's zone: the engine's own default is UTC, which is what an
+    // unset guild renders, so the fixture cannot depend on where this runs.
+    timezone: timezone ?? 'UTC',
+    ...(lists ? { lists } : {}),
     ...(identity?.numberOffset !== undefined ? { numberOffset: identity.numberOffset } : {}),
   };
 

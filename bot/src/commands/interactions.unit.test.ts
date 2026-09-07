@@ -9,6 +9,9 @@ import { registerInteractionHandler, type InteractionDeps } from './interactions
 import { LOGGING_MODAL_ID } from './loggingModal.js';
 import { CREATE_FROM_SETUP_MODAL_ID, CREATE_MODAL_ID } from './createModal.js';
 import { GENERAL_MODAL_ID, SETUP_SETTINGS_ID, setupId } from './setupPanel.js';
+import { listsId, LISTS_SELECT_ID } from './listsPanel.js';
+import { TIMEZONE_MODAL_ID } from './timezoneModal.js';
+import { editorId } from './templatePanel.js';
 import { ALIAS_MODAL_ID } from './aliasModal.js';
 import { ALIAS_SELECT_ID, aliasHash, aliasId } from './aliasPanel.js';
 
@@ -187,7 +190,10 @@ function fakeInteraction(opts: FakeInteractionOpts) {
 function setup(overrides: Partial<InteractionDeps> = {}) {
   const client = fakeClient();
   const settings = {
-    getConfig: vi.fn().mockResolvedValue({ enabled: true, primaries: [], aliases: {} }),
+    // `lists` is always present on a real `GuildConfig`, so the fake carries it
+    // too: an empty map is what a guild with no named lists returns, and a fake
+    // that omitted it would let a caller reading it pass here and throw live.
+    getConfig: vi.fn().mockResolvedValue({ enabled: true, primaries: [], aliases: {}, lists: {} }),
     setLogging: vi.fn().mockResolvedValue({ ok: true, message: 'ok' }),
     getLogging: vi.fn().mockResolvedValue({ enabled: false, level: 1, channelId: null }),
     listAliases: vi.fn().mockResolvedValue({}),
@@ -482,6 +488,7 @@ describe('registerInteractionHandler (router)', () => {
       primaries: [{ channelId: 'p-live' }, { channelId: 'p-gone' }],
       defaultTemplate: 'T',
       defaultStatus: 'S',
+      lists: {},
     });
     const env = setup({ settings: settings as never });
     dispose = env.dispose;
@@ -512,6 +519,7 @@ describe('registerInteractionHandler (router)', () => {
       primaries: [{ channelId: 'p-live' }, { channelId: 'p-gone' }],
       defaultTemplate: 'T',
       defaultStatus: 'S',
+      lists: {},
     });
     const env = setup({ settings: settings as never });
     dispose = env.dispose;
@@ -892,7 +900,7 @@ describe('registerInteractionHandler (/alias panel)', () => {
   const withAliases = (aliases: Record<string, string>) => {
     const env = setup();
     env.settings.listAliases.mockResolvedValue(aliases);
-    env.settings.getConfig.mockResolvedValue({ enabled: true, primaries: [], aliases });
+    env.settings.getConfig.mockResolvedValue({ enabled: true, primaries: [], aliases, lists: {} });
     return env;
   };
 
@@ -1399,6 +1407,7 @@ describe('registerInteractionHandler (/setup panel)', () => {
         primaries: [{ channelId: 'p1' }],
         defaultTemplate: 'T',
         defaultStatus: 'S',
+        lists: {},
       }),
       createPrimary: vi.fn().mockResolvedValue({ ok: true, message: 'Created <#new1>.' }),
       recordContact: vi.fn().mockResolvedValue(undefined),
@@ -1866,5 +1875,306 @@ describe('/debug gating', () => {
     await flush();
     expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain("can't show you");
     expect(env.deps.feature.debugChannel).not.toHaveBeenCalled();
+  });
+});
+
+describe('registerInteractionHandler (time zone and named lists)', () => {
+  let dispose: (() => void) | undefined;
+  afterEach(() => dispose?.());
+
+  /** Everything the two settings surfaces touch, with nothing else stubbed. */
+  function settingsFake(over: Record<string, unknown> = {}) {
+    return {
+      getConfig: vi.fn().mockResolvedValue({
+        enabled: true,
+        primaries: [],
+        aliases: {},
+        lists: {},
+        timezone: 'Europe/Amsterdam',
+      }),
+      setTimeZone: vi.fn().mockResolvedValue({ ok: true, message: 'Time zone set.' }),
+      listNamedLists: vi.fn().mockResolvedValue({ animals: ['otter', 'badger'] }),
+      setNamedList: vi.fn().mockResolvedValue({ ok: true, message: 'Added.' }),
+      removeNamedList: vi.fn().mockResolvedValue({ ok: true, message: 'Removed.' }),
+      ...over,
+    };
+  }
+
+  it('opens the time zone modal prefilled from the settings select', async () => {
+    const settings = settingsFake();
+    const env = setup({ settings: settings as never });
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'stringSelect',
+      customId: SETUP_SETTINGS_ID,
+      values: [setupId('timezone')],
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+
+    const modal = JSON.stringify(interaction.showModal.mock.calls[0]?.[0]);
+    expect(modal).toContain(TIMEZONE_MODAL_ID);
+    expect(modal).toContain('Europe/Amsterdam');
+  });
+
+  it('saves the submitted zone and refreshes the panel in place', async () => {
+    const settings = settingsFake();
+    const env = setup({ settings: settings as never });
+    dispose = env.dispose;
+    const { interaction, reply, editReply } = fakeInteraction({
+      kind: 'modal',
+      customId: TIMEZONE_MODAL_ID,
+      manageChannels: true,
+      fromMessage: true,
+      textInputs: { zone: 'Asia/Tokyo' },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+
+    expect(settings.setTimeZone).toHaveBeenCalledWith('g1', 'Asia/Tokyo');
+    expect(reply).not.toHaveBeenCalled();
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('Time zone set.');
+  });
+
+  /** A blank submit is how the setting is cleared, so it must reach the service. */
+  it('passes a blank zone through rather than treating it as a no-op', async () => {
+    const settings = settingsFake();
+    const env = setup({ settings: settings as never });
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'modal',
+      customId: TIMEZONE_MODAL_ID,
+      manageChannels: true,
+      fromMessage: true,
+      textInputs: { zone: '' },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(settings.setTimeZone).toHaveBeenCalledWith('g1', '');
+  });
+
+  it('refuses the zone modal without Manage Channels, and writes nothing', async () => {
+    const settings = settingsFake();
+    const env = setup({ settings: settings as never });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'modal',
+      customId: TIMEZONE_MODAL_ID,
+      manageChannels: false,
+      fromMessage: true,
+      textInputs: { zone: 'Asia/Tokyo' },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(settings.setTimeZone).not.toHaveBeenCalled();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('Manage Channels');
+  });
+
+  it('opens the named-lists panel from the settings select', async () => {
+    const settings = settingsFake();
+    const env = setup({ settings: settings as never });
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'stringSelect',
+      customId: SETUP_SETTINGS_ID,
+      values: [setupId('lists')],
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+
+    const panel = JSON.stringify(editReply.mock.calls[0]?.[0]);
+    expect(panel).toContain('Named lists');
+    expect(panel).toContain('animals');
+  });
+
+  it('opens one list from the picker, then its edit modal prefilled', async () => {
+    const settings = settingsFake();
+    const env = setup({ settings: settings as never });
+    dispose = env.dispose;
+    const picked = fakeInteraction({
+      kind: 'stringSelect',
+      customId: LISTS_SELECT_ID,
+      values: ['animals'],
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', picked.interaction);
+    await flush();
+    // `respond` edits the message in place for a component interaction, so the
+    // detail view arrives through `update`, not `editReply`.
+    expect(JSON.stringify(picked.interaction.update.mock.calls[0]?.[0])).toContain(
+      '[[list:animals]]',
+    );
+
+    const edit = fakeInteraction({
+      kind: 'button',
+      customId: listsId('edit', 'animals'),
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', edit.interaction);
+    await flush();
+    const modal = JSON.stringify(edit.interaction.showModal.mock.calls[0]?.[0]);
+    expect(modal).toContain('avc:lists:save:animals');
+    expect(modal).toContain('otter');
+  });
+
+  /**
+   * The name in the custom id is what makes a name change a rename: without it
+   * the service would add a second list and leave the first behind.
+   */
+  it('saves an edit as a rename, carrying the name the modal opened on', async () => {
+    const settings = settingsFake();
+    const env = setup({ settings: settings as never });
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'modal',
+      customId: listsId('save', 'animals'),
+      manageChannels: true,
+      fromMessage: true,
+      textInputs: { name: 'beasts', options: 'otter\nbadger' },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(settings.setNamedList).toHaveBeenCalledWith(
+      'g1',
+      'beasts',
+      ['otter', 'badger'],
+      'animals',
+    );
+  });
+
+  it('saves a new list with no previous name', async () => {
+    const settings = settingsFake();
+    const env = setup({ settings: settings as never });
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'modal',
+      customId: listsId('save'),
+      manageChannels: true,
+      fromMessage: true,
+      textInputs: { name: 'animals', options: 'otter' },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(settings.setNamedList).toHaveBeenCalledWith('g1', 'animals', ['otter']);
+  });
+
+  it('removes a list and reports it on the refreshed panel', async () => {
+    const settings = settingsFake();
+    const env = setup({ settings: settings as never });
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'button',
+      customId: listsId('remove', 'animals'),
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(settings.removeNamedList).toHaveBeenCalledWith('g1', 'animals');
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('Removed.');
+  });
+
+  it('refuses every list action without Manage Channels', async () => {
+    const settings = settingsFake();
+    const env = setup({ settings: settings as never });
+    dispose = env.dispose;
+    for (const customId of [listsId('remove', 'animals'), listsId('add')]) {
+      const { interaction } = fakeInteraction({ kind: 'button', customId, manageChannels: false });
+      env.client.emit('interactionCreate', interaction);
+      await flush();
+    }
+    const { interaction } = fakeInteraction({
+      kind: 'modal',
+      customId: listsId('save', 'animals'),
+      manageChannels: false,
+      fromMessage: true,
+      textInputs: { name: 'beasts', options: 'otter' },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+
+    expect(settings.removeNamedList).not.toHaveBeenCalled();
+    expect(settings.setNamedList).not.toHaveBeenCalled();
+  });
+});
+
+describe('registerInteractionHandler (template advice)', () => {
+  let dispose: (() => void) | undefined;
+  afterEach(() => dispose?.());
+
+  const editorState = {
+    found: true,
+    scope: 'primary' as const,
+    name: { effectiveTemplate: 'T', preview: 'T' },
+    status: { effectiveTemplate: 'S', preview: 'S' },
+  };
+
+  function editorEnv(config: Record<string, unknown>) {
+    const settings = {
+      getConfig: vi.fn().mockResolvedValue({ enabled: true, primaries: [], lists: {}, ...config }),
+      setTemplate: vi.fn().mockResolvedValue({ ok: true, message: 'Saved.' }),
+      recordContact: vi.fn().mockResolvedValue(undefined),
+    };
+    const feature = {
+      getEditorState: vi.fn().mockResolvedValue(editorState),
+      rerenderSiblings: vi.fn().mockResolvedValue({ rateLimited: [] }),
+    };
+    return setup({ settings: settings as never, feature: feature as never });
+  }
+
+  async function save(env: ReturnType<typeof setup>, template: string): Promise<string> {
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'modal',
+      customId: editorId('save', 'primary', 'name', 'p1'),
+      manageChannels: true,
+      fromMessage: true,
+      textInputs: { template },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    return JSON.stringify(editReply.mock.calls[0]?.[0]);
+  }
+
+  /**
+   * The structural half. `/template` accepted anything before this was wired up,
+   * so an unknown variable rendered the false branch with nothing said.
+   */
+  it('advises on a hand-typed template the lint can fault', async () => {
+    const env = editorEnv({});
+    dispose = env.dispose;
+    expect(await save(env, '{{NONSENSE ?? a // b}}')).toContain('not a conditional variable');
+  });
+
+  /** The guild-shaped half: true of the template only because of what is not set. */
+  it('says a date token renders in UTC while no zone is set', async () => {
+    const env = editorEnv({});
+    dispose = env.dispose;
+    const withoutZone = await save(env, '@@weekday@@ room');
+    expect(withoutZone).toContain('UTC');
+
+    const zoned = editorEnv({ timezone: 'Europe/Amsterdam' });
+    dispose = zoned.dispose;
+    expect(await save(zoned, '@@weekday@@ room')).not.toContain('UTC');
+  });
+
+  it('names a list the guild does not have, since it would print as written', async () => {
+    const env = editorEnv({});
+    dispose = env.dispose;
+    expect(await save(env, 'The [[list:animals]] room')).toContain('no list called');
+
+    const withList = editorEnv({ lists: { animals: ['otter'] } });
+    dispose = withList.dispose;
+    const advised = await save(withList, 'The [[list:animals]] room');
+    expect(advised).not.toContain('no list called');
+    // And a real list is not faulted for having no `/` in it either.
+    expect(advised).not.toContain('random picker');
+  });
+
+  it('saves the template either way, since advice never refuses', async () => {
+    const env = editorEnv({});
+    dispose = env.dispose;
+    const panel = await save(env, '@@weekday@@ [[list:nope]]');
+    expect(panel).toContain('Saved.');
   });
 });

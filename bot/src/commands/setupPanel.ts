@@ -339,6 +339,16 @@ export interface SetupPanelInput {
    * outcome and the new state arrive in one message rather than two.
    */
   note?: string;
+  /**
+   * The guild's IANA zone, absent when it has never been set.
+   *
+   * Carried so the settings select can report it: unlike every other option
+   * here, the default is not merely a default, it is a value that is wrong for
+   * most servers and invisible until a date token renders.
+   */
+  timezone?: string;
+  /** How many named `[[list:name]]` pools the guild has, for the select's label. */
+  listCount?: number;
 }
 
 /**
@@ -531,6 +541,29 @@ function settingsRow(
       .setValue(setupId('general'))
       .setDescription('What room names show when nobody is playing a game. Default: General')
       .setEmoji('🎮'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel('Time zone')
+      .setValue(setupId('timezone'))
+      // The one description here that reports state rather than explaining the
+      // setting. An unset zone renders the date tokens in UTC silently, which is
+      // the wrong day for most of the install base, so the panel has to be able
+      // to say so without being opened (`plans/name-tokens.md` 10.1).
+      .setDescription(
+        input.timezone === undefined
+          ? 'Date and time tokens use UTC. Set yours so the days line up'
+          : `Date and time tokens use ${input.timezone}`.slice(0, 100),
+      )
+      .setEmoji('🕓'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel('Named lists')
+      .setValue(setupId('lists'))
+      .setDescription(
+        (input.listCount ?? 0) === 0
+          ? 'Sets of words a template can pick one of, as [[list:name]]'
+          : `${input.listCount} set${input.listCount === 1 ? '' : 's'} of words a template ` +
+              'can pick from, as [[list:name]]',
+      )
+      .setEmoji('🎲'),
   ];
   // The assistant is hidden in an expired guild because `allowedWhileExpired`
   // refuses it, and the panel must not offer an action it is about to refuse.

@@ -129,7 +129,18 @@ import {
   parseInheritModal,
 } from './inheritModal.js';
 import { buildLoggingModal, LOGGING_MODAL_ID, parseLoggingModal } from './loggingModal.js';
-import { lintTemplate } from '../features/templateAssistant/validate.js';
+import {
+  buildListDetailPanel,
+  buildListEditModal,
+  buildListsPanel,
+  findList,
+  LISTS_PREFIX,
+  LISTS_SELECT_ID,
+  parseListEditModal,
+  parseListsId,
+} from './listsPanel.js';
+import { buildTimeZoneModal, parseTimeZoneModal, TIMEZONE_MODAL_ID } from './timezoneModal.js';
+import { adviseTemplate, lintTemplate } from '../features/templateAssistant/validate.js';
 import {
   ASSISTANT_PREFIX,
   buildAssistantModal,
@@ -398,7 +409,15 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     if (interaction.isModalSubmit()) {
       // `CREATE_FROM_SETUP_MODAL_ID` is deliberately absent: it creates a
       // channel, so it is a write path like `CREATE_MODAL_ID` beside it.
-      return interaction.customId === GENERAL_MODAL_ID || interaction.customId === LOGGING_MODAL_ID;
+      // Every settings modal the "More settings" select can open, since the
+      // select itself is exempt: allowing the panel but refusing the modal it
+      // just opened would strand a gated admin mid-edit.
+      return (
+        interaction.customId === GENERAL_MODAL_ID ||
+        interaction.customId === LOGGING_MODAL_ID ||
+        interaction.customId === TIMEZONE_MODAL_ID ||
+        interaction.customId.startsWith(LISTS_PREFIX)
+      );
     }
     return false;
   }
@@ -772,6 +791,11 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
           ? { currentStatus: state.status.currentTemplate }
           : {}),
         ...(interaction.locale ? { locale: interaction.locale } : {}),
+        // Both are things the prompt promises to tell the model about: an unset
+        // zone makes a date token render in UTC, and an invented list name
+        // prints literally.
+        ...(config.timezone !== undefined ? { timezone: config.timezone } : {}),
+        lists: config.lists,
       },
       request,
       session.history,
@@ -1389,8 +1413,18 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
      * is about (`plans/name-tokens.md` §6.8). An admin with Manage Channels may
      * still set any name they like, so this only ever appends to the note.
      */
-    const advice = lintTemplate(value, field === 'name' ? 'name' : 'status')
-      .map((issue) => `⚠️ ${issue.message}`)
+    const guildConfig = await run(guildId, 'editor:advice', () => deps.settings.getConfig(guildId));
+    const advice = [
+      ...lintTemplate(value, field === 'name' ? 'name' : 'status').map((issue) => issue.message),
+      // The two things a structural lint cannot see, both of which render
+      // something plausible and wrong: a date token with no zone set, and a
+      // `[[list:name]]` naming a pool this guild does not have.
+      ...adviseTemplate(value, {
+        timezone: guildConfig.timezone,
+        listNames: Object.keys(guildConfig.lists),
+      }),
+    ]
+      .map((message) => `⚠️ ${message}`)
       .join('\n');
     /**
      * Record who set this up, for the two ADMIN scopes only.
@@ -2141,6 +2175,67 @@ Already subscribed? Add the new server ` +
     }
   }
 
+  /**
+   * Reads the guild's named lists WITHOUT the per-guild dispatcher, for the same
+   * reasons {@link readAliases} documents: a `showModal` cannot be deferred, and
+   * this is a `SettingsCache` hit rather than a query. WRITES stay on it.
+   */
+  const readLists = (guildId: string): Promise<Record<string, string[]>> =>
+    deps.settings.listNamedLists(guildId);
+
+  /** Re-renders the named-lists panel in place, after a mutation or a Back. */
+  async function refreshListsPanel(
+    interaction: ButtonInteraction | StringSelectMenuInteraction | ModalSubmitInteraction,
+    opts: { note?: string } = {},
+  ): Promise<void> {
+    if (!interaction.deferred && !interaction.replied) await interaction.deferUpdate();
+    const lists = await readLists(interaction.guildId!);
+    await interaction.editReply(toUpdate(buildListsPanel(lists, opts)));
+  }
+
+  /** The named-lists panel buttons: add, edit, remove, back, close. */
+  async function handleListsButton(interaction: ButtonInteraction): Promise<void> {
+    if (!(await requireManageChannels(interaction))) return;
+    const parsed = parseListsId(interaction.customId);
+    if (!parsed) return;
+    const guildId = interaction.guildId!;
+    const { action, name } = parsed;
+
+    if (action === 'close') {
+      await interaction.update({ content: 'Closed.', embeds: [], components: [] });
+      return;
+    }
+    // Showing a modal is itself the acknowledgement, so this must not defer.
+    if (action === 'add') {
+      await interaction.showModal(buildListEditModal());
+      return;
+    }
+    if (action === 'back') {
+      await interaction.deferUpdate();
+      await refreshListsPanel(interaction);
+      return;
+    }
+    // edit / remove both address one list, which may be gone by now.
+    if (name === null) return;
+    if (action === 'remove') {
+      await interaction.deferUpdate();
+      const res = await run(guildId, 'lists:remove', () =>
+        deps.settings.removeNamedList(guildId, name),
+      );
+      await refreshListsPanel(interaction, { note: formatResult(res) });
+      return;
+    }
+    if (action === 'edit') {
+      const options = findList(await readLists(guildId), name);
+      if (!options) {
+        await interaction.deferUpdate();
+        await refreshListsPanel(interaction, { note: 'That list is no longer there.' });
+        return;
+      }
+      await interaction.showModal(buildListEditModal(name, options));
+    }
+  }
+
   /** The `/setup` "More settings" select, and the alias picker. */
   async function handleStringSelect(interaction: StringSelectMenuInteraction): Promise<void> {
     if (interaction.customId === SETUP_SETTINGS_ID) {
@@ -2156,6 +2251,22 @@ Already subscribed? Add the new server ` +
       // the boundary, and `runSetupAction` re-checks for the button path.
       if (!(await requireManageChannels(interaction))) return;
       return runSetupAction(interaction, chosen.slice(SETUP_PREFIX.length));
+    }
+    if (interaction.customId === LISTS_SELECT_ID) {
+      if (!(await requireManageChannels(interaction))) return;
+      const name = interaction.values[0];
+      if (!name) return;
+      const lists = await readLists(interaction.guildId!);
+      const options = findList(lists, name);
+      if (!options) {
+        await respond(
+          interaction,
+          buildListsPanel(lists, { note: 'That list is no longer there.' }),
+        );
+        return;
+      }
+      await respond(interaction, buildListDetailPanel(name, options));
+      return;
     }
     if (interaction.customId !== ALIAS_SELECT_ID) return;
     if (!(await requireManageChannels(interaction))) return;
@@ -2264,6 +2375,8 @@ Already subscribed? Add the new server ` +
       managed: managedRows,
       problems: deps.permissionProblems?.recent(guildId) ?? [],
       assistant: Boolean(deps.assistant),
+      listCount: Object.keys(config.lists).length,
+      ...(config.timezone !== undefined ? { timezone: config.timezone } : {}),
       entitlement,
       // Guild-scoped, so an admin clicking it cannot authorize into the wrong
       // server. Self-host grants permissions on the role instead, so there is
@@ -2357,6 +2470,20 @@ Already subscribed? Add the new server ` +
         deps.settings.getConfig(guildId),
       );
       await interaction.showModal(buildGeneralModal(config.general));
+      return;
+    }
+    if (action === 'timezone') {
+      // Undispatched, like `readLists` and `readAliases`: `showModal` cannot be
+      // deferred, so a queued read would sit behind every rename in flight.
+      const config = await deps.settings.getConfig(guildId);
+      await interaction.showModal(buildTimeZoneModal(config.timezone));
+      return;
+    }
+    if (action === 'lists') {
+      // Always reached from the panel, so the panel is what it replaces.
+      // `refreshListsPanel` defers for us if this branch ever gains a caller
+      // that has not.
+      await refreshListsPanel(interaction);
       return;
     }
     if (action === 'manage') {
@@ -2485,6 +2612,7 @@ Already subscribed? Add the new server ` +
     if (interaction.customId.startsWith(ADOPT_PREFIX)) return handleAdoptButton(interaction);
     if (interaction.customId.startsWith(GROUP_PREFIX)) return handleGroupButton(interaction);
     if (interaction.customId.startsWith(ALIAS_PREFIX)) return handleAliasButton(interaction);
+    if (interaction.customId.startsWith(LISTS_PREFIX)) return handleListsButton(interaction);
     if (interaction.customId.startsWith(CHANNELINFO_PREFIX))
       return handleChannelInfoButton(interaction, entitled);
     if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorButton(interaction);
@@ -2605,6 +2733,8 @@ Already subscribed? Add the new server ` +
     if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorModal(interaction);
     if (interaction.customId.startsWith(ASSISTANT_PREFIX)) return handleAssistantModal(interaction);
     if (interaction.customId === GENERAL_MODAL_ID) return handleGeneralSubmit(interaction);
+    if (interaction.customId === TIMEZONE_MODAL_ID) return handleTimeZoneSubmit(interaction);
+    if (interaction.customId.startsWith(LISTS_PREFIX)) return handleListSaveSubmit(interaction);
     // `avc:alias` is the pre-panel id of the Add modal, still accepted so a
     // modal opened on an old instance mid-deploy can submit against a new one.
     // It covers only that direction: a panel opened on a NEW instance whose
@@ -2635,6 +2765,54 @@ Already subscribed? Add the new server ` +
     }
     const res = await run(guildId, 'setup:general', () => deps.settings.setGeneral(guildId, label));
     await interaction.reply({ content: formatResult(res), ephemeral: true });
+  }
+
+  /** The `/setup` time zone modal submit. Blank clears the setting. */
+  async function handleTimeZoneSubmit(interaction: ModalSubmitInteraction): Promise<void> {
+    if (!(await requireManageChannels(interaction))) return;
+    const guildId = interaction.guildId!;
+    const zone = parseTimeZoneModal(interaction.fields);
+    // Same shape as `handleGeneralSubmit`: opened from the panel today, with the
+    // plain-reply branch as the defence for a modal that has no message behind it.
+    if (interaction.isFromMessage()) {
+      await interaction.deferUpdate();
+      const res = await run(guildId, 'setup:timezone', () =>
+        deps.settings.setTimeZone(guildId, zone),
+      );
+      await refreshSetupPanel(interaction, { note: formatResult(res) });
+      return;
+    }
+    const res = await run(guildId, 'setup:timezone', () =>
+      deps.settings.setTimeZone(guildId, zone),
+    );
+    await interaction.reply({ content: formatResult(res), ephemeral: true });
+  }
+
+  /**
+   * The named-list add/edit modal submit.
+   *
+   * The custom id carries the name the modal was OPENED on, so a name change in
+   * the box is a rename rather than a second list, and the service does the
+   * delete and the set in one write.
+   */
+  async function handleListSaveSubmit(interaction: ModalSubmitInteraction): Promise<void> {
+    if (!(await requireManageChannels(interaction))) return;
+    const parsed = parseListsId(interaction.customId);
+    if (!parsed || parsed.action !== 'save') return;
+    const guildId = interaction.guildId!;
+    const { name, options } = parseListEditModal(interaction.fields);
+    const previous = parsed.name;
+    const res = await run(guildId, 'lists:save', () =>
+      previous === null
+        ? deps.settings.setNamedList(guildId, name, options)
+        : deps.settings.setNamedList(guildId, name, options, previous),
+    );
+    if (!interaction.isFromMessage()) {
+      await interaction.reply({ content: formatResult(res), ephemeral: true });
+      return;
+    }
+    await interaction.deferUpdate();
+    await refreshListsPanel(interaction, { note: formatResult(res) });
   }
 
   /** The alias panel's Add modal submit. */

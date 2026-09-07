@@ -8,6 +8,7 @@ import {
   type CurrentConfig,
   type GuildFacts,
   type ImportPlan,
+  EXPORT_SETTINGS_KEYS,
 } from '@avc/core';
 import { buildExportFile, type BuildExportOptions } from './configSnapshot.js';
 
@@ -143,7 +144,10 @@ describe('buildExportFile', () => {
   it('emits every settings key, using null for the ones the guild has not set', () => {
     const file = buildExportFile(empty(), options());
     expect(Object.values(file.settings).every((v) => v === null)).toBe(true);
-    expect(Object.keys(file.settings)).toHaveLength(11);
+    // Bound to the list rather than a literal: a key added to
+    // EXPORT_SETTINGS_KEYS and not to the exporter is what this catches, and a
+    // hard-coded count only catches it until someone updates the count.
+    expect(Object.keys(file.settings).sort()).toEqual([...EXPORT_SETTINGS_KEYS].sort());
   });
 
   it('emits every template field, using null for the ones the row omits', () => {

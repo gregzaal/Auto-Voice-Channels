@@ -1,6 +1,8 @@
 import {
   AT_TOKENS,
   CONDITION_VARIABLES,
+  DATE_TOKENS,
+  LIST_PREFIX,
   MAX_CHANNEL_NAME_LENGTH,
   LATE_TOKENS,
   MAX_STATUS_LENGTH,
@@ -142,6 +144,10 @@ export function lintTemplate(template: string, field: TemplateField): TemplateIs
 
   // -- constructs that silently render as literal text when malformed ------
   for (const inner of blocks(template, '[[', ']]')) {
+    // `[[list:name]]` is the one form with no `/`: its choices live in the
+    // guild's settings rather than in the template. Whether the name exists is
+    // a question about the guild, so it belongs in `adviseTemplate`, not here.
+    if (inner.trim().startsWith(LIST_PREFIX)) continue;
     if (!inner.includes('/')) {
       add(
         'random-without-choices',
@@ -247,6 +253,57 @@ export function lintTemplate(template: string, field: TemplateField): TemplateIs
   }
 
   return issues;
+}
+
+/**
+ * What a guild would need to have configured for a template to render as its
+ * author expects. Passed separately from the template because none of it is
+ * knowable from the template alone.
+ */
+export interface TemplateAdviceContext {
+  /** The guild's IANA zone, absent when it has never been set. */
+  timezone?: string | undefined;
+  /** The names of the guild's `[[list:name]]` pools. */
+  listNames?: readonly string[] | undefined;
+}
+
+/**
+ * Advice a structural lint cannot give: the two ways a template that is
+ * perfectly well formed still renders wrong because of what the GUILD has (or
+ * has not) configured (`plans/name-tokens.md` §10.1, §10.2).
+ *
+ * Separate from {@link lintTemplate}, which is pure structure and is shared by
+ * surfaces that have no guild context, and separate from the issue list, which
+ * is fed back to the model as a correction. These are notes for a human: the
+ * template is accepted either way.
+ */
+export function adviseTemplate(template: string, ctx: TemplateAdviceContext): string[] {
+  const advice: string[] = [];
+
+  if (ctx.timezone === undefined && DATE_TOKENS.some((t) => template.includes(t))) {
+    advice.push(
+      'Date and time tokens use UTC until a time zone is set for this server, ' +
+        'in `/setup` → Server defaults.',
+    );
+  }
+
+  const known = new Set(ctx.listNames ?? []);
+  for (const inner of blocks(template, '[[', ']]')) {
+    const trimmed = inner.trim();
+    if (!trimmed.startsWith(LIST_PREFIX)) continue;
+    const name = trimmed.slice(LIST_PREFIX.length).trim();
+    // A pool that does not exist is not an error the engine can report: the
+    // whole `[[list:name]]` prints exactly as written, which reads as the
+    // feature being broken rather than as a typo.
+    if (!known.has(name)) {
+      advice.push(
+        `There is no list called \`${name}\`, so \`[[list:${name}]]\` would show up as ` +
+          'written. Lists are set up in `/setup` → Server defaults.',
+      );
+    }
+  }
+
+  return advice;
 }
 
 /**

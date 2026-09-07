@@ -177,7 +177,10 @@ export class VoiceCommands {
 
     // A deliberate handover: the target becomes the original creator too, so the
     // giver can't `/reclaim` it back afterwards.
-    await this.deps.secondaries.setOwnerAndCreator(id, targetId);
+    // The target's RAW display name rides along, so `@@original_creator@@`
+    // names the person who now owns the room rather than whoever gave it away.
+    const target = this.deps.voice.membersInChannel(id).find((m) => m.id === targetId);
+    await this.deps.secondaries.setOwnerAndCreator(id, targetId, target?.displayName);
     await this.deps.feature.rerenderSecondary(guildId, id);
     return ok(`Transferred ownership to <@${targetId}>.`);
   }
@@ -210,7 +213,11 @@ export class VoiceCommands {
     if (ownerPresent && !isOriginalCreator) {
       return fail('The current owner is still here, they can `/transfer` it to you.');
     }
-    await this.deps.secondaries.setOwnerAndCreator(row.channelId, userId);
+    await this.deps.secondaries.setOwnerAndCreator(
+      row.channelId,
+      userId,
+      present.find((m) => m.id === userId)?.displayName,
+    );
     await this.deps.feature.rerenderSecondary(guildId, row.channelId);
     return ok(
       isOriginalCreator
