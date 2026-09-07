@@ -116,6 +116,28 @@ export const TIERS: readonly Tier[] = [
 ] as const;
 
 /**
+ * A tier's price as one line of prose, for every message the bot sends.
+ *
+ * The HEADLINE with the billed total beside it, never the yearly figure alone
+ * (`plans/pricing-ladder.md` §5.1, §5.3): "$7.50 a month, billed yearly ($90)".
+ * A bot message has no room for a two-line card and no toggle to offer, so it
+ * states the default and the total it comes from.
+ *
+ * In core rather than in the bot, because `/setup`'s panel and the billing
+ * notices both quote a price and were two hand-written formatters that had
+ * already drifted apart once. Never "from $X": it is that server's own tier
+ * price, not a floor.
+ */
+export function priceSentence(tier: Tier): string {
+  if (tier.pricePerYear === 0) return 'free';
+  if (tier.pricePerYear === null) return 'custom pricing';
+  const headline = headlinePerMonth(tier);
+  if (headline === null) return 'free';
+  const money = (n: number): string => `$${Number.isInteger(n) ? String(n) : n.toFixed(2)}`;
+  return `${money(headline)} a month, billed yearly (${money(tier.pricePerYear)})`;
+}
+
+/**
  * The headline price: the monthly figure for a tier paid YEARLY.
  *
  * **This is what every customer-facing surface shows**, with the billed yearly

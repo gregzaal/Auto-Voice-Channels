@@ -16,7 +16,16 @@ import {
   type InteractionReplyOptions,
   type InteractionUpdateOptions,
 } from 'discord.js';
-import { tierById, tierFor, tierLabel, tierRank, type AuthStatus, type TierId } from '@avc/core';
+import {
+  priceSentence,
+  tierById,
+  tierFor,
+  tierLabel,
+  tierRank,
+  type AuthStatus,
+  type Tier,
+  type TierId,
+} from '@avc/core';
 import { SITE_URL, subscribeUrl } from '../features/billing/messages.js';
 import {
   permissionProblemSummary,
@@ -140,10 +149,15 @@ export interface PlanInput {
   shared?: boolean;
 }
 
-function priceOf(tier: { pricePerYear: number | null }): string {
-  if (tier.pricePerYear === 0) return 'free';
+/**
+ * The panel's price line, from core's one formatter (§5.1).
+ *
+ * "contact us" rather than core's "custom pricing" for the quoted tier: the
+ * panel's sentence reads "your plan would be contact us" otherwise.
+ */
+function priceOf(tier: Tier): string {
   if (tier.pricePerYear === null) return 'contact us';
-  return `$${tier.pricePerYear}/yr`;
+  return priceSentence(tier);
 }
 
 /**

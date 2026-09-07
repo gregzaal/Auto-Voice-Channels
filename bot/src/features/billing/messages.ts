@@ -1,4 +1,5 @@
 import {
+  priceSentence,
   tierById,
   tierFor,
   trialPolicyFor,
@@ -36,12 +37,19 @@ export function subscribeUrl(guildId: string): string {
   return `${SITE_URL}/dashboard?guild=${guildId}`;
 }
 
-/** Price label for the tier a guild of `memberCount` members needs. */
+/**
+ * Price label for the tier a guild of `memberCount` members needs.
+ *
+ * The headline with its billed total, from core's one formatter (§5.1), plus
+ * the tier NAME on every notice: "Rare" means nothing to somebody reading a
+ * warning about their own server, and the price without the name means nothing
+ * to somebody comparing it against the pricing page.
+ */
 function priceLabel(memberCount: number): string {
   const tier = tierFor(memberCount);
   if (tier.pricePerYear === 0) return 'free';
   if (tier.pricePerYear === null) return 'custom pricing';
-  return `$${tier.pricePerYear}/yr (${tier.label} tier)`;
+  return `${priceSentence(tier)} on the ${tier.label} plan`;
 }
 
 /** The one-time welcome when the bot joins a guild, by trial policy (§6). */
@@ -130,12 +138,9 @@ export function notificationMessage(
   audience: NotificationAudience = 'guild',
 ): string {
   const tierLine = n.requiredTier ? tierById(n.requiredTier) : tierFor(memberCount);
-  const price =
-    tierLine.pricePerYear === null
-      ? 'custom pricing'
-      : tierLine.pricePerYear === 0
-        ? 'free'
-        : `$${tierLine.pricePerYear}/yr`;
+  // Core's one formatter, like every other price the bot quotes (§5.1). This
+  // was a third hand-written copy of the same three branches.
+  const price = priceSentence(tierLine);
 
   /**
    * A fan-out copy landing in a server whose admins are not the buyer.

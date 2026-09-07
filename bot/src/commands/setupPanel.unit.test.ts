@@ -35,7 +35,7 @@ describe('formatPlan', () => {
     expect(line).toContain('Free trial');
     expect(line).toContain('10 days');
     expect(line).toContain('Uncommon tier');
-    expect(line).toContain('$18/yr');
+    expect(line).toContain('$1.50 a month, billed yearly ($18)');
     expect(line).toContain(LINK);
   });
 
@@ -73,9 +73,9 @@ describe('formatPlan', () => {
         shared: true,
       });
       expect(line).toContain('Legendary tier');
-      expect(line).toContain('$180/yr');
+      expect(line).toContain('$15 a month, billed yearly ($180)');
       expect(line).not.toContain('Uncommon tier');
-      expect(line).not.toContain('$18/yr');
+      expect(line).not.toContain('($18)');
     });
 
     it('says the subscription also covers other servers, without saying "pool"', () => {
@@ -151,7 +151,7 @@ describe('formatPlan', () => {
   it('quotes the billed tier for a subscriber who has outgrown it', () => {
     const line = formatPlan({ ...base, memberCount: 1_500, status: 'active', billedTier: 's' });
     expect(line).toContain('Uncommon tier');
-    expect(line).toContain('$18/yr');
+    expect(line).toContain('$1.50 a month, billed yearly ($18)');
     expect(line).not.toContain('$59/yr');
   });
 
