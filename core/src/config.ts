@@ -1,5 +1,11 @@
 import { z } from 'zod';
 import { DEFAULT_FLEET, FLEETS } from './domain/fleets.js';
+import {
+  SUPPORTER_ROLE_ADVICE_KEYS,
+  SUPPORTER_ROLE_ENV_KEYS,
+  SUPPORTER_ROLE_TIER_IDS,
+  envKeyForSupporterRole,
+} from './domain/tiers.js';
 
 /**
  * Application configuration, validated with zod at startup. The process should
@@ -252,17 +258,24 @@ export const configSchema = z
          * "supporter" role on it would be the one badge that means nothing.
          */
         byTier: z
-          .object({
-            s: snowflake.optional(),
-            m: snowflake.optional(),
-            l: snowflake.optional(),
-            xl: snowflake.optional(),
-            xxl: snowflake.optional(),
-          })
+          .object(
+            /**
+             * Derived from `TIER_IDS`, never a hand-written literal.
+             *
+             * A literal `{ s, m, l, xl, xxl }` compiles clean against
+             * `{ [K in TierId]?: string }` because every key is optional, so
+             * adding a tier to the ladder leaves `roleFor` returning undefined
+             * for it and nobody on that tier badged, with nothing failing.
+             * `plans/pricing-ladder.md` §8.2.
+             */
+            Object.fromEntries(
+              SUPPORTER_ROLE_TIER_IDS.map((id) => [id, snowflake.optional()]),
+            ) as Record<(typeof SUPPORTER_ROLE_TIER_IDS)[number], z.ZodOptional<typeof snowflake>>,
+          )
           .refine((r) => Object.values(r).some((id) => id !== undefined), {
             message:
               'SUPPORT_GUILD_ID is set but no SUPPORT_ROLE_<TIER> is. Set at least one of ' +
-              'SUPPORT_ROLE_S / _M / _L / _XL / _XXL, or unset SUPPORT_GUILD_ID.',
+              `${SUPPORTER_ROLE_ADVICE_KEYS.join(' / ')}, or unset SUPPORT_GUILD_ID.`,
           }),
         /**
          * Delay between role writes during a full reconcile.
@@ -455,24 +468,16 @@ function envToInput(env: NodeJS.ProcessEnv): Record<string, unknown> {
 function supporterRolesInput(e: NodeJS.ProcessEnv): Record<string, unknown> | undefined {
   const keys = [
     'SUPPORT_GUILD_ID',
-    'SUPPORT_ROLE_S',
-    'SUPPORT_ROLE_M',
-    'SUPPORT_ROLE_L',
-    'SUPPORT_ROLE_XL',
-    'SUPPORT_ROLE_XXL',
+    ...SUPPORTER_ROLE_ENV_KEYS,
     'SUPPORT_ROLE_WRITE_SPACING_MS',
     'SUPPORT_ROLE_RECONCILE_INTERVAL_HOURS',
-  ] as const;
+  ];
   if (!keys.some((k) => e[k] !== undefined)) return undefined;
   return {
     guildId: e.SUPPORT_GUILD_ID,
-    byTier: {
-      s: e.SUPPORT_ROLE_S,
-      m: e.SUPPORT_ROLE_M,
-      l: e.SUPPORT_ROLE_L,
-      xl: e.SUPPORT_ROLE_XL,
-      xxl: e.SUPPORT_ROLE_XXL,
-    },
+    byTier: Object.fromEntries(
+      SUPPORTER_ROLE_TIER_IDS.map((id) => [id, e[envKeyForSupporterRole(id)]]),
+    ),
     writeSpacingMs: e.SUPPORT_ROLE_WRITE_SPACING_MS,
     reconcileIntervalHours: e.SUPPORT_ROLE_RECONCILE_INTERVAL_HOURS,
   };

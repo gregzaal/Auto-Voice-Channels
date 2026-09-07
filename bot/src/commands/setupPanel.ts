@@ -16,7 +16,7 @@ import {
   type InteractionReplyOptions,
   type InteractionUpdateOptions,
 } from 'discord.js';
-import { TIER_IDS, tierById, tierFor, type AuthStatus, type TierId } from '@avc/core';
+import { tierById, tierFor, tierRank, type AuthStatus, type TierId } from '@avc/core';
 import { SITE_URL, subscribeUrl } from '../features/billing/messages.js';
 import {
   permissionProblemSummary,
@@ -230,7 +230,7 @@ export function formatPlan(opts: PlanInput): string {
      * for, an outgrown plan needs the one they now need. Quoting the lower of
      * the two would tell someone over their limit to buy what they already have.
      */
-    const tier = billed && TIER_IDS.indexOf(billed.id) > TIER_IDS.indexOf(own.id) ? billed : own;
+    const tier = billed && tierRank(billed.id) > tierRank(own.id) ? billed : own;
     return `🕊️ ${left} Everything still works. Keep AVC on the ${tier.label} tier (${priceOf(tier)}) at ${link}`;
   }
   if (status === 'expired') {
