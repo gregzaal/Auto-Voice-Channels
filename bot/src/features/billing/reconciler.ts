@@ -908,22 +908,45 @@ export class BillingReconciler {
          * the Exotic conversation. `record` is best-effort, so a failed audit
          * write cannot cost the pass.
          */
-        await this.deps.opsAudit
-          .record({
-            actor: 'billing-reconciler',
-            action: 'billing.hard_gate_unplaceable',
-            target: current.guildId,
-            details: {
-              fleet: this.deps.fleet,
-              memberCount: current.memberCount,
-              policy,
-              note:
-                'Guild is in trial with no window and is above the self-serve ceiling, so no ' +
-                'trial duration applies. Left entitled and untouched on purpose. Arrange a ' +
-                'quoted arrangement, or move it to active with a subscription.',
-            },
-          })
-          .catch(() => undefined);
+        /**
+         * Once a day, not once an hour.
+         *
+         * This is a STATE, not an event: the guild sits in it until somebody
+         * arranges a price, so an unguarded row per advance pass is about 24 a
+         * day per guild. `ops_audit` is pruned at 365 days so nothing grows
+         * without bound, but the readers are the harm: `loadRecentOps(25)`,
+         * `opsAudit.recent(50)` and `v_recent_ops` ("the last hour") would show
+         * nothing else within a day, so the row meant to make one guild visible
+         * would hide every other operator action. Same reasoning as the
+         * permission-problem backoff in AGENTS.md, and `hasActionSince` bounds
+         * the check in SQL rather than reading a page and filtering.
+         */
+        const alreadyToday = await this.deps.opsAudit
+          .hasActionSince(
+            'billing.hard_gate_unplaceable',
+            current.guildId,
+            new Date(now.getTime() - 86_400_000),
+          )
+          .catch(() => true); // A failed read must not turn into a write storm.
+        if (!alreadyToday) {
+          await this.deps.opsAudit
+            .record({
+              actor: 'billing-reconciler',
+              action: 'billing.hard_gate_unplaceable',
+              target: current.guildId,
+              details: {
+                fleet: this.deps.fleet,
+                memberCount: current.memberCount,
+                policy,
+                note:
+                  'Guild is in trial with no window and is above the self-serve ceiling, so no ' +
+                  'trial duration applies. Left entitled and untouched on purpose. Arrange a ' +
+                  'quoted arrangement, or move it to active with a subscription. Recorded at ' +
+                  'most once a day while the condition lasts.',
+              },
+            })
+            .catch(() => undefined);
+        }
         return;
       }
     }

@@ -265,6 +265,25 @@ export function pricedTierById(id: TierId): Tier | null {
 }
 
 /**
+ * A tier's name for CUSTOMER-FACING copy, given a possibly-stored id.
+ *
+ * Use this, never `tierById(id).label`, wherever the id came out of the
+ * database (`guilds.tier`, `subscriptions.tier`, `member_pools.billed_tier`).
+ * `tierById`'s fallback answers with the largest priced tier, which is the
+ * right direction for a CEILING (see its docstring) and confidently wrong for a
+ * NAME: a customer still stamped `l` was told they were on the "Exotic" plan,
+ * and one message read "more members than the Exotic plan covers", which is
+ * impossible since Exotic is unbounded.
+ *
+ * The fallback is the bare id, which is terse but true. `guilds.tier` is never
+ * cleared when a subscription lapses, so whether any such row exists is a data
+ * question rather than something the code can promise.
+ */
+export function tierLabel(id: TierId): string {
+  return pricedTierById(id)?.label ?? id.toUpperCase();
+}
+
+/**
  * Orders tiers by size: negative when `a` is a smaller tier than `b`, zero when
  * equal, positive when larger. Used for the over-limit check (`required > billed`).
  */

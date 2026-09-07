@@ -16,7 +16,7 @@ import {
   type InteractionReplyOptions,
   type InteractionUpdateOptions,
 } from 'discord.js';
-import { tierById, tierFor, tierRank, type AuthStatus, type TierId } from '@avc/core';
+import { tierById, tierFor, tierLabel, tierRank, type AuthStatus, type TierId } from '@avc/core';
 import { SITE_URL, subscribeUrl } from '../features/billing/messages.js';
 import {
   permissionProblemSummary,
@@ -158,6 +158,8 @@ export function formatPlan(opts: PlanInput): string {
 
   const shared = opts.shared === true;
   const billed = opts.billedTier ? tierById(opts.billedTier) : null;
+  /** The billed tier's NAME, honest about an id this build no longer prices. */
+  const billedName = opts.billedTier ? tierLabel(opts.billedTier) : null;
   /** What this server's own size would require, ignoring any subscription. */
   const own = tierFor(memberCount);
 
@@ -197,14 +199,16 @@ export function formatPlan(opts: PlanInput): string {
 
   if (status === 'active') {
     if (shared) {
-      const tierLine = billed ? `${billed.label} tier (${priceOf(billed)})` : 'your plan';
+      const tierLine =
+        billedName && billed ? `${billedName} tier (${priceOf(billed)})` : 'your plan';
       return (
         `✅ **Subscribed** · ${tierLine}, covering this server along with the others on the ` +
         `same subscription. Manage it from the dashboard at ${link}`
       );
     }
     const tier = billed ?? own;
-    return `✅ **Subscribed** · ${tier.label} tier (${priceOf(tier)}). Thanks for supporting AVC!`;
+    const name = billed && billedName ? billedName : own.label;
+    return `✅ **Subscribed** · ${name} tier (${priceOf(tier)}). Thanks for supporting AVC!`;
   }
   if (status === 'grace') {
     const graceDays = graceUntil ? daysUntil(now, graceUntil) : null;
@@ -230,8 +234,10 @@ export function formatPlan(opts: PlanInput): string {
      * for, an outgrown plan needs the one they now need. Quoting the lower of
      * the two would tell someone over their limit to buy what they already have.
      */
-    const tier = billed && tierRank(billed.id) > tierRank(own.id) ? billed : own;
-    return `🕊️ ${left} Everything still works. Keep AVC on the ${tier.label} tier (${priceOf(tier)}) at ${link}`;
+    const useBilled = billed !== null && tierRank(billed.id) > tierRank(own.id);
+    const tier = useBilled ? billed! : own;
+    const name = useBilled ? (billedName ?? billed!.label) : own.label;
+    return `🕊️ ${left} Everything still works. Keep AVC on the ${name} tier (${priceOf(tier)}) at ${link}`;
   }
   if (status === 'expired') {
     return shared
@@ -279,8 +285,8 @@ export function formatPlan(opts: PlanInput): string {
    */
   if (tier.pricePerYear === null) {
     return (
-      '🏛️ This server is **larger than our self-serve plans cover**. Get in touch and we will ' +
-      `work out the right arrangement: ${SITE_URL}`
+      '🏛️ This server is **larger than our self-serve plans cover**. Here is how to get in ' +
+      `touch so we can work out the right arrangement: ${SITE_URL}/pricing#xxl`
     );
   }
 
