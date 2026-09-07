@@ -226,13 +226,12 @@
       }
     },
     {
-      "$comment": "Asserted only `field: status` before, so it turned the render checks on over whatever long text the model invented and failed intermittently on nothing anyone could act on (§9.1). The four things the request actually names are assertable, and a status is capped at 500 rather than 100, so there is room for all of them.",
+      "$comment": "§9 'not yet probed': very long literal text near the 100-char clamp. FINDING: the model cannot reliably count characters. Told to keep names under 100 it still emitted 122, and when pushed harder it asserted the text was 'already within the limit'. No prompt wording fixes this, which is precisely why the length check is in the validator: production feeds `renders-truncated` back with the actual count and the loop shortens it. Pinned here so the weakness stays visible rather than looking solved.",
       "group": "long",
-      "request": "A really long status describing the game, the party, the owner and the headcount all at once.",
+      "request": "Name it exactly: The Extremely Long And Very Detailed Lounge For People Who Enjoy Playing Cooperative Games Together In The Evenings",
       "expect": {
-        "field": "status",
-        "contains": ["@@game_name@@", "@@owner@@"],
-        "containsAny": ["@@num@@", "@@num_others@@"]
+        "field": "name",
+        "allowIssues": ["template-too-long", "renders-truncated"]
       }
     },
     {
