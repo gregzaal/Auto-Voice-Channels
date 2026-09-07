@@ -180,9 +180,10 @@
       "request": "Zeige den Namen des Erstellers und das Spiel.",
       "expect": {
         "field": "name",
-        "containsAny": ["@@owner@@", "@@creator@@"],
+        "containsAny": ["@@owner@@", "@@creator@@", "@@original_creator@@"],
         "language": "de"
-      }
+      },
+      "$comment": "Accepts the original-creator token too, and this case is why that matters: shipping @@original_creator@@ changed what the model picks for creator phrasing. \"Ersteller\" is whoever MADE the room, so the new token is at least as good an answer as @@owner@@ and the model now reaches for it. The case exists for the multilingual check, not to pin which of two legitimate tokens wins."
     },
     {
       "$comment": "§9 finding 1: an English request must not drift. This was the deterministic failure before the Reply language field existed.",
