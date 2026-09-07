@@ -105,7 +105,7 @@ export const TIERS: readonly Tier[] = [
     pricePerYear: 180,
     pricePerMonth: 18,
   },
-  { id: 'mythic', label: 'Mythic', maxExclusive: 300_000, pricePerYear: 360, pricePerMonth: 36 },
+  { id: 'mythic', label: 'Mythic', maxExclusive: 300_000, pricePerYear: 390, pricePerMonth: 39 },
   {
     id: 'exotic',
     label: 'Exotic',

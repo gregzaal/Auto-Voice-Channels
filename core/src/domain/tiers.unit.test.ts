@@ -49,7 +49,7 @@ describe('tierFor', () => {
     expect(tierFor(5_000).pricePerYear).toBe(30);
     expect(tierFor(20_000).pricePerYear).toBe(90);
     expect(tierFor(50_000).pricePerYear).toBe(180);
-    expect(tierFor(200_000).pricePerYear).toBe(360);
+    expect(tierFor(200_000).pricePerYear).toBe(390);
     expect(tierFor(500_000).pricePerYear).toBeNull();
   });
 
@@ -92,7 +92,7 @@ describe('tierFor', () => {
     expect(headlinePerMonth(tierFor(5_000))).toBeCloseTo(2.5, 10);
     expect(headlinePerMonth(tierFor(20_000))).toBeCloseTo(7.5, 10);
     expect(headlinePerMonth(tierFor(50_000))).toBeCloseTo(15, 10);
-    expect(headlinePerMonth(tierFor(200_000))).toBeCloseTo(30, 10);
+    expect(headlinePerMonth(tierFor(200_000))).toBeCloseTo(32.5, 10);
   });
 
   it('isFreeForever tracks the <100 boundary', () => {
