@@ -97,8 +97,8 @@ export const configSchema = z
     adminChannelId: z.string().optional(),
 
     /**
-     * Dead-man's switch. The in-process watcher POSTs here on every healthy
-     * tick, and something outside notices when the POSTs stop.
+     * Dead-man's switch. The in-process watcher GETs here on every healthy
+     * tick, and something outside notices when the pings stop.
      *
      * Optional and unset by default, so nothing changes for a self-hoster who
      * does not want it -- but it is the one piece of down-detection a

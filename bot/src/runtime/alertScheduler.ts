@@ -15,8 +15,8 @@ import {
  * a queue depth, whether this instance's gateway is actually connected).
  * This runs here, sees all of that, and cannot report its own death.
  *
- * Hence the third leg: a dead-man's switch. Every healthy tick POSTs
- * `WATCHDOG_PING_URL`, and something outside notices when the POSTs stop.
+ * Hence the third leg: a dead-man's switch. Every healthy tick pings
+ * `WATCHDOG_PING_URL`, and something outside notices when the pings stop.
  * That is also the **only** down-detection available to a self-hoster, who
  * has no `avc-web` and no second machine, which is why it is a plain
  * optional URL rather than anything of ours.
@@ -614,12 +614,27 @@ export class AlertScheduler {
     }
   }
 
+  /**
+   * `GET`, and the verb is the whole compatibility surface: there is no body.
+   *
+   * Uptime Kuma 1.x registers its push route GET-only (`router.get`, so a POST
+   * 404s and a healthy bot read as down), and 2.x takes any verb. Every other
+   * heartbeat service checked accepts GET, so it is the broadest-compatible
+   * choice. Not configurable, because no provider has been found to refuse it.
+   *
+   * The one header is there because a GET is cacheable where a POST was not,
+   * so an intermediary in front of a self-hosted monitor could answer a beat
+   * the origin never sees. Sent as a header rather than `cache: 'no-store'`,
+   * which is what undici puts on the wire for it anyway and is absent from
+   * this project's `RequestInit` type.
+   */
   private async ping(): Promise<void> {
     const url = this.deps.watchdogPingUrl;
     if (!url) return;
     try {
       const res = await this.fetchFn(url, {
-        method: 'POST',
+        method: 'GET',
+        headers: { 'cache-control': 'no-cache' },
         signal: AbortSignal.timeout(PING_TIMEOUT_MS),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);

@@ -281,6 +281,20 @@ describe('AlertScheduler', () => {
       expect(scheduler.stats.watchdog.lastPingAt).not.toBeNull();
     });
 
+    /** The verb is the compatibility surface, so it is pinned. See `ping()`. */
+    it('pings with GET', async () => {
+      const methods: (string | undefined)[] = [];
+      const { scheduler } = build([], {
+        url: 'https://hb.test/x',
+        fetchFn: (async (_url: string, init?: RequestInit) => {
+          methods.push(init?.method);
+          return new Response(null, { status: 200 });
+        }) as never,
+      });
+      await scheduler.tick();
+      expect(methods).toEqual(['GET']);
+    });
+
     /** A confirmed critical means the process is alive and not working. */
     it('withholds the ping when a critical is confirmed', async () => {
       const { state, check } = togglable('gateway.down', 'critical');
