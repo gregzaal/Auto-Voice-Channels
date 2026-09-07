@@ -2099,6 +2099,54 @@ describe('registerInteractionHandler (time zone and named lists)', () => {
   });
 });
 
+describe('registerInteractionHandler (the expired-guild carve-out)', () => {
+  let dispose: (() => void) | undefined;
+  afterEach(() => dispose?.());
+
+  /**
+   * `/setup` and its settings modals are the exemption that lets a gated admin
+   * see and fix their state, and the named-lists PANEL is reachable from the
+   * exempt settings select. Its buttons therefore have to be exempt too:
+   * otherwise a gated admin is shown a panel whose every button, Close
+   * included, answers with the reactivation notice.
+   */
+  it('lets a gated admin use the named-lists panel it just showed them', async () => {
+    const settings = {
+      getConfig: vi.fn().mockResolvedValue({ enabled: true, primaries: [], lists: {} }),
+      listNamedLists: vi.fn().mockResolvedValue({ animals: ['otter'] }),
+      removeNamedList: vi.fn().mockResolvedValue({ ok: true, message: 'Removed.' }),
+    };
+    const env = setup({
+      settings: settings as never,
+      guilds: {
+        get: vi.fn().mockResolvedValue({ authStatus: 'expired' }),
+        isEntitled: vi.fn().mockResolvedValue(false),
+      } as never,
+      selfHosted: false,
+    });
+    dispose = env.dispose;
+
+    const opened = fakeInteraction({
+      kind: 'stringSelect',
+      customId: SETUP_SETTINGS_ID,
+      values: [setupId('lists')],
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', opened.interaction);
+    await flush();
+    expect(JSON.stringify(opened.editReply.mock.calls[0]?.[0])).toContain('Named lists');
+
+    const removed = fakeInteraction({
+      kind: 'button',
+      customId: listsId('remove', 'animals'),
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', removed.interaction);
+    await flush();
+    expect(settings.removeNamedList).toHaveBeenCalledWith('g1', 'animals');
+  });
+});
+
 describe('registerInteractionHandler (template advice)', () => {
   let dispose: (() => void) | undefined;
   afterEach(() => dispose?.());

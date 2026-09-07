@@ -104,7 +104,12 @@ describe('every render goes through buildRenderContext', () => {
    * stored value reports a limit the room may not have had for months.
    */
   it('reads the user limit from the live channel', () => {
-    const body = SOURCE.slice(SOURCE.indexOf('buildRenderContext(input: RenderContextInput)'));
-    expect(body.slice(0, 900)).toContain('userLimitOf');
+    // Bounded by the method's own closing brace, not by a character count: a
+    // fixed window silently stops covering the method the moment anything is
+    // added above the line it was looking for, which is how this test broke.
+    const from = SOURCE.indexOf('buildRenderContext(input: RenderContextInput)');
+    expect(from).toBeGreaterThan(-1);
+    const body = SOURCE.slice(from, SOURCE.indexOf('\n  }', from));
+    expect(body).toContain('userLimitOf');
   });
 });

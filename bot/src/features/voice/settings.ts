@@ -68,6 +68,18 @@ export const MAX_LIST_OPTIONS = 100;
 export const MAX_LIST_OPTION_LENGTH = 100;
 
 /**
+ * Total characters one list may hold, counting the newline between options.
+ *
+ * Matched to `LIST_OPTIONS_INPUT_MAX`, the cap Discord puts on the paragraph
+ * input the edit modal prefills. Without it the two caps disagree: 100 options
+ * of 100 characters is ~10k, the modal would only ever hold the first 4000, and
+ * an admin who opened Edit and pressed Save without typing anything would
+ * silently drop every option past the cut and truncate the one it landed in.
+ * A stored list has to be editable by the surface that stores it.
+ */
+export const MAX_LIST_TOTAL_LENGTH = 4000;
+
+/**
  * Own-property test for a user-typed key.
  *
  * `in` walks the prototype chain, and an alias key is a game name, so a guild
@@ -281,6 +293,13 @@ export class GuildSettingsService {
         `A list can hold up to ${MAX_LIST_OPTIONS} options. That one has ${options.length}.`,
       );
     }
+    const total = options.reduce((sum, o) => sum + o.length + 1, -1);
+    if (total > MAX_LIST_TOTAL_LENGTH) {
+      return fail(
+        `That list is ${total} characters all together, and one list can hold ` +
+          `${MAX_LIST_TOTAL_LENGTH}. Split it into two lists, or shorten the options.`,
+      );
+    }
     const tooLong = options.find((o) => o.length > MAX_LIST_OPTION_LENGTH);
     if (tooLong !== undefined) {
       return fail(
@@ -290,7 +309,11 @@ export class GuildSettingsService {
     }
     let message = '';
     const res = await this.editLists(guildId, (current) => {
-      const renaming = previousName !== undefined && previousName !== name;
+      // A rename only leaves the count unchanged if the old name is still THERE.
+      // A panel opened before someone else removed that list would otherwise
+      // skip the cap and push the guild to 26, one more than the select can show.
+      const renaming =
+        previousName !== undefined && previousName !== name && hasList(current, previousName);
       const replacing = hasList(current, name);
       // Counted against the cap only when this add would really be a new entry:
       // a rename or a replace leaves the count the same or lower.

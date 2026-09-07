@@ -12,6 +12,7 @@ import {
   MAX_LISTS,
   MAX_LIST_OPTIONS,
   MAX_LIST_OPTION_LENGTH,
+  MAX_LIST_TOTAL_LENGTH,
 } from './settings.js';
 
 const GUILD = 'guild-settings-test';
@@ -183,6 +184,35 @@ describe('GuildSettingsService (integration)', () => {
     const first = await settings.listAliases(GUILD);
     first['Injected'] = 'nope';
     expect(await settings.listAliases(GUILD)).toEqual({ 'Counter-Strike 2': 'CS2' });
+  });
+
+  /**
+   * A stored list has to be editable by the surface that stores it. The edit
+   * modal prefills a 4000-character input, so a longer list would come back
+   * from an untouched Save with its tail silently gone.
+   */
+  it('refuses a list too long for the modal that edits it to round-trip', async () => {
+    const fits = Array.from({ length: 50 }, () => 'x'.repeat(79));
+    expect((await settings.setNamedList(GUILD, 'ok', fits)).ok).toBe(true);
+    const tooBig = Array.from({ length: 50 }, () => 'x'.repeat(80));
+    const res = await settings.setNamedList(GUILD, 'big', tooBig);
+    expect(res.ok).toBe(false);
+    expect(res.message).toContain(String(MAX_LIST_TOTAL_LENGTH));
+    expect(Object.keys(await settings.listNamedLists(GUILD))).toEqual(['ok']);
+  });
+
+  /**
+   * The cap is skipped for a rename because a rename leaves the count alone,
+   * which is only true if the old name is still there. A panel opened before
+   * someone else removed that list would otherwise push the guild past the cap.
+   */
+  it('does not let a rename of a vanished list slip past the cap', async () => {
+    for (let i = 0; i < MAX_LISTS; i++) {
+      await settings.setNamedList(GUILD, `list${i}`, ['one']);
+    }
+    const res = await settings.setNamedList(GUILD, 'ghost', ['one'], 'already-removed');
+    expect(res.ok).toBe(false);
+    expect(Object.keys(await settings.listNamedLists(GUILD))).toHaveLength(MAX_LISTS);
   });
 
   it('sets a time zone, canonicalising what was typed', async () => {

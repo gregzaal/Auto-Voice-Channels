@@ -28,7 +28,7 @@ Reply with **exactly one JSON object and nothing else** — no text before or af
 ## How to write a good template
 
 1. **Keep the admin's own words.** Plain text — room names, labels, `'s`, emoji — stays exactly as they wrote it, in their language. Only tokens are special, and tokens are always typed exactly as shown below (capital letters matter).
-2. **Only use tokens from this document.** Never invent a token, variable, or style. If the admin asks for something the bot can't do — react to the time of day, the date, what someone is listening to, etc. — write the closest template you can and say in `explanation` what isn't possible.
+2. **Only use tokens from this document.** Never invent a token, variable, or style. If the admin asks for something the bot can't do — the minute or second, the date of the month, what someone is listening to, how long the channel has existed, etc. — write the closest template you can and say in `explanation` what isn't possible.
 3. **A name must never be empty.** If a name renders to nothing, the channel shows a broken-looking `-`. So a name made of only a no-`else` conditional is wrong: `{{LIVE ?? 🔴}}` is empty whenever the owner isn't live — instead always keep some ordinary text, e.g. `{{LIVE ?? 🔴 }}@@owner@@'s room`. **This holds even if the admin says to show "just" or "only" that one thing** — add a fallback anyway. If they truly want a name that is *only* a badge that disappears, that's impossible for a name: say so and offer to put it in the **status** instead. (A **status** is allowed to be empty — that simply clears it — so a bare `{{LIVE ?? 🔴}}` is fine for a status.)
 4. **Mind the channel type** (given to you in the context):
    - **Numbered channels** (the usual case): the numbering tokens `##`, `$#`, `+#`, `@@nato@@` work here.
@@ -149,7 +149,6 @@ Shows the first part when the condition is true, the second when it's false. The
 | `WEEKDAY` | the day's English name (text), e.g. `{{WEEKDAY=Saturday ?? ...}}` |
 | `MONTH` | the month's English name (text) |
 | `WEEKEND` | it is Saturday or Sunday |
-| `HOUR` | the hour, 0 to 23 (number), e.g. `{{HOUR>=18 ?? evening}}` |
 | `OWNER` | the channel owner's user ID (list of one). Empty when the owner has left, so a bare `{{OWNER ?? ...}}` means "this channel has an owner" |
 
 **Ways to test a variable:**
@@ -158,8 +157,8 @@ Shows the first part when the condition is true, the second when it's false. The
 |---|---|
 | `{{VAR ?? ...}}` | true when the variable is on / non-empty |
 | `{{VAR:value ?? ...}}` | true when it contains `value` (for `ROLE`: when the owner has that role ID) |
-| `{{VAR=value ?? ...}}` and `{{VAR!=value ?? ...}}` | equals / not-equals (compared as numbers only for `PLAYERS`/`MAX`, otherwise as text) |
-| `{{VAR>=value ?? ...}}` (also `>`, `<`, `<=`) | numeric comparison — only meaningful for `PLAYERS` and `MAX` |
+| `{{VAR=value ?? ...}}` and `{{VAR!=value ?? ...}}` | equals / not-equals (compared as numbers for `PLAYERS`/`MAX`, as text for `GAME`, `WEEKDAY` and `MONTH`) |
+| `{{VAR>=value ?? ...}}` (also `>`, `<`, `<=`) | numeric comparison — of the variables, only `PLAYERS` and `MAX`. For anything else numeric, compare the **token**: `{{@@hour@@>=18 ?? ...}}`, `{{@@num@@>=5 ?? ...}}` |
 
 **What can go on the left of a condition.** Any variable in the table above, a plain number, or one of these counting tokens: `@@num@@`, `@@num_others@@`, `@@num_playing@@`, `@@num_live@@`, `@@party_size@@`, `@@limit@@`, `@@slots@@`, `@@hour@@`, `$#` (and its padded forms `$0#`, `$00#`, ...). So `{{@@num@@ >= 5 ?? busy}}` works, and so does comparing two of them: `{{@@num@@ >= @@limit@@ ?? full}}`.
 
@@ -230,7 +229,7 @@ More request → template mappings (`name` unless noted):
 - a flame once the room is full → `{{FULL ?? 🔥 }}@@owner@@'s room`
 - a red dot when anyone in the room is streaming → `{{ANY_LIVE ?? 🔴 }}@@game_name@@ ##`
 - a different name at the weekend → `{{WEEKEND ?? 🎉 Weekend // @@owner@@'s}} room`
-- something only in the evening → `@@owner@@'s room{{HOUR>=18 ?? 🌙}}`
+- something only in the evening → `@@owner@@'s room{{@@hour@@>=18 ?? 🌙}}`
 - the room named after whoever made it, even after it changes hands → `@@original_creator@@'s room`
 
 Request: *"Add the word 'busy' to the name when 5 or more people are in the channel."*

@@ -109,7 +109,6 @@ export const VALUE_VARIABLES: Record<string, string> = {
   PLAYERS: '@@num_playing@@',
   WEEKDAY: '@@weekday@@',
   MONTH: '@@month@@',
-  HOUR: '@@hour@@',
   MAX: '@@party_size@@',
 };
 

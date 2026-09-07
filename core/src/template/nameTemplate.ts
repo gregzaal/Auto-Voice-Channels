@@ -184,8 +184,12 @@ function randomOptions(
   inner: string,
   lists: Record<string, string[]> | undefined,
 ): string[] | undefined {
-  if (inner.startsWith(LIST_PREFIX)) {
-    const key = inner.slice(LIST_PREFIX.length).trim();
+  // Trimmed before the prefix test, because the lint, the advisory path and the
+  // site's highlighter all trim: without it `[[ list:a]]` rendered as literal
+  // text while every surface that describes a template reported it as fine.
+  const trimmed = inner.trim();
+  if (trimmed.startsWith(LIST_PREFIX)) {
+    const key = trimmed.slice(LIST_PREFIX.length).trim();
     // Own-property, never `in` or a bare index: the name comes from a stored
     // template, so `[[list:constructor]]` would otherwise reach up the
     // prototype chain and hand back a function. Same trap `getAlias` and
@@ -524,18 +528,21 @@ export interface ExpressionVars {
    */
   PRIVATE: boolean;
   /**
-   * Date and time, in the guild's zone, at hour-or-coarser granularity only.
+   * Date, in the guild's zone, at day-or-coarser granularity.
    *
-   * There is deliberately no minute or second here. A minute-granular value
-   * changes on nearly every 5-minute sweep tick, which is the whole rename
-   * budget spent on a clock, forever, on every managed channel in the guild
-   * (`plans/name-tokens.md` §2). `HOUR` is the finest thing admitted, and it
-   * flips a threshold condition at most twice a day.
+   * There is deliberately no minute or second anywhere in this family. A
+   * minute-granular value changes on nearly every 5-minute sweep tick, which is
+   * the whole rename budget spent on a clock, forever, on every managed channel
+   * in the guild (`plans/name-tokens.md` §2). The hour is the finest thing
+   * admitted, and it is `@@hour@@` rather than an `HOUR` variable: §5.1's rule
+   * is that a variable must express something a comparison of tokens cannot, and
+   * `{{@@hour@@>=18 ?? …}}` already says it. These three earn their place
+   * because `=` and `:` on a STRING is not something any token can be compared
+   * with, and because "is it the weekend" is a rule rather than a value.
    */
   WEEKDAY: string;
   MONTH: string;
   WEEKEND: boolean;
-  HOUR: number;
 }
 
 /** What a resolved conditional operand can be. */
@@ -567,7 +574,6 @@ const CONDITION_VARIABLE_SET: Record<keyof ExpressionVars, true> = {
   WEEKDAY: true,
   MONTH: true,
   WEEKEND: true,
-  HOUR: true,
 };
 
 export const CONDITION_VARIABLES = Object.keys(CONDITION_VARIABLE_SET) as (keyof ExpressionVars)[];
@@ -708,6 +714,29 @@ export function canonicalTimeZone(zone: string): string | null {
 }
 
 /**
+ * {@link canonicalTimeZone}, memoised.
+ *
+ * Resolving a zone costs a fresh `Intl.DateTimeFormat`, measured at ~41us, and
+ * the render path asks about the zone for **every template containing a `{{`**,
+ * which includes the default status template every guild has. Memoised on the
+ * RAW input rather than the canonical name so a stored value only ever resolves
+ * once, whatever it is. Cleared wholesale past a ceiling: the write paths all
+ * store canonical names, so the real key set is the IANA one, and a cache keyed
+ * by stored data should still not be the thing that grows without bound.
+ */
+const CANONICAL_ZONES = new Map<string, string | null>();
+
+export function knownTimeZone(zone: string): string | undefined {
+  let hit = CANONICAL_ZONES.get(zone);
+  if (hit === undefined) {
+    if (CANONICAL_ZONES.size > 2000) CANONICAL_ZONES.clear();
+    hit = canonicalTimeZone(zone);
+    CANONICAL_ZONES.set(zone, hit);
+  }
+  return hit ?? undefined;
+}
+
+/**
  * Whether a string is a zone the engine will render in.
  *
  * Exported because the value has to be validated at BOTH ends: the settings blob
@@ -716,7 +745,7 @@ export function canonicalTimeZone(zone: string): string | null {
  * use {@link canonicalTimeZone} instead, and store what it returns.
  */
 export function isValidTimeZone(zone: string): boolean {
-  return canonicalTimeZone(zone) !== null;
+  return knownTimeZone(zone) !== undefined;
 }
 
 /**
@@ -740,6 +769,12 @@ export const LIST_NAME_MAX = 40;
  */
 export function isValidListName(name: string): boolean {
   if (name === '' || name.length > LIST_NAME_MAX) return false;
+  // `__proto__` is refused rather than sanitised, because the two writers
+  // disagree about it and neither is wrong: `out[name] = …` in the importer hits
+  // the prototype setter and silently drops the entry, while the panel's object
+  // spread stores it as an own property. One name, two behaviours, so it is not
+  // a name.
+  if (name === '__proto__') return false;
   if (name !== name.trim()) return false;
   if (/[[\]/:]/.test(name)) return false;
   // Control characters, checked by code point rather than by a character class:
@@ -768,7 +803,7 @@ function formatterFor(zone: string): Intl.DateTimeFormat {
       weekday: 'long',
       month: 'long',
       // `h23` rather than `hour12: false`: the latter reports midnight as "24"
-      // in some environments, which would make `{{HOUR>=18}}` true at 00:00.
+      // in some environments, which would make `{{@@hour@@>=18}}` true at 00:00.
       hourCycle: 'h23',
       hour: '2-digit',
     });
@@ -783,13 +818,20 @@ export interface DateParts {
   weekday: string;
   /** English month name, e.g. `September`. */
   month: string;
-  /** Hour of the day, 0 to 23. */
-  hour: number;
-  /** Saturday or Sunday. */
+  /**
+   * Hour of the day, 0 to 23, or `null` when there is no clock to read.
+   *
+   * Nullable rather than `0`, because `0` is midnight: a caller with no clock
+   * would otherwise render `@@hour@@` as a plausible-looking `0` and make
+   * `{{@@hour@@<=1 ?? …}}` true, which is exactly the class of silent wrongness
+   * the whole date family is written to avoid.
+   */
+  hour: number | null;
+  /** Saturday or Sunday. False with no clock, like every other unknown here. */
   weekend: boolean;
 }
 
-const NO_DATE: DateParts = { weekday: '', month: '', hour: 0, weekend: false };
+const NO_DATE: DateParts = { weekday: '', month: '', hour: null, weekend: false };
 
 /**
  * Resolves the date parts a template needs.
@@ -804,14 +846,21 @@ const NO_DATE: DateParts = { weekday: '', month: '', hour: 0, weekend: false };
  */
 export function dateParts(now: Date | undefined, timezone: string | undefined): DateParts {
   if (!now || Number.isNaN(now.getTime())) return NO_DATE;
-  const zone = timezone && isValidTimeZone(timezone) ? timezone : 'UTC';
-  const parts = formatterFor(zone).formatToParts(now);
+  // Resolved to a canonical name FIRST, never handed to `Intl` as stored.
+  // `Intl.DateTimeFormat` throws `RangeError` on a zone it cannot parse, and a
+  // throw here is a throw inside the render of every managed channel in the
+  // guild, tripping its breaker with an error mentioning nothing about a zone.
+  // A stored value that no longer resolves degrades to UTC instead.
+  const parts = formatterFor(timezone ? (knownTimeZone(timezone) ?? 'UTC') : 'UTC').formatToParts(
+    now,
+  );
   const pick = (type: string): string => parts.find((p) => p.type === type)?.value ?? '';
   const weekday = pick('weekday');
+  const hour = Number.parseInt(pick('hour'), 10);
   return {
     weekday,
     month: pick('month'),
-    hour: Number.parseInt(pick('hour'), 10) || 0,
+    hour: Number.isNaN(hour) ? null : hour,
     weekend: weekday === 'Saturday' || weekday === 'Sunday',
   };
 }
@@ -1015,7 +1064,6 @@ function buildExpressionVars(
     WEEKDAY: clock.weekday,
     MONTH: clock.month,
     WEEKEND: clock.weekend,
-    HOUR: clock.hour,
   };
 }
 
@@ -1253,7 +1301,12 @@ export function renderChannelName(
     clock = dateParts(ctx.now, ctx.timezone);
     if (name.includes('@@weekday@@')) name = name.split('@@weekday@@').join(clock.weekday);
     if (name.includes('@@month@@')) name = name.split('@@month@@').join(clock.month);
-    if (name.includes('@@hour@@')) name = name.split('@@hour@@').join(String(clock.hour));
+    // Empty, not `0`, when there is no clock: see `DateParts.hour`. An empty
+    // left side makes a comparison take the false branch, which is the right
+    // default for a value nobody could read.
+    if (name.includes('@@hour@@')) {
+      name = name.split('@@hour@@').join(clock.hour === null ? '' : String(clock.hour));
+    }
   }
   if (name.includes('@@limit@@')) name = name.split('@@limit@@').join(String(userLimit));
   if (name.includes('@@slots@@')) {

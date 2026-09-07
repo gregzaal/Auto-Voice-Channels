@@ -386,6 +386,11 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       // and must not slip through on the `/setup` panel's blanket exemption.
       // (It is free on every tier — see the assistant's own docs — but an
       // expired guild has no automation for a template to drive.)
+      // The named-lists panel is reachable from the exempt settings select, so
+      // its own buttons have to be exempt too. Without this a gated admin
+      // is shown a panel whose every button, Close included, answers with
+      // the reactivation notice.
+      if (interaction.customId.startsWith(LISTS_PREFIX)) return true;
       if (interaction.customId === `${SETUP_PREFIX}assistant`) return false;
       // A `/channelinfo` view button, or the command's own exemption stops at
       // the first click and the panel answers with the reactivation notice.
@@ -403,6 +408,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
        * that option in an expired guild, but the option is chosen by the client
        * and this is the half that enforces it.
        */
+      if (interaction.customId === LISTS_SELECT_ID) return true;
       if (interaction.customId !== SETUP_SETTINGS_ID) return false;
       return !interaction.values.includes(setupId('assistant'));
     }

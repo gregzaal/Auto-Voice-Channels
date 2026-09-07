@@ -1,5 +1,5 @@
 import { EXPORT_SETTINGS_KEYS, type ExportSettingsKey, type GuildConfigFile } from './format.js';
-import { isValidListName, isValidTimeZone } from '../template/nameTemplate.js';
+import { canonicalTimeZone, isValidListName } from '../template/nameTemplate.js';
 
 /**
  * The pure differ behind `/import`: a file plus the guild's current state in, a
@@ -67,6 +67,12 @@ export const IMPORT_LIMITS = {
   listNameChars: 40,
   listOptions: 100,
   listOptionChars: 100,
+  /**
+   * `MAX_LIST_TOTAL_LENGTH`, and the reason it exists on this side too: the
+   * `/setup` modal that edits a list prefills a 4000-character input, so a
+   * longer imported list could not be edited without silently losing its tail.
+   */
+  listTotalChars: 4000,
 } as const;
 
 export type ChannelKind = 'voice' | 'text' | 'category' | 'other';
@@ -926,7 +932,13 @@ function validateSetting(
       // is inert rather than dangerous. Dropped here anyway, so the importer
       // REPORTS it: silently storing a zone that will never take effect is the
       // shape of bug this file exists to make visible.
-      if (typeof value !== 'string' || !isValidTimeZone(value)) return drop('setting_invalid');
+      // Stored CANONICAL, never as written. `Intl` accepts a padded name here
+      // and throws on it at render time, and a throw on the render path takes
+      // out every managed channel in the guild with an error that mentions no
+      // zone at all. Canonicalising also collapses `europe/amsterdam` and the
+      // deprecated `Japan` onto the names the panel reads back.
+      if (typeof value !== 'string') return drop('setting_invalid');
+      return canonicalTimeZone(value) ?? drop('setting_invalid');
       return value;
 
     case 'lists': {
@@ -954,6 +966,8 @@ function validateSetting(
         ) {
           return drop('setting_invalid');
         }
+        const total = (options as string[]).reduce((sum, o) => sum + o.length + 1, -1);
+        if (total > limits.listTotalChars) return drop('setting_invalid');
         out[name] = options;
       }
       return out;

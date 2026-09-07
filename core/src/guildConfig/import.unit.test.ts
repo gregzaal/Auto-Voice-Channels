@@ -987,13 +987,17 @@ describe('the differ writes no auth state, by construction', () => {
      * - `./format.js` is the wire schema, zod and nothing else.
      * - `../template/nameTemplate.js` is the render engine, which is pure by
      *   construction and asserted so by its own barrel: no repositories, no
-     *   `pg`, no node builtins. The differ borrows `isValidTimeZone` from it
+     *   `pg`, no node builtins. The differ borrows `canonicalTimeZone` from it
      *   rather than keeping a second copy, which is the lesson the shared
      *   engine was extracted to learn (`plans/name-tokens.md` §4.1).
      *
      * Widening this list is a real decision. The forbidden-call checks below
      * are the teeth and stay whatever it contains.
      */
+    // Counted first: a loop of assertions over a list the scan failed to build
+    // passes vacuously, which is the same silent-pass failure a source-scanning
+    // test exists to avoid.
+    expect(imports.length).toBeGreaterThan(0);
     for (const from of imports) {
       expect(['./format.js', '../template/nameTemplate.js']).toContain(from);
     }

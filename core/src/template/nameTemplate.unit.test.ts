@@ -915,12 +915,42 @@ describe('date and time parts', () => {
     });
   });
 
+  /**
+   * A zone that no longer resolves must degrade, never throw. `Intl` throws
+   * `RangeError` on one it cannot parse, and a throw here is a throw inside the
+   * render of every managed channel in the guild: the breaker trips, no rooms
+   * are created, and the error mentions no zone at all.
+   */
   it('falls back to UTC for a missing or unusable zone, never to the host clock', () => {
     const utc = { weekday: 'Friday', month: 'September', hour: 19, weekend: false };
     expect(dateParts(friday, undefined)).toEqual(utc);
     expect(dateParts(friday, 'Middle/Earth')).toEqual(utc);
     // An offset is refused at the write end, so a stored one is corrupt data.
     expect(dateParts(friday, '+09:00')).toEqual(utc);
+    expect(dateParts(friday, '')).toEqual(utc);
+  });
+
+  /**
+   * The one that got through review: `canonicalTimeZone` trims, so a padded name
+   * passed `isValidTimeZone` and then threw when handed to `Intl` as stored. Now
+   * the resolved name is what reaches the formatter, so it renders.
+   */
+  it('resolves a padded or oddly-cased zone rather than throwing on it', () => {
+    const ams = { weekday: 'Friday', month: 'September', hour: 21, weekend: false };
+    expect(dateParts(friday, '  Europe/Amsterdam  ')).toEqual(ams);
+    expect(dateParts(friday, 'europe/amsterdam')).toEqual(ams);
+    // The default status template every guild has contains a `{{`, which is what
+    // makes the clock path reachable for a guild using no date token at all.
+    const one = member({ id: '1', displayName: 'Sam' });
+    const ctx: RenderContext = {
+      index: 0,
+      members: [one],
+      creator: one,
+      creatorName: 'Sam',
+      now: friday,
+      timezone: ' UTC ',
+    };
+    expect(renderChannelName(DEFAULT_STATUS_TEMPLATE, ctx, { allowEmpty: true })).toBe('');
   });
 
   /**
@@ -932,13 +962,22 @@ describe('date and time parts', () => {
     expect(dateParts(undefined, 'Europe/Amsterdam')).toEqual({
       weekday: '',
       month: '',
-      hour: 0,
+      // Null, not 0: zero is midnight, and a plausible-looking midnight would
+      // make `{{@@hour@@<=1 ?? …}}` true for a caller that has no clock at all.
+      hour: null,
       weekend: false,
     });
     expect(dateParts(new Date(NaN), 'Europe/Amsterdam').weekday).toBe('');
+
+    const one = member({ id: '1', displayName: 'Sam' });
+    const noClock: RenderContext = { index: 0, members: [one], creator: one, creatorName: 'Sam' };
+    expect(renderChannelName('[@@hour@@][@@weekday@@]', noClock)).toBe('[][]');
+    // An empty left side takes the false branch, which is the right default for
+    // a value nobody could read.
+    expect(renderChannelName('{{@@hour@@<=1 ?? night // day}}', noClock)).toBe('day');
   });
 
-  it('substitutes the tokens, and compares HOUR as a number', () => {
+  it('substitutes the tokens, and compares the hour as a number', () => {
     const one = member({ id: '1', displayName: 'Sam' });
     const ctx = (timezone?: string): RenderContext => ({
       index: 0,
@@ -951,10 +990,22 @@ describe('date and time parts', () => {
     expect(renderChannelName('@@weekday@@ @@month@@ @@hour@@', ctx('Europe/Amsterdam'))).toBe(
       'Friday September 21',
     );
-    expect(renderChannelName('{{HOUR>=18 ?? Evening // Daytime}}', ctx('Europe/Amsterdam'))).toBe(
-      'Evening',
+    /**
+     * `@@hour@@` as the OPERAND, and there is deliberately no `HOUR` variable:
+     * §5.1's rule is that a variable must express something a comparison of
+     * tokens cannot, and this comparison already says it. `WEEKDAY` and `MONTH`
+     * do earn theirs, because `=` and `:` on a string is not something any token
+     * can be compared with.
+     */
+    expect(
+      renderChannelName('{{@@hour@@>=18 ?? Evening // Daytime}}', ctx('Europe/Amsterdam')),
+    ).toBe('Evening');
+    expect(renderChannelName('{{@@hour@@>=18 ?? Evening // Daytime}}', ctx('Asia/Tokyo'))).toBe(
+      'Daytime',
     );
-    expect(renderChannelName('{{HOUR>=18 ?? Evening // Daytime}}', ctx('Asia/Tokyo'))).toBe(
+    // The variable form is not a variable, so it takes the false branch rather
+    // than quietly meaning something.
+    expect(renderChannelName('{{HOUR>=18 ?? Evening // Daytime}}', ctx('Europe/Amsterdam'))).toBe(
       'Daytime',
     );
     expect(renderChannelName('{{WEEKEND ?? Weekend // Weekday}}', ctx('Europe/Amsterdam'))).toBe(
@@ -1008,6 +1059,17 @@ describe('[[list:name]]', () => {
    * `[[…]]` with no `/` follows. An unknown name is what a typo produces, and an
    * empty render would read as the feature being broken.
    */
+  /**
+   * Trimmed the same way the lint, the advisory path and the site's highlighter
+   * trim. Before this, `[[ list:a]]` rendered as literal text while every
+   * surface that describes a template reported it as fine.
+   */
+  it('tolerates space around the whole marker, not just the name', () => {
+    expect(resolveRandom('[[ list:animals ]]', 1, lists)).toBe(
+      resolveRandom('[[list:animals]]', 1, lists),
+    );
+  });
+
   it('leaves an unknown name as literal text', () => {
     expect(resolveRandom('[[list:nope]]', 3, lists)).toBe('[[list:nope]]');
     expect(resolveRandom('[[list:animals]]', 3, undefined)).toBe('[[list:animals]]');
@@ -1061,6 +1123,12 @@ describe('list names', () => {
   it('refuses surrounding whitespace instead of trimming it', () => {
     expect(isValidListName(' animals')).toBe(false);
     expect(isValidListName('animals ')).toBe(false);
+  });
+
+  /** Two writers disagree about it, so it is not a name. See `isValidListName`. */
+  it('refuses __proto__', () => {
+    expect(isValidListName('__proto__')).toBe(false);
+    expect(isValidListName('__proto__x')).toBe(true);
   });
 
   it('refuses a control character', () => {

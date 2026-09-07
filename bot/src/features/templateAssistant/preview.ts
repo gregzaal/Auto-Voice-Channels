@@ -24,7 +24,7 @@ const PREVIEW_SEED = 4;
  * Fixed, not `new Date()`, for the same reason the seed is fixed: a preview that
  * wobbled between two renders of the same template would make the propose loop
  * non-deterministic and the fixtures untestable. A Friday evening because that
- * is the one instant where `{{WEEKEND}}` and `{{HOUR>=18}}`, the two conditions
+ * is the one instant where `{{WEEKEND}}` and `{{@@hour@@>=18}}`, the two conditions
  * an admin actually reaches for, disagree, so a template testing either shows
  * something in ONE scenario instead of needing a second one.
  *

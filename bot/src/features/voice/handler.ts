@@ -1368,12 +1368,30 @@ export class VoiceFeature {
   buildRenderContext(input: RenderContextInput): RenderContext {
     const { settings, members, channelId } = input;
     const owner = input.ownerId ? members.find((m) => m.id === input.ownerId) : undefined;
+    /**
+     * The original creator's name: the cached one, else the live one if they
+     * happen to be in the room, else nothing (the engine then falls back to the
+     * current owner, and to `Unknown`).
+     *
+     * The live fallback is what stops a room that predates the cache costing an
+     * extra rename: without it the first render after the upgrade names the
+     * CURRENT owner, the backfill then stores the real name, and the next sweep
+     * renames again to the right one. Two renames and a wrong name in between,
+     * for a token justified on the grounds that it reduces churn
+     * (`plans/name-tokens.md` §10.4). The cache still wins when present, because
+     * stability is the token's whole point.
+     */
+    const rawOriginalCreator =
+      input.originalCreatorName ??
+      (input.originalCreatorId
+        ? members.find((m) => m.id === input.originalCreatorId)?.displayName
+        : undefined);
     const originalCreatorName =
-      input.originalCreatorName === undefined || !input.originalCreatorId
-        ? input.originalCreatorName
+      rawOriginalCreator === undefined || !input.originalCreatorId
+        ? rawOriginalCreator
         : displayName(settings, {
             id: input.originalCreatorId,
-            displayName: input.originalCreatorName,
+            displayName: rawOriginalCreator,
           });
     return {
       index: input.index,

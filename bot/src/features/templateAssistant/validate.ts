@@ -283,7 +283,7 @@ export function adviseTemplate(template: string, ctx: TemplateAdviceContext): st
   if (ctx.timezone === undefined && DATE_TOKENS.some((t) => template.includes(t))) {
     advice.push(
       'Date and time tokens use UTC until a time zone is set for this server, ' +
-        'in `/setup` → Server defaults.',
+        'in `/setup` under More settings.',
     );
   }
 
@@ -298,7 +298,7 @@ export function adviseTemplate(template: string, ctx: TemplateAdviceContext): st
     if (!known.has(name)) {
       advice.push(
         `There is no list called \`${name}\`, so \`[[list:${name}]]\` would show up as ` +
-          'written. Lists are set up in `/setup` → Server defaults.',
+          'written. Lists are set up in `/setup` under More settings.',
       );
     }
   }
