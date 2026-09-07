@@ -7,6 +7,7 @@ import {
   notificationMessage,
   onboardingMessage,
   SITE_URL,
+  SUPPORT_URL,
   subscribeUrl,
 } from './messages.js';
 
@@ -34,10 +35,19 @@ describe('onboardingMessage (§6 size bands)', () => {
     expect(msg).toContain(LINK);
   });
 
-  it('hard-gate band asks to talk first', () => {
+  it('hard-gate band asks to talk first, and promises no infrastructure', () => {
     const msg = onboardingMessage('hard_gate', 2_000_000, GUILD);
-    expect(msg).toContain('dedicated infrastructure');
-    expect(msg).toContain(SITE_URL);
+    expect(msg).toContain('needs a conversation');
+    // Owner decision 5 retracted the dedicated-infrastructure promise: we do
+    // not know yet that we can serve a server that size, and this message goes
+    // to the largest server that ever adds the bot. The test asserted the
+    // retracted claim, which is what kept it alive here after `/setup` and
+    // `/pricing` had both dropped it.
+    expect(msg).not.toContain('infrastructure');
+    // The support server, not the homepage: a money message deep-links to the
+    // thing that answers it, and the homepage names no contact route.
+    expect(msg).toContain(SUPPORT_URL);
+    expect(msg).not.toContain(`${SITE_URL} `);
   });
 });
 
@@ -97,9 +107,14 @@ describe('notificationMessage (the §4 ladder)', () => {
       notificationMessage({ key: 'grace_nudge', kind: 'grace_nudge', daysLeft: 12 }, 500, GUILD),
     ).toContain('12 days');
     expect(notificationMessage({ key: 'r', kind: 'reactivated' }, 500, GUILD)).toContain('back on');
-    expect(notificationMessage({ key: 'x', kind: 'grew_into_xxl' }, 1_500_000, GUILD)).toContain(
-      'million',
-    );
+    // 300,000, where the ladder ends now. The KEY keeps its old name because it
+    // is stored text in `metadata.billing` and `billing_notifications.key`;
+    // renaming it would re-send the notice to everyone who already had it.
+    const grew = notificationMessage({ key: 'x', kind: 'grew_into_xxl' }, 1_500_000, GUILD);
+    expect(grew).toContain('300,000');
+    expect(grew).not.toContain('million');
+    expect(grew).not.toContain('infrastructure');
+    expect(grew).toContain(SUPPORT_URL);
   });
 });
 

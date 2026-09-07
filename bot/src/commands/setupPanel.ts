@@ -26,7 +26,7 @@ import {
   type Tier,
   type TierId,
 } from '@avc/core';
-import { SITE_URL, subscribeUrl } from '../features/billing/messages.js';
+import { SITE_URL, SUPPORT_URL, subscribeUrl } from '../features/billing/messages.js';
 import {
   permissionProblemSummary,
   type ProblemLike,
@@ -47,25 +47,12 @@ export const setupId = (action: string): string => `${SETUP_PREFIX}${action}`;
 export const SIGNUP_URL = 'https://auto-voice.io/signup';
 export const DOCS_URL = 'https://auto-voice.io/docs';
 /**
- * The support server.
- *
- * **Use a NEVER-EXPIRING invite and check it after changing it.** The previous
- * code (`jVm4tjrczE`) silently expired: `GET /invites/<code>` answered
- * `Invite is expired` (50270), and an expired code cannot be revived or
- * recreated, so the only fix is a new one. It was dead in the `/setup` panel
- * here, on all 15 pages of the website that carry it (the footer puts it on
- * every page), and in the cutover announcement, which had already gone to
- * thousands of servers before anyone noticed.
- *
- * Nothing in either repo can catch this: it is a string that stays valid-looking
- * forever. `discord.gg` codes are also duplicated in `web/src/lib/env.ts` as
- * `SUPPORT_SERVER_URL`, deliberately not shared through `@avc/core` -- that
- * module's entry point re-exports the Postgres client, and `env.ts` is imported
- * widely enough on the web side that pulling a core *value* into it is the
- * documented way to drag `pg` into a browser bundle. Two constants, checked by
- * hand, beats one constant and a build that dies on `Can't resolve 'fs'`.
+ * The support server invite lives in `features/billing/messages.ts`, which this
+ * module already imports from, because the billing notices need it too and the
+ * import can only run one way. Its comment there carries the history: an
+ * expired invite cannot be recreated, and the last one was dead in three
+ * places at once.
  */
-export const SUPPORT_URL = 'https://discord.gg/HT6GNhJ';
 
 /**
  * The public source repo, for `/source` (AGPL-3.0 §13's network-use clause).

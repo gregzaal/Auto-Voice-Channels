@@ -131,8 +131,9 @@ export const TIERS: readonly Tier[] = [
 export function priceSentence(tier: Tier): string {
   if (tier.pricePerYear === 0) return 'free';
   if (tier.pricePerYear === null) return 'custom pricing';
-  const headline = headlinePerMonth(tier);
-  if (headline === null) return 'free';
+  // Not null by here: `headlinePerMonth` returns null for exactly the zero and
+  // null prices the two lines above already returned for.
+  const headline = headlinePerMonth(tier)!;
   const money = (n: number): string => `$${Number.isInteger(n) ? String(n) : n.toFixed(2)}`;
   return `${money(headline)} a month, billed yearly (${money(tier.pricePerYear)})`;
 }
@@ -324,7 +325,7 @@ export const TRIAL_YEAR_DAYS = 365;
 /**
  * The short trial, for guilds already large when the bot is added.
  *
- * **30 days, up from 14** (`plans/pricing-ladder.md` §7). A $90-to-$360
+ * **30 days, up from 14** (`plans/pricing-ladder.md` §7). A $90-to-$390
  * decision inside a community team needs a purchase cycle, and 30 days of a
  * 300k server costs us about $20. Raising it also changes the warning cadence:
  * `leniency.ts` picks its short offsets for any window of 30 days or less, and

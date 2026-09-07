@@ -38,6 +38,23 @@ export function subscribeUrl(guildId: string): string {
 }
 
 /**
+ * The support server invite, which is where a money message that cannot be
+ * self-served has to send someone.
+ *
+ * **Lives here rather than in `setupPanel.ts` because both need it and the
+ * import can only run one way**: the panel already imports `SITE_URL` and
+ * `subscribeUrl` from this module, so putting it there and reaching back for it
+ * would be a cycle. A third copy of the invite code was the alternative and is
+ * the worse one: an expired invite cannot be recreated, so the only fix is a new
+ * code, and the last time one expired it was dead in the panel, on all 15 pages
+ * of the website and in a cutover announcement that had already reached
+ * thousands of servers. `web/src/lib/env.ts` holds the second copy as
+ * `SUPPORT_SERVER_URL`, deliberately, because that module cannot import a core
+ * value without dragging Postgres into a browser bundle. Two constants checked
+ * by hand, not three.
+ */
+export const SUPPORT_URL = 'https://discord.gg/HT6GNhJ';
+/**
  * Price label for the tier a guild of `memberCount` members needs.
  *
  * The headline with its billed total, from core's one formatter (§5.1), plus
@@ -83,10 +100,20 @@ export function onboardingMessage(
         `Subscribe (or read why we charge) at ${subscribeUrl(guildId)}`
       );
     case 'hard_gate':
+      /**
+       * Promises nothing about infrastructure, and links the support server
+       * rather than the homepage (§5.3).
+       *
+       * It used to say "we run servers this size on dedicated infrastructure",
+       * which owner decision 5 retracted: we do not know yet that we can serve
+       * a server that size, and saying so to the largest server that ever adds
+       * the bot is the worst place to find out. The homepage also names no
+       * contact route, so `SITE_URL` was an instruction to go looking.
+       */
       return (
-        `👋 **Thanks for your interest in Auto Voice Channels!** This server is very large, and ` +
-        `we run servers this size on dedicated infrastructure, so let's set that up together ` +
-        `before switching AVC on. Contact us at ${SITE_URL} and we'll get you going.`
+        `👋 **Thanks for your interest in Auto Voice Channels!** A server this size needs a ` +
+        `conversation before we switch AVC on, so we can make sure it works well for you. ` +
+        `Come and say hello at ${SUPPORT_URL} and we'll take it from there.`
       );
   }
 }
@@ -229,10 +256,17 @@ export function notificationMessage(
     case 'reactivated':
       return `💜 **AVC is back on!** Voice automation has resumed on this server. Thanks for being here.`;
     case 'grew_into_xxl':
+      /**
+       * 300,000, which is where the ladder now ends, and no infrastructure
+       * promise (§5.3, owner decision 5). The `grew_into_xxl` KEY keeps its old
+       * name deliberately: it is stored text in `metadata.billing` and in
+       * `billing_notifications.key`, so renaming it would re-send the notice to
+       * every guild that has already had it.
+       */
       return (
-        `🏛️ **Your server has grown past one million members.** Amazing! At this size we run ` +
-        `AVC on dedicated infrastructure, so let's talk: reach us via ${SITE_URL} and we'll ` +
-        `arrange the right setup. Nothing changes in the meantime.`
+        `🏛️ **Your server has grown past 300,000 members.** Amazing! A server this size is ` +
+        `past the plans we sell, so let's talk about what you need: come and find us at ` +
+        `${SUPPORT_URL}. Nothing changes in the meantime.`
       );
   }
 }
