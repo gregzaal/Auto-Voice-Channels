@@ -195,10 +195,23 @@ export function notificationMessage(
   switch (n.kind) {
     case 'trial_warning': {
       const days = n.daysLeft ?? 0;
+      /**
+       * Names the one thing that makes deciding early cost nothing
+       * (`plans/pricing-ladder.md` §6.5). The warning used to offer only
+       * "subscribe", which asked the admin to throw away the trial days they
+       * had left in order to stop being reminded about them, so the rational
+       * move was to ignore every warning until the last one.
+       *
+       * No date, deliberately. The exact first-charge date is a function of
+       * when the customer opens checkout, not of when this was sent, and the
+       * dashboard card the link lands on quotes it precisely. Naming one here
+       * would be a second answer to the question the invoice settles.
+       */
       return (
         `⏳ **Your AVC free trial ends in ${days} day${days === 1 ? '' : 's'}.** ` +
         `Everything keeps working until then, and there's a generous grace period after. ` +
-        `To keep AVC running (${tierLine.label} tier, ${price}), subscribe at ${link}`
+        `Set up a subscription now and you keep every day of the trial: the first charge ` +
+        `lands the day it ends. ${tierLine.label} tier, ${price}, at ${link}`
       );
     }
     case 'grace_started': {

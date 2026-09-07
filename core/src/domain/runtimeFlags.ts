@@ -65,6 +65,24 @@ export const RUNTIME_FLAGS = {
    */
   BILLING_REFUND_REQUESTS_DISABLED: 'billing.refund_requests_disabled',
 
+  /**
+   * Stops offering "subscribe now, first charge when your trial ends"
+   * (`plans/pricing-ladder.md` §6.5). Read by `avc-web` alone, like
+   * {@link BILLING_AUTO_CANCEL_DISABLED} above, so one row is the whole switch.
+   *
+   * Set, the dashboard offers the ordinary charge-now checkout instead and a
+   * trialing server is sold exactly as it was before this shipped. Nothing
+   * already sold is touched: a subscription Paddle is holding in `trialing`
+   * keeps its trial and bills on its own date, because the trial lives on the
+   * price the subscription already carries and nothing here can reach it.
+   *
+   * It exists because this is the one checkout path that mints a NON-CATALOGUE
+   * price at request time, so it depends on a Paddle write succeeding before the
+   * customer sees an overlay. Reverting to a catalogue price id is a lever, and
+   * the alternative was a deploy on the revenue path.
+   */
+  BILLING_TRIAL_SUBSCRIBE_DISABLED: 'billing.trial_subscribe_disabled',
+
   // -- AI-assisted templates (plans/assisted_templates.md §5) ----------------
   // NOT plan features. The per-guild cap is uniform on every tier and is never
   // raised by paying; it exists so a stuck client loop cannot run up a bill.

@@ -4,11 +4,13 @@ import {
   DEFAULT_LENIENCY_CONFIG,
   evaluateLeniency,
   guildFloor,
+  resumesUnconsumedTrial,
   shouldGrantPoolExit,
   sustainedBreach,
   sustainedDrop,
   type LeniencyState,
 } from './leniency.js';
+import { subscriptionNeverCharged } from '../repositories/subscriptions.js';
 
 const DAY_MS = 86_400_000;
 const NOW = new Date('2026-07-04T12:00:00.000Z');
@@ -210,7 +212,16 @@ describe('evaluateLeniency — active (dunning backstop)', () => {
   };
 
   it('converges to grace when a subscription stopped paying and the webhook was missed', () => {
-    const decision = evaluateLeniency(state({ ...paying, subscriptionOk: false }), NOW);
+    // A SPENT trial, which is what every renewal failure looks like: the
+    // deadline is a year or more behind by the time a renewal can fail.
+    const decision = evaluateLeniency(
+      state({
+        ...paying,
+        subscriptionOk: false,
+        authExpiresAt: new Date(NOW.getTime() - days(30)),
+      }),
+      NOW,
+    );
     expect(decision.transition).toMatchObject({
       toStatus: 'grace',
       reason: 'subscription_lapsed',
@@ -221,6 +232,73 @@ describe('evaluateLeniency — active (dunning backstop)', () => {
       reason: 'subscription_lapsed',
       daysLeft: 60,
     });
+  });
+
+  it('hands an UNCONSUMED trial back rather than replacing it with grace', () => {
+    /**
+     * `plans/pricing-ladder.md` §6.5a. Subscribe during a trial, then cancel
+     * before the first charge: the counterfactual is plainly the trial the
+     * server still holds, and a 60-day grace window in its place eats up to a
+     * year of it. The `state` helper's own default is a 200-day trial, which
+     * is why the test above had to be made explicit about being spent.
+     */
+    const decision = evaluateLeniency(
+      state({ ...paying, subscriptionOk: false, subscriptionNeverCharged: true }),
+      NOW,
+    );
+    expect(decision.transition).toMatchObject({
+      toStatus: 'trial',
+      reason: 'subscription_lapsed_trial_resumes',
+      graceUntil: null,
+    });
+    // Nothing about the server's service changed, so nothing is sent: the
+    // trial ladder's own T-30/7/1 warnings resume by themselves.
+    expect(decision.notifications).toEqual([]);
+  });
+
+  it('does NOT hand a trial back to a subscription that has taken money', () => {
+    /**
+     * The exploit an adversarial review found in the first version of this
+     * branch, which tested the trial DATE alone. Rare is the one tier with a
+     * one-year trial and a monthly price, so a customer who subscribes monthly
+     * on day 10, pays one month, and then has month two decline is an ordinary
+     * dunning case sitting 325 days inside its own trial window. Resuming the
+     * trial there is eleven free months for one $3 charge, and silent: this
+     * branch sends no notification and the dashboard reads "free trial".
+     */
+    const decision = evaluateLeniency(
+      state({
+        ...paying,
+        subscriptionOk: false,
+        subscriptionNeverCharged: false,
+        memberCount: 5_000,
+        samples: samplesAt(5_000, 10),
+      }),
+      NOW,
+    );
+    expect(decision.transition).toMatchObject({
+      toStatus: 'grace',
+      reason: 'subscription_lapsed',
+    });
+    // And they are TOLD, which the resume branch would also have taken away.
+    expect(decision.notifications[0]).toMatchObject({ kind: 'grace_started' });
+  });
+
+  it('treats an unknown charge history as charged', () => {
+    // The field is optional, so every caller written before §6.5a keeps the
+    // ordinary grace behaviour rather than silently handing out free time.
+    const decision = evaluateLeniency(state({ ...paying, subscriptionOk: false }), NOW);
+    expect(decision.transition?.toStatus).toBe('grace');
+  });
+
+  it('does not touch auth_expires_at when the trial resumes', () => {
+    // The whole mechanism is that the column was never rewritten, so the
+    // transition must not carry an expiry of its own either.
+    const decision = evaluateLeniency(
+      state({ ...paying, subscriptionOk: false, subscriptionNeverCharged: true }),
+      NOW,
+    );
+    expect(decision.transition).not.toHaveProperty('expiresAt');
   });
 
   it('leaves a healthy subscription alone', () => {
@@ -773,5 +851,64 @@ describe('guildFloor (refunds.md §5)', () => {
     // date to invent and the floor is `expired`.
     const out = guildFloor(g({ authStatus: 'active', memberCount: 2_000_000 }), NOW);
     expect(out).toMatchObject({ toStatus: 'expired', reason: 'floor_expired' });
+  });
+});
+
+/**
+ * The predicate both drivers of the ladder share (`plans/pricing-ladder.md`
+ * §6.5a). Tested directly as well as through `evaluateLeniency`, because the
+ * bug it exists to prevent was a MISSING condition rather than a wrong one, and
+ * a missing condition is invisible from the outside until the one population
+ * that trips it shows up.
+ */
+describe('resumesUnconsumedTrial', () => {
+  const future = new Date(NOW.getTime() + days(300));
+  const past = new Date(NOW.getTime() - days(1));
+
+  it('needs BOTH an unspent trial and a subscription that never charged', () => {
+    expect(
+      resumesUnconsumedTrial({ authExpiresAt: future, subscriptionNeverCharged: true }, NOW),
+    ).toBe(true);
+    expect(
+      resumesUnconsumedTrial({ authExpiresAt: future, subscriptionNeverCharged: false }, NOW),
+    ).toBe(false);
+    expect(
+      resumesUnconsumedTrial({ authExpiresAt: past, subscriptionNeverCharged: true }, NOW),
+    ).toBe(false);
+  });
+
+  it('refuses when either fact is absent', () => {
+    expect(resumesUnconsumedTrial({ authExpiresAt: future }, NOW)).toBe(false);
+    expect(resumesUnconsumedTrial({ subscriptionNeverCharged: true }, NOW)).toBe(false);
+    expect(resumesUnconsumedTrial({}, NOW)).toBe(false);
+    expect(
+      resumesUnconsumedTrial({ authExpiresAt: null, subscriptionNeverCharged: true }, NOW),
+    ).toBe(false);
+  });
+
+  it('refuses a truthy non-true value for the money fact', () => {
+    // `!== true` rather than a falsy test, so nothing coerces its way in.
+    expect(
+      resumesUnconsumedTrial({ authExpiresAt: future, subscriptionNeverCharged: undefined }, NOW),
+    ).toBe(false);
+  });
+});
+
+describe('subscriptionNeverCharged', () => {
+  it('needs every charge marker absent', () => {
+    expect(subscriptionNeverCharged({})).toBe(true);
+    expect(
+      subscriptionNeverCharged({ chargedTotal: null, chargedAt: null, firstChargedAt: null }),
+    ).toBe(true);
+    expect(subscriptionNeverCharged({ chargedTotal: '3000' })).toBe(false);
+    expect(subscriptionNeverCharged({ chargedAt: NOW })).toBe(false);
+    expect(subscriptionNeverCharged({ firstChargedAt: NOW })).toBe(false);
+  });
+
+  it('reads a MISSING subscription as charged, not as never charged', () => {
+    // An absent row is an unknown rather than a proven zero, and the caller
+    // that meets it is the webhook, where a lost row is a real possibility.
+    expect(subscriptionNeverCharged(null)).toBe(false);
+    expect(subscriptionNeverCharged(undefined)).toBe(false);
   });
 });

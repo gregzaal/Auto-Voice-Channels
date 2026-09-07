@@ -82,6 +82,18 @@ export interface LeniencyState {
   hasSubscription: boolean;
   /** Whether the Paddle subscription is in good standing (false during dunning). */
   subscriptionOk: boolean;
+  /**
+   * Whether that subscription has never taken a payment, from the absence of
+   * every charge marker on the row (`charged_total`, `charged_at`,
+   * `first_charged_at`).
+   *
+   * Read only by the trial-resume branch in {@link evaluateActive}. Optional,
+   * and its absence means "assume it charged": every caller that predates
+   * `plans/pricing-ladder.md` §6.5a keeps the ordinary grace behaviour, which
+   * is the safe direction, since the alternative default hands free months to
+   * anybody whose renewal fails inside their own trial window.
+   */
+  subscriptionNeverCharged?: boolean | undefined;
   /** Latest member-count sample (a hint — transitions re-validate via REST). */
   memberCount: number | null;
   /**
@@ -209,6 +221,50 @@ function alreadySent(state: LeniencyState, key: string): boolean {
   return state.notifications[key] !== undefined;
 }
 
+/**
+ * Whether a lapsed subscription should hand a server back to its own trial
+ * instead of opening a grace window (`plans/pricing-ladder.md` §6.5a).
+ *
+ * **TWO facts, and needing both is the whole correctness of it.** An earlier
+ * version asked only whether `auth_expires_at` was still in the future, on the
+ * reasoning that a renewal is by definition a year past the trial deadline so
+ * the branch could never fire for one. **That reasoning was wrong**, and an
+ * adversarial review found it: Rare is the one tier with a one-YEAR trial and a
+ * MONTHLY price, so a customer who subscribes monthly on day 10 of a 365-day
+ * trial, pays one month, and then has month two decline is an ordinary dunning
+ * case sitting 325 days inside its own trial window. The date test alone sent
+ * them back to `trial` for those 325 days, silently (this branch sends no
+ * notification, by design) and with the dashboard reading "free trial" rather
+ * than "payment failed". One $3 charge for eleven free months.
+ *
+ * So the money fact is required too: this only ever applies to a subscription
+ * that has NEVER charged, which is exactly the case it was written for, a
+ * checkout completed during a trial and cancelled before the first charge.
+ * `subscriptionNeverCharged` is opt-in and its absence means "assume it
+ * charged", so any caller that has not been taught about it keeps the ordinary
+ * grace behaviour rather than silently handing out free time.
+ *
+ * Shared by the two drivers of the ladder ({@link evaluateActive} here, and
+ * `transitionFor` in the web app's `paddle/sync.ts`) so they cannot reach
+ * different answers about the same server, and shared as ONE predicate over
+ * both facts rather than a date test each site combines with its own money
+ * test, which is how they would drift. Which driver sees a lapse first is a
+ * race: the hourly tick and the Paddle webhook both act on it.
+ */
+export function resumesUnconsumedTrial(
+  input: {
+    authExpiresAt?: Date | null | undefined;
+    /** Whether NO `transaction.completed` has ever landed for this subscription. */
+    subscriptionNeverCharged?: boolean | undefined;
+  },
+  now: Date,
+): boolean {
+  // Explicitly `!== true`, not a bare falsy test: absent must mean "assume it
+  // charged", which is the direction that costs nothing if a caller forgets.
+  if (input.subscriptionNeverCharged !== true) return false;
+  return Boolean(input.authExpiresAt && input.authExpiresAt.getTime() > now.getTime());
+}
+
 function evaluateActive(state: LeniencyState, now: Date, config: LeniencyConfig): LeniencyDecision {
   const required = requiredTierOf(state);
 
@@ -219,6 +275,44 @@ function evaluateActive(state: LeniencyState, now: Date, config: LeniencyConfig)
   // Guarded on a subscription actually existing — a manually arranged guild
   // (no Paddle row) is entitled by agreement, not by a payment we can see.
   if (state.hasSubscription && !state.subscriptionOk) {
+    /**
+     * An unconsumed trial resumes on its ORIGINAL date instead of being
+     * replaced by a grace window, which is the same rule `guildFloor`'s
+     * `floor_trial` rung already applies to refunds and pool exits: a server
+     * must never be left worse off than if it had never subscribed.
+     *
+     * The case that made this urgent is "subscribe during your trial, then
+     * cancel" (`plans/pricing-ladder.md` §6.5). Nothing has been charged, so
+     * the counterfactual is plainly the trial they still hold, and a 60-day
+     * grace window in its place silently eats up to a year of it. The defect
+     * predates trial-subscribe (a charge-now subscribe followed by a cancel
+     * does the same thing), but that release is what invites the whole trialing
+     * base onto the path, so it ships with the fix.
+     *
+     * **No notification**, deliberately. Nothing about the server's service
+     * changed, the trial ladder's own T-30/7/1 warnings resume by themselves,
+     * and the subscription ending is something Paddle emails about directly. A
+     * notification here would say "nothing happened to you". That silence is
+     * also why {@link resumesUnconsumedTrial} has to require the money fact:
+     * applied to a customer whose card had failed, this branch would hide a
+     * real dunning state behind "free trial" and tell them nothing.
+     *
+     * There is no exploit in the generous direction: a subscription that never
+     * charged leaves the server exactly the free time it already had and not a
+     * day more. A subscription that DID charge is excluded by the predicate,
+     * which is the half this branch originally got wrong.
+     */
+    if (resumesUnconsumedTrial(state, now)) {
+      return {
+        transition: {
+          toStatus: 'trial',
+          reason: 'subscription_lapsed_trial_resumes',
+          graceUntil: null,
+          requiresCountValidation: false,
+        },
+        notifications: [],
+      };
+    }
     return {
       transition: {
         toStatus: 'grace',

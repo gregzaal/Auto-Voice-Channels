@@ -291,12 +291,20 @@ export function formatPlan(opts: PlanInput): string {
     );
   }
 
-  // Trial: the common 100 to 1M case.
+  // Trial: the common 100 to 300k case.
   const days = expiresAt ? daysUntil(now, expiresAt) : null;
   if (days !== null && days > 0) {
+    /**
+     * Says that deciding early costs nothing (`plans/pricing-ladder.md` §6.5),
+     * the same fact the trial warnings now carry. "Manage anytime" was true and
+     * useless: the panel's own reader is the admin weighing whether to subscribe
+     * before the trial runs out, and the answer they need is that they do not
+     * have to wait for it to.
+     */
     return (
       `🎟️ **Free trial**, ${days} day${days === 1 ? '' : 's'} left, then the ${tier.label} ` +
-      `tier (${priceLabel}). Manage anytime at ${link}`
+      `tier (${priceLabel}). Subscribe now and the first charge waits until the trial ` +
+      `ends: ${link}`
     );
   }
   if (days !== null) {

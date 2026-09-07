@@ -37,6 +37,21 @@ describe('formatPlan', () => {
     expect(line).toContain('Uncommon tier');
     expect(line).toContain('$1.50 a month, billed yearly ($18)');
     expect(line).toContain(LINK);
+    /**
+     * §6.5: the panel's reader is the admin weighing whether to subscribe
+     * before the trial runs out, and the fact they need is that they do not
+     * have to wait for it to. "Manage anytime" was true and useless.
+     */
+    expect(line).toContain('the first charge waits until the trial');
+  });
+
+  it('does not promise a deferred charge once the trial has lapsed', () => {
+    // A spent trial gets the ordinary charge-now checkout, so the line must
+    // not offer a first charge in the future.
+    const expiresAt = new Date('2026-06-01T00:00:00.000Z');
+    const line = formatPlan({ ...base, memberCount: 500, expiresAt });
+    expect(line).toContain('lapsed');
+    expect(line).not.toContain('waits until');
   });
 
   it('flags an expired server and deep-links to its dashboard card', () => {

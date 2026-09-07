@@ -11,6 +11,7 @@ import {
   RUNTIME_FLAGS,
   shouldGrantPoolExit,
   subscriptionInGoodStanding,
+  subscriptionNeverCharged,
   tierFor,
   trialDurationMs,
   trialPolicyFor,
@@ -1291,6 +1292,9 @@ export class BillingReconciler {
       billedTier: row.tier,
       hasSubscription: subscription !== undefined,
       subscriptionOk: subscription ? subscriptionInGoodStanding(subscription) : false,
+      // Gates the trial-resume branch only (§6.5a). A missing row reads as
+      // charged, which is the direction that cannot give service away.
+      subscriptionNeverCharged: subscriptionNeverCharged(subscription),
       memberCount: row.memberCount,
       samples: meta.samples,
       guildCreatedAt: row.createdAt,

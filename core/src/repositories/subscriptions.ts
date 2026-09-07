@@ -234,6 +234,37 @@ export function subscriptionInGoodStanding(sub: {
 }
 
 /**
+ * Whether a subscription has never taken a payment.
+ *
+ * Three markers, all written by the same statement (`recordChargedTotals`), so
+ * in practice they agree and any one of them would do. All three are read
+ * anyway because the question is asked in the direction where being wrong is
+ * expensive: this gates the trial-resume branch
+ * (`plans/pricing-ladder.md` §6.5a), so a false "never charged" hands a
+ * customer whose renewal failed the rest of their own trial window for free.
+ * `charged_total` is the one `recordChargedTotals` cannot skip (the amount is
+ * required), `first_charged_at` is the set-once marker, and `charged_at` moves
+ * with each renewal.
+ *
+ * A missing row reads as CHARGED, not as never-charged, for the same reason: an
+ * absent subscription is an unknown rather than a proven zero, and the caller
+ * that meets it is the webhook, where a lost row is a real possibility.
+ */
+export function subscriptionNeverCharged(
+  sub:
+    | {
+        chargedTotal?: string | null | undefined;
+        chargedAt?: Date | null | undefined;
+        firstChargedAt?: Date | null | undefined;
+      }
+    | null
+    | undefined,
+): boolean {
+  if (!sub) return false;
+  return sub.chargedTotal == null && sub.chargedAt == null && sub.firstChargedAt == null;
+}
+
+/**
  * Paddle statuses where the money has not arrived but the customer has not gone
  * anywhere either: the charge failed and Paddle is retrying it.
  */

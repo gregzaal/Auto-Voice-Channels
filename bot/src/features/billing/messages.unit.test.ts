@@ -62,6 +62,24 @@ describe('notificationMessage (the §4 ladder)', () => {
     expect(msg).toContain('$1.50 a month, billed yearly ($18)');
   });
 
+  it('trial warning says deciding early costs nothing (§6.5)', () => {
+    /**
+     * The message used to offer only "subscribe", which asked the admin to
+     * throw away the trial days they had left in order to stop being reminded
+     * about them. The rational move was to ignore every warning until the last.
+     */
+    const msg = notificationMessage(
+      { key: 'trial_warning:30:x', kind: 'trial_warning', daysLeft: 30, requiredTier: 'm' },
+      5_000,
+      GUILD,
+    );
+    expect(msg).toContain('keep every day of the trial');
+    expect(msg).toContain('the day it ends');
+    // No date: the first charge is a function of when checkout is opened, not
+    // of when this was sent, and the dashboard quotes it precisely.
+    expect(msg).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+  });
+
   it('over-limit grace celebrates growth, never threatens', () => {
     const msg = notificationMessage(
       {

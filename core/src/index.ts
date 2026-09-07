@@ -10,6 +10,7 @@ export * from './domain/fleets.js';
 export * from './domain/runtimeFlags.js';
 export * from './domain/metrics.js';
 export * from './domain/settingsCache.js';
+export * from './domain/trialSubscribe.js';
 export * from './repositories/guilds.js';
 export * from './repositories/subscriptions.js';
 export * from './repositories/billingEvents.js';
