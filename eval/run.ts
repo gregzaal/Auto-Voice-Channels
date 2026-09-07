@@ -71,6 +71,14 @@ interface EvalCase {
   locale?: string;
   history?: AssistantTurn[];
   expect?: Expectation;
+  /**
+   * Named `[[list:name]]` pools this guild has, for a case about them.
+   *
+   * Per case rather than global, because the interesting pair is a request that
+   * SHOULD use a list and one that should not: the model is told which lists
+   * exist, and an invented name renders literally.
+   */
+  lists?: Record<string, string[]>;
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -171,6 +179,8 @@ async function runCase(
     aliases: context.aliases,
     creatorName: context.creatorName,
     standalone: context.standalone,
+    ...(context.lists ? { lists: context.lists } : {}),
+    ...(context.timezone !== undefined ? { timezone: context.timezone } : {}),
   });
 
   const allowed = new Set(expected.allowIssues ?? []);
@@ -276,6 +286,11 @@ async function main(): Promise<void> {
       general: 'General',
       aliases: {},
       creatorName: 'Kay',
+      // A concrete zone, because that is the state any guild using a date token
+      // is in: with none set the prompt tells the model the tokens would render
+      // in UTC, which is a warning worth having in production and noise here.
+      timezone: 'Europe/Amsterdam',
+      ...(testCase.lists ? { lists: testCase.lists } : {}),
       ...(testCase.locale ? { locale: testCase.locale } : {}),
     };
     const result = await runCase(client, testCase, context);
