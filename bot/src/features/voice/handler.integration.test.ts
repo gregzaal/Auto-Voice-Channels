@@ -12,6 +12,7 @@ import { startPostgres } from '../../test/pgContainer.js';
 import { fakeLogger } from '../../runtime/testUtils.js';
 import { RecordingVoiceActions } from './actions.js';
 import { VoiceFeature } from './handler.js';
+import { renderChannelName } from './nameTemplate.js';
 import { PermissionProblemTracker } from './permissionProblems.js';
 import { PrivacyService } from './privacy.js';
 import type { VoiceStateEvent } from './types.js';
@@ -1167,6 +1168,94 @@ describe('VoiceFeature (integration)', () => {
     expect(info.seed).toBe(7);
     expect(info.members).toHaveLength(1);
     expect(info.members[0]).toMatchObject({ id: 'alice', playing: ['Halo'] });
+  });
+
+  /**
+   * `/channelinfo`'s four answers, which is the thing `debugChannel` gets wrong:
+   * it never consults `managed`, so an adopted channel reads back as unmanaged.
+   */
+  describe('channelInfo', () => {
+    it('resolves a room, with its template provenance and live context', async () => {
+      await secondaries.create({
+        channelId: 'ci-room',
+        guildId: GUILD,
+        primaryChannelId: PRIMARY,
+        ownerId: 'alice',
+        originalCreator: 'bob',
+        state: { index: 0, seed: 7 },
+      });
+      voice.put('ci-room', member('alice', ['Halo']));
+
+      const info = await feature.channelInfo(GUILD, 'ci-room');
+      expect(info.kind).toBe('room');
+      expect(info.ownerId).toBe('alice');
+      expect(info.originalCreator).toBe('bob');
+      expect(info.render?.synthetic).toBe(false);
+      expect(info.render?.nameTemplate).toBe('## [@@game_name@@]');
+      expect(info.render?.nameSource).toBe('creator');
+      expect(info.game).toBe('Halo');
+      expect(info.seed).toBe(7);
+      // The context is the assembled one, so the panel can render through it.
+      expect(renderChannelName(info.render!.nameTemplate, info.render!.ctx)).toBe('#1 [Halo]');
+    });
+
+    it("prefers the room's own override, and says so", async () => {
+      await secondaries.create({
+        channelId: 'ci-override',
+        guildId: GUILD,
+        primaryChannelId: PRIMARY,
+        ownerId: 'alice',
+        state: { index: 0, template: 'My room' },
+      });
+      const info = await feature.channelInfo(GUILD, 'ci-override');
+      expect(info.render?.nameTemplate).toBe('My room');
+      expect(info.render?.nameSource).toBe('channel');
+    });
+
+    /**
+     * A creator channel has no room, so its preview is synthetic and must be
+     * flagged. Rendering against whoever is standing in the creator right now
+     * would report a name no channel has ever had.
+     */
+    it('previews a creator channel from an empty first room, flagged synthetic', async () => {
+      voice.put(PRIMARY, member('alice', ['Halo']));
+      const info = await feature.channelInfo(GUILD, PRIMARY);
+      expect(info.kind).toBe('creator');
+      expect(info.render?.synthetic).toBe(true);
+      expect(info.render?.ctx.members).toHaveLength(0);
+      expect(info.primary?.channelId).toBe(PRIMARY);
+    });
+
+    it('resolves an adopted channel that debugChannel reports as unmanaged', async () => {
+      const f = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        guilds,
+        managed,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+      });
+      await managed.create({
+        channelId: 'ci-adopted',
+        guildId: GUILD,
+        ownerId: 'alice',
+        template: { name: 'Lounge __quiet/busy__' },
+      });
+      expect((await f.debugChannel(GUILD, 'ci-adopted')).isSecondary).toBe(false);
+
+      const info = await f.channelInfo(GUILD, 'ci-adopted');
+      expect(info.kind).toBe('managed');
+      expect(info.render?.nameSource).toBe('managed');
+      expect(info.render?.nameTemplate).toBe('Lounge __quiet/busy__');
+    });
+
+    it('reports an ordinary voice channel as unmanaged, with nothing to render', async () => {
+      const info = await feature.channelInfo(GUILD, 'ci-nothing');
+      expect(info.kind).toBe('unmanaged');
+      expect(info.render).toBeUndefined();
+    });
   });
 
   it('a default-private primary spawns its secondaries private (locked + companion)', async () => {

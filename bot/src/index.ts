@@ -524,6 +524,7 @@ async function main(): Promise<void> {
     managed,
     autoChannels,
     permissionProblems,
+    flags,
     ...(assistant ? { assistant } : {}),
     configTransfer: {
       db,

@@ -4,6 +4,7 @@ import type {
   Logger,
   ManagedChannelRepository,
   ManagedChannelRow,
+  PrimaryTemplate,
   SecondaryChannelRepository,
   SecondaryChannelRow,
 } from '@avc/core';
@@ -11,6 +12,7 @@ import { isEntitled } from '@avc/core';
 import type { VoiceActions } from './actions.js';
 import type { GuildVoiceView, MemberActivity, VoiceMember, VoiceStateEvent } from './types.js';
 import {
+  getChannelGames,
   getGameName,
   MAX_STATUS_LENGTH,
   renderChannelName,
@@ -257,6 +259,94 @@ export interface ChannelDebug {
   /** What `renderChannelName` produces for this channel right now. */
   renderedName?: string;
   seed?: number;
+}
+
+/**
+ * What AVC considers a voice channel to be. `unmanaged` is a real answer, not a
+ * failure: it is what `/channelinfo` tells someone standing in an ordinary voice
+ * channel, and it is the state `/template` offers to adopt.
+ */
+export type ChannelKind = 'room' | 'creator' | 'managed' | 'unmanaged';
+
+/** Where an effective template came from, for the "why this name" explanation. */
+export type TemplateSource = 'channel' | 'creator' | 'server' | 'managed';
+
+/**
+ * The template half of {@link ChannelInfo}: the context to render against and
+ * the templates in effect, with their provenance.
+ */
+export interface ChannelRenderInfo {
+  /**
+   * The render context. Built by {@link VoiceFeature.buildRenderContext} for
+   * every kind except `creator`, where it is synthetic (see {@link synthetic}),
+   * and handed out so a diagnostic surface renders through the real engine
+   * rather than describing what it thinks the engine would do.
+   */
+  ctx: RenderContext;
+  /**
+   * True when {@link ctx} describes a channel that does not exist: a creator
+   * channel has no room of its own, so its template is previewed against the
+   * FIRST room it would spawn. A surface showing this must say so, or it
+   * reports a name no channel has ever had as if it were live.
+   */
+  synthetic: boolean;
+  nameTemplate: string;
+  nameSource: TemplateSource;
+  statusTemplate: string;
+  statusSource: TemplateSource;
+}
+
+/** The creator channel's own configuration, for the admin half of the panel. */
+export interface PrimaryConfig {
+  channelId: string;
+  startAt?: number | undefined;
+  above?: boolean | undefined;
+  limit?: number | undefined;
+  defaultPrivate?: boolean | undefined;
+  inheritperms?: string | undefined;
+}
+
+/** Lifts a creator channel's stored template into the reportable subset. */
+function primaryConfig(row: { channelId: string; template: PrimaryTemplate }): PrimaryConfig {
+  return {
+    channelId: row.channelId,
+    startAt: row.template.startAt,
+    above: row.template.above,
+    limit: row.template.limit,
+    defaultPrivate: row.template.defaultPrivate,
+    inheritperms: row.template.inheritperms,
+  };
+}
+
+/**
+ * Everything `/channelinfo` reports about one voice channel.
+ *
+ * Deliberately not {@link ChannelDebug}. That one is a raw dump whose shape we
+ * change freely, and it exists to be read by us; this one backs a command any
+ * member can run, so it carries the resolved answers rather than the raw state.
+ */
+export interface ChannelInfo {
+  channelId: string;
+  kind: ChannelKind;
+  /** Absent for `unmanaged`, which has no template and nothing to render. */
+  render?: ChannelRenderInfo;
+  ownerId: string | null;
+  /** Whoever holds the durable claim, so `/reclaim` can be explained. */
+  originalCreator: string | null;
+  primary?: PrimaryConfig;
+  seed?: number;
+  /** The stored sibling index, which the `##` family renders from. */
+  index?: number;
+  /** LIVE, from Discord, not the creator channel's configured default. */
+  userLimit: number;
+  isPrivate: boolean;
+  members: { total: number; bots: number };
+  /** The representative game after aliases, and the raw names behind it. */
+  game: string;
+  rawGames: string[];
+  general: string;
+  enabled: boolean;
+  aliasCount: number;
 }
 
 type CreateOutcome =
@@ -1622,6 +1712,157 @@ export class VoiceFeature {
   }
 
   /**
+   * Resolves everything `/channelinfo` reports for one voice channel.
+   *
+   * Related to {@link debugChannel} and deliberately separate from it. That one
+   * is the dev dump and covers only rooms, so an adopted channel reads back as
+   * `unmanaged`; this one answers all four kinds and returns the resolved
+   * templates with their provenance rather than the raw state blob.
+   *
+   * It renders nothing. The {@link RenderContext} goes out intact so the panel
+   * probes the real engine, which is the only way a token readout cannot drift
+   * from what the channel is actually named (`plans/name-tokens.md` §3).
+   */
+  async channelInfo(guildId: string, channelId: string): Promise<ChannelInfo> {
+    const guild = await this.deps.guilds.ensure(guildId);
+    const settings = parseVoiceSettings(guild.settings);
+    const members = this.deps.voice.membersInChannel(channelId);
+    const userLimit = this.deps.voice.userLimitOf?.(channelId) ?? 0;
+    const base = {
+      channelId,
+      ownerId: null as string | null,
+      originalCreator: null as string | null,
+      userLimit,
+      isPrivate: false,
+      members: { total: members.length, bots: members.filter((m) => m.bot).length },
+      game: getGameName(members, { aliases: settings.aliases, general: settings.general }),
+      rawGames: getChannelGames(members, settings.general),
+      general: settings.general,
+      enabled: settings.enabled,
+      aliasCount: Object.keys(settings.aliases).length,
+    };
+
+    const secondary = await this.deps.secondaries.get(channelId);
+    if (secondary && secondary.guildId === guildId) {
+      const primary = await this.deps.autoChannels.get(secondary.primaryChannelId);
+      const renderCtx = this.buildRenderContext({
+        channelId,
+        settings,
+        members,
+        index: secondary.state.index ?? 0,
+        ownerId: secondary.ownerId,
+        seed: secondary.state.seed,
+        isPrivate: secondary.state.private === true,
+        startAt: primary?.template.startAt,
+      });
+      return {
+        ...base,
+        kind: 'room',
+        ownerId: secondary.ownerId,
+        originalCreator: secondary.originalCreator,
+        isPrivate: secondary.state.private === true,
+        render: {
+          ctx: renderCtx,
+          synthetic: false,
+          nameTemplate:
+            secondary.state.template ?? primary?.template.name ?? settings.channelNameTemplate,
+          /**
+           * `!== undefined`, matching the `??` above rather than truthiness.
+           * An empty-string template is a real stored value the renderer will
+           * use, so a truthy test would report it as inherited from a creator
+           * channel whose template is not the one being rendered.
+           */
+          nameSource:
+            secondary.state.template !== undefined
+              ? 'channel'
+              : primary?.template.name !== undefined
+                ? 'creator'
+                : 'server',
+          statusTemplate:
+            secondary.state.statusTemplate ??
+            primary?.template.status ??
+            settings.channelStatusTemplate,
+          statusSource:
+            secondary.state.statusTemplate !== undefined
+              ? 'channel'
+              : primary?.template.status !== undefined
+                ? 'creator'
+                : 'server',
+        },
+        ...(primary ? { primary: primaryConfig(primary) } : {}),
+        ...(secondary.state.seed !== undefined ? { seed: secondary.state.seed } : {}),
+        ...(secondary.state.index !== undefined ? { index: secondary.state.index } : {}),
+      };
+    }
+
+    const own = await this.deps.autoChannels.get(channelId);
+    if (own && own.guildId === guildId) {
+      /**
+       * A creator channel has no room of its own, so there is nothing live to
+       * render. Preview the FIRST room it would spawn, from an empty member
+       * list at index 0, exactly as `getEditorState` does for the same reason.
+       *
+       * Hand-assembled rather than routed through `buildRenderContext`, and
+       * that is the point of `synthetic: true`: the assembler reads the LIVE
+       * channel, so it would report whoever is standing in the creator channel
+       * right now, and its user limit, as if they belonged to a room that does
+       * not exist. `renderContextGuard.unit.test.ts` exempts the same shape in
+       * `getEditorState`, under the name `previewCtx`.
+       */
+      const previewCtx: RenderContext = {
+        index: 0,
+        members: [],
+        aliases: settings.aliases,
+        general: settings.general,
+        numberOffset: own.template.startAt === undefined ? 0 : own.template.startAt - 1,
+      };
+      return {
+        ...base,
+        kind: 'creator',
+        render: {
+          ctx: previewCtx,
+          synthetic: true,
+          nameTemplate: own.template.name ?? settings.channelNameTemplate,
+          nameSource: own.template.name !== undefined ? 'creator' : 'server',
+          statusTemplate: own.template.status ?? settings.channelStatusTemplate,
+          statusSource: own.template.status !== undefined ? 'creator' : 'server',
+        },
+        primary: primaryConfig(own),
+      };
+    }
+
+    const managed = await this.deps.managed?.get(channelId);
+    if (managed && managed.guildId === guildId) {
+      const renderCtx = this.buildRenderContext({
+        channelId,
+        settings,
+        members,
+        index: 0,
+        ownerId: managed.ownerId,
+        seed: managed.state.seed,
+      });
+      return {
+        ...base,
+        kind: 'managed',
+        ownerId: managed.ownerId,
+        render: {
+          ctx: renderCtx,
+          synthetic: false,
+          // An adopted channel has no inherited default: its templates are
+          // whatever `/template` wrote, and an empty one means "leave it alone".
+          nameTemplate: managed.template.name ?? '',
+          nameSource: 'managed',
+          statusTemplate: managed.template.status ?? '',
+          statusSource: 'managed',
+        },
+        ...(managed.state.seed !== undefined ? { seed: managed.state.seed } : {}),
+      };
+    }
+
+    return { ...base, kind: 'unmanaged' };
+  }
+
+  /**
    * Resolves the state behind a `/name` (per-channel override) or `/template`
    * (per-primary) editor panel: the currently-saved template, the effective one,
    * and a live preview rendered against the channel's current members.
@@ -1659,11 +1900,17 @@ export class VoiceFeature {
       // Preview the FIRST room this creator spawns: empty, and index 0, which
       // the `##` family renders as 1. Rendering against whoever is sitting in
       // the creator right now would preview a channel that never exists.
+      //
+      // `numberOffset` carries `/position`'s `startAt`, so a guild numbering
+      // from 4 previews `#4` here as well as in `/channelinfo`. Without it this
+      // panel said `#1` for a first room that will be called `#4`, and the two
+      // surfaces disagreed about the same channel.
       const previewCtx = {
         index: 0,
         members: [],
         aliases: settings.aliases,
         general: settings.general,
+        numberOffset: own.template.startAt === undefined ? 0 : own.template.startAt - 1,
       };
       const ownName = own.template.name ?? settings.channelNameTemplate;
       const ownStatus = own.template.status ?? settings.channelStatusTemplate;

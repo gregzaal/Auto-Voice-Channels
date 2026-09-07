@@ -43,13 +43,33 @@ export interface ScenarioOptions {
    * tokens render `?` — previewing them as `#1` would be a lie.
    */
   standalone: boolean;
+  /**
+   * The identity of a REAL channel these scenarios describe, when there is one.
+   *
+   * `/channelinfo` previews an existing room's template against these states, so
+   * the previews must differ from that room only in the SITUATION. Left unset by
+   * the assistant, which is proposing a template for rooms that do not exist yet
+   * and wants the stable fixture identity instead.
+   */
+  identity?: {
+    index?: number | undefined;
+    seed?: number | undefined;
+    numberOffset?: number | undefined;
+  };
 }
 
 /** The scenarios every proposal is rendered against, in display order. */
 export function previewScenarios(opts: ScenarioOptions): PreviewScenario[] {
-  const { general, aliases, creatorName, standalone } = opts;
-  const index = standalone ? -1 : 0;
-  const base = { index, aliases, general, creatorName, seed: PREVIEW_SEED };
+  const { general, aliases, creatorName, standalone, identity } = opts;
+  const index = identity?.index ?? (standalone ? -1 : 0);
+  const base = {
+    index,
+    aliases,
+    general,
+    creatorName,
+    seed: identity?.seed ?? PREVIEW_SEED,
+    ...(identity?.numberOffset !== undefined ? { numberOffset: identity.numberOffset } : {}),
+  };
 
   const owner = member('owner', creatorName);
   const playingOwner = member('owner', creatorName, {

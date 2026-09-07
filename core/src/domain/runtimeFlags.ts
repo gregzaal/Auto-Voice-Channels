@@ -246,6 +246,24 @@ export const RUNTIME_FLAGS = {
    * is the wrong response to a notice that turns out to be wrong.
    */
   IMPORT_ANNOUNCE_DISABLED: 'import.announce_disabled',
+
+  // -- Channel diagnostics ----------------------------------------------------
+  /**
+   * Kill-switch for `/channelinfo` on **this fleet**, checked in both the
+   * command and its buttons.
+   *
+   * It reads and writes nothing, so this is a load lever rather than a safety
+   * one, and it is here because of an asymmetry: `/channelinfo` is the first
+   * command ANY member can invoke that does several database reads, and
+   * `global.pause` stops no slash command at all. Withdrawing a global command
+   * the other way means a deploy plus up to an hour of Discord propagation,
+   * which is the wrong shape of response to a load problem.
+   *
+   * Set it and the command still registers and still answers, saying it is
+   * unavailable. That is deliberate: a command that vanishes from the picker
+   * mid-incident reads as a broken bot.
+   */
+  CHANNELINFO_DISABLED: 'channelinfo.disabled',
 } as const;
 
 /** Defaults for the AI levers, kept next to the keys so bot + tooling agree. */

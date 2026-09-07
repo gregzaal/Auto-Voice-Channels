@@ -64,6 +64,17 @@ interface FakeInteractionOpts {
   optionInteger?: number;
   optionString?: string;
   optionUserId?: string;
+  /** The `channel` option's value, for `/channelinfo` and `/debug`. */
+  optionChannelId?: string;
+  /**
+   * Voice channels in the guild cache, and whether the CALLER can see each.
+   *
+   * Separate from {@link category} because the two questions differ: that one
+   * asks what the BOT holds on a category, this one asks what the caller can
+   * see, which is what binds a channel id somebody typed to what they may look
+   * at.
+   */
+  voiceChannels?: Record<string, { name: string; callerCanSee: boolean }>;
 }
 
 /** Builds a minimal interaction with the methods/getters the router touches. */
@@ -88,13 +99,25 @@ function fakeInteraction(opts: FakeInteractionOpts) {
       },
       channels: {
         cache: {
-          get: (id: string) =>
-            opts.category && opts.category.id === id
-              ? {
-                  name: opts.category.name,
-                  permissionsFor: () => ({ has: (p: bigint) => holds(opts.category!.perms, p) }),
-                }
-              : undefined,
+          get: (id: string) => {
+            if (opts.category && opts.category.id === id) {
+              return {
+                name: opts.category.name,
+                permissionsFor: () => ({ has: (p: bigint) => holds(opts.category!.perms, p) }),
+              };
+            }
+            const vc = opts.voiceChannels?.[id];
+            if (!vc) return undefined;
+            return {
+              name: vc.name,
+              // The subject matters here: the caller's view and the bot's are
+              // different questions asked of the same channel.
+              permissionsFor: (subject: unknown) => ({
+                has: (p: bigint) =>
+                  subject === interaction.user ? vc.callerCanSee : holds(opts.botPerms, p),
+              }),
+            };
+          },
           // A real ChannelManager cache. `size` 0 (the default) is what an
           // unpopulated cache looks like, which callers must fail open on.
           has: (id: string) => (opts.existingChannels ?? []).includes(id),
@@ -145,7 +168,7 @@ function fakeInteraction(opts: FakeInteractionOpts) {
       getInteger: () => opts.optionInteger ?? 2,
       getString: () => opts.optionString ?? 'x',
       getUser: () => ({ id: opts.optionUserId ?? 'u2' }),
-      getChannel: () => null,
+      getChannel: () => (opts.optionChannelId ? { id: opts.optionChannelId } : null),
       getBoolean: () => null,
       getAttachment: () => null,
     },
@@ -1521,5 +1544,327 @@ describe('registerInteractionHandler (/setup panel)', () => {
     expect(setGeneral).toHaveBeenCalledWith('g1', 'Chatting');
     expect(reply).not.toHaveBeenCalled();
     expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('Set to Chatting.');
+  });
+});
+
+/**
+ * `/channelinfo`, whose gating is the interesting part.
+ *
+ * It is the one command open to every member that can be pointed at a channel
+ * by id, so the tests below are mostly about that seam: who may use the option,
+ * and whether the id they supply is bound to what they can already see.
+ */
+describe('/channelinfo', () => {
+  let dispose: (() => void) | undefined;
+  afterEach(() => dispose?.());
+
+  const ROOM = 'vc1';
+  const OTHER = 'vc2';
+
+  /** A `ChannelInfo` thin enough for the router, thick enough for the panel. */
+  const channelInfo = {
+    channelId: ROOM,
+    kind: 'room' as const,
+    render: {
+      ctx: { index: 0, members: [], aliases: {}, general: 'General', userLimit: 0 },
+      synthetic: false,
+      nameTemplate: 'Room ##',
+      nameSource: 'creator' as const,
+      statusTemplate: '',
+      statusSource: 'server' as const,
+    },
+    ownerId: null,
+    originalCreator: null,
+    userLimit: 0,
+    isPrivate: false,
+    members: { total: 0, bots: 0 },
+    game: 'General',
+    rawGames: ['General'],
+    general: 'General',
+    enabled: true,
+    aliasCount: 0,
+  };
+
+  function infoEnv(overrides: Partial<InteractionDeps> = {}) {
+    return setup({
+      feature: { channelInfo: vi.fn().mockResolvedValue(channelInfo) } as never,
+      ...overrides,
+    });
+  }
+
+  const visible = { [ROOM]: { name: 'Room #1', callerCanSee: true } };
+
+  it('answers a member standing in a voice channel', async () => {
+    const env = infoEnv();
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'channelinfo',
+      voiceChannelId: ROOM,
+      voiceChannels: visible,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(interaction.deferReply).toHaveBeenCalled();
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('Channel info');
+  });
+
+  it('asks a member with no voice channel to join one', async () => {
+    const env = infoEnv();
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'channelinfo',
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('Join a voice channel');
+    expect(interaction.deferReply).not.toHaveBeenCalled();
+  });
+
+  it('refuses the channel option to a member without Manage Channels', async () => {
+    const env = infoEnv();
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'channelinfo',
+      optionChannelId: OTHER,
+      voiceChannels: { [OTHER]: { name: 'Secret', callerCanSee: true } },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('Manage Channels');
+    expect(env.deps.feature.channelInfo).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The leak this check exists to close. Discord's picker only offers channels
+   * the member can see, but the API does not enforce it, so without binding the
+   * id to the caller an admin could read who is sitting in a private voice
+   * channel they were never admitted to.
+   */
+  it('refuses a channel the caller cannot see, even with Manage Channels', async () => {
+    const env = infoEnv();
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'channelinfo',
+      manageChannels: true,
+      optionChannelId: OTHER,
+      voiceChannels: { [OTHER]: { name: 'Secret', callerCanSee: false } },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain("can't show you");
+    expect(env.deps.feature.channelInfo).not.toHaveBeenCalled();
+  });
+
+  it('refuses a channel that is not in the cache at all (fails closed)', async () => {
+    const env = infoEnv();
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'channelinfo',
+      manageChannels: true,
+      optionChannelId: 'never-heard-of-it',
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain("can't show you");
+  });
+
+  it('lets an admin inspect a creator channel they can see', async () => {
+    const env = infoEnv();
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'channelinfo',
+      manageChannels: true,
+      optionChannelId: OTHER,
+      voiceChannels: { [OTHER]: { name: 'Join to create', callerCanSee: true } },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(env.deps.feature.channelInfo).toHaveBeenCalledWith('g1', OTHER);
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('Channel info');
+  });
+
+  /**
+   * The guild whose breaker is tripped is exactly the guild somebody is running
+   * this command on to find out what is wrong, so a refused dispatch has to say
+   * that rather than fall into the router's generic catch.
+   */
+  it('explains a refused dispatch instead of erroring', async () => {
+    const env = infoEnv({
+      dispatcher: {
+        dispatch: () => Promise.reject(new Error('circuit open')),
+      } as never,
+    });
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'channelinfo',
+      voiceChannelId: ROOM,
+      voiceChannels: visible,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('backing off');
+    expect(env.reportError).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The switch is read AFTER the defer, deliberately: it is a load lever, and
+   * spending an uncached flag read on the three-second budget during the
+   * incident it exists for is how the member gets "The application did not
+   * respond" instead of the notice. So this answers by `editReply`.
+   */
+  it('answers politely while the kill-switch is set, after deferring', async () => {
+    const env = infoEnv({
+      flags: { getBool: vi.fn().mockResolvedValue(true) } as never,
+    });
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'channelinfo',
+      voiceChannelId: ROOM,
+      voiceChannels: visible,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(interaction.deferReply).toHaveBeenCalled();
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('switched off');
+    expect(env.deps.feature.channelInfo).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The ordering the lever depends on: nothing that needs the database may run
+   * before the interaction is acknowledged.
+   */
+  it('defers before reading the kill-switch, not after', async () => {
+    const order: string[] = [];
+    const env = infoEnv({
+      flags: {
+        getBool: vi.fn().mockImplementation(() => {
+          order.push('flag');
+          return Promise.resolve(false);
+        }),
+      } as never,
+    });
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'command',
+      commandName: 'channelinfo',
+      voiceChannelId: ROOM,
+      voiceChannels: visible,
+    });
+    interaction.deferReply = vi.fn().mockImplementation(() => {
+      order.push('defer');
+      interaction.deferred = true;
+      return Promise.resolve(undefined);
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(order).toEqual(['defer', 'flag']);
+  });
+
+  /** A flag read that fails must not take the command with it. */
+  it('stays available when the flag read fails', async () => {
+    const env = infoEnv({
+      flags: { getBool: vi.fn().mockRejectedValue(new Error('db down')) } as never,
+    });
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'channelinfo',
+      voiceChannelId: ROOM,
+      voiceChannels: visible,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('Channel info');
+  });
+
+  it('still answers in a hard-gated guild, saying the server is paused', async () => {
+    const env = infoEnv({
+      selfHosted: false,
+      guilds: { get: vi.fn().mockResolvedValue({ authStatus: 'expired' }) } as never,
+    });
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'channelinfo',
+      voiceChannelId: ROOM,
+      voiceChannels: visible,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    const body = JSON.stringify(editReply.mock.calls[0]?.[0]);
+    expect(body).toContain('Channel info');
+    expect(body).toContain('paused');
+  });
+
+  it('re-checks the caller on a view button, not just on the command', async () => {
+    const env = infoEnv();
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'button',
+      customId: `avc:info:tokens:${OTHER}`,
+      voiceChannels: { [OTHER]: { name: 'Secret', callerCanSee: false } },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain("can't show you");
+    expect(env.deps.feature.channelInfo).not.toHaveBeenCalled();
+  });
+
+  it('renders the requested view from a button', async () => {
+    const env = infoEnv();
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'button',
+      customId: `avc:info:tokens:${ROOM}`,
+      voiceChannels: visible,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(interaction.deferUpdate).toHaveBeenCalled();
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('Why this name');
+  });
+});
+
+/** The two holes that made "just open `/debug` up" the wrong move. */
+describe('/debug gating', () => {
+  let dispose: (() => void) | undefined;
+  afterEach(() => dispose?.());
+
+  it('refuses a caller without Manage Channels, not just the Discord default', async () => {
+    const env = setup({ feature: { debugChannel: vi.fn() } as never });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'debug',
+      voiceChannelId: 'vc1',
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('Manage Channels');
+    expect(env.deps.feature.debugChannel).not.toHaveBeenCalled();
+  });
+
+  it('refuses a channel the caller cannot see', async () => {
+    const env = setup({ feature: { debugChannel: vi.fn() } as never });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'debug',
+      manageChannels: true,
+      optionChannelId: 'vc2',
+      voiceChannels: { vc2: { name: 'Secret', callerCanSee: false } },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain("can't show you");
+    expect(env.deps.feature.debugChannel).not.toHaveBeenCalled();
   });
 });
