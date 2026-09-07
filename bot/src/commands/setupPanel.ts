@@ -262,10 +262,25 @@ export function formatPlan(opts: PlanInput): string {
     );
   }
 
-  if (tier.id === 'xxl') {
+  /**
+   * The hard-gated top tier, keyed on "has no self-serve price" rather than on
+   * an id.
+   *
+   * This was `tier.id === 'xxl'`, which the rarity ladder turned into dead
+   * code: a server above the gate fell through to the trial copy and was
+   * quoted a price that does not exist. `pricePerYear === null` is the
+   * definitional property of a quoted tier and cannot go stale that way.
+   *
+   * The copy no longer promises dedicated infrastructure. Owner decision 5
+   * defers that until we know we can serve a server this size
+   * (`plans/pricing-ladder.md` §2), so promising it here was a claim the
+   * product no longer supports. Phase 4 owns the rest of this rewrite,
+   * including pointing it at the support server rather than the site.
+   */
+  if (tier.pricePerYear === null) {
     return (
-      '🏛️ This server is **very large**, and we run servers this size on dedicated ' +
-      `infrastructure. Let's set you up: ${SITE_URL}`
+      '🏛️ This server is **larger than our self-serve plans cover**. Get in touch and we will ' +
+      `work out the right arrangement: ${SITE_URL}`
     );
   }
 

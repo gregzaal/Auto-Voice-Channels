@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ACCEPT_ONLY_TIER_IDS,
   compareTiers,
+  headlinePerMonth,
   envKeyForSupporterRole,
   isTierId,
   PRICED_TIER_IDS,
@@ -27,12 +28,14 @@ describe('tierFor', () => {
     expect(tierFor(999).id).toBe('s');
     expect(tierFor(1_000).id).toBe('m');
     expect(tierFor(9_999).id).toBe('m');
-    expect(tierFor(10_000).id).toBe('l');
-    expect(tierFor(99_999).id).toBe('l');
-    expect(tierFor(100_000).id).toBe('xl');
-    expect(tierFor(999_999).id).toBe('xl');
-    expect(tierFor(1_000_000).id).toBe('xxl');
-    expect(tierFor(50_000_000).id).toBe('xxl');
+    expect(tierFor(10_000).id).toBe('epic');
+    expect(tierFor(29_999).id).toBe('epic');
+    expect(tierFor(30_000).id).toBe('legendary');
+    expect(tierFor(99_999).id).toBe('legendary');
+    expect(tierFor(100_000).id).toBe('mythic');
+    expect(tierFor(299_999).id).toBe('mythic');
+    expect(tierFor(300_000).id).toBe('exotic');
+    expect(tierFor(50_000_000).id).toBe('exotic');
   });
 
   it('clamps negative / non-finite counts to the free tier', () => {
@@ -40,13 +43,56 @@ describe('tierFor', () => {
     expect(tierFor(Number.NaN).id).toBe('free');
   });
 
-  it('exposes prices matching the monetization plan', () => {
+  it('exposes the rarity ladder prices (pricing-ladder.md §3)', () => {
     expect(tierFor(50).pricePerYear).toBe(0);
-    expect(tierFor(500).pricePerYear).toBe(19);
-    expect(tierFor(5_000).pricePerYear).toBe(59);
-    expect(tierFor(50_000).pricePerYear).toBe(399);
-    expect(tierFor(500_000).pricePerYear).toBe(1_999);
-    expect(tierFor(2_000_000).pricePerYear).toBeNull();
+    expect(tierFor(500).pricePerYear).toBe(18);
+    expect(tierFor(5_000).pricePerYear).toBe(30);
+    expect(tierFor(20_000).pricePerYear).toBe(90);
+    expect(tierFor(50_000).pricePerYear).toBe(180);
+    expect(tierFor(200_000).pricePerYear).toBe(360);
+    expect(tierFor(500_000).pricePerYear).toBeNull();
+  });
+
+  /**
+   * Rule 4 (§4): the headline is a whole dollar or a half, and where monthly
+   * billing is offered the monthly price is a whole dollar. This is the test
+   * that makes a price nobody can display fail the build, which is the whole
+   * reason the yearly figures are multiples of 6 and 30 rather than round.
+   */
+  it('every price is round in all three framings', () => {
+    for (const tier of TIERS) {
+      if (tier.pricePerYear === null || tier.pricePerYear === 0) {
+        expect(headlinePerMonth(tier)).toBeNull();
+        expect(tier.pricePerMonth).toBeNull();
+        continue;
+      }
+      expect(tier.pricePerYear % 6).toBe(0);
+      const headline = headlinePerMonth(tier)!;
+      expect(headline * 2).toBe(Math.round(headline * 2));
+      if (tier.pricePerMonth !== null) {
+        expect(tier.pricePerYear % 30).toBe(0);
+        expect(tier.pricePerMonth).toBe(tier.pricePerYear / 10);
+        expect(tier.pricePerMonth).toBe(Math.round(tier.pricePerMonth));
+      }
+    }
+  });
+
+  it('offers monthly billing only where twelve charges beat one', () => {
+    // Below a yearly price of $28.95 Paddle's fixed 50c per transaction eats
+    // the difference, so Uncommon is deliberately yearly-only (§3.1).
+    for (const tier of TIERS) {
+      const monthlyOffered = tier.pricePerMonth !== null;
+      const clearsTheLine = (tier.pricePerYear ?? 0) > 28.95;
+      expect(monthlyOffered).toBe(clearsTheLine);
+    }
+  });
+
+  it('headlines read as the plan states them', () => {
+    expect(headlinePerMonth(tierFor(500))).toBeCloseTo(1.5, 10);
+    expect(headlinePerMonth(tierFor(5_000))).toBeCloseTo(2.5, 10);
+    expect(headlinePerMonth(tierFor(20_000))).toBeCloseTo(7.5, 10);
+    expect(headlinePerMonth(tierFor(50_000))).toBeCloseTo(15, 10);
+    expect(headlinePerMonth(tierFor(200_000))).toBeCloseTo(30, 10);
   });
 
   it('isFreeForever tracks the <100 boundary', () => {
@@ -69,8 +115,8 @@ describe('tier helpers', () => {
   it('compareTiers orders by size', () => {
     expect(compareTiers('free', 's')).toBeLessThan(0);
     expect(compareTiers('m', 'm')).toBe(0);
-    expect(compareTiers('xl', 'm')).toBeGreaterThan(0);
-    expect(compareTiers('xxl', 'xl')).toBeGreaterThan(0);
+    expect(compareTiers('legendary', 'm')).toBeGreaterThan(0);
+    expect(compareTiers('exotic', 'mythic')).toBeGreaterThan(0);
   });
 });
 
@@ -81,15 +127,15 @@ describe('trialPolicyFor (monetization.md §3)', () => {
     expect(trialPolicyFor(100)).toBe('year');
     expect(trialPolicyFor(9_999)).toBe('year');
     expect(trialPolicyFor(10_000)).toBe('short');
-    expect(trialPolicyFor(999_999)).toBe('short');
-    expect(trialPolicyFor(1_000_000)).toBe('hard_gate');
+    expect(trialPolicyFor(299_999)).toBe('short');
+    expect(trialPolicyFor(300_000)).toBe('hard_gate');
   });
 
-  it('trial durations: a year for small/dormant, 14 days for large, none for the gate', () => {
+  it('trial durations: a year for small/dormant, 30 days for large, none for the gate', () => {
     const day = 86_400_000;
     expect(trialDurationMs('dormant')).toBe(365 * day);
     expect(trialDurationMs('year')).toBe(365 * day);
-    expect(trialDurationMs('short')).toBe(14 * day);
+    expect(trialDurationMs('short')).toBe(30 * day);
     expect(trialDurationMs('hard_gate')).toBeNull();
   });
 });
@@ -121,11 +167,12 @@ describe('TIER_IDS against TIERS', () => {
     expect([...PRICED_TIER_IDS, ...ACCEPT_ONLY_TIER_IDS].sort()).toEqual([...TIER_IDS].sort());
   });
 
-  it('carries exactly the rarity ids as accept-only during this repricing', () => {
-    // Phase A accepts the four new ids a release before TIERS prices them.
-    // Phase 1 moves them into TIERS and leaves l/xl/xxl here instead; phase 7
-    // empties this list. Update it deliberately, one phase at a time.
-    expect([...ACCEPT_ONLY_TIER_IDS]).toEqual(['epic', 'legendary', 'mythic', 'exotic']);
+  it('carries exactly the RETIRED ids as accept-only after phase 1', () => {
+    // Phase A accepted the four rarity ids a release before TIERS priced them.
+    // Phase 1 has now moved them into TIERS, so the accept-only set flips to
+    // the ids TIERS has dropped; phase 7 empties this list once nothing older
+    // than phase 1 can run. Update it deliberately, one phase at a time.
+    expect([...ACCEPT_ONLY_TIER_IDS]).toEqual(['l', 'xl', 'xxl']);
   });
 
   it('isTierId accepts every id and rejects anything else', () => {
@@ -218,7 +265,7 @@ describe('accept-only fallbacks point the lenient way', () => {
    */
   it('leaves a real guild under the ceiling of an accept-only billed tier', () => {
     for (const id of ACCEPT_ONLY_TIER_IDS) {
-      expect(tierById(id).maxExclusive).toBeGreaterThan(300_000);
+      expect(tierById(id).maxExclusive).toBe(Number.POSITIVE_INFINITY);
     }
   });
 

@@ -883,7 +883,7 @@ export class BillingReconciler {
       const effectivePolicy = policy === 'short' ? 'year' : policy;
       const duration = trialDurationMs(effectivePolicy);
       // hard_gate joins are handled by onboarding; a pre-existing giant guild
-      // mid-beta is left alone rather than retro-gated by the backfill.
+      // is left alone rather than retro-gated by the backfill.
       if (duration !== null) {
         current = await this.deps.store.transitionAuth({
           guildId: current.guildId,
@@ -893,6 +893,37 @@ export class BillingReconciler {
           expiresAtIfNull: new Date(current.createdAt.getTime() + duration),
         });
       } else {
+        /**
+         * A `trial` guild too large for any self-serve tier, with no window.
+         *
+         * This used to be a bare `return`, which meant no window, no warning,
+         * no gate and no record, permanently and silently. It was unreachable
+         * while the gate sat at 1,000,000; the rarity ladder moved it to
+         * 300,000, so it is now merely improbable (`plans/pricing-ladder.md`
+         * §7 lists it as the edge case phase 1 has to close).
+         *
+         * Still no retro-gate: this guild has been working, and cutting it off
+         * because a boundary moved under it is the one outcome the leniency
+         * model exists to avoid. Make it VISIBLE instead, so someone can start
+         * the Exotic conversation. `record` is best-effort, so a failed audit
+         * write cannot cost the pass.
+         */
+        await this.deps.opsAudit
+          .record({
+            actor: 'billing-reconciler',
+            action: 'billing.hard_gate_unplaceable',
+            target: current.guildId,
+            details: {
+              fleet: this.deps.fleet,
+              memberCount: current.memberCount,
+              policy,
+              note:
+                'Guild is in trial with no window and is above the self-serve ceiling, so no ' +
+                'trial duration applies. Left entitled and untouched on purpose. Arrange a ' +
+                'quoted arrangement, or move it to active with a subscription.',
+            },
+          })
+          .catch(() => undefined);
         return;
       }
     }

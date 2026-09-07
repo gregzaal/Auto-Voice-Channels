@@ -171,7 +171,7 @@ describe('evaluateLeniency — active (over-limit)', () => {
     expect(due.notifications[0]).toMatchObject({
       kind: 'grace_started',
       reason: 'over_limit',
-      requiredTier: 'l',
+      requiredTier: 'epic',
     });
   });
 
@@ -526,7 +526,7 @@ describe('pooledMemberCount (member-based-pricing.md §5.2)', () => {
       NOW,
     );
     expect(decision.transition).toMatchObject({ toStatus: 'grace', reason: 'over_limit' });
-    expect(decision.notifications[0]).toMatchObject({ requiredTier: 'l' });
+    expect(decision.notifications[0]).toMatchObject({ requiredTier: 'epic' });
   });
 
   it('over-limit still fires for a pool that grew, exactly like a guild would', () => {

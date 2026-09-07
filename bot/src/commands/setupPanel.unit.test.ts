@@ -34,8 +34,8 @@ describe('formatPlan', () => {
     const line = formatPlan({ ...base, memberCount: 500, expiresAt });
     expect(line).toContain('Free trial');
     expect(line).toContain('10 days');
-    expect(line).toContain('S tier');
-    expect(line).toContain('$19/yr');
+    expect(line).toContain('Uncommon tier');
+    expect(line).toContain('$18/yr');
     expect(line).toContain(LINK);
   });
 
@@ -45,10 +45,12 @@ describe('formatPlan', () => {
     expect(line).toContain(LINK);
   });
 
-  it('routes ≥1M servers to the dedicated-infra conversation', () => {
-    const line = formatPlan({ ...base, memberCount: 2_000_000 });
-    expect(line).toContain('dedicated');
+  it('routes servers above the self-serve ceiling to a conversation', () => {
+    const line = formatPlan({ ...base, memberCount: 400_000 });
+    expect(line).toContain('self-serve');
     expect(line).toContain('auto-voice.io');
+    // Owner decision 5 defers dedicated infrastructure, so nothing may promise it.
+    expect(line).not.toContain('dedicated');
   });
 
   it('acknowledges an active subscription', () => {
@@ -67,13 +69,13 @@ describe('formatPlan', () => {
         ...base,
         memberCount: 200,
         status: 'active',
-        billedTier: 'l',
+        billedTier: 'legendary',
         shared: true,
       });
-      expect(line).toContain('L tier');
-      expect(line).toContain('$399/yr');
-      expect(line).not.toContain('S tier');
-      expect(line).not.toContain('$19/yr');
+      expect(line).toContain('Legendary tier');
+      expect(line).toContain('$180/yr');
+      expect(line).not.toContain('Uncommon tier');
+      expect(line).not.toContain('$18/yr');
     });
 
     it('says the subscription also covers other servers, without saying "pool"', () => {
@@ -148,8 +150,8 @@ describe('formatPlan', () => {
    */
   it('quotes the billed tier for a subscriber who has outgrown it', () => {
     const line = formatPlan({ ...base, memberCount: 1_500, status: 'active', billedTier: 's' });
-    expect(line).toContain('S tier');
-    expect(line).toContain('$19/yr');
+    expect(line).toContain('Uncommon tier');
+    expect(line).toContain('$18/yr');
     expect(line).not.toContain('$59/yr');
   });
 
@@ -165,15 +167,15 @@ describe('formatPlan', () => {
       graceUntil: new Date('2026-06-22T00:00:00.000Z'),
       billedTier: 's',
     });
-    expect(overLimit).toContain('M tier');
+    expect(overLimit).toContain('Rare tier');
     const lapsed = formatPlan({
       ...base,
       memberCount: 200,
       status: 'grace',
       graceUntil: new Date('2026-06-22T00:00:00.000Z'),
-      billedTier: 'l',
+      billedTier: 'legendary',
     });
-    expect(lapsed).toContain('L tier');
+    expect(lapsed).toContain('Legendary tier');
   });
 
   /**

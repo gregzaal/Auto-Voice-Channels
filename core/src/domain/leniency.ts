@@ -4,6 +4,7 @@ import {
   compareTiers,
   tierById,
   tierFor,
+  TIERS,
   trialDurationMs,
   trialPolicyFor,
   type TierId,
@@ -52,7 +53,16 @@ export const DEFAULT_LENIENCY_CONFIG: LeniencyConfig = {
   upgradeBreachSamples: 7,
   downgradeDropSamples: 30,
   warnDaysBefore: [30, 7, 1],
-  shortWarnDaysBefore: [7, 2, 1],
+  /**
+   * `[14, 7, 1]`, not `[7, 2, 1]`, because the short trial is now 30 days.
+   *
+   * The selector below picks these for any window of 30 days or less, so the
+   * old offsets would leave a 30-day trial silent for 23 days and then warn at
+   * T-7, under a pricing page that promises T-30
+   * (`plans/pricing-ladder.md` §7). Only the most imminent unsent offset ever
+   * fires, so widening the first one bursts nothing.
+   */
+  shortWarnDaysBefore: [14, 7, 1],
   graceNudgeDays: 7,
   hardGateDisabled: false,
 };
@@ -271,15 +281,32 @@ function evaluateTrial(state: LeniencyState, now: Date, config: LeniencyConfig):
   // nothing expires, nothing warns, even if the window date has passed.
   if (required.id === 'free') return { notifications };
 
-  // Growing into XXL during a trial: a leniency-model tier transition — we
-  // reach out to arrange the dedicated-infra deal; the trial window itself is
-  // untouched (§3). One-time heads-up once the breach is sustained.
+  /**
+   * Growing into the top, hard-gated tier during a trial: a leniency-model
+   * tier transition, so we reach out to arrange it and the trial window itself
+   * is untouched (§3). One-time heads-up once the breach is sustained.
+   *
+   * **The floor is derived from the table, never named by id.** Naming the
+   * second tier (`tierById('mythic')`) is how this branch would go silently
+   * dead at the next repricing: `tierById` of an id `TIERS` no longer prices
+   * answers with the TOP tier, whose ceiling is `Infinity`, and no breach can
+   * ever exceed that. The same trap already cost this branch once, when the
+   * rarity ladder retired `xl`.
+   *
+   * **The dedupe key keeps its `_xxl` name deliberately.** It is stored text
+   * in `metadata.billing.notified` and `billing_notifications.key`, so
+   * renaming it would strand any queued row mid-deploy for no gain
+   * (`plans/pricing-ladder.md` §7). The tier it refers to is now Exotic at
+   * 300,000; only the copy changes, in phase 4.
+   */
+  const topTier = TIERS[TIERS.length - 1]!;
+  const topTierFloor = TIERS[TIERS.length - 2]?.maxExclusive ?? Number.POSITIVE_INFINITY;
   if (
-    required.id === 'xxl' &&
-    sustainedBreach(state.samples, tierById('xl').maxExclusive, config.upgradeBreachSamples) &&
+    required.id === topTier.id &&
+    sustainedBreach(state.samples, topTierFloor, config.upgradeBreachSamples) &&
     !alreadySent(state, 'grew_into_xxl')
   ) {
-    notifications.push({ key: 'grew_into_xxl', kind: 'grew_into_xxl', requiredTier: 'xxl' });
+    notifications.push({ key: 'grew_into_xxl', kind: 'grew_into_xxl', requiredTier: topTier.id });
   }
 
   const expiresAt = state.authExpiresAt;

@@ -23,14 +23,14 @@ describe('onboardingMessage (§6 size bands)', () => {
   it('1-year trial band names the price and the why', () => {
     const msg = onboardingMessage('year', 500, GUILD);
     expect(msg).toContain('1-year free trial');
-    expect(msg).toContain('$19/yr');
+    expect(msg).toContain('$18/yr');
     expect(msg).toContain(LINK);
   });
 
-  it('14-day band explains the short taste and the cost model', () => {
+  it('30-day band explains the short taste and the cost model', () => {
     const msg = onboardingMessage('short', 20_000, GUILD);
-    expect(msg).toContain('14-day free trial');
-    expect(msg).toContain('$399/yr');
+    expect(msg).toContain('30-day free trial');
+    expect(msg).toContain('$90/yr');
     expect(msg).toContain(LINK);
   });
 
@@ -49,16 +49,16 @@ describe('notificationMessage (the §4 ladder)', () => {
       GUILD,
     );
     expect(msg).toContain('7 days');
-    expect(msg).toContain('$19/yr');
+    expect(msg).toContain('$18/yr');
   });
 
   it('over-limit grace celebrates growth, never threatens', () => {
     const msg = notificationMessage(
       {
-        key: 'grace_started:over_limit:l',
+        key: 'grace_started:over_limit:epic',
         kind: 'grace_started',
         reason: 'over_limit',
-        requiredTier: 'l',
+        requiredTier: 'epic',
         daysLeft: 60,
       },
       12_000,
@@ -66,7 +66,7 @@ describe('notificationMessage (the §4 ladder)', () => {
     );
     expect(msg).toContain('grown');
     expect(msg).toContain('60 days');
-    expect(msg).toContain('$399/yr');
+    expect(msg).toContain('$90/yr');
   });
 
   it('trial-expiry grace reassures nothing broke', () => {

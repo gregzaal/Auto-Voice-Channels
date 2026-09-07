@@ -37,10 +37,10 @@ describe('decideOnboarding (§3/§6)', () => {
     expect(d.setExpiresAt).toEqual(new Date(NOW.getTime() + 365 * DAY_MS));
   });
 
-  it('10k–1M: the 14-day trial', () => {
+  it('10k-300k: the 30-day trial', () => {
     const d = decideOnboarding(row(), 20_000, NOW);
     expect(d.policy).toBe('short');
-    expect(d.setExpiresAt).toEqual(new Date(NOW.getTime() + 14 * DAY_MS));
+    expect(d.setExpiresAt).toEqual(new Date(NOW.getTime() + 30 * DAY_MS));
   });
 
   it('≥1M joining fresh: hard gate, no trial window', () => {

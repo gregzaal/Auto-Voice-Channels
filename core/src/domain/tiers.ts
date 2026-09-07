@@ -52,7 +52,7 @@ export function isTierId(value: unknown): value is TierId {
 }
 
 export interface Tier {
-  /** Stable id (also the future Paddle price-id key). */
+  /** Stable id (also the Paddle price-id key). */
   id: TierId;
   /** Short display label. */
   label: string;
@@ -60,17 +60,75 @@ export interface Tier {
   maxExclusive: number;
   /** USD list price per year, or `null` for the bespoke "contact us" tier. `0` = free forever. */
   pricePerYear: number | null;
+  /**
+   * USD list price per month when billed MONTHLY, or `null` where monthly
+   * billing is not offered (`free`, `s` and `exotic`, plus every retired id).
+   *
+   * **Not the headline.** The headline is {@link headlinePerMonth}, which is
+   * the yearly price over 12 and is what every surface shows by default. This
+   * is the higher figure a customer pays for the convenience of paying monthly,
+   * exactly one tenth of the yearly price, so "pay yearly, get two months free"
+   * is arithmetically exact rather than approximately true
+   * (`plans/pricing-ladder.md` §3).
+   *
+   * Uncommon has none because below a yearly price of $28.95 Paddle's fixed 50
+   * cents per transaction eats the difference: twelve charges would net less
+   * than one (§3.1).
+   */
+  pricePerMonth: number | null;
 }
 
-/** The tier table, ascending by size. The last entry is the unbounded XXL tier. */
+/**
+ * The tier table, ascending by size. The last entry is the unbounded top tier.
+ *
+ * **The rarity ladder** (`plans/pricing-ladder.md` §3, approved 2026-09-07).
+ * Every yearly price is a multiple of 6, so the headline (yearly over 12) is a
+ * whole dollar or a half; where monthly billing is offered the yearly price is
+ * a multiple of 30, so the monthly price is a whole dollar too. That is rule 4
+ * of §4 and it is why these are the exact numbers rather than round-looking
+ * yearly figures: $19 shows as $1.58, which the display decision forbids.
+ *
+ * `s` and `m` keep their ids: their member ranges are unchanged and only the
+ * label and price move, so renaming them would be a data migration on three
+ * rows for cosmetics. `l`, `xl` and `xxl` are gone from the ladder but stay in
+ * {@link TIER_IDS} until phase 7, because rows still reference them.
+ */
 export const TIERS: readonly Tier[] = [
-  { id: 'free', label: 'Free', maxExclusive: 100, pricePerYear: 0 },
-  { id: 's', label: 'S', maxExclusive: 1_000, pricePerYear: 19 },
-  { id: 'm', label: 'M', maxExclusive: 10_000, pricePerYear: 59 },
-  { id: 'l', label: 'L', maxExclusive: 100_000, pricePerYear: 399 },
-  { id: 'xl', label: 'XL', maxExclusive: 1_000_000, pricePerYear: 1_999 },
-  { id: 'xxl', label: 'XXL', maxExclusive: Number.POSITIVE_INFINITY, pricePerYear: null },
+  { id: 'free', label: 'Free', maxExclusive: 100, pricePerYear: 0, pricePerMonth: null },
+  { id: 's', label: 'Uncommon', maxExclusive: 1_000, pricePerYear: 18, pricePerMonth: null },
+  { id: 'm', label: 'Rare', maxExclusive: 10_000, pricePerYear: 30, pricePerMonth: 3 },
+  { id: 'epic', label: 'Epic', maxExclusive: 30_000, pricePerYear: 90, pricePerMonth: 9 },
+  {
+    id: 'legendary',
+    label: 'Legendary',
+    maxExclusive: 100_000,
+    pricePerYear: 180,
+    pricePerMonth: 18,
+  },
+  { id: 'mythic', label: 'Mythic', maxExclusive: 300_000, pricePerYear: 360, pricePerMonth: 36 },
+  {
+    id: 'exotic',
+    label: 'Exotic',
+    maxExclusive: Number.POSITIVE_INFINITY,
+    pricePerYear: null,
+    pricePerMonth: null,
+  },
 ] as const;
+
+/**
+ * The headline price: the monthly figure for a tier paid YEARLY.
+ *
+ * **This is what every customer-facing surface shows**, with the billed yearly
+ * total beside it in the same line and never as a footnote
+ * (`plans/pricing-ladder.md` §5.1). Derived here rather than stored, so it can
+ * never disagree with `pricePerYear`, and exact to the cent by rule 4.
+ *
+ * `null` for Free (there is no monthly framing of nothing) and Exotic (quoted).
+ */
+export function headlinePerMonth(tier: Tier): number | null {
+  if (tier.pricePerYear === null || tier.pricePerYear === 0) return null;
+  return tier.pricePerYear / 12;
+}
 
 /**
  * The ids {@link TIERS} actually prices, ascending by size.
@@ -222,24 +280,40 @@ export function compareTiers(a: TierId, b: TierId): number {
 // ---------------------------------------------------------------------------
 
 export const TRIAL_YEAR_DAYS = 365;
-export const TRIAL_SHORT_DAYS = 14;
+/**
+ * The short trial, for guilds already large when the bot is added.
+ *
+ * **30 days, up from 14** (`plans/pricing-ladder.md` §7). A $90-to-$360
+ * decision inside a community team needs a purchase cycle, and 30 days of a
+ * 300k server costs us about $20. Raising it also changes the warning cadence:
+ * `leniency.ts` picks its short offsets for any window of 30 days or less, and
+ * the old `[7, 2, 1]` would leave a 30-day trial silent for 23 days.
+ */
+export const TRIAL_SHORT_DAYS = 30;
 
 export type TrialPolicy =
   /** `< 100` members — free forever; the trial clock runs but is never needed. */
   | 'dormant'
   /** `100 – 9,999` members — 1-year free trial, fully entitled. */
   | 'year'
-  /** `10,000 – 999,999` members — 14-day free trial, then subscribe. */
+  /** `10,000 – 299,999` members — 30-day free trial, then subscribe. */
   | 'short'
-  /** `≥ 1,000,000` members — no trial; a subscription must be arranged first. */
+  /** `≥ 300,000` members — no trial; a subscription must be arranged first. */
   | 'hard_gate';
 
-/** The trial policy for a guild of `memberCount` members at bot-add time. */
+/**
+ * The trial policy for a guild of `memberCount` members at bot-add time.
+ *
+ * Keyed off the tier id rather than the count so the bounds live in exactly one
+ * place. The hard gate moved from 1,000,000 to 300,000 with the rarity ladder
+ * (§7, owner decision 5): self-serve ends where rule 2's quarter-margin closes,
+ * and a server above it is a conversation before the bot is switched on.
+ */
 export function trialPolicyFor(memberCount: number): TrialPolicy {
   const tier = tierFor(memberCount);
   if (tier.id === 'free') return 'dormant';
   if (tier.id === 's' || tier.id === 'm') return 'year';
-  if (tier.id === 'xxl') return 'hard_gate';
+  if (tier.id === 'exotic') return 'hard_gate';
   return 'short';
 }
 
