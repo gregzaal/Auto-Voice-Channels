@@ -339,6 +339,8 @@ const MANAGED_STATE_FIELDS = ['seed', 'name', 'status'] as const;
 const LEGACY_TEMPLATE_FIELDS: readonly string[] = ['name', 'limit', 'above', 'inheritperms'];
 
 const PROBLEM_ALERT_VALUES = new Set(['contact', 'quiet', 'off']);
+
+const GAME_NAME_MODE_VALUES = new Set(['shared', 'top']);
 const ROOT_GROUP_KEY = '@root';
 const SNOWFLAKE = /^\d{17,20}$/;
 
@@ -377,7 +379,15 @@ function isStringMap(value: unknown): value is Record<string, string> {
 /** Turns a validated native file into the normalised shape. */
 export function fromNativeFile(file: GuildConfigFile): IncomingConfig {
   const settings = new Map<ExportSettingsKey, unknown>();
-  for (const key of EXPORT_SETTINGS_KEYS) settings.set(key, file.settings[key]);
+  // Only keys the file actually carries. An omitted key means its writer did
+  // not know it (see `settingsReadSchema`), and `diffSettings` skips a key the
+  // map does not hold; setting it to `undefined` here would instead read as
+  // `null` and REMOVE the stored value.
+  for (const key of EXPORT_SETTINGS_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(file.settings, key)) {
+      settings.set(key, file.settings[key]);
+    }
+  }
 
   return {
     source: 'native',
@@ -972,6 +982,16 @@ function validateSetting(
       }
       return out;
     }
+
+    case 'game_name_mode':
+      // `readGameNameMode` reads anything unrecognised as `shared`, so an
+      // unknown mode is inert rather than dangerous. Dropped here anyway so the
+      // importer REPORTS it, for the same reason `timezone` is: storing a value
+      // that will never take effect is the shape of bug this file exists to
+      // make visible.
+      if (typeof value !== 'string' || !GAME_NAME_MODE_VALUES.has(value))
+        return drop('setting_invalid');
+      return value;
   }
 }
 

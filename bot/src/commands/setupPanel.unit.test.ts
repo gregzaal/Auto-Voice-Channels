@@ -441,6 +441,36 @@ describe('buildSetupPanel', () => {
     expect(json).toContain('Managed channels (1)');
   });
 
+  /**
+   * The option toggles on selection rather than opening a modal, so its
+   * description is the only place it can report the current value and say what
+   * selecting it will do.
+   */
+  it('reports the current tied-games mode in the settings select', () => {
+    const shared = JSON.stringify(buildSetupPanel({ ...baseInput, isAdmin: true }));
+    expect(shared).toContain(setupId('gamemode'));
+    expect(shared).toContain('A two-way tie shows both games');
+
+    const top = JSON.stringify(
+      buildSetupPanel({ ...baseInput, isAdmin: true, gameNameMode: 'top' }),
+    );
+    expect(top).toContain('Room names pick one game when several are tied');
+  });
+
+  /**
+   * Exempt while expired, like every other setting on this select and unlike
+   * the assistant. `allowedWhileExpired` refuses only the assistant, and the
+   * panel must not offer an action it is about to refuse -- nor hide one it
+   * will accept.
+   */
+  it('keeps the tied-games setting reachable in an expired guild', () => {
+    const json = JSON.stringify(
+      buildSetupPanel({ ...baseInput, isAdmin: true, entitlement: 'expired' }),
+    );
+    expect(json).toContain(setupId('gamemode'));
+    expect(json).not.toContain(setupId('assistant'));
+  });
+
   it('omits an empty channel list rather than explaining it', () => {
     const json = JSON.stringify(buildSetupPanel({ ...baseInput, isAdmin: true }));
     expect(json).toContain('Creator channels (1)');

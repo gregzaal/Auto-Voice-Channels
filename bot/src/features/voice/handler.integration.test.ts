@@ -1171,6 +1171,46 @@ describe('VoiceFeature (integration)', () => {
   });
 
   /**
+   * Both diagnostics resolve the game the way the render path does.
+   *
+   * They each used to call `getGameName` with the aliases and the label alone,
+   * so in a `top` guild they would report the shared-mode answer while the
+   * channel carried a different name. A diagnostic that disagrees with the
+   * thing it is describing is worse than no diagnostic.
+   */
+  it('reports the same game the channel is named after under top mode', async () => {
+    await guilds.updateSettings(GUILD, { game_name_mode: 'top' });
+    await secondaries.create({
+      channelId: 'tie',
+      guildId: GUILD,
+      primaryChannelId: PRIMARY,
+      ownerId: 'bella',
+      state: { index: 0, seed: 7 },
+    });
+    // Tied two-all, and the owner is on Doom, so the owner's game wins.
+    voice.put('tie', member('alice', ['Halo']));
+    voice.put('tie', member('bella', ['Doom']));
+    voice.put('tie', member('carol', ['Halo']));
+    voice.put('tie', member('dave', ['Doom']));
+
+    await feature.rerenderSecondary(GUILD, 'tie');
+    const renamed = actions.ofType('rename').at(-1);
+    expect(renamed).toMatchObject({ channelId: 'tie', name: '#1 [Doom]' });
+
+    const dbg = await feature.debugChannel(GUILD, 'tie');
+    expect(dbg.computedGame).toBe('Doom');
+    const info = await feature.channelInfo(GUILD, 'tie');
+    expect(info.game).toBe('Doom');
+    expect(info.rawGames).toEqual(['Doom']);
+
+    // `beforeEach` clears the channel tables but not the guild row, and
+    // `ensure` is `onConflictDoNothing`, so the mode would otherwise leak into
+    // every test below this one. Harmless today only because none of them
+    // builds a tie.
+    await guilds.updateSettings(GUILD, { game_name_mode: 'shared' });
+  });
+
+  /**
    * `/channelinfo`'s four answers, which is the thing `debugChannel` gets wrong:
    * it never consults `managed`, so an adopted channel reads back as unmanaged.
    */

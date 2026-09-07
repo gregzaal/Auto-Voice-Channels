@@ -1,4 +1,4 @@
-import { renderChannelName, type RenderContext } from '../voice/nameTemplate.js';
+import { renderChannelName, type GameNameMode, type RenderContext } from '../voice/nameTemplate.js';
 import type { VoiceMember } from '../voice/types.js';
 import { maxLengthFor, type TemplateField } from './validate.js';
 
@@ -68,6 +68,12 @@ export interface ScenarioOptions {
    */
   timezone?: string | undefined;
   /**
+   * How the guild resolves a tie for most-played game, so a scenario with two
+   * games previews the way that guild will actually render it. Absent is
+   * `shared`, the default.
+   */
+  gameNameMode?: GameNameMode | undefined;
+  /**
    * The identity of a REAL channel these scenarios describe, when there is one.
    *
    * `/channelinfo` previews an existing room's template against these states, so
@@ -85,6 +91,7 @@ export interface ScenarioOptions {
 /** The scenarios every proposal is rendered against, in display order. */
 export function previewScenarios(opts: ScenarioOptions): PreviewScenario[] {
   const { general, aliases, creatorName, standalone, identity, lists, timezone } = opts;
+  const { gameNameMode } = opts;
   const index = identity?.index ?? (standalone ? -1 : 0);
   const base = {
     index,
@@ -96,6 +103,7 @@ export function previewScenarios(opts: ScenarioOptions): PreviewScenario[] {
     // Never the host's zone: the engine's own default is UTC, which is what an
     // unset guild renders, so the fixture cannot depend on where this runs.
     timezone: timezone ?? 'UTC',
+    ...(gameNameMode ? { gameNameMode } : {}),
     ...(lists ? { lists } : {}),
     ...(identity?.numberOffset !== undefined ? { numberOffset: identity.numberOffset } : {}),
   };
@@ -145,6 +153,29 @@ export function previewScenarios(opts: ScenarioOptions): PreviewScenario[] {
           member('m3', 'Sam', {
             playing: ['Halo'],
             activities: [{ kind: 'playing', name: 'Halo' }],
+          }),
+        ],
+        creator: playingOwner,
+      },
+    },
+    /**
+     * Two games on one member each, which is the only situation where
+     * `gameNameMode` changes anything.
+     *
+     * Without it the whole tie behaviour is invisible to the grader: a `shared`
+     * guild renders `Halo, Doom` here and a `top` guild renders one of them,
+     * and a proposal comparing `{{GAME=...}}` grades differently in each.
+     */
+    {
+      key: 'tied',
+      label: 'two games, tied',
+      ctx: {
+        ...base,
+        members: [
+          playingOwner,
+          member('m2', 'Robin', {
+            playing: ['Deep Rock Galactic'],
+            activities: [{ kind: 'playing', name: 'Deep Rock Galactic' }],
           }),
         ],
         creator: playingOwner,

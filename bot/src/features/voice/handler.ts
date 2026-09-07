@@ -1398,6 +1398,7 @@ export class VoiceFeature {
       members,
       aliases: settings.aliases,
       general: settings.general,
+      gameNameMode: settings.gameNameMode,
       userLimit: this.deps.voice.userLimitOf?.(channelId) ?? 0,
       isPrivate: input.isPrivate ?? false,
       // `startAt` is what the admin typed (the first room's number), so the
@@ -1810,7 +1811,14 @@ export class VoiceFeature {
         activities: m.activities ?? [],
         selfStreaming: m.selfStreaming ?? false,
       })),
-      computedGame: getGameName(members, { aliases: settings.aliases, general: settings.general }),
+      // Resolved exactly as the render path does, mode and owner included, or
+      // this reports a different game from the one the room is named after.
+      computedGame: getGameName(members, {
+        aliases: settings.aliases,
+        general: settings.general,
+        mode: settings.gameNameMode,
+        ...(inGuild && secondary.ownerId ? { ownerId: secondary.ownerId } : {}),
+      }),
       ...(renderedName !== undefined ? { renderedName } : {}),
       ...(inGuild && secondary.state.seed !== undefined ? { seed: secondary.state.seed } : {}),
     };
@@ -1833,6 +1841,18 @@ export class VoiceFeature {
     const settings = parseVoiceSettings(guild.settings);
     const members = this.deps.voice.membersInChannel(channelId);
     const userLimit = this.deps.voice.userLimitOf?.(channelId) ?? 0;
+    const secondary = await this.deps.secondaries.get(channelId);
+    // Read before `base` purely so the game resolution can see the owner, who
+    // breaks a tie. The four kinds below still each report their own ownership.
+    const isRoom = secondary !== undefined && secondary.guildId === guildId;
+    // `general` is the positional argument of `getChannelGames`, so it is
+    // deliberately NOT in here: a second copy in the options would read as if
+    // it could override the one beside it.
+    const gameOptions = {
+      aliases: settings.aliases,
+      mode: settings.gameNameMode,
+      ...(isRoom && secondary.ownerId ? { ownerId: secondary.ownerId } : {}),
+    };
     const base = {
       channelId,
       ownerId: null as string | null,
@@ -1840,15 +1860,14 @@ export class VoiceFeature {
       userLimit,
       isPrivate: false,
       members: { total: members.length, bots: members.filter((m) => m.bot).length },
-      game: getGameName(members, { aliases: settings.aliases, general: settings.general }),
-      rawGames: getChannelGames(members, settings.general),
+      game: getGameName(members, { ...gameOptions, general: settings.general }),
+      rawGames: getChannelGames(members, settings.general, gameOptions),
       general: settings.general,
       enabled: settings.enabled,
       aliasCount: Object.keys(settings.aliases).length,
     };
 
-    const secondary = await this.deps.secondaries.get(channelId);
-    if (secondary && secondary.guildId === guildId) {
+    if (isRoom) {
       const primary = await this.deps.autoChannels.get(secondary.primaryChannelId);
       const renderCtx = this.buildRenderContext({
         channelId,
@@ -1921,6 +1940,7 @@ export class VoiceFeature {
         members: [],
         aliases: settings.aliases,
         general: settings.general,
+        gameNameMode: settings.gameNameMode,
         numberOffset: own.template.startAt === undefined ? 0 : own.template.startAt - 1,
       };
       return {
@@ -2017,6 +2037,7 @@ export class VoiceFeature {
         members: [],
         aliases: settings.aliases,
         general: settings.general,
+        gameNameMode: settings.gameNameMode,
         numberOffset: own.template.startAt === undefined ? 0 : own.template.startAt - 1,
       };
       const ownName = own.template.name ?? settings.channelNameTemplate;

@@ -80,6 +80,7 @@ function nativeFile(over: Partial<GuildConfigFile> = {}): GuildConfigFile {
       problem_alerts: null,
       timezone: null,
       lists: null,
+      game_name_mode: null,
     },
     creator_channels: [],
     adopted_channels: [],
@@ -162,11 +163,25 @@ describe('parseNativeFile', () => {
     expect(parseNativeFile(nativeFile()).ok).toBe(true);
   });
 
-  it('refuses a file missing a settings key, rather than reading it as untouched', () => {
+  /**
+   * Reversed deliberately. This used to refuse a file missing a settings key,
+   * on the grounds that totality catches a serializer that forgot one. That
+   * protection lives on the WRITE side instead, where it belongs: the exporter
+   * is a loop over `EXPORT_SETTINGS_KEYS` returning a total `ExportedSettings`,
+   * and `configSnapshot.unit.test.ts` binds it to that list.
+   *
+   * What the refusal actually cost was every file an older build wrote. Adding
+   * `timezone` and `lists` already made pre-2.1.0 files un-importable in
+   * production, silently, and `game_name_mode` would have done it again to
+   * every file the current release wrote. The pre-import snapshot IS the
+   * documented undo, so that refusal lands on the one file somebody reaches
+   * for after a mistake.
+   */
+  it('accepts a file written before a settings key existed', () => {
     const file = nativeFile() as unknown as Record<string, Record<string, unknown>>;
-    delete file.settings.problem_alerts;
-    const result = parseNativeFile(file);
-    expect(result.ok).toBe(false);
+    delete file.settings.game_name_mode;
+    delete file.settings.timezone;
+    expect(parseNativeFile(file).ok).toBe(true);
   });
 
   /** A reason may name the path and the problem. It may never carry a value. */
@@ -470,6 +485,39 @@ describe('diffGuildConfig: settings', () => {
     file.settings.problem_alerts = 'loud';
     const plan = planOf(file);
     expect(plan.settingsPatch.problem_alerts).toBeUndefined();
+    expect(noteCodes(plan)).toContain('setting_invalid');
+  });
+
+  /**
+   * The distinction the laxer parse depends on: OMITTED means the file does not
+   * speak to the key, `null` means the key is absent from the stored blob and
+   * should be removed. Collapsing the two would let an older file silently
+   * clear settings it has never heard of.
+   */
+  it('leaves an omitted settings key untouched, where null removes it', () => {
+    const current = currentConfig({ settings: { general: 'Voice rooms' } });
+
+    const omitted = nativeFile() as unknown as Record<string, Record<string, unknown>>;
+    delete omitted.settings.general;
+    const untouched = planOf(omitted, current);
+    expect(untouched.settingsPatch.general).toBeUndefined();
+    expect(untouched.settingsRemove).not.toContain('general');
+
+    const explicitNull = planOf(nativeFile(), current);
+    expect(explicitNull.settingsRemove).toContain('general');
+  });
+
+  it('carries game_name_mode through, and drops an unrecognised one', () => {
+    const good = nativeFile();
+    good.settings.game_name_mode = 'top';
+    expect(planOf(good).settingsPatch.game_name_mode).toBe('top');
+
+    // `readGameNameMode` reads anything unknown as `shared`, so without the
+    // validation an admin's file could store a mode that never takes effect.
+    const bad = nativeFile();
+    bad.settings.game_name_mode = 'owner';
+    const plan = planOf(bad);
+    expect(plan.settingsPatch.game_name_mode).toBeUndefined();
     expect(noteCodes(plan)).toContain('setting_invalid');
   });
 

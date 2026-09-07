@@ -437,7 +437,7 @@ export class GuildRepository {
          */
         // One `- key` per key rather than `- text[]`: drizzle expands a JS array
         // into a tuple of placeholders, which Postgres reads as a record and
-        // refuses to cast. The keys are few (at most the eleven settings keys),
+        // refuses to cast. The keys are few (at most the settings keys),
         // and each stays a bound parameter this way.
         let next = sql`${guilds.settings} || ${JSON.stringify(patch)}::jsonb`;
         for (const key of removeKeys) next = sql`(${next}) - ${key}::text`;

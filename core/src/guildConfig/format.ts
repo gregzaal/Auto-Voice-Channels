@@ -40,13 +40,13 @@ import { z } from 'zod';
 export const AVC_EXPORT_VERSION = 1;
 
 /**
- * The eleven settings keys a file carries, as they appear on the wire.
+ * The fourteen settings keys a file carries, as they appear on the wire.
  *
  * These are the literal keys of the `guilds.settings` blob, mirroring
  * `SETTINGS_KEYS` in `bot/src/features/voice/guildSettings.ts`, which cannot be
  * imported here because it pulls in the bot's template engine.
  * `settingsKeys.unit.test.ts` in the bot binds the two lists mechanically, so a
- * twelfth key cannot appear there and be silently missing from every export.
+ * new key cannot appear there and be silently missing from every export.
  */
 export const EXPORT_SETTINGS_KEYS = [
   'enabled',
@@ -62,6 +62,7 @@ export const EXPORT_SETTINGS_KEYS = [
   'problem_alerts',
   'timezone',
   'lists',
+  'game_name_mode',
 ] as const;
 
 export type ExportSettingsKey = (typeof EXPORT_SETTINGS_KEYS)[number];
@@ -73,12 +74,11 @@ const stringMap = z.record(z.string(), z.string());
 const groupConfig = z.object({ above: z.boolean() });
 
 /**
- * Every key required and every key nullable: a total document.
+ * Every key nullable, and every key required of a WRITER: a total document.
  *
- * Required rather than optional so a serializer that forgets one fails here
- * instead of producing a file whose missing key silently means "leave alone".
- * The only place absent is legal is a LEGACY file, which does not go through
- * this schema at all.
+ * `ExportedSettings` is the write contract, and `configSnapshot.ts` builds one,
+ * so a serializer that forgets a key still fails at compile time. Reading is
+ * deliberately laxer: see `settingsReadSchema`.
  */
 export const exportedSettingsSchema = z.object({
   enabled: z.boolean().nullable(),
@@ -97,9 +97,41 @@ export const exportedSettingsSchema = z.object({
   timezone: z.string().nullable(),
   /** Named `[[list:name]]` pools: a name to its options. */
   lists: z.record(z.string(), z.array(z.string())).nullable(),
+  /**
+   * How `@@game_name@@` resolves a most-played tie: `shared` or `top`.
+   *
+   * A bare string rather than an enum, deliberately. A file written by a newer
+   * build carrying a mode this one does not know about must not fail the whole
+   * import; `validateSettingsValue` refuses the value with an issue instead,
+   * and `readGameNameMode` treats anything unrecognised as `shared`.
+   */
+  game_name_mode: z.string().nullable(),
 });
 
 export type ExportedSettings = z.infer<typeof exportedSettingsSchema>;
+
+/**
+ * The same keys, every one OPTIONAL, for reading a file somebody else wrote.
+ *
+ * A settings key omitted entirely is a file whose writer did not know the key,
+ * which is every file written before that key shipped. It is NOT the same as
+ * `null`, which says the key is absent from the stored blob and should be
+ * removed, so `fromNativeFile` must leave an omitted key out of the incoming
+ * map and let `diffSettings` skip it.
+ *
+ * Getting this wrong is not hypothetical: with the keys required, adding a
+ * fourteenth refused every file the previous release wrote, naming a key the
+ * admin had never heard of. Since `/import`'s pre-import snapshot IS the
+ * documented undo, that refusal lands on the one file somebody reaches for
+ * after a mistake.
+ *
+ * `AVC_EXPORT_VERSION` deliberately does NOT move for a new key. Zod strips
+ * unknown keys rather than refusing them, so an older bot already accepts a
+ * newer file and ignores what it does not know, while `sniffFormat` refuses any
+ * version above its own. Bumping the version would break that direction to fix
+ * this one.
+ */
+const settingsReadSchema = exportedSettingsSchema.partial();
 
 /**
  * A creator channel's template on the wire: all seven fields of
@@ -185,7 +217,7 @@ export const guildConfigFileSchema = z.object({
    * read, so the file is one fleet's view while the envelope names the server.
    */
   source_fleet_channel_scope: z.string().nullable(),
-  settings: exportedSettingsSchema,
+  settings: settingsReadSchema,
   creator_channels: z.array(exportedCreatorChannelSchema),
   adopted_channels: z.array(exportedAdoptedChannelSchema),
 });

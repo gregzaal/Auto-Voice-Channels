@@ -3,6 +3,7 @@ import {
   DEFAULT_STATUS_TEMPLATE,
   isValidTimeZone,
 } from './nameTemplate.js';
+import type { GameNameMode } from './nameTemplate.js';
 
 /**
  * Single source of truth for reading the guild `settings` jsonb blob. The blob is
@@ -24,6 +25,7 @@ export const SETTINGS_KEYS = {
   problemAlerts: 'problem_alerts',
   timezone: 'timezone',
   lists: 'lists',
+  gameNameMode: 'game_name_mode',
 } as const;
 
 /**
@@ -98,6 +100,11 @@ export interface VoiceSettings {
   timezone: string | undefined;
   /** Named `[[list:name]]` random pools. */
   lists: Record<string, string[]>;
+  /**
+   * How `@@game_name@@` resolves a tie for most-played game. `shared` names
+   * both, `top` names one. See `GameNameMode`.
+   */
+  gameNameMode: GameNameMode;
 }
 
 /** True only when `value` is a plain object whose values are ALL strings. */
@@ -159,7 +166,21 @@ export function parseVoiceSettings(settings: Record<string, unknown>): VoiceSett
     // Intl does not know could otherwise reach the render path.
     timezone: readTimeZone(settings),
     lists: stringArrayMap(settings[SETTINGS_KEYS.lists]),
+    gameNameMode: readGameNameMode(settings),
   };
+}
+
+/**
+ * How a most-played tie resolves, defaulting to `shared`.
+ *
+ * `shared` is the default because it is what every guild has always had, and
+ * naming one of two equally-played games is an opinion, not a correction.
+ * Anything unrecognised reads as `shared` for the same reason: the blob is
+ * `record(unknown)` at the repository boundary and `/import` fills it from a
+ * file, so an unknown value must fall back to the behaviour nobody chose.
+ */
+export function readGameNameMode(settings: Record<string, unknown>): GameNameMode {
+  return settings[SETTINGS_KEYS.gameNameMode] === 'top' ? 'top' : 'shared';
 }
 
 /** The stored zone, or `undefined` when absent or unrecognised. */

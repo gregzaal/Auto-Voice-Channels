@@ -250,8 +250,9 @@ function importCeilingsExceeded(file: GuildConfigFile, text: string): string[] {
   if (file.adopted_channels.length > IMPORT_LIMITS.adoptedChannels) {
     over.push(`more than ${IMPORT_LIMITS.adoptedChannels} adopted channels`);
   }
+  // Nullish, not `!== null`: an older file can omit the key entirely.
   const nicks = file.settings.custom_nicks;
-  if (nicks !== null && Object.keys(nicks).length > IMPORT_LIMITS.customNicks) {
+  if (nicks && Object.keys(nicks).length > IMPORT_LIMITS.customNicks) {
     over.push(`more than ${IMPORT_LIMITS.customNicks} member nicknames`);
   }
   return over;
@@ -988,10 +989,12 @@ function auditDetails(
       // Keys and a count, never the names members chose for themselves. The
       // privacy policy covers ids and per-server settings, which is ids, not
       // member-chosen text, and this table is backed up under GFS retention.
-      custom_nicks:
-        snapshot.settings.custom_nicks === null
-          ? null
-          : { redactedEntryCount: Object.keys(snapshot.settings.custom_nicks).length },
+      // Nullish, not `=== null`: a settings key can also be ABSENT now that a
+      // file written by an older build parses (see `settingsReadSchema`), and
+      // both mean there is nothing here to redact.
+      custom_nicks: snapshot.settings.custom_nicks
+        ? { redactedEntryCount: Object.keys(snapshot.settings.custom_nicks).length }
+        : null,
     },
   };
   const text = JSON.stringify(redacted);

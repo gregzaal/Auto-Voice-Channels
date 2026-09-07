@@ -16,6 +16,7 @@ import {
   budgetExhaustedMessage,
 } from './messages.js';
 import { previewScenarios, renderPair, type PreviewScenario } from './preview.js';
+import type { GameNameMode } from '../voice/nameTemplate.js';
 import { TEMPLATE_ASSISTANT_SYSTEM_PROMPT } from './systemPrompt.js';
 import {
   adviseTemplate,
@@ -122,6 +123,11 @@ export interface AssistantContext {
    * renderer cannot resolve would grade as a defect.
    */
   lists?: Record<string, string[]>;
+  /**
+   * How the guild resolves a tie for most-played game, so the preview fixtures
+   * grade the proposal the way this guild will actually render it.
+   */
+  gameNameMode?: GameNameMode;
 }
 
 export interface ProposedField {
@@ -383,6 +389,7 @@ export class TemplateAssistant {
       standalone: context.standalone,
       ...(context.lists ? { lists: context.lists } : {}),
       ...(context.timezone !== undefined ? { timezone: context.timezone } : {}),
+      ...(context.gameNameMode ? { gameNameMode: context.gameNameMode } : {}),
     });
 
     const issues: TemplateIssue[] = [];

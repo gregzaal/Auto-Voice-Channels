@@ -29,6 +29,7 @@ import {
   timeZoneConfirmation,
 } from './guildSettings.js';
 import type { GroupConfig, ProblemAlertMode } from './guildSettings.js';
+import type { GameNameMode } from './nameTemplate.js';
 import { type CommandResult } from './commands.js';
 
 /** Logging verbosity levels (legacy parity): 1 lifecycle, 2 changes, 3 joins/leaves. */
@@ -120,6 +121,8 @@ export interface GuildConfig {
   lists: Record<string, string[]>;
   /** The guild's IANA zone, absent when never set (date tokens then use UTC). */
   timezone?: string;
+  /** How `@@game_name@@` resolves a tie for most-played game. */
+  gameNameMode: GameNameMode;
   primaries: { channelId: string; template: string; limit: number }[];
 }
 
@@ -189,6 +192,7 @@ export class GuildSettingsService {
       general: s.general,
       defaultTemplate: s.channelNameTemplate,
       defaultStatus: s.channelStatusTemplate,
+      gameNameMode: s.gameNameMode,
       aliases: s.aliases,
       lists: s.lists,
       primaries: primaries.map((p) => toPrimaryView(p)),
@@ -210,6 +214,25 @@ export class GuildSettingsService {
     if (!value) return fail('Provide a word to use when no game is detected.');
     await this.deps.guilds.updateSettings(guildId, { general: value });
     return ok(`The "no game" label is now **${value}**.`);
+  }
+
+  /**
+   * How `@@game_name@@` resolves a tie for most-played game.
+   *
+   * Deliberately does NOT re-render, matching `setGeneral`. This is guild-wide,
+   * so a fan-out would rename every managed channel in the guild at once; the
+   * five-minute safety-net sweep already re-renders on drift and paces the wave
+   * within the per-channel rename budget.
+   */
+  async setGameNameMode(guildId: string, mode: GameNameMode): Promise<CommandResult> {
+    await this.deps.guilds.updateSettings(guildId, {
+      [SETTINGS_KEYS.gameNameMode]: mode,
+    });
+    return ok(
+      mode === 'top'
+        ? 'Room names now pick one game when several are tied.'
+        : 'Room names now show both games when two are tied.',
+    );
   }
 
   /**

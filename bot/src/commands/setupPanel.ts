@@ -22,6 +22,7 @@ import {
   permissionProblemSummary,
   type ProblemLike,
 } from '../features/voice/permissionProblems.js';
+import type { GameNameMode } from '../features/voice/nameTemplate.js';
 
 /** Custom-id namespace for the `/setup` panel components. */
 export const SETUP_PREFIX = 'avc:setup:';
@@ -325,6 +326,11 @@ export interface SetupPanelInput {
    * rather than shown-and-broken.
    */
   assistant?: boolean;
+  /**
+   * How `@@game_name@@` resolves a tie for most-played game, so the settings
+   * select can report the current value and say what selecting it does.
+   */
+  gameNameMode?: GameNameMode;
   /** Hosted billing state, reduced to what the panel renders differently. */
   entitlement?: SetupEntitlement;
   /**
@@ -541,6 +547,18 @@ function settingsRow(
       .setValue(setupId('general'))
       .setDescription('What room names show when nobody is playing a game. Default: General')
       .setEmoji('🎮'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel('Tied games')
+      .setValue(setupId('gamemode'))
+      // Reports state, like the time zone option below and for the same
+      // reason: this one toggles on selection rather than opening a modal, so
+      // the description is the only place it can say what selecting it does.
+      .setDescription(
+        input.gameNameMode === 'top'
+          ? 'Room names pick one game when several are tied. Switch back to show both'
+          : 'A two-way tie shows both games. Switch to name the room after one of them',
+      )
+      .setEmoji('🎯'),
     new StringSelectMenuOptionBuilder()
       .setLabel('Time zone')
       .setValue(setupId('timezone'))

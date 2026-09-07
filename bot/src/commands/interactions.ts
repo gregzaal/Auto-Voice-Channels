@@ -789,6 +789,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         standalone: session.scope === 'adopted',
         general: config.general,
         aliases: config.aliases,
+        gameNameMode: config.gameNameMode,
         creatorName: interaction.user.displayName || interaction.user.username,
         ...(state.name.currentTemplate !== undefined
           ? { currentName: state.name.currentTemplate }
@@ -2382,6 +2383,7 @@ Already subscribed? Add the new server ` +
       problems: deps.permissionProblems?.recent(guildId) ?? [],
       assistant: Boolean(deps.assistant),
       listCount: Object.keys(config.lists).length,
+      gameNameMode: config.gameNameMode,
       ...(config.timezone !== undefined ? { timezone: config.timezone } : {}),
       entitlement,
       // Guild-scoped, so an admin clicking it cannot authorize into the wrong
@@ -2476,6 +2478,24 @@ Already subscribed? Add the new server ` +
         deps.settings.getConfig(guildId),
       );
       await interaction.showModal(buildGeneralModal(config.general));
+      return;
+    }
+    if (action === 'gamemode') {
+      // Re-reads rather than trusting the panel it was clicked from, exactly
+      // as `toggle` above does: a stale panel would otherwise flip the setting
+      // to the value the admin is already looking at.
+      const res = await run(guildId, 'setup:gamemode', async () => {
+        const config = await deps.settings.getConfig(guildId);
+        return deps.settings.setGameNameMode(
+          guildId,
+          config.gameNameMode === 'top' ? 'shared' : 'top',
+        );
+      });
+      // The note is the only feedback there is. Unlike the pause toggle beside
+      // this, nothing on the refreshed panel changes visibly: the new value is
+      // reported inside a CLOSED select's option description, so without this
+      // the admin picks the setting and sees no answer at all.
+      await refreshSetupPanel(interaction, { note: formatResult(res) });
       return;
     }
     if (action === 'timezone') {

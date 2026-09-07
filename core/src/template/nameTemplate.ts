@@ -67,11 +67,54 @@ export function getAlias(name: string, aliases: Record<string, string> = {}): st
   return name;
 }
 
+/**
+ * How a tie for most-played game resolves.
+ *
+ * `shared` is the legacy behaviour and the default: two tied games are both
+ * named, three or more fall back to the "no game" label. `top` always resolves
+ * to exactly one game. Per guild, via `settings.game_name_mode`.
+ */
+export type GameNameMode = 'shared' | 'top';
+
 export interface GameNameOptions {
   /** Per-guild aliases (override the built-ins). */
   aliases?: Record<string, string>;
   /** The "no specific game" label (legacy `settings.general`). */
   general?: string;
+  /** Tie handling. Absent is `shared`. */
+  mode?: GameNameMode;
+  /**
+   * The room owner's id, which breaks a tie in their favour.
+   *
+   * Optional because an adopted standalone channel has no owner, and because
+   * `RenderContext.creator` is only set when the owner is actually in the room.
+   * Either way the tie falls through to the deterministic order.
+   */
+  ownerId?: string;
+}
+
+/**
+ * What one pass over the members decided about games.
+ *
+ * Both halves come out of the same call deliberately. `names` may hold two
+ * games while the party tokens need exactly one, and computing that separately
+ * is how the two drift apart: `getPartyInfo` matches an activity name against
+ * the game it is given, so handing it the joined string "Halo, Doom" matched
+ * nothing and silently zeroed `@@num_playing@@`, `@@party_size@@`, `{{RICH}}`
+ * and `{{PLAYERS}}` on every tied room.
+ */
+export interface GameResolution {
+  /** Raw (un-aliased) names to display, or `[general]` when no game is named. */
+  names: string[];
+  /**
+   * The single raw game the party tokens describe, or `undefined` when the
+   * rendered name does not name a game.
+   *
+   * Undefined for a three-or-more-way tie under `shared`, where the name is the
+   * "no game" label: the name declines to claim a game, so the party tokens
+   * must decline too, rather than reporting one arbitrary game's party.
+   */
+  representative?: string;
 }
 
 /**
@@ -85,11 +128,47 @@ function playingNames(m: VoiceMember): string[] {
 }
 
 /**
+ * Which of the tied games wins.
+ *
+ * The owner's game first, because it is their room, and it is the only
+ * tie-break that means anything to the person reading the name. It costs no
+ * rename churn either: the owner's presence changing, the owner leaving,
+ * `/transfer` and `/reclaim` all already trigger a re-render, so this value
+ * only moves when something was going to re-render anyway.
+ *
+ * Otherwise the first in the caller's order, which is already deterministic:
+ * counts descending, and `Array.prototype.sort` is stable, so equal counts keep
+ * insertion order, which is alphabetical by the earliest-sorted player.
+ *
+ * Matches RAW names, because that is what the counts are keyed on. Aliasing
+ * happens afterwards, in `getGameName`.
+ */
+function breakGameTie(tied: string[], members: VoiceMember[], ownerId?: string): string {
+  if (ownerId !== undefined) {
+    const owner = members.find((m) => m.id === ownerId && !m.bot);
+    if (owner) {
+      const playing = new Set(playingNames(owner));
+      const theirs = tied.find((g) => playing.has(g));
+      if (theirs !== undefined) return theirs;
+    }
+  }
+  return tied[0]!;
+}
+
+/**
  * Determines the representative game(s) for a channel, replicating the legacy
  * tie-breaking: the most-played game wins; ties of two are joined; three or more
- * distinct ties fall back to "General".
+ * distinct ties fall back to "General". Under `mode: 'top'` a tie instead
+ * resolves to one game (see `breakGameTie`).
+ *
+ * The single authority for both the displayed name and the game the party
+ * tokens describe, for the reason `GameResolution` records.
  */
-export function getChannelGames(members: VoiceMember[], general = 'General'): string[] {
+export function resolveGames(
+  members: VoiceMember[],
+  options: GameNameOptions = {},
+): GameResolution {
+  const general = options.general ?? 'General';
   const counts = new Map<string, number>();
   const sorted = [...members]
     .filter((m) => !m.bot)
@@ -100,29 +179,67 @@ export function getChannelGames(members: VoiceMember[], general = 'General'): st
       counts.set(gname, (counts.get(gname) ?? 0) + 1);
     }
   }
-  if (counts.size === 0) return [general];
+  if (counts.size === 0) return { names: [general] };
 
   const games = [...counts.entries()].sort((a, b) => b[1] - a[1]);
-  const [biggest, mostPlayers] = games[0]!;
-  const gnames = [biggest];
-  for (const [gn, gp] of games.slice(1)) {
-    if (gp === mostPlayers) gnames.push(gn);
+  const mostPlayers = games[0]![1];
+  const tied = games.filter(([, gp]) => gp === mostPlayers).map(([gn]) => gn);
+  if (tied.length === 1) return { names: tied, representative: tied[0]! };
+
+  if (options.mode === 'top') {
+    const winner = breakGameTie(tied, members, options.ownerId);
+    return { names: [winner], representative: winner };
   }
-  if (gnames.length > 2) return [general];
-  return gnames;
+  // Three or more tied is the "no game" label, and deliberately has NO
+  // representative: see `GameResolution`. Note this cutoff counts RAW names,
+  // as it always has, so three games that all alias to one label still read as
+  // a three-way tie.
+  if (tied.length > 2) return { names: [general] };
+  /**
+   * Both names, and the party tokens follow the FIRST tied game rather than the
+   * owner's.
+   *
+   * The owner tie-break is deliberately confined to `top`, where the NAME
+   * already moves with ownership so the party moving with it costs no extra
+   * rename. Here the name does not move, so an owner-dependent representative
+   * would make `/transfer`, `/reclaim` and the automatic handover when an owner
+   * leaves each rename the room, for any template reading a party token, in a
+   * guild that opted into nothing. That is the no-op guard `plans/name-tokens.md`
+   * §2 says must not be weakened.
+   */
+  return { names: tied, representative: tied[0]! };
+}
+
+/** Aliases, de-duplicates and joins raw game names for display. */
+function joinGameNames(names: string[], general: string, aliases: Record<string, string>): string {
+  if (names.length === 1 && names[0] === general) return general;
+  const aliased: string[] = [];
+  for (const g of names) {
+    const a = getAlias(g, aliases);
+    if (!aliased.includes(a)) aliased.push(a);
+  }
+  return aliased.join(', ');
+}
+
+/**
+ * The channel's game(s) as raw names.
+ *
+ * Kept as-is for the callers that only want the names (`/debug`, the site's
+ * demo adapter). `resolveGames` is the one to reach for inside the renderer,
+ * which needs the representative game as well.
+ */
+export function getChannelGames(
+  members: VoiceMember[],
+  general = 'General',
+  options: Omit<GameNameOptions, 'general'> = {},
+): string[] {
+  return resolveGames(members, { ...options, general }).names;
 }
 
 /** Resolves a single display string for the channel's game(s). */
 export function getGameName(members: VoiceMember[], options: GameNameOptions = {}): string {
   const general = options.general ?? 'General';
-  const games = getChannelGames(members, general);
-  if (games.length === 1 && games[0] === general) return general;
-  const aliased: string[] = [];
-  for (const g of games) {
-    const a = getAlias(g, options.aliases ?? {});
-    if (!aliased.includes(a)) aliased.push(a);
-  }
-  return aliased.join(', ');
+  return joinGameNames(resolveGames(members, options).names, general, options.aliases ?? {});
 }
 
 const ROMAN: [number, string][] = [
@@ -341,10 +458,18 @@ export interface PartyInfo {
  */
 export function getPartyInfo(
   members: VoiceMember[],
-  gameName: string,
+  gameName: string | undefined,
   aliases: Record<string, string> = {},
   userLimit = 0,
 ): PartyInfo {
+  // No representative game means the rendered name does not name one, so there
+  // is nothing for these tokens to describe. Undefined rather than a sentinel
+  // string on purpose: passing the "no game" label through would start matching
+  // a member genuinely playing a game called General.
+  if (gameName === undefined) {
+    return { state: '', details: '', rich: false, numPlaying: '0', size: '0' };
+  }
+
   const counts = new Map<string, number>();
   const states = new Map<string, string>();
   const details = new Map<string, string>();
@@ -1116,6 +1241,14 @@ export interface RenderContext {
   members: VoiceMember[];
   aliases?: Record<string, string>;
   general?: string;
+  /**
+   * How a tie for most-played game resolves, from `settings.game_name_mode`.
+   * Absent is `shared`, the legacy behaviour.
+   *
+   * A guild setting rather than a per-creator-channel one, so it also covers
+   * adopted standalone channels, which render from a different table.
+   */
+  gameNameMode?: GameNameMode;
   /** Owner display name, for `@@owner@@` (and its older name, `@@creator@@`). */
   creatorName?: string;
   /**
@@ -1273,11 +1406,23 @@ export function renderChannelName(
     name = name.split('@@nato@@').join(natoWord(natoIndex));
   }
 
-  // 4. Representative game (needed by party info + conditionals too).
-  const gameName = getGameName(ctx.members, {
+  // 4. Representative game (needed by party info + conditionals too). One
+  //    resolution feeds both the displayed name and the party lookup, so the
+  //    two can never disagree about which game the room is on.
+  const resolvedGames = resolveGames(ctx.members, {
     ...(ctx.aliases ? { aliases: ctx.aliases } : {}),
     ...(ctx.general ? { general: ctx.general } : {}),
+    ...(ctx.gameNameMode ? { mode: ctx.gameNameMode } : {}),
+    // The owner, when they are actually in the room, breaks a tie in their
+    // favour. `creator` is already absent otherwise, so no extra check.
+    ...(ctx.creator ? { ownerId: ctx.creator.id } : {}),
   });
+  const gameName = joinGameNames(resolvedGames.names, ctx.general ?? 'General', ctx.aliases ?? {});
+  // Aliased, because that is what `getPartyInfo` compares activity names against.
+  const partyGame =
+    resolvedGames.representative === undefined
+      ? undefined
+      : getAlias(resolvedGames.representative, ctx.aliases ?? {});
 
   // 5. Member counts and the room's capacity. All of these substitute BEFORE
   //    conditionals resolve (step 7), which is what makes them usable as
@@ -1326,7 +1471,7 @@ export function renderChannelName(
     name.includes('{{') ||
     (name.includes('<<') && name.includes('|'))
   ) {
-    const party = getPartyInfo(ctx.members, gameName, ctx.aliases ?? {}, ctx.userLimit ?? 0);
+    const party = getPartyInfo(ctx.members, partyGame, ctx.aliases ?? {}, ctx.userLimit ?? 0);
     numPlaying = Number.parseInt(party.numPlaying, 10) || 0;
     name = name.split('@@num_playing@@').join(party.numPlaying);
     name = name.split('@@party_size@@').join(party.size);

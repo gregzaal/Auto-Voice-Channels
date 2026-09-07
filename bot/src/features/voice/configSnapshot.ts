@@ -200,7 +200,7 @@ function unknownKeys(
   return out;
 }
 
-/** Every one of the eleven keys, `null` where the blob has none. */
+/** Every one of every key, `null` where the blob has none. */
 function exportedSettings(settings: Record<string, unknown>): ExportedSettings {
   const out: Record<string, unknown> = {};
   for (const key of EXPORT_SETTINGS_KEYS) {

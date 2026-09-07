@@ -197,6 +197,7 @@ describe('TemplateAssistant.propose', () => {
     expect(result.proposal.fields[0]!.previews.map((p) => p.rendered)).toEqual([
       '#1 - General',
       '#1 - Halo',
+      '#1 - Halo, Deep Rock Galactic',
       '#1 - Deep Rock Galactic',
       '#1 - Deep Rock Galactic',
       '#1 - General',

@@ -1302,6 +1302,34 @@ describe('registerInteractionHandler (/setup panel)', () => {
     expect(editReply).toHaveBeenCalled();
   });
 
+  /**
+   * Re-reads rather than trusting the panel it was clicked from: two admins
+   * with the panel open would otherwise flip each other's change back.
+   */
+  it('flips the tied-games mode from the freshly-read value', async () => {
+    const base = setup();
+    base.dispose();
+    const setGameNameMode = vi.fn().mockResolvedValue({ ok: true, message: 'one game' });
+    const getConfig = vi.fn().mockResolvedValue({
+      enabled: true,
+      primaries: [],
+      aliases: {},
+      lists: {},
+      gameNameMode: 'top',
+    });
+    const env = setup({
+      settings: { ...base.settings, getConfig, setGameNameMode } as never,
+    });
+    dispose = env.dispose;
+    const { interaction, editReply } = settingsSelect([setupId('gamemode')]);
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(setGameNameMode).toHaveBeenCalledWith('g1', 'shared');
+    // The note is the only feedback: the new value lives inside a closed
+    // select's option description, so a silent refresh tells the admin nothing.
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('one game');
+  });
+
   it('refuses the select to someone without Manage Channels', async () => {
     const env = setup();
     dispose = env.dispose;

@@ -60,7 +60,7 @@ A template is ordinary text plus **tokens** that the bot replaces. Anything that
 
 ## The game
 
-- `@@game_name@@` — the game the channel is playing. The most-played game wins; if exactly two are tied it shows both (`Halo, Doom`); if three or more are tied, or nobody is playing, it shows the server's "no-game" label (usually `General` — the real value is in your context). Long names are auto-shortened (e.g. `League of Legends` → `LoL`).
+- `@@game_name@@` — the game the channel is playing. The most-played game wins. How a tie resolves is a per-server setting, so do not promise either behaviour in your explanation: by default exactly two tied games both show (`Halo, Doom`) and three or more show the server's "no-game" label, but a server can instead have every tie resolve to a single game. Nobody playing always shows the "no-game" label (usually `General` — the real value is in your context). Long names are auto-shortened (e.g. `League of Legends` → `LoL`).
 
 ## People
 

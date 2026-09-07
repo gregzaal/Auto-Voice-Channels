@@ -15,6 +15,7 @@ import {
   RANDOM_EMOJIS,
   renderChannelName,
   resolveEmptyOccupied,
+  resolveGames,
   resolveRandom,
   toRoman,
   type RenderContext,
@@ -98,6 +99,114 @@ describe('getGameName', () => {
     expect(name).toContain('LoL');
     expect(name).toContain('CS:GO');
   });
+
+  it('names one game under top mode', () => {
+    const members = [
+      member({ id: 'ana', playing: ['Halo'] }),
+      member({ id: 'ben', playing: ['Halo'] }),
+      member({ id: 'cyd', playing: ['Doom'] }),
+      member({ id: 'dee', playing: ['Doom'] }),
+    ];
+    expect(getGameName(members)).toBe('Halo, Doom');
+    expect(getGameName(members, { mode: 'top' })).toBe('Halo');
+    expect(getGameName(members, { mode: 'top', ownerId: 'dee' })).toBe('Doom');
+  });
+});
+
+describe('resolveGames', () => {
+  /** Two games on two members each, so the top count is always a tie. */
+  function tiedRoom(): VoiceMember[] {
+    return [
+      member({ id: 'ana', playing: ['Halo'] }),
+      member({ id: 'ben', playing: ['Halo'] }),
+      member({ id: 'cyd', playing: ['Doom'] }),
+      member({ id: 'dee', playing: ['Doom'] }),
+    ];
+  }
+
+  it('has no representative game when nobody is playing', () => {
+    expect(resolveGames([member({ id: 'a' })])).toEqual({ names: ['General'] });
+  });
+
+  it('names one game and represents it when there is no tie', () => {
+    const members = [
+      member({ id: 'ana', playing: ['Halo'] }),
+      member({ id: 'ben', playing: ['Halo'] }),
+      member({ id: 'cyd', playing: ['Doom'] }),
+    ];
+    expect(resolveGames(members)).toEqual({ names: ['Halo'], representative: 'Halo' });
+  });
+
+  it('keeps both names on a two-way tie but represents only one', () => {
+    expect(resolveGames(tiedRoom())).toEqual({
+      names: ['Halo', 'Doom'],
+      representative: 'Halo',
+    });
+  });
+
+  it('resolves a two-way tie to one game under top mode', () => {
+    expect(resolveGames(tiedRoom(), { mode: 'top' })).toEqual({
+      names: ['Halo'],
+      representative: 'Halo',
+    });
+  });
+
+  it("breaks a tie towards the owner's game", () => {
+    expect(resolveGames(tiedRoom(), { mode: 'top', ownerId: 'dee' })).toEqual({
+      names: ['Doom'],
+      representative: 'Doom',
+    });
+    // Shared mode is untouched by the owner, on purpose: the name does not move
+    // with ownership there, so neither may the party tokens, or a handover
+    // renames the room in a guild that opted into nothing.
+    expect(resolveGames(tiedRoom(), { ownerId: 'dee' })).toEqual({
+      names: ['Halo', 'Doom'],
+      representative: 'Halo',
+    });
+  });
+
+  it('falls back to the deterministic order when the owner cannot break the tie', () => {
+    // Playing neither tied game, absent from the room, and a bot: all three
+    // fall through to the first game in count-then-insertion order.
+    const playingNeither = [...tiedRoom(), member({ id: 'eve', playing: ['Rust'] })];
+    expect(resolveGames(playingNeither, { mode: 'top', ownerId: 'eve' }).names).toEqual(['Halo']);
+    expect(resolveGames(tiedRoom(), { mode: 'top', ownerId: 'nobody' }).names).toEqual(['Halo']);
+    const botOwner = [...tiedRoom(), member({ id: 'bot', bot: true, playing: ['Doom'] })];
+    expect(resolveGames(botOwner, { mode: 'top', ownerId: 'bot' }).names).toEqual(['Halo']);
+  });
+
+  it('falls back to the no-game label on a three-way tie, with no representative', () => {
+    const members = [
+      member({ id: 'ana', playing: ['Halo'] }),
+      member({ id: 'ben', playing: ['Doom'] }),
+      member({ id: 'cyd', playing: ['Rust'] }),
+    ];
+    expect(resolveGames(members)).toEqual({ names: ['General'] });
+    // Top mode is the whole point: it always lands on a game.
+    expect(resolveGames(members, { mode: 'top' })).toEqual({
+      names: ['Halo'],
+      representative: 'Halo',
+    });
+  });
+
+  it('counts the three-way cutoff on raw names, not aliased ones', () => {
+    // Pre-existing behaviour, pinned rather than changed: three games that all
+    // alias to one label still read as a three-way tie and render the label.
+    const members = [
+      member({ id: 'ana', playing: ['Halo'] }),
+      member({ id: 'ben', playing: ['Doom'] }),
+      member({ id: 'cyd', playing: ['Rust'] }),
+    ];
+    const aliases = { Halo: 'FPS', Doom: 'FPS', Rust: 'FPS' };
+    expect(resolveGames(members, { aliases }).names).toEqual(['General']);
+    expect(getGameName(members, { aliases })).toBe('General');
+  });
+
+  it('honours a custom no-game label', () => {
+    expect(resolveGames([member({ id: 'a' })], { general: 'Chatting' })).toEqual({
+      names: ['Chatting'],
+    });
+  });
 });
 
 describe('toRoman', () => {
@@ -129,6 +238,105 @@ describe('renderChannelName', () => {
 
   it('renders ? for an unknown index', () => {
     expect(renderChannelName('##', { index: -1, members: [] })).toBe('#?');
+  });
+
+  describe('a tied room', () => {
+    /**
+     * Halo and Doom on two members each, with a party on the Halo side.
+     *
+     * The party tokens used to read `0` here: they are looked up by the game
+     * the room is on, and a tie made that the joined string "Halo, Doom",
+     * which matches no activity name.
+     */
+    function tiedRoom(): VoiceMember[] {
+      const halo = {
+        kind: 'playing' as const,
+        name: 'Halo',
+        state: 'Ranked',
+        party: { id: 'p1', size: [2, 5] as [number, number] },
+      };
+      return [
+        member({ id: 'ana', activities: [halo] }),
+        member({ id: 'ben', activities: [halo] }),
+        member({ id: 'cyd', activities: [{ kind: 'playing', name: 'Doom' }] }),
+        member({ id: 'dee', activities: [{ kind: 'playing', name: 'Doom' }] }),
+      ];
+    }
+
+    it('reports the party of the game it named', () => {
+      expect(
+        renderChannelName('@@game_name@@ @@num_playing@@/@@party_size@@', {
+          index: 0,
+          members: tiedRoom(),
+        }),
+      ).toBe('Halo, Doom 2/5');
+    });
+
+    it('is rich, and reports the state, of the game it named', () => {
+      expect(
+        renderChannelName('{{RICH ?? @@party_state@@ // nothing}}', {
+          index: 0,
+          members: tiedRoom(),
+        }),
+      ).toBe('Ranked');
+    });
+
+    it('names one game under top mode, party and all', () => {
+      expect(
+        renderChannelName('@@game_name@@ @@num_playing@@/@@party_size@@', {
+          index: 0,
+          members: tiedRoom(),
+          gameNameMode: 'top',
+        }),
+      ).toBe('Halo 2/5');
+    });
+
+    it("breaks the tie towards the owner's game", () => {
+      const members = tiedRoom();
+      expect(
+        renderChannelName('@@game_name@@', {
+          index: 0,
+          members,
+          gameNameMode: 'top',
+          creator: members[3]!,
+        }),
+      ).toBe('Doom');
+    });
+
+    it('claims no party on a three-way tie, where it names no game', () => {
+      // The name declines to name a game, so the party tokens must decline
+      // too rather than describing one arbitrary game's party.
+      const members = [
+        member({
+          id: 'ana',
+          activities: [
+            {
+              kind: 'playing',
+              name: 'Halo',
+              state: 'Ranked',
+              party: { id: 'p1', size: [2, 5] },
+            },
+          ],
+        }),
+        member({ id: 'ben', activities: [{ kind: 'playing', name: 'Doom' }] }),
+        member({ id: 'cyd', activities: [{ kind: 'playing', name: 'Rust' }] }),
+      ];
+      expect(
+        renderChannelName('@@game_name@@ @@num_playing@@/@@party_size@@', {
+          index: 0,
+          members,
+        }),
+      ).toBe('General 0/0');
+      expect(renderChannelName('{{RICH ?? rich // plain}}', { index: 0, members })).toBe('plain');
+      // Top mode names one of them, so the party comes back.
+      expect(
+        renderChannelName('@@game_name@@ @@num_playing@@/@@party_size@@', {
+          index: 0,
+          members,
+          gameNameMode: 'top',
+        }),
+      ).toBe('Halo 2/5');
+    });
   });
 
   it('renders roman numerals', () => {

@@ -141,6 +141,7 @@ describe('preview scenarios', () => {
     expect(previewScenarios(opts).map((s) => s.key)).toEqual([
       'idle',
       'playing',
+      'tied',
       'streaming',
       'party',
       'filling',
@@ -160,7 +161,16 @@ describe('preview scenarios', () => {
     );
     expect(rendered[0]).toBe('idle');
     expect(rendered[1]).toBe('Halo');
-    expect(rendered[2]).toBe('Deep Rock Galactic');
+    // The tied scenario, which is the only one `gameNameMode` changes: shared
+    // names both games, and a `top` guild would render just the owner's.
+    expect(rendered[2]).toBe('Halo, Deep Rock Galactic');
+    expect(
+      renderPair('{{PLAYING ?? @@game_name@@ // idle}}', 'name', {
+        ...scenarios[2]!.ctx,
+        gameNameMode: 'top',
+      }).rendered,
+    ).toBe('Halo');
+    expect(rendered[3]).toBe('Deep Rock Galactic');
   });
 
   it('shows `?` for numbering tokens on a standalone channel', () => {

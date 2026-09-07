@@ -408,6 +408,7 @@ export function buildScenarioPanel(input: ChannelInfoPanelInput): InteractionRep
     // view would disagree with the live one for no reason the reader can see.
     ...(ctx.lists ? { lists: ctx.lists } : {}),
     timezone: ctx.timezone,
+    gameNameMode: ctx.gameNameMode,
     // Same room, different situation. Without this the previews would carry the
     // fixture's number and random picks, so a room called "Bravo" would preview
     // as "Alpha" and read as a bug.
