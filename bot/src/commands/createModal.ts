@@ -13,6 +13,17 @@ import type { CreatePrimaryOptions } from '../features/voice/index.js';
 
 /** Custom id of the `/create` setup modal, the "Create another" + "Retry" buttons. */
 export const CREATE_MODAL_ID = 'avc:create:submit';
+/**
+ * The same modal, opened from the `/setup` panel's own button.
+ *
+ * The id carries the origin because `isFromMessage()` cannot: "Create another"
+ * and "Retry" are buttons on their own result messages, so all three paths look
+ * message-borne and only this one has a panel behind it to refresh.
+ *
+ * Deliberately NOT on `allowedWhileExpired`'s modal whitelist. It creates a
+ * channel, so it is a write path exactly like {@link CREATE_MODAL_ID}.
+ */
+export const CREATE_FROM_SETUP_MODAL_ID = 'avc:create:submit:setup';
 export const CREATE_AGAIN_ID = 'avc:create:again';
 /** Prefix for the "Retry" button; `:<token>` keys the saved selections to re-prefill. */
 export const CREATE_RETRY_PREFIX = 'avc:create:retry:';
@@ -51,7 +62,11 @@ const DEFAULT_PRIMARY_NAME = '➕ New Session';
  * Pass `prefill` to re-open the modal with a user's prior selections intact (used
  * by the "Retry" button after a failed create) instead of the guild defaults.
  */
-export function buildCreateModal(defaults: CreateDefaults, prefill?: CreatePrefill): ModalBuilder {
+export function buildCreateModal(
+  defaults: CreateDefaults,
+  prefill?: CreatePrefill,
+  customId: string = CREATE_MODAL_ID,
+): ModalBuilder {
   const name = prefill?.name ?? DEFAULT_PRIMARY_NAME;
   const nameTemplate = (prefill?.nameTemplate ?? defaults.nameTemplate).slice(
     0,
@@ -75,7 +90,7 @@ export function buildCreateModal(defaults: CreateDefaults, prefill?: CreatePrefi
   if (prefill?.parentId) category.setDefaultChannels(prefill.parentId);
 
   return new ModalBuilder()
-    .setCustomId(CREATE_MODAL_ID)
+    .setCustomId(customId)
     .setTitle('Create a creator channel')
     .addLabelComponents(
       new LabelBuilder().setLabel('Category').setChannelSelectMenuComponent(category),

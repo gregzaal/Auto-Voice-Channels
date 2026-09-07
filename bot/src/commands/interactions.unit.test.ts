@@ -7,7 +7,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fakeLogger } from '../runtime/testUtils.js';
 import { registerInteractionHandler, type InteractionDeps } from './interactions.js';
 import { LOGGING_MODAL_ID } from './loggingModal.js';
-import { CREATE_MODAL_ID } from './createModal.js';
+import { CREATE_FROM_SETUP_MODAL_ID, CREATE_MODAL_ID } from './createModal.js';
+import { GENERAL_MODAL_ID, SETUP_SETTINGS_ID, setupId } from './setupPanel.js';
 import { ALIAS_MODAL_ID } from './aliasModal.js';
 import { ALIAS_SELECT_ID, aliasHash, aliasId } from './aliasPanel.js';
 
@@ -45,6 +46,8 @@ interface FakeInteractionOpts {
   textInputs?: Record<string, string>;
   /** The `privacy` string-select value. */
   privacy?: 'open' | 'private';
+  /** Any other modal string-select values, by custom id (e.g. logging's `level`). */
+  selectValues?: Record<string, string[]>;
   /** The category chosen in the modal's channel-select. */
   selectedChannelId?: string;
   /** Permission flags the bot member holds guild-wide. */
@@ -127,7 +130,14 @@ function fakeInteraction(opts: FakeInteractionOpts) {
       interaction.deferred = true;
       return Promise.resolve(undefined);
     }),
-    deferUpdate: vi.fn().mockResolvedValue(undefined),
+    // Flips `deferred` for the same reason `deferReply` above does: once a
+    // handler has deferred, `reply` throws and the code must reach for
+    // `followUp` or `editReply`. A fake that left this false let a test pass
+    // against a path production never takes.
+    deferUpdate: vi.fn().mockImplementation(() => {
+      interaction.deferred = true;
+      return Promise.resolve(undefined);
+    }),
     update: vi.fn().mockResolvedValue(undefined),
     showModal: vi.fn().mockResolvedValue(undefined),
     values: opts.values ?? [],
@@ -140,7 +150,8 @@ function fakeInteraction(opts: FakeInteractionOpts) {
       getAttachment: () => null,
     },
     fields: {
-      getStringSelectValues: (k: string) => (k === 'privacy' && opts.privacy ? [opts.privacy] : []),
+      getStringSelectValues: (k: string) =>
+        k === 'privacy' && opts.privacy ? [opts.privacy] : (opts.selectValues?.[k] ?? []),
       getSelectedChannels: () =>
         opts.selectedChannelId ? { first: () => ({ id: opts.selectedChannelId }) } : null,
       getTextInputValue: (k: string) => opts.textInputs?.[k] ?? '',
@@ -1216,5 +1227,299 @@ describe('commands that talk to Discord acknowledge first', () => {
       if (!branch.includes('replyResult') || !branch.includes('await run(')) continue;
       expect(deferring, `${name} awaits work then replies, so it must defer`).toContain(name);
     }
+  });
+});
+
+/**
+ * The panel's "More settings" select, and the modal submits that refresh the
+ * panel they were opened from.
+ *
+ * Both are places where an action could quietly become reachable to someone who
+ * should not have it, or stop being reachable at all.
+ */
+describe('registerInteractionHandler (/setup panel)', () => {
+  let dispose: (() => void) | undefined;
+  afterEach(() => dispose?.());
+
+  const settingsSelect = (values: string[], opts: { manageChannels?: boolean } = {}) =>
+    fakeInteraction({
+      kind: 'stringSelect',
+      customId: SETUP_SETTINGS_ID,
+      values,
+      manageChannels: opts.manageChannels ?? true,
+    });
+
+  it('routes a chosen setting to the action its option names', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction } = settingsSelect([setupId('logging')]);
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(interaction.showModal).toHaveBeenCalled();
+  });
+
+  it('toggles automation from the select and refreshes the panel in place', async () => {
+    const base = setup();
+    base.dispose();
+    const setEnabled = vi.fn().mockResolvedValue({ ok: true, message: 'paused' });
+    const env = setup({ settings: { ...base.settings, setEnabled } as never });
+    dispose = env.dispose;
+    const { interaction, editReply } = settingsSelect([setupId('toggle')]);
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(setEnabled).toHaveBeenCalledWith('g1', false);
+    expect(editReply).toHaveBeenCalled();
+  });
+
+  it('refuses the select to someone without Manage Channels', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, reply } = settingsSelect([setupId('logging')], { manageChannels: false });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(interaction.showModal).not.toHaveBeenCalled();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('Manage Channels');
+  });
+
+  /**
+   * The same carve-out the assistant BUTTON has. The panel hides this option in
+   * an expired guild, but the option is chosen client-side, so the route gate is
+   * the half that enforces it.
+   */
+  it('refuses the assistant through the select in an expired guild', async () => {
+    const env = setup({
+      selfHosted: false,
+      guilds: { get: vi.fn().mockResolvedValue({ authStatus: 'expired' }) } as never,
+    });
+    dispose = env.dispose;
+    const { interaction, reply } = settingsSelect([setupId('assistant')]);
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(interaction.showModal).not.toHaveBeenCalled();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('auto-voice.io');
+  });
+
+  /** Logging and the label are why the panel is exempt from the hard gate. */
+  it('still allows logging through the select in an expired guild', async () => {
+    const env = setup({
+      selfHosted: false,
+      guilds: { get: vi.fn().mockResolvedValue({ authStatus: 'expired' }) } as never,
+    });
+    dispose = env.dispose;
+    const { interaction } = settingsSelect([setupId('logging')]);
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(interaction.showModal).toHaveBeenCalled();
+  });
+
+  it('runs nothing for a select value that is not a panel action', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction } = settingsSelect(['avc:tpl:edit:primary:name:1']);
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(interaction.showModal).not.toHaveBeenCalled();
+    expect(env.settings.setLogging).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The picker sets message content ("Pick a voice channel to manage:"). An
+   * omitted `content` is dropped from the edit rather than cleared, so the panel
+   * would render underneath that stranded prompt.
+   */
+  it('returns to the panel from a picker, clearing the picker prompt', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'button',
+      customId: setupId('open'),
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    const payload = editReply.mock.calls[0]?.[0];
+    expect(JSON.stringify(payload)).toContain('embeds');
+    expect(payload.content).toBeNull();
+  });
+
+  /**
+   * Reachable during a rolling deploy: a panel rendered by a new machine, and an
+   * older one still owning the shard. Falling off the end silently is what
+   * Discord shows as "This interaction failed".
+   */
+  it('answers a panel control it does not recognise', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const button = fakeInteraction({
+      kind: 'button',
+      customId: setupId('nonesuch'),
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', button.interaction);
+    await flush();
+    expect(JSON.stringify(button.reply.mock.calls[0]?.[0])).toContain('out of date');
+
+    const select = settingsSelect(['avc:tpl:edit:primary:name:1']);
+    env.client.emit('interactionCreate', select.interaction);
+    await flush();
+    expect(JSON.stringify(select.reply.mock.calls[0]?.[0])).toContain('out of date');
+  });
+
+  /**
+   * A create from the panel updates the panel, rather than leaving it showing a
+   * creator channel count that is now one short.
+   */
+  it('refreshes the panel after a create started from it', async () => {
+    const settings = {
+      getConfig: vi.fn().mockResolvedValue({
+        enabled: true,
+        primaries: [{ channelId: 'p1' }],
+        defaultTemplate: 'T',
+        defaultStatus: 'S',
+      }),
+      createPrimary: vi.fn().mockResolvedValue({ ok: true, message: 'Created <#new1>.' }),
+      recordContact: vi.fn().mockResolvedValue(undefined),
+    };
+    const env = setup({ settings: settings as never });
+    dispose = env.dispose;
+    const { interaction, reply, editReply } = fakeInteraction({
+      kind: 'modal',
+      customId: CREATE_FROM_SETUP_MODAL_ID,
+      manageChannels: true,
+      fromMessage: true,
+      textInputs: { name: 'Lobby', nameTemplate: 'T', statusTemplate: 'S' },
+      selectedChannelId: 'cat1',
+      existingChannels: ['p1'],
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+
+    expect(settings.createPrimary).toHaveBeenCalled();
+    expect(reply).not.toHaveBeenCalled();
+    const panel = JSON.stringify(editReply.mock.calls[0]?.[0]);
+    expect(panel).toContain('Creator channels (1)');
+    expect(panel).toContain('Created <#new1>.');
+    // The panel carries its own create button, so the result needs no second one.
+    expect(panel).not.toContain('avc:create:again');
+  });
+
+  /**
+   * The failure path has already deferred, so `reply` would throw. Nothing was
+   * created, so the panel behind it is still accurate and is left alone.
+   */
+  it('follows up rather than replying when a panel create fails', async () => {
+    const settings = {
+      getConfig: vi.fn().mockResolvedValue({
+        enabled: true,
+        primaries: [],
+        defaultTemplate: 'T',
+        defaultStatus: 'S',
+      }),
+      createPrimary: vi.fn().mockRejectedValue(missingPermissions()),
+    };
+    const env = setup({ settings: settings as never });
+    dispose = env.dispose;
+    const { interaction, reply, followUp } = fakeInteraction({
+      kind: 'modal',
+      customId: CREATE_FROM_SETUP_MODAL_ID,
+      manageChannels: true,
+      fromMessage: true,
+      id: 'modal-9',
+      textInputs: { name: 'Lobby', nameTemplate: 'T', statusTemplate: 'S' },
+      selectedChannelId: 'cat1',
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+
+    expect(reply).not.toHaveBeenCalled();
+    expect(followUp).toHaveBeenCalled();
+    expect(env.reportError).not.toHaveBeenCalled();
+    expect(JSON.stringify(followUp.mock.calls[0]?.[0])).toContain('avc:create:retry:modal-9');
+  });
+
+  /**
+   * The slash command has no panel behind it, so it keeps the plain reply. Same
+   * modal either way, so only the origin can tell the two apart.
+   */
+  it('replies plainly to a create from the slash command', async () => {
+    const settings = {
+      getConfig: vi.fn().mockResolvedValue({
+        enabled: true,
+        primaries: [],
+        defaultTemplate: 'T',
+        defaultStatus: 'S',
+      }),
+      createPrimary: vi.fn().mockResolvedValue({ ok: true, message: 'Created <#new1>.' }),
+      recordContact: vi.fn().mockResolvedValue(undefined),
+    };
+    const env = setup({ settings: settings as never });
+    dispose = env.dispose;
+    const { interaction, reply, editReply } = fakeInteraction({
+      kind: 'modal',
+      customId: CREATE_MODAL_ID,
+      manageChannels: true,
+      textInputs: { name: 'Lobby', nameTemplate: 'T', statusTemplate: 'S' },
+      selectedChannelId: 'cat1',
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+
+    expect(editReply).not.toHaveBeenCalled();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('avc:create:again');
+  });
+
+  it('refreshes the panel after logging saved from it, and replies from /logging', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    // `off`, so the save skips the "can I post there" check, which needs a
+    // channel this fake's cache does not carry. The branch under test is which
+    // way the result is delivered, not what was saved.
+    const level = { level: ['off'] };
+    const fromPanel = fakeInteraction({
+      kind: 'modal',
+      customId: LOGGING_MODAL_ID,
+      manageChannels: true,
+      fromMessage: true,
+      selectValues: level,
+    });
+    env.client.emit('interactionCreate', fromPanel.interaction);
+    await flush();
+    expect(env.settings.setLogging).toHaveBeenCalled();
+    expect(fromPanel.reply).not.toHaveBeenCalled();
+    expect(fromPanel.editReply).toHaveBeenCalled();
+
+    const fromCommand = fakeInteraction({
+      kind: 'modal',
+      customId: LOGGING_MODAL_ID,
+      manageChannels: true,
+      selectValues: level,
+    });
+    env.client.emit('interactionCreate', fromCommand.interaction);
+    await flush();
+    expect(fromCommand.reply).toHaveBeenCalled();
+    expect(fromCommand.editReply).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The label modal is the other panel-borne write, and shares the branch.
+   */
+  it('refreshes the panel after the label is saved from it', async () => {
+    const base = setup();
+    base.dispose();
+    const setGeneral = vi.fn().mockResolvedValue({ ok: true, message: 'Set to Chatting.' });
+    const env = setup({ settings: { ...base.settings, setGeneral } as never });
+    dispose = env.dispose;
+    const { interaction, reply, editReply } = fakeInteraction({
+      kind: 'modal',
+      customId: GENERAL_MODAL_ID,
+      manageChannels: true,
+      fromMessage: true,
+      textInputs: { label: 'Chatting' },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(setGeneral).toHaveBeenCalledWith('g1', 'Chatting');
+    expect(reply).not.toHaveBeenCalled();
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('Set to Chatting.');
   });
 });

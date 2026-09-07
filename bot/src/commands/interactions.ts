@@ -86,6 +86,9 @@ import {
   parseSetupPick,
   parseSetupPickArg,
   SETUP_PREFIX,
+  SETUP_SETTINGS_ID,
+  setupId,
+  type SetupEntitlement,
 } from './setupPanel.js';
 import {
   ADOPT_PREFIX,
@@ -99,6 +102,7 @@ import {
 import {
   buildCreateModal,
   CREATE_AGAIN_ID,
+  CREATE_FROM_SETUP_MODAL_ID,
   CREATE_MODAL_ID,
   CREATE_RETRY_PREFIX,
   parseCreateModal,
@@ -139,6 +143,7 @@ import {
 } from './groupPanel.js';
 import { groupKeyFor, ROOT_GROUP_KEY } from '../features/voice/guildSettings.js';
 import { describeError } from '../ops/describeError.js';
+import { reinviteUrlFor } from '../ops/announce.js';
 
 export interface InteractionDeps {
   client: Client;
@@ -323,7 +328,23 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       if (interaction.customId === `${SETUP_PREFIX}assistant`) return false;
       return interaction.customId.startsWith(SETUP_PREFIX);
     }
+    if (interaction.isStringSelectMenu()) {
+      /**
+       * The panel's "More settings" select carries the same actions its buttons
+       * used to, so it needs the same exemption and the same carve-out. Without
+       * this branch an expired guild loses the logging and label modals the
+       * panel is exempt in order to provide.
+       *
+       * The assistant is refused here exactly as it is above: the select hides
+       * that option in an expired guild, but the option is chosen by the client
+       * and this is the half that enforces it.
+       */
+      if (interaction.customId !== SETUP_SETTINGS_ID) return false;
+      return !interaction.values.includes(setupId('assistant'));
+    }
     if (interaction.isModalSubmit()) {
+      // `CREATE_FROM_SETUP_MODAL_ID` is deliberately absent: it creates a
+      // channel, so it is a write path like `CREATE_MODAL_ID` beside it.
       return interaction.customId === GENERAL_MODAL_ID || interaction.customId === LOGGING_MODAL_ID;
     }
     return false;
@@ -520,7 +541,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
 
   /**
    * The "manage a channel" flow, reusable from `/template`, the `/setup`
-   * "Manage a channel" button, and the channel picker. Routes to the right
+   * "Edit room names" button, and the channel picker. Routes to the right
    * editor for what the channel *is*: a creator-channel secondary edits the
    * primary's templates; an adopted standalone edits its own; anything else is
    * offered for adoption. Responds in place via {@link respond} (a fresh reply
@@ -1075,6 +1096,22 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       });
       return;
     }
+    /**
+     * Opened from the `/setup` panel, so the panel is what should carry the
+     * result. Reached from `/logging` there is no message behind the modal, and
+     * a plain reply is the only thing that works.
+     *
+     * Both the validation above and the two gates before it `reply`, so they
+     * stay ahead of this branch: nothing may defer before they have run.
+     */
+    if (interaction.isFromMessage()) {
+      await interaction.deferUpdate();
+      const res = await run(guildId, 'cmd:logging', () =>
+        deps.settings.setLogging(guildId, target, parsed.level, parsed.alerts),
+      );
+      await refreshSetupPanel(interaction, { note: formatResult(res) });
+      return;
+    }
     const res = await run(guildId, 'cmd:logging', () =>
       deps.settings.setLogging(guildId, target, parsed.level, parsed.alerts),
     );
@@ -1490,9 +1527,17 @@ Already subscribed? Add the new server ` +
     };
   }
 
-  /** `/create` (and the "Create another" button) → open the setup modal. */
+  /**
+   * `/create` (and the "Create another" button, and the panel) → the setup modal.
+   *
+   * `fromSetup` stamps the modal with its own custom id so the submit knows there
+   * is a panel behind it to refresh. It cannot be inferred at submit time:
+   * "Create another" and "Retry" are buttons on their own result messages, so
+   * every one of the three paths looks message-borne.
+   */
   async function openCreateModal(
-    interaction: ChatInputCommandInteraction | ButtonInteraction,
+    interaction: ChatInputCommandInteraction | ButtonInteraction | StringSelectMenuInteraction,
+    opts: { fromSetup?: boolean } = {},
   ): Promise<void> {
     const guildId = interaction.guildId!;
     const gate = await gateCheck(guildId);
@@ -1508,10 +1553,14 @@ Already subscribed? Add the new server ` +
     // well within the 3s window before showModal — which must be the first response).
     const config = await deps.settings.getConfig(guildId);
     await interaction.showModal(
-      buildCreateModal({
-        nameTemplate: config.defaultTemplate,
-        statusTemplate: config.defaultStatus,
-      }),
+      buildCreateModal(
+        {
+          nameTemplate: config.defaultTemplate,
+          statusTemplate: config.defaultStatus,
+        },
+        undefined,
+        opts.fromSetup ? CREATE_FROM_SETUP_MODAL_ID : CREATE_MODAL_ID,
+      ),
     );
   }
 
@@ -1520,6 +1569,16 @@ Already subscribed? Add the new server ` +
     const guildId = interaction.guildId!;
     if (!(await requireManageChannels(interaction))) return;
     if (!(await isEntitledOrReject(interaction, guildId))) return;
+    /**
+     * Whether there is a `/setup` panel behind this modal to update in place.
+     *
+     * Both halves are needed. The id says the modal was opened from the panel;
+     * `isFromMessage` says this submit still has that message to edit. Checked
+     * only after the two gates above, which reply rather than update.
+     */
+    const fromPanel =
+      interaction.customId === CREATE_FROM_SETUP_MODAL_ID && interaction.isFromMessage();
+    if (fromPanel) await interaction.deferUpdate();
     const config = await deps.settings.getConfig(guildId);
     const defaults = { nameTemplate: config.defaultTemplate, statusTemplate: config.defaultStatus };
     const prefill = readCreateModalRaw(interaction.fields);
@@ -1539,23 +1598,36 @@ Already subscribed? Add the new server ` +
       await replyCreatePermissionError(interaction, prefill, outcome.err);
       return;
     }
-    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId(CREATE_AGAIN_ID)
-        .setLabel('Create another')
-        .setStyle(ButtonStyle.Secondary),
-    );
-    await interaction.reply({
-      content: formatResult(outcome.result),
-      components: [row],
-      ephemeral: true,
-    });
+    if (fromPanel) {
+      /**
+       * Back to the panel, carrying the outcome as its note. No "Create another"
+       * button: the refreshed panel has the create button on it, now beside a
+       * creator channel list that includes what was just made.
+       */
+      await refreshSetupPanel(interaction, { note: formatResult(outcome.result) });
+    } else {
+      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(CREATE_AGAIN_ID)
+          .setLabel('Create another')
+          .setStyle(ButtonStyle.Secondary),
+      );
+      await interaction.reply({
+        content: formatResult(outcome.result),
+        components: [row],
+        ephemeral: true,
+      });
+    }
     /**
-     * After the reply, and not awaited before it. This handler does not defer,
-     * so everything ahead of the first `reply` sits inside Discord's 3-second
-     * acknowledgement budget, behind an entitlement read, a `getConfig` and a
-     * channel-create REST call. Bookkeeping must not be what pushes an
-     * already-successful create into "This interaction failed".
+     * After the answer, and not awaited before it. Reached from `/create` this
+     * handler never defers, so everything ahead of the first `reply` sits inside
+     * Discord's 3-second acknowledgement budget, behind an entitlement read, a
+     * `getConfig` and a channel-create REST call. Bookkeeping must not be what
+     * pushes an already-successful create into "This interaction failed".
+     *
+     * The panel path defers up front and so has fifteen minutes, but the
+     * ordering stays the same for both: there is no reason to make the admin
+     * wait on a contact write either way.
      */
     void deps.settings.recordContact(guildId, interaction.user.id);
   }
@@ -1616,7 +1688,19 @@ Already subscribed? Add the new server ` +
         .setLabel('Retry')
         .setStyle(ButtonStyle.Primary),
     );
-    await interaction.reply({ content: lines.join('\n'), components: [row], ephemeral: true });
+    const payload = { content: lines.join('\n'), components: [row], ephemeral: true };
+    /**
+     * `followUp` once the panel path has already deferred, since `reply` would
+     * throw on an acknowledged interaction. The error goes in its own message
+     * rather than replacing the panel deliberately: nothing was created, so the
+     * panel behind it is still accurate, and Retry re-opens the modal with the
+     * admin's selections intact.
+     */
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp(payload);
+      return;
+    }
+    await interaction.reply(payload);
   }
 
   /** "Retry" after a failed `/create`: re-open the modal with the saved selections. */
@@ -1635,8 +1719,16 @@ Already subscribed? Add the new server ` +
     const saved = createRetries.get(interaction.customId.slice(CREATE_RETRY_PREFIX.length));
     const config = await deps.settings.getConfig(guildId);
     const defaults = { nameTemplate: config.defaultTemplate, statusTemplate: config.defaultStatus };
-    // The saved prefill expires (and is lost on restart); fall back to the guild
-    // defaults so Retry still opens a usable modal.
+    /**
+     * The saved prefill expires (and is lost on restart); fall back to the guild
+     * defaults so Retry still opens a usable modal.
+     *
+     * Deliberately the PLAIN modal id even when the create started from the
+     * panel. Retry lives on the error message, so a modal opened from it has
+     * that message as its `@original`: refreshing "the panel" would render a
+     * second one where the error was and leave the first still stale. A plain
+     * reply is the honest answer, and the panel is one `/setup` away.
+     */
     await interaction.showModal(buildCreateModal(defaults, saved?.prefill));
   }
 
@@ -1767,8 +1859,22 @@ Already subscribed? Add the new server ` +
     }
   }
 
-  /** The alias picker: opens one alias's detail view in place. */
+  /** The `/setup` "More settings" select, and the alias picker. */
   async function handleStringSelect(interaction: StringSelectMenuInteraction): Promise<void> {
+    if (interaction.customId === SETUP_SETTINGS_ID) {
+      const chosen = interaction.values[0];
+      if (!chosen || !chosen.startsWith(SETUP_PREFIX)) {
+        // Values are chosen client-side, so this is either a forged submit or a
+        // panel from a build this one does not share. Either way it gets an
+        // answer rather than a silent "This interaction failed".
+        await safeReply(interaction, 'That option is out of date. Run `/setup` again.');
+        return;
+      }
+      // Gated here as well as inside, mirroring the alias branch below: this is
+      // the boundary, and `runSetupAction` re-checks for the button path.
+      if (!(await requireManageChannels(interaction))) return;
+      return runSetupAction(interaction, chosen.slice(SETUP_PREFIX.length));
+    }
     if (interaction.customId !== ALIAS_SELECT_ID) return;
     if (!(await requireManageChannels(interaction))) return;
     const guildId = interaction.guildId!;
@@ -1792,7 +1898,12 @@ Already subscribed? Add the new server ` +
 
   /** Gathers everything the `/setup` panel shows for this guild + viewer. */
   async function buildSetupReply(
-    interaction: ChatInputCommandInteraction | ButtonInteraction,
+    interaction:
+      | ChatInputCommandInteraction
+      | ButtonInteraction
+      | StringSelectMenuInteraction
+      | ModalSubmitInteraction,
+    opts: { note?: string } = {},
   ): Promise<InteractionReplyOptions> {
     const guildId = interaction.guildId!;
     const [config, managedRows, guildRow] = await Promise.all([
@@ -1804,19 +1915,42 @@ Already subscribed? Add the new server ` +
     const missingPermissions = me
       ? missingBotPermissions((flag) => me.permissions.has(flag))
       : ALL_REQUIRED_PERMISSION_LABELS;
-    const plan = formatPlan({
-      guildId,
-      memberCount: interaction.guild?.memberCount ?? 0,
-      status: guildRow?.authStatus ?? 'trial',
-      expiresAt: guildRow?.authExpiresAt ?? null,
-      graceUntil: guildRow?.graceUntil ?? null,
-      selfHosted: deps.selfHosted,
-      now: new Date(),
-      // Both unconditional: the billed tier is what any subscriber pays for,
-      // pooled or not, and `shared` only changes the wording.
-      billedTier: guildRow?.tier ?? null,
-      shared: guildRow?.poolId != null,
-    });
+    const status = guildRow?.authStatus ?? 'trial';
+    /**
+     * Self-host renders no plan line at all.
+     *
+     * `formatPlan` still has its self-hosted branch for any other caller, but
+     * on a panel whose whole purpose is to stop showing fields that can only
+     * ever say "fine", a billing line for a deployment with no billing is the
+     * clearest example of one.
+     */
+    const plan = deps.selfHosted
+      ? null
+      : formatPlan({
+          guildId,
+          memberCount: interaction.guild?.memberCount ?? 0,
+          status,
+          expiresAt: guildRow?.authExpiresAt ?? null,
+          graceUntil: guildRow?.graceUntil ?? null,
+          selfHosted: false,
+          now: new Date(),
+          // Both unconditional: the billed tier is what any subscriber pays for,
+          // pooled or not, and `shared` only changes the wording.
+          billedTier: guildRow?.tier ?? null,
+          shared: guildRow?.poolId != null,
+        });
+    /**
+     * Self-host is always `ok`: `isEntitled` short-circuits on it, so there is
+     * no state a self-hoster can reach where the panel should be telling them
+     * to pay for something.
+     */
+    const entitlement: SetupEntitlement = deps.selfHosted
+      ? 'ok'
+      : status === 'expired'
+        ? 'expired'
+        : status === 'grace'
+          ? 'grace'
+          : 'ok';
     /**
      * Creator channels whose Discord channel is gone are hidden from the panel,
      * never deleted (owner, 2026-08-27, and see the note in `reconcileGuild`).
@@ -1842,11 +1976,18 @@ Already subscribed? Add the new server ` +
       enabled: config.enabled,
       isAdmin: hasManageChannels(interaction),
       plan,
+      guildId,
       missingPermissions,
       primaries,
       managed: managedRows,
       problems: deps.permissionProblems?.recent(guildId) ?? [],
       assistant: Boolean(deps.assistant),
+      entitlement,
+      // Guild-scoped, so an admin clicking it cannot authorize into the wrong
+      // server. Self-host grants permissions on the role instead, so there is
+      // no OAuth screen worth sending them to.
+      ...(deps.selfHosted ? {} : { inviteUrl: reinviteUrlFor(deps.clientId, guildId) }),
+      ...(opts.note ? { note: opts.note } : {}),
     });
   }
 
@@ -1881,18 +2022,39 @@ Already subscribed? Add the new server ` +
    * `deferUpdate` keeps the existing message on screen while the work runs,
    * which is what an in-place refresh should look like.
    */
-  async function refreshSetupPanel(interaction: ButtonInteraction): Promise<void> {
+  async function refreshSetupPanel(
+    interaction: ButtonInteraction | StringSelectMenuInteraction | ModalSubmitInteraction,
+    opts: { note?: string } = {},
+  ): Promise<void> {
     if (!interaction.deferred && !interaction.replied) await interaction.deferUpdate();
-    await interaction.editReply(toUpdate(await buildSetupReply(interaction)));
+    await interaction.editReply(toUpdate(await buildSetupReply(interaction, opts)));
   }
 
-  /** The `/setup` panel buttons. (`lang` is disabled and never fires.) */
+  /** The `/setup` panel buttons. */
   async function handleSetupButton(interaction: ButtonInteraction): Promise<void> {
-    const action = interaction.customId.slice(SETUP_PREFIX.length);
+    return runSetupAction(interaction, interaction.customId.slice(SETUP_PREFIX.length));
+  }
+
+  /**
+   * One panel action, whether it arrived as a button or as a "More settings"
+   * option.
+   *
+   * The select's option values ARE the button ids, so both entry points hand the
+   * same `action` string to the same body. That is what keeps the gating honest:
+   * there is one place an action can be reached from, not two that have to be
+   * kept in step.
+   */
+  async function runSetupAction(
+    interaction: ButtonInteraction | StringSelectMenuInteraction,
+    action: string,
+  ): Promise<void> {
     // Create runs its own entitlement + permission gating (and opens a modal).
-    if (action === 'create') return openCreateModal(interaction);
+    if (action === 'create') return openCreateModal(interaction, { fromSetup: true });
     if (!(await requireManageChannels(interaction))) return;
     const guildId = interaction.guildId!;
+    // "Back to setup" from a picker that replaced the panel. Read-only, so it
+    // needs nothing beyond the Manage Channels check above.
+    if (action === 'open') return refreshSetupPanel(interaction);
     if (action === 'toggle') {
       await run(guildId, 'setup:toggle', async () => {
         const config = await deps.settings.getConfig(guildId);
@@ -1920,7 +2082,9 @@ Already subscribed? Add the new server ` +
       const channelId = currentVoiceChannelId(interaction);
       if (channelId) return manageChannelCore(interaction, channelId);
       await interaction.update(
-        buildChannelPickerMessage('manage', '🛠️ Pick a voice channel to manage:'),
+        // `back`, because this picker REPLACES the panel. Without it the admin
+        // has no way back short of running `/setup` again.
+        buildChannelPickerMessage('manage', '🛠️ Pick a voice channel to manage:', { back: true }),
       );
       return;
     }
@@ -1928,10 +2092,26 @@ Already subscribed? Add the new server ` +
       const channelId = currentVoiceChannelId(interaction);
       if (channelId) return assistantCore(interaction, channelId);
       await interaction.update(
-        buildChannelPickerMessage('templateassistant', '✨ Pick a voice channel to name:'),
+        buildChannelPickerMessage('templateassistant', '✨ Pick a voice channel to name:', {
+          back: true,
+        }),
       );
       return;
     }
+    /**
+     * An action this build does not know. `handleButton` has the same fallback
+     * for an unclaimed custom id, but setup ids never reach it because the
+     * prefix check routes them here first.
+     *
+     * Reachable during a rolling deploy, which is what makes it worth answering:
+     * a panel rendered by a new machine can be clicked while an older one still
+     * owns the shard, and falling off the end silently is what Discord shows as
+     * "This interaction failed".
+     */
+    await safeReply(
+      interaction,
+      'That control is out of date. Run `/setup` again to get a fresh panel.',
+    );
   }
 
   // Picker commands that require Manage Channels (the open `name` command self-gates
@@ -2123,7 +2303,12 @@ Already subscribed? Add the new server ` +
   }
 
   async function handleModal(interaction: ModalSubmitInteraction): Promise<void> {
-    if (interaction.customId === CREATE_MODAL_ID) return handleCreateSubmit(interaction);
+    if (
+      interaction.customId === CREATE_MODAL_ID ||
+      interaction.customId === CREATE_FROM_SETUP_MODAL_ID
+    ) {
+      return handleCreateSubmit(interaction);
+    }
     if (interaction.customId.startsWith(POSITION_MODAL_PREFIX)) {
       const channelId = positionChannelId(interaction.customId);
       if (channelId) return handlePositionSubmit(interaction, channelId);
@@ -2152,9 +2337,19 @@ Already subscribed? Add the new server ` +
   async function handleGeneralSubmit(interaction: ModalSubmitInteraction): Promise<void> {
     if (!(await requireManageChannels(interaction))) return;
     const guildId = interaction.guildId!;
-    const res = await run(guildId, 'setup:general', () =>
-      deps.settings.setGeneral(guildId, interaction.fields.getTextInputValue('label')),
-    );
+    const label = interaction.fields.getTextInputValue('label');
+    // Always opened from the panel today. The plain-reply branch is the same
+    // defence `handleAliasSubmit` keeps: a modal with no message behind it
+    // cannot be answered with an update.
+    if (interaction.isFromMessage()) {
+      await interaction.deferUpdate();
+      const res = await run(guildId, 'setup:general', () =>
+        deps.settings.setGeneral(guildId, label),
+      );
+      await refreshSetupPanel(interaction, { note: formatResult(res) });
+      return;
+    }
+    const res = await run(guildId, 'setup:general', () => deps.settings.setGeneral(guildId, label));
     await interaction.reply({ content: formatResult(res), ephemeral: true });
   }
 
@@ -2247,7 +2442,11 @@ Already subscribed? Add the new server ` +
 }
 
 function currentVoiceChannelId(
-  interaction: ChatInputCommandInteraction | ButtonInteraction | ChannelSelectMenuInteraction,
+  interaction:
+    | ChatInputCommandInteraction
+    | ButtonInteraction
+    | ChannelSelectMenuInteraction
+    | StringSelectMenuInteraction,
 ): string | undefined {
   // `interaction.member` may be the raw API shape (no `.voice`) when uncached;
   // use it only when it's a real GuildMember, else resolve from the guild cache.
@@ -2387,11 +2586,19 @@ async function safeReply(interaction: Interaction, content: string): Promise<voi
   }
 }
 
-/** Strips `ephemeral` (invalid on `update`/`editReply`) but keeps embeds/components. */
+/**
+ * Strips `ephemeral` (invalid on `update`/`editReply`) but keeps embeds/components.
+ *
+ * `content: null` for the same reason {@link respond} carries it: an omitted
+ * `content` is dropped from the request body rather than cleared, so editing an
+ * embed-only panel over a message that HAD text leaves that text stranded above
+ * it. The channel picker sets a prompt ("Pick a voice channel to manage:"), and
+ * its "Back to setup" button edits the panel straight back over it.
+ */
 function toUpdate(
   reply: InteractionReplyOptions,
-): Pick<InteractionUpdateOptions, 'embeds' | 'components'> {
-  return { embeds: reply.embeds ?? [], components: reply.components ?? [] };
+): Pick<InteractionUpdateOptions, 'content' | 'embeds' | 'components'> {
+  return { content: null, embeds: reply.embeds ?? [], components: reply.components ?? [] };
 }
 
 /**

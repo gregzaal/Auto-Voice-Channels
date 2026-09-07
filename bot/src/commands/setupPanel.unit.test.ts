@@ -8,6 +8,8 @@ import {
   missingBotPermissions,
   parseSetupPick,
   setupId,
+  SETUP_SETTINGS_ID,
+  setupState,
 } from './setupPanel.js';
 
 const NOW = new Date('2026-06-17T00:00:00.000Z');
@@ -208,11 +210,15 @@ describe('missingBotPermissions', () => {
 describe('buildSetupPanel', () => {
   const baseInput = {
     enabled: true,
-    plan: '🆓 Free forever',
+    plan: '🆓 Free forever' as string | null,
+    guildId: '462606582367125509',
     missingPermissions: [] as string[],
     primaries: [{ channelId: 'p1' }],
     managed: [] as { channelId: string }[],
   };
+
+  /** How many Success (green) buttons the payload carries. */
+  const successCount = (json: string): number => (json.match(/"style":3/g) ?? []).length;
 
   it('shows admin action buttons (toggle/create/manage/logging) for admins', () => {
     const json = JSON.stringify(buildSetupPanel({ ...baseInput, isAdmin: true }));
@@ -234,7 +240,7 @@ describe('buildSetupPanel', () => {
       buildSetupPanel({ ...baseInput, isAdmin: true, assistant: true }),
     );
     expect(withAssistant).toContain(setupId('assistant'));
-    expect(withAssistant).toContain('Name it for me');
+    expect(withAssistant).toContain('Write a name template for me');
   });
 
   it('never offers the assistant to a non-admin', () => {
@@ -335,13 +341,251 @@ describe('buildSetupPanel', () => {
     expect(json).not.toContain('Needs attention');
   });
 
-  it('labels the toggle button by current state', () => {
+  /**
+   * Pausing is a setting; turning a paused server back on is THE action. So the
+   * two directions live in different places, which is the whole shape of the
+   * panel in one assertion.
+   */
+  it('offers pause as a setting, and turning back on as the recommended action', () => {
+    const on = JSON.stringify(buildSetupPanel({ ...baseInput, isAdmin: true, enabled: true }));
+    expect(on).toContain('Pause on this server');
+    expect(on).not.toContain('Turn back on');
+
+    const off = JSON.stringify(buildSetupPanel({ ...baseInput, isAdmin: true, enabled: false }));
+    expect(off).toContain('Turn back on');
+    expect(off).not.toContain('Pause on this server');
+  });
+
+  /**
+   * The rule the old panel broke: five Primary blues, a green and a greyed-out
+   * placeholder meant nothing read as the thing to press. Asserted across every
+   * state because it is the one property a future edit is most likely to
+   * violate by adding "just one more" button.
+   */
+  it('renders at most one green button, and never a disabled one', () => {
+    const states = [
+      { ...baseInput, isAdmin: true },
+      { ...baseInput, isAdmin: true, enabled: false },
+      { ...baseInput, isAdmin: true, primaries: [] },
+      { ...baseInput, isAdmin: true, problems: [{ channelId: 'x9' }] },
+      { ...baseInput, isAdmin: true, entitlement: 'grace' as const },
+      { ...baseInput, isAdmin: true, assistant: true },
+    ];
+    for (const input of states) {
+      const json = JSON.stringify(buildSetupPanel(input));
+      expect(successCount(json)).toBe(1);
+      expect(json).not.toContain('"disabled":true');
+    }
+  });
+
+  /**
+   * Where the fix is a link, a green button beside it would compete with the
+   * only thing that actually helps.
+   */
+  it('renders no green button when the fix is a link', () => {
+    const expired = JSON.stringify(
+      buildSetupPanel({ ...baseInput, isAdmin: true, entitlement: 'expired' }),
+    );
+    expect(successCount(expired)).toBe(0);
+    const perms = JSON.stringify(
+      buildSetupPanel({
+        ...baseInput,
+        isAdmin: true,
+        missingPermissions: ['Manage Channels'],
+        inviteUrl: 'https://discord.com/oauth2/authorize?client_id=1',
+      }),
+    );
+    expect(successCount(perms)).toBe(0);
+  });
+
+  it('drops the language placeholder entirely', () => {
+    const json = JSON.stringify(buildSetupPanel({ ...baseInput, isAdmin: true }));
+    expect(json).not.toContain(setupId('lang'));
+    expect(json).not.toContain('soon');
+  });
+
+  /**
+   * The first-run panel offers exactly one thing. Nothing in the settings select
+   * applies before a creator channel exists, and the empty channel lists used to
+   * advertise adopting an existing channel to every server that opened the panel.
+   */
+  it('offers only the one action on first run', () => {
+    const json = JSON.stringify(
+      buildSetupPanel({ ...baseInput, isAdmin: true, primaries: [], assistant: true }),
+    );
+    expect(json).toContain(setupId('create'));
+    expect(json).not.toContain(SETUP_SETTINGS_ID);
+    expect(json).not.toContain(setupId('manage'));
+    expect(json).not.toContain('Creator channels');
+    expect(json).not.toContain('Managed channels');
+    expect(json).toContain('Start by making one');
+  });
+
+  /**
+   * There is no slash command for the "no game" label, so the select is its only
+   * entry point. A guild with adopted channels and no creator channel still
+   * renders `firstRun`, and hiding the select there made a setting those
+   * channels' templates depend on unreachable from anywhere in the product.
+   */
+  it('keeps the settings reachable on first run when channels are already managed', () => {
+    const json = JSON.stringify(
+      buildSetupPanel({
+        ...baseInput,
+        isAdmin: true,
+        primaries: [],
+        managed: [{ channelId: 'm1' }],
+      }),
+    );
+    expect(json).toContain(SETUP_SETTINGS_ID);
+    expect(json).toContain(setupId('general'));
+    expect(json).toContain('Managed channels (1)');
+  });
+
+  it('omits an empty channel list rather than explaining it', () => {
+    const json = JSON.stringify(buildSetupPanel({ ...baseInput, isAdmin: true }));
+    expect(json).toContain('Creator channels (1)');
+    expect(json).not.toContain('Managed channels');
+    const withManaged = JSON.stringify(
+      buildSetupPanel({ ...baseInput, isAdmin: true, managed: [{ channelId: 'm1' }] }),
+    );
+    expect(withManaged).toContain('Managed channels (1)');
+  });
+
+  /** Self-host has no billing, so it gets no billing line. */
+  it('renders no plan line when there is no plan', () => {
+    const json = JSON.stringify(buildSetupPanel({ ...baseInput, isAdmin: true, plan: null }));
+    expect(json).not.toContain('Free forever');
+    expect(json).toContain('Permissions look good');
+  });
+
+  /**
+   * An expired guild is shown the one thing that works and nothing that does
+   * not. The route gate refuses these anyway; the panel not offering them is
+   * what stops it advertising an action it is about to refuse.
+   */
+  it('offers only reactivation when expired', () => {
+    const json = JSON.stringify(
+      buildSetupPanel({
+        ...baseInput,
+        isAdmin: true,
+        assistant: true,
+        entitlement: 'expired',
+        plan: 'Your AVC trial or subscription has ended.',
+      }),
+    );
+    expect(json).toContain('Reactivate');
+    expect(json).toContain(`dashboard?guild=${baseInput.guildId}`);
+    expect(json).not.toContain(setupId('create'));
+    expect(json).not.toContain(setupId('manage'));
+    expect(json).not.toContain(setupId('assistant'));
+    expect(json).not.toContain('Pause on this server');
+    // Logging and the label still work, and are the reason the panel is exempt
+    // from the hard gate at all.
+    expect(json).toContain(setupId('logging'));
+  });
+
+  it('offers the re-invite link only when permissions are missing', () => {
+    const url = 'https://discord.com/oauth2/authorize?client_id=1';
+    const missing = JSON.stringify(
+      buildSetupPanel({
+        ...baseInput,
+        isAdmin: true,
+        missingPermissions: ['Manage Channels'],
+        inviteUrl: url,
+      }),
+    );
+    expect(missing).toContain('Fix permissions');
+    expect(missing).toContain(url);
+    const healthy = JSON.stringify(
+      buildSetupPanel({ ...baseInput, isAdmin: true, inviteUrl: url }),
+    );
+    expect(healthy).not.toContain('Fix permissions');
+  });
+
+  /** "Permissions look good" over a list of failures reads as a contradiction. */
+  it('does not claim things look good while reporting problems', () => {
+    const json = JSON.stringify(
+      buildSetupPanel({ ...baseInput, isAdmin: true, problems: [{ channelId: 'x9' }] }),
+    );
+    expect(json).toContain('Needs attention');
+    expect(json).not.toContain('Permissions look good');
+  });
+
+  it('carries the result of the action that refreshed it', () => {
+    const json = JSON.stringify(
+      buildSetupPanel({ ...baseInput, isAdmin: true, note: 'Created <#new1>.' }),
+    );
+    expect(json).toContain('Created <#new1>.');
+  });
+
+  it('colours the embed by state', () => {
+    const colorOf = (input: Parameters<typeof buildSetupPanel>[0]): number | undefined =>
+      (buildSetupPanel(input).embeds?.[0] as { color?: number } | undefined)?.color;
+    expect(colorOf({ ...baseInput, isAdmin: true })).toBe(0x4caf50);
+    expect(colorOf({ ...baseInput, isAdmin: true, enabled: false })).toBe(0x9e9e9e);
+    expect(colorOf({ ...baseInput, isAdmin: true, primaries: [] })).toBe(0x5865f2);
+    expect(colorOf({ ...baseInput, isAdmin: true, entitlement: 'expired' })).toBe(0xed4245);
+    expect(colorOf({ ...baseInput, isAdmin: true, missingPermissions: ['Connect'] })).toBe(
+      0xed4245,
+    );
+    expect(colorOf({ ...baseInput, isAdmin: true, problems: [{ channelId: 'x' }] })).toBe(0xfaa61a);
+    expect(colorOf({ ...baseInput, isAdmin: true, entitlement: 'grace' })).toBe(0xfaa61a);
+  });
+
+  /** A non-admin sees the state and nothing they cannot act on, in every state. */
+  it('gives a non-admin the links and nothing else, even when something is wrong', () => {
+    const json = JSON.stringify(
+      buildSetupPanel({
+        ...baseInput,
+        isAdmin: false,
+        missingPermissions: ['Manage Channels'],
+        inviteUrl: 'https://discord.com/oauth2/authorize?client_id=1',
+      }),
+    );
+    expect(json).not.toContain(SETUP_SETTINGS_ID);
+    expect(json).not.toContain('Fix permissions');
+    expect(json).toContain('discord.gg');
+    expect(json).toContain('Missing');
+  });
+});
+
+/**
+ * Ordering is the whole contract: every difference the panel renders is derived
+ * from this one value, so a state that wins when it should not changes six
+ * things at once.
+ */
+describe('setupState', () => {
+  const base = {
+    enabled: true,
+    isAdmin: true,
+    plan: null,
+    guildId: 'g1',
+    missingPermissions: [] as string[],
+    primaries: [{ channelId: 'p1' }],
+    managed: [] as { channelId: string }[],
+  };
+
+  it('ranks expired above everything, since nothing else would work', () => {
     expect(
-      JSON.stringify(buildSetupPanel({ ...baseInput, isAdmin: true, enabled: true })),
-    ).toContain('Disable');
-    expect(
-      JSON.stringify(buildSetupPanel({ ...baseInput, isAdmin: true, enabled: false })),
-    ).toContain('Enable');
+      setupState({ ...base, entitlement: 'expired', enabled: false, missingPermissions: ['x'] }),
+    ).toBe('expired');
+  });
+
+  it('ranks missing permissions above a pause, which would change nothing', () => {
+    expect(setupState({ ...base, missingPermissions: ['Manage Channels'], enabled: false })).toBe(
+      'permissions',
+    );
+  });
+
+  it('ranks problems above first run, since a failure names channels either way', () => {
+    expect(setupState({ ...base, primaries: [], problems: [{ channelId: 'x' }] })).toBe('problems');
+  });
+
+  it('falls through to first run and healthy', () => {
+    expect(setupState({ ...base, primaries: [] })).toBe('firstRun');
+    expect(setupState(base)).toBe('healthy');
+    expect(setupState({ ...base, enabled: false })).toBe('paused');
+    expect(setupState({ ...base, entitlement: 'grace' })).toBe('grace');
   });
 });
 
@@ -353,6 +597,21 @@ describe('channel picker', () => {
     expect(parseSetupPick(setupId('pick:manage'))).toBe('manage');
     expect(parseSetupPick(setupId('toggle'))).toBeNull();
     expect(parseSetupPick('avc:tpl:edit:primary:name:1')).toBeNull();
+    // The settings select is not a picker, and must never parse as one.
+    expect(parseSetupPick(SETUP_SETTINGS_ID)).toBeNull();
+  });
+
+  /**
+   * Only the picker that REPLACED a panel gets a way back. Opened from a slash
+   * command there is no panel behind it, so the button would be a lie.
+   */
+  it('offers a way back only when it replaced a panel', () => {
+    expect(
+      JSON.stringify(buildChannelPickerMessage('manage', 'pick one', { back: true })),
+    ).toContain(setupId('open'));
+    expect(JSON.stringify(buildChannelPickerMessage('manage', 'pick one'))).not.toContain(
+      setupId('open'),
+    );
   });
 });
 

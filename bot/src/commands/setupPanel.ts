@@ -7,9 +7,12 @@ import {
   EmbedBuilder,
   ModalBuilder,
   PermissionFlagsBits,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder,
   TextInputBuilder,
   TextInputStyle,
   type APIEmbed,
+  type APIEmbedField,
   type InteractionReplyOptions,
   type InteractionUpdateOptions,
 } from 'discord.js';
@@ -279,12 +282,30 @@ export function formatPlan(opts: PlanInput): string {
   return `🎟️ **Free trial active**, the ${tier.label} tier (${priceLabel}) when it ends. Manage at ${link}`;
 }
 
+/**
+ * How the hosted billing state affects the panel, reduced to the three cases it
+ * renders differently. `ok` covers every entitled status a customer never has to
+ * act on; self-host is always `ok`.
+ */
+export type SetupEntitlement = 'ok' | 'grace' | 'expired';
+
 export interface SetupPanelInput {
   enabled: boolean;
   /** Whether the viewer has Manage Channels (admin actions are shown only to them). */
   isAdmin: boolean;
-  /** Pre-formatted plan line (see {@link formatPlan}). */
-  plan: string;
+  /**
+   * Pre-formatted plan line (see {@link formatPlan}), or `null` when there is no
+   * plan to speak of.
+   *
+   * Self-host passes `null` rather than the "every feature unlocked" line: a
+   * server with no billing has nothing to check, and a status line that can only
+   * ever say one thing is the kind of always-fine field this panel exists to
+   * stop rendering. `formatPlan` keeps its self-hosted branch for any other
+   * caller.
+   */
+  plan: string | null;
+  /** Needed so the expired and grace states can deep-link to THIS server's card. */
+  guildId: string;
   /** Missing required bot permissions (empty → all good). */
   missingPermissions: string[];
   primaries: { channelId: string }[];
@@ -304,70 +325,170 @@ export interface SetupPanelInput {
    * rather than shown-and-broken.
    */
   assistant?: boolean;
+  /** Hosted billing state, reduced to what the panel renders differently. */
+  entitlement?: SetupEntitlement;
+  /**
+   * Re-invite URL, so the missing-permissions state can offer the one-click fix
+   * instead of only describing it. Absent on self-host, where nobody is going
+   * through an OAuth screen to fix their own bot.
+   */
+  inviteUrl?: string;
+  /**
+   * A one-off result line from the action that just refreshed this panel (a
+   * creator channel created, logging saved). Rendered in a nameless field so the
+   * outcome and the new state arrive in one message rather than two.
+   */
+  note?: string;
 }
 
-const INTRO =
-  '**Open-source and self-hostable.**\n' +
-  'Members join a **creator channel** and AVC spins up a personal room for ' +
-  'them, auto-named, and cleaned up when empty.';
+/**
+ * Which situation the server is in, highest first. Every difference the panel
+ * renders -- colour, headline, which action is recommended, which settings are
+ * offered -- is derived from this one value, so a state is added in one place
+ * rather than in six conditionals.
+ *
+ * Order is not cosmetic. `expired` outranks everything because no other action
+ * works until it is fixed; missing permissions outrank a pause because turning
+ * automation back on would change nothing; and `problems` outranks `firstRun`
+ * because a guild reporting failures has channels to fix, whatever the creator
+ * channel count says.
+ */
+export type SetupState =
+  | 'expired'
+  | 'permissions'
+  | 'paused'
+  | 'problems'
+  | 'grace'
+  | 'firstRun'
+  | 'healthy';
 
-function channelList(ids: { channelId: string }[], empty: string): string {
-  if (ids.length === 0) return empty;
+export function setupState(input: SetupPanelInput): SetupState {
+  if (input.entitlement === 'expired') return 'expired';
+  if (input.missingPermissions.length > 0) return 'permissions';
+  if (!input.enabled) return 'paused';
+  if ((input.problems?.length ?? 0) > 0) return 'problems';
+  if (input.entitlement === 'grace') return 'grace';
+  if (input.primaries.length === 0) return 'firstRun';
+  return 'healthy';
+}
+
+const STATE_COLOR: Record<SetupState, number> = {
+  expired: 0xed4245,
+  permissions: 0xed4245,
+  paused: 0x9e9e9e,
+  problems: 0xfaa61a,
+  grace: 0xfaa61a,
+  firstRun: 0x5865f2,
+  healthy: 0x4caf50,
+};
+
+/**
+ * Shown once, to the only person who has never seen AVC work: an admin with no
+ * creator channel yet. Every other state assumes they know what the bot does.
+ */
+const FIRST_RUN_INTRO =
+  'Members join a **creator channel** and get their own room, named ' +
+  'automatically and removed when it empties. Start by making one.';
+
+function channelList(ids: { channelId: string }[]): string {
   const shown = ids.slice(0, 10).map((c) => `• <#${c.channelId}>`);
   if (ids.length > 10) shown.push(`…and ${ids.length - 10} more`);
   return shown.join('\n');
 }
 
-/** Renders the `/setup` panel — info, plan/permissions status, and first-step buttons. */
-export function buildSetupPanel(input: SetupPanelInput): InteractionReplyOptions {
-  const permsValue =
-    input.missingPermissions.length === 0
-      ? '✅ Permissions look good.'
-      : `⚠️ Missing **${input.missingPermissions.join('**, **')}** . Re-invite me with the correct ` +
-        'permissions, or grant them on my role.';
+/** The one line describing what is missing, and the two ways to grant it. */
+function missingPermissionsLine(missing: string[]): string {
+  return (
+    `⚠️ Missing **${missing.join('**, **')}**. Re-invite me with the correct ` +
+    'permissions, or grant them on my role.'
+  );
+}
 
-  const embed: APIEmbed = new EmbedBuilder()
-    .setTitle('Auto-Voice-Channels · Setup')
-    .setColor(input.enabled ? 0x4caf50 : 0x9e9e9e)
-    .setDescription(INTRO)
-    .addFields(
-      { name: 'Your plan', value: input.plan },
-      { name: 'Permissions', value: permsValue },
-      {
-        name: 'Automation',
-        value: input.enabled ? '🟢 Enabled' : '⚪ Disabled',
-        inline: true,
-      },
-      {
-        name: `Creator channels (${input.primaries.length})`,
-        value: channelList(input.primaries, '_None yet, use the "New creator channel" button._'),
-      },
-      {
-        name: `Managed channels (${input.managed.length})`,
-        value: channelList(
-          input.managed,
-          '_None. The "Manage a channel" button adopts an existing one._',
-        ),
-      },
-    )
-    .toJSON();
+/**
+ * The description, top to bottom.
+ *
+ * Only the state's own story goes here, then the plan line. Every "everything is
+ * fine" line the old panel rendered unconditionally is now the absence of a
+ * problem line, which is what lets a healthy panel be two lines instead of six
+ * fields.
+ */
+function headlineLines(input: SetupPanelInput, state: SetupState): string[] {
+  const lines: string[] = [];
+  switch (state) {
+    case 'expired':
+    case 'grace':
+      // The plan line already names the problem and carries the dashboard
+      // link, so repeating it above would say the same thing twice.
+      break;
+    case 'permissions':
+      lines.push(missingPermissionsLine(input.missingPermissions));
+      break;
+    case 'paused':
+      lines.push('⏸️ **Paused.** AVC is not making new rooms on this server.');
+      break;
+    case 'problems':
+      // Deliberately no status line. The "Needs attention" field below is the
+      // message, and "permissions look good" above it reads as a contradiction
+      // to someone whose rooms are not being made.
+      break;
+    case 'firstRun':
+      lines.push(FIRST_RUN_INTRO, '✅ Permissions look good.');
+      break;
+    case 'healthy':
+      lines.push('✅ Permissions look good, automation is on.');
+      break;
+  }
+  if (input.plan) lines.push(input.plan);
+  return lines;
+}
+
+/** Renders the `/setup` panel for the state the server is actually in. */
+export function buildSetupPanel(input: SetupPanelInput): InteractionReplyOptions {
+  const state = setupState(input);
+  const problems = input.problems ?? [];
+  const fields: APIEmbedField[] = [];
 
   // Surface recent permission incidents with the fix that actually matches
-  // what failed, so admins aren't left guessing why automation stalled.
+  // what failed, so admins aren't left guessing why automation stalled. First,
+  // because in this state it is the only thing worth reading.
   //
   // Rendered by the shared summariser, which the push notice also uses: an
   // admin who got the notice and then opens this panel must read the same
   // advice, or one of the two is teaching them the wrong fix.
-  if (input.problems && input.problems.length > 0) {
-    embed.fields!.push({
-      name: `⚠️ Needs attention (${input.problems.length})`,
-      value: permissionProblemSummary(input.problems).join('\n\n'),
+  if (problems.length > 0) {
+    fields.push({
+      name: `⚠️ Needs attention (${problems.length})`,
+      value: permissionProblemSummary(problems).join('\n\n'),
     });
   }
+  // Both lists are omitted when empty rather than explaining themselves. The
+  // empty "Managed channels (0)" hint advertised adopting an existing channel
+  // to every server on every open, which is an advanced path most never take.
+  if (input.primaries.length > 0) {
+    fields.push({
+      name: `Creator channels (${input.primaries.length})`,
+      value: channelList(input.primaries),
+    });
+  }
+  if (input.managed.length > 0) {
+    fields.push({
+      name: `Managed channels (${input.managed.length})`,
+      value: channelList(input.managed),
+    });
+  }
+  // The outcome of whatever action refreshed this panel, in a nameless field so
+  // it reads as a footnote to the new state rather than a section of its own.
+  if (input.note) fields.push({ name: '​', value: input.note.slice(0, 1024) });
 
-  const components = input.isAdmin
-    ? adminRows(input.enabled, input.assistant === true)
-    : memberRows();
+  const builder = new EmbedBuilder()
+    .setTitle('Auto-Voice-Channels · Setup')
+    .setColor(STATE_COLOR[state]);
+  const description = headlineLines(input, state).join('\n');
+  if (description) builder.setDescription(description);
+  if (fields.length > 0) builder.addFields(...fields);
+  const embed: APIEmbed = builder.toJSON();
+
+  const components = input.isAdmin ? adminRows(input, state) : memberRows();
   return { embeds: [embed], components, ephemeral: true };
 }
 
@@ -377,71 +498,150 @@ function linkButton(label: string, url: string, emoji?: string): ButtonBuilder {
   return b;
 }
 
-// A disabled placeholder until i18n lands.
-// TODO(i18n): enable this button and wire a language picker once i18n is implemented.
-function languageButton(): ButtonBuilder {
-  return new ButtonBuilder()
-    .setCustomId(setupId('lang'))
-    .setLabel('Language (soon)')
-    .setEmoji('🌐')
-    .setStyle(ButtonStyle.Secondary)
-    .setDisabled(true);
-}
+/** Custom id of the "More settings" select. */
+export const SETUP_SETTINGS_ID = setupId('settings');
 
-function adminRows(enabled: boolean, assistant: boolean): ReturnType<typeof rowOf>[] {
-  const row1 = rowOf(
-    new ButtonBuilder()
-      .setCustomId(setupId('toggle'))
-      .setLabel(enabled ? 'Disable' : 'Enable')
-      .setStyle(enabled ? ButtonStyle.Secondary : ButtonStyle.Success),
-    new ButtonBuilder()
-      .setCustomId(setupId('create'))
-      .setLabel('New creator channel')
-      .setEmoji('➕')
-      .setStyle(ButtonStyle.Success),
-    new ButtonBuilder()
-      .setCustomId(setupId('manage'))
-      .setLabel('Manage a channel')
-      .setEmoji('🛠️')
-      .setStyle(ButtonStyle.Primary),
-    ...(assistant
-      ? [
-          new ButtonBuilder()
-            .setCustomId(setupId('assistant'))
-            .setLabel('Name it for me')
-            .setEmoji('✨')
-            .setStyle(ButtonStyle.Primary),
-        ]
-      : []),
-  );
-  const row2 = rowOf(
-    new ButtonBuilder()
-      .setCustomId(setupId('logging'))
-      .setLabel('Set up logging')
-      .setEmoji('🪵')
-      .setStyle(ButtonStyle.Primary),
-    new ButtonBuilder()
-      .setCustomId(setupId('general'))
+type PanelRow = ActionRowBuilder<ButtonBuilder> | ActionRowBuilder<StringSelectMenuBuilder>;
+
+/**
+ * The settings nobody opens `/setup` for, behind one select.
+ *
+ * Every option's VALUE is the button id the action already had, so the routing,
+ * the gating and the tests all key off the same string whether the action was
+ * reached from a button or from here. The descriptions are the point: they are
+ * where "no game label" and "template assistant" stop being jargon, which a row
+ * of buttons has nowhere to put.
+ *
+ * The i18n language picker is deliberately NOT an option here. It needs a select
+ * of its own (`plans/i18n.md` §2.2, capped at 25 locales by trap 16), and there
+ * is a spare row for it.
+ */
+function settingsRow(
+  input: SetupPanelInput,
+  state: SetupState,
+): ActionRowBuilder<StringSelectMenuBuilder> {
+  const options = [
+    new StringSelectMenuOptionBuilder()
+      .setLabel('Event logging')
+      .setValue(setupId('logging'))
+      .setDescription('Post room events to a text channel, and how to hear about problems')
+      .setEmoji('🪵'),
+    new StringSelectMenuOptionBuilder()
       .setLabel('"No game" label')
-      .setEmoji('🎮')
-      .setStyle(ButtonStyle.Primary),
-    languageButton(),
-  );
-  const row3 = rowOf(
-    linkButton('Learn more', DOCS_URL, '📖'),
-    linkButton('Community support', SUPPORT_URL, '💬'),
-  );
-  return [row1, row2, row3];
+      .setValue(setupId('general'))
+      .setDescription('What room names show when nobody is playing a game. Default: General')
+      .setEmoji('🎮'),
+  ];
+  // The assistant is hidden in an expired guild because `allowedWhileExpired`
+  // refuses it, and the panel must not offer an action it is about to refuse.
+  // The pause toggle below is hidden for consistency only: that flag IS still
+  // writable while expired, deliberately, since `/setup` and its settings modals
+  // are the exemption that lets a gated admin see and fix their state.
+  if (input.assistant === true && state !== 'expired') {
+    options.push(
+      new StringSelectMenuOptionBuilder()
+        .setLabel('Write a name template for me')
+        .setValue(setupId('assistant'))
+        .setDescription('Describe the room names you want and AVC writes the template')
+        .setEmoji('✨'),
+    );
+  }
+  // Only when there is something to pause. When it is already paused, turning it
+  // back on is the recommended action and sits on the row above.
+  if (input.enabled && state !== 'expired') {
+    options.push(
+      new StringSelectMenuOptionBuilder()
+        .setLabel('Pause on this server')
+        .setValue(setupId('toggle'))
+        .setDescription('Stop making new rooms until you turn it back on')
+        .setEmoji('⏸️'),
+    );
+  }
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(SETUP_SETTINGS_ID)
+    .setPlaceholder('More settings')
+    .setMinValues(1)
+    .setMaxValues(1)
+    .addOptions(...options);
+  return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu);
 }
 
-function memberRows(): ReturnType<typeof rowOf>[] {
-  return [
-    rowOf(
-      linkButton('Learn more', DOCS_URL, '📖'),
-      linkButton('Community support', SUPPORT_URL, '💬'),
-      languageButton(),
-    ),
-  ];
+/**
+ * At most ONE Success button, and never a Primary, a Danger or a disabled one.
+ *
+ * The old panel had five blues, a green and a greyed-out placeholder, so nothing
+ * read as the thing to press. Here the single green button is whatever this
+ * state's answer is, and where the answer is a link (reactivate, re-invite) or
+ * there is no answer, there is no green button at all.
+ */
+function adminRows(input: SetupPanelInput, state: SetupState): PanelRow[] {
+  const actions: ButtonBuilder[] = [];
+
+  if (state === 'expired') {
+    // Nothing else on the panel would do anything, so nothing else is offered.
+    actions.push(linkButton('Reactivate', subscribeUrl(input.guildId), '💳'));
+  } else {
+    if (state === 'grace') {
+      actions.push(linkButton('Manage subscription', subscribeUrl(input.guildId), '💳'));
+    }
+    if (state === 'permissions' && input.inviteUrl) {
+      actions.push(linkButton('Fix permissions', input.inviteUrl, '🔑'));
+    }
+    if (state === 'paused') {
+      actions.push(
+        new ButtonBuilder()
+          .setCustomId(setupId('toggle'))
+          .setLabel('Turn back on')
+          .setEmoji('▶️')
+          .setStyle(ButtonStyle.Success),
+      );
+    }
+    actions.push(
+      new ButtonBuilder()
+        .setCustomId(setupId('create'))
+        .setLabel('New creator channel')
+        .setEmoji('➕')
+        // Steps down wherever the recommended action is something else, so the
+        // green button is never ambiguous.
+        .setStyle(
+          state === 'paused' || state === 'permissions'
+            ? ButtonStyle.Secondary
+            : ButtonStyle.Success,
+        ),
+    );
+    if (input.primaries.length > 0 || input.managed.length > 0) {
+      actions.push(
+        new ButtonBuilder()
+          .setCustomId(setupId('manage'))
+          .setLabel('Edit room names')
+          .setEmoji('🛠️')
+          .setStyle(ButtonStyle.Secondary),
+      );
+    }
+  }
+
+  const rows: PanelRow[] = [rowOf(...actions)];
+  /**
+   * The first-run panel offers exactly one thing, which is the point of it.
+   *
+   * Except when the guild already has managed channels: it is then not a first
+   * run in any real sense, and the "no game" label has **no other entry point in
+   * the product** (there is no slash command for it), so hiding the select would
+   * make a setting those channels' templates depend on unreachable. A guild with
+   * nothing at all loses nothing, since the label has no channel to affect until
+   * it makes one, at which point this state no longer applies.
+   */
+  if (state !== 'firstRun' || input.managed.length > 0) rows.push(settingsRow(input, state));
+  rows.push(linkRow());
+  return rows;
+}
+
+function memberRows(): PanelRow[] {
+  return [linkRow()];
+}
+
+function linkRow(): ActionRowBuilder<ButtonBuilder> {
+  return rowOf(linkButton('Docs', DOCS_URL, '📖'), linkButton('Support server', SUPPORT_URL, '💬'));
 }
 
 function rowOf(...buttons: ButtonBuilder[]): ActionRowBuilder<ButtonBuilder> {
@@ -467,8 +667,30 @@ export function channelPickerRow(command: string): ActionRowBuilder<ChannelSelec
 export function buildChannelPickerMessage(
   command: string,
   prompt: string,
+  opts: { back?: boolean } = {},
 ): InteractionUpdateOptions {
-  return { content: prompt, embeds: [], components: [channelPickerRow(command)] };
+  const components: (
+    | ActionRowBuilder<ChannelSelectMenuBuilder>
+    | ActionRowBuilder<ButtonBuilder>
+  )[] = [channelPickerRow(command)];
+  /**
+   * Only when the picker REPLACED a panel, which is the case that used to
+   * dead-end: `/setup` was gone and nothing brought it back short of running the
+   * command again. Reached from a slash command there is no panel to return to,
+   * so the button would be a lie.
+   */
+  if (opts.back) {
+    components.push(
+      rowOf(
+        new ButtonBuilder()
+          .setCustomId(setupId('open'))
+          .setLabel('Back to setup')
+          .setEmoji('↩️')
+          .setStyle(ButtonStyle.Secondary),
+      ),
+    );
+  }
+  return { content: prompt, embeds: [], components };
 }
 
 /** Parses the command out of a `avc:setup:pick:<command>` channel-select id. */
@@ -502,7 +724,7 @@ export const GENERAL_MODAL_ID = 'avc:setup:label:set';
 export function buildGeneralModal(current?: string): ModalBuilder {
   const input = new TextInputBuilder()
     .setCustomId('label')
-    .setLabel('"No game" label')
+    .setLabel('Shown instead of a game name')
     .setPlaceholder('General')
     .setStyle(TextInputStyle.Short)
     .setRequired(true)
