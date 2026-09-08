@@ -192,7 +192,7 @@ describe('evaluateLeniency — active (over-limit)', () => {
     const decision = evaluateLeniency(
       state({
         authStatus: 'active',
-        billedTier: 'xl',
+        billedTier: 'legendary',
         subscriptionOk: true,
         memberCount: 50,
         samples: samplesAt(50, 40),
@@ -307,12 +307,22 @@ describe('evaluateLeniency — active (dunning backstop)', () => {
   });
 
   it('never mistakes a manually arranged guild (no Paddle row) for a failed payment', () => {
-    // An XXL guild on a bespoke deal is entitled by agreement: a billed tier
-    // with no subscription behind it must not trip the backstop.
+    /**
+     * An Exotic guild on a bespoke deal is entitled by agreement: a billed tier
+     * with no subscription behind it must not trip the backstop.
+     *
+     * **`exotic`, not `mythic`.** This said `xxl`, and phase 7's first pass
+     * remapped the retired ids by ladder position, which put it on `mythic`.
+     * Wrong: `xxl` was the UNBOUNDED top tier and `mythic` has a ceiling of
+     * 300,000, so 2,000,000 members became over-limit and the test started
+     * proving the opposite of its name. `exotic` is the successor by role. The
+     * test caught it, which is the argument for pairing a tier with a member
+     * count the tier can actually hold.
+     */
     const decision = evaluateLeniency(
       state({
         authStatus: 'active',
-        billedTier: 'xxl',
+        billedTier: 'exotic',
         hasSubscription: false,
         subscriptionOk: false,
         memberCount: 2_000_000,
@@ -444,7 +454,7 @@ describe('evaluateLeniency — grace', () => {
 
   it('a subscription covering the size reactivates to active', () => {
     const decision = evaluateLeniency(
-      graceState({ billedTier: 'l', subscriptionOk: true, memberCount: 12_000 }),
+      graceState({ billedTier: 'epic', subscriptionOk: true, memberCount: 12_000 }),
       NOW,
     );
     expect(decision.transition).toMatchObject({ toStatus: 'active' });
@@ -452,7 +462,7 @@ describe('evaluateLeniency — grace', () => {
 
   it('a dunning subscription does NOT reactivate just because size fits', () => {
     const decision = evaluateLeniency(
-      graceState({ billedTier: 'l', subscriptionOk: false, memberCount: 12_000 }),
+      graceState({ billedTier: 'epic', subscriptionOk: false, memberCount: 12_000 }),
       NOW,
     );
     expect(decision.transition).toBeUndefined();

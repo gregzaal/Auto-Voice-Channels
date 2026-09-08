@@ -249,7 +249,7 @@ describe('supporter roles', () => {
     const config = loadConfig({ ...baseEnv, SUPPORT_GUILD_ID: GUILD, SUPPORT_ROLE_M: ROLE });
     expect(config.supporterRoles?.guildId).toBe(GUILD);
     expect(config.supporterRoles?.byTier.m).toBe(ROLE);
-    expect(config.supporterRoles?.byTier.xl).toBeUndefined();
+    expect(config.supporterRoles?.byTier.epicegendary).toBeUndefined();
     expect(config.supporterRoles?.writeSpacingMs).toBe(250);
     expect(config.supporterRoles?.reconcileIntervalHours).toBe(24);
   });

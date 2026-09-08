@@ -3,7 +3,18 @@ import { Collection, DiscordAPIError } from 'discord.js';
 import type { RuntimeFlagsRepository, TierId } from '@avc/core';
 import { SupporterRoles, planRoleChange } from './supporterRoles.js';
 
-const ROLES = { s: 'role-s', m: 'role-m', l: 'role-l', xl: 'role-xl', xxl: 'role-xxl' } as const;
+/**
+ * Keyed by the CURRENT tier ids. It was `{ s, m, l, xl, xxl }`, which phase 7
+ * retired; the ids and the role-id strings have to move together or a test
+ * asks for a tier the fixture has no role for.
+ */
+const ROLES = {
+  s: 'role-s',
+  m: 'role-m',
+  epic: 'role-epic',
+  legendary: 'role-legendary',
+  mythic: 'role-mythic',
+} as const;
 const MANAGED = Object.values(ROLES);
 
 describe('planRoleChange', () => {
@@ -22,14 +33,14 @@ describe('planRoleChange', () => {
 
   it('removes the badge when nothing is owed', () => {
     expect(
-      planRoleChange({ managed: MANAGED, currentRoles: ['role-l'], desired: undefined }),
-    ).toEqual({ add: [], remove: ['role-l'] });
+      planRoleChange({ managed: MANAGED, currentRoles: ['role-epic'], desired: undefined }),
+    ).toEqual({ add: [], remove: ['role-epic'] });
   });
 
   it('swaps on an upgrade rather than stacking', () => {
     expect(
-      planRoleChange({ managed: MANAGED, currentRoles: ['role-s'], desired: 'role-xl' }),
-    ).toEqual({ add: ['role-xl'], remove: ['role-s'] });
+      planRoleChange({ managed: MANAGED, currentRoles: ['role-s'], desired: 'role-legendary' }),
+    ).toEqual({ add: ['role-legendary'], remove: ['role-s'] });
   });
 
   /**
@@ -41,20 +52,23 @@ describe('planRoleChange', () => {
     const plan = planRoleChange({
       managed: MANAGED,
       currentRoles: ['moderator', 'role-s', 'some-colour'],
-      desired: 'role-l',
+      desired: 'role-epic',
     });
-    expect(plan).toEqual({ add: ['role-l'], remove: ['role-s'] });
+    expect(plan).toEqual({ add: ['role-epic'], remove: ['role-s'] });
   });
 
   /** A member who somehow accumulated several badges converges to exactly one. */
   it('collapses duplicates to the desired badge', () => {
     const plan = planRoleChange({
       managed: MANAGED,
-      currentRoles: ['role-s', 'role-m', 'role-xxl'],
+      currentRoles: ['role-s', 'role-m', 'role-mythic'],
       desired: 'role-m',
     });
     expect(plan.add).toEqual([]);
-    expect(plan.remove.sort()).toEqual(['role-s', 'role-xxl']);
+    // Both sides sorted. It compared a sorted result against a hand-ordered
+    // literal, which only matched because the old role names happened to sort
+    // that way, so renaming a fixture role broke a test about duplicates.
+    expect(plan.remove.sort()).toEqual(['role-mythic', 'role-s'].sort());
   });
 
   /** An unmapped tier resolves to no role id, which must not be added blindly. */
@@ -249,21 +263,21 @@ describe('SupporterRoles.reconcile', () => {
   it('adds, swaps and removes in one pass, and leaves matching members alone', async () => {
     const needsAdd = member('u-add');
     const needsSwap = member('u-swap', ['role-s']);
-    const needsRemove = member('u-remove', ['role-xl']);
+    const needsRemove = member('u-remove', ['role-legendary']);
     const correct = member('u-ok', ['role-m']);
     const { sut } = buildSut({
       members: [needsAdd, needsSwap, needsRemove, correct],
       tiers: new Map<string, TierId>([
-        ['u-add', 'l'],
-        ['u-swap', 'xxl'],
+        ['u-add', 'epic'],
+        ['u-swap', 'mythic'],
         ['u-ok', 'm'],
       ]),
     });
 
     await sut.reconcile();
 
-    expect(badges(needsAdd)).toEqual(['role-l']);
-    expect(badges(needsSwap)).toEqual(['role-xxl']);
+    expect(badges(needsAdd)).toEqual(['role-epic']);
+    expect(badges(needsSwap)).toEqual(['role-mythic']);
     expect(badges(needsRemove)).toEqual([]);
     expect(badges(correct)).toEqual(['role-m']);
     expect(correct.roles.add).not.toHaveBeenCalled();
@@ -280,18 +294,18 @@ describe('SupporterRoles.reconcile', () => {
    */
   it('leaves exactly one badge after an upgrade and after a downgrade', async () => {
     const up = member('u-up', ['role-s', 'moderator']);
-    const down = member('u-down', ['role-xxl', 'moderator']);
+    const down = member('u-down', ['role-mythic', 'moderator']);
     const { sut } = buildSut({
       members: [up, down],
       tiers: new Map<string, TierId>([
-        ['u-up', 'xxl'],
+        ['u-up', 'mythic'],
         ['u-down', 's'],
       ]),
     });
 
     await sut.reconcile();
 
-    expect(badges(up)).toEqual(['role-xxl']);
+    expect(badges(up)).toEqual(['role-mythic']);
     expect(badges(down)).toEqual(['role-s']);
     // And the unmanaged role survived both.
     expect(up.roles.cache.has('moderator')).toBe(true);
@@ -335,7 +349,7 @@ describe('SupporterRoles.reconcile', () => {
   it.each(['support.roles_disabled', 'global.pause'])(
     '%s freezes without stripping',
     async (flag) => {
-      const holder = member('u-1', ['role-xl']);
+      const holder = member('u-1', ['role-legendary']);
       const { sut } = buildSut({
         members: [holder],
         tiers: new Map(),
@@ -359,8 +373,8 @@ describe('SupporterRoles.reconcile', () => {
 
   it('reports a role it cannot assign, once per change of state', async () => {
     const { sut, report, guild } = buildSut({ members: [member('u-1')], tiers: new Map() });
-    guild.roles.cache.set('role-xl', {
-      id: 'role-xl',
+    guild.roles.cache.set('role-legendary', {
+      id: 'role-legendary',
       name: 'XL',
       comparePositionTo: () => 1,
     } as never);
@@ -375,7 +389,7 @@ describe('SupporterRoles.reconcile', () => {
 
   it('reports a configured role that does not exist', async () => {
     const { sut, report, guild } = buildSut({ members: [member('u-1')], tiers: new Map() });
-    guild.roles.cache.delete('role-l');
+    guild.roles.cache.delete('role-epic');
 
     await sut.reconcile();
     expect(report).toHaveBeenCalledTimes(1);
@@ -391,12 +405,12 @@ describe('SupporterRoles.reconcile', () => {
       members: [bad, good],
       tiers: new Map<string, TierId>([
         ['u-bad', 'm'],
-        ['u-good', 'l'],
+        ['u-good', 'epic'],
       ]),
     });
 
     await sut.reconcile();
-    expect(badges(good)).toEqual(['role-l']);
+    expect(badges(good)).toEqual(['role-epic']);
     expect(sut.stats.errors).toBe(1);
   });
 });
@@ -404,16 +418,19 @@ describe('SupporterRoles.reconcile', () => {
 describe('SupporterRoles.syncMember', () => {
   it('badges a purchaser who is in the guild', async () => {
     const m = member('u-1');
-    const { sut } = buildSut({ members: [m], tiers: new Map<string, TierId>([['u-1', 'xl']]) });
+    const { sut } = buildSut({
+      members: [m],
+      tiers: new Map<string, TierId>([['u-1', 'legendary']]),
+    });
 
     await sut.syncMember('u-1');
-    expect(badges(m)).toEqual(['role-xl']);
+    expect(badges(m)).toEqual(['role-legendary']);
     expect(sut.stats.eventsReceived).toBe(1);
     expect(sut.stats.eventsApplied).toBe(1);
   });
 
   it('un-badges a purchaser whose subscription has lapsed', async () => {
-    const m = member('u-1', ['role-xl']);
+    const m = member('u-1', ['role-legendary']);
     const { sut } = buildSut({ members: [m], tiers: new Map() });
 
     await sut.syncMember('u-1');
@@ -480,10 +497,10 @@ describe('SupporterRoles.reconcileAfterReconnect', () => {
 
   it('runs when nothing has reconciled yet', async () => {
     const m = member('u-1');
-    const { sut } = buildSut({ members: [m], tiers: new Map<string, TierId>([['u-1', 'l']]) });
+    const { sut } = buildSut({ members: [m], tiers: new Map<string, TierId>([['u-1', 'epic']]) });
 
     await sut.reconcileAfterReconnect();
-    expect(badges(m)).toEqual(['role-l']);
+    expect(badges(m)).toEqual(['role-epic']);
   });
 });
 
@@ -521,14 +538,14 @@ describe('stale-cache hazards', () => {
   /** The same hazard through a swap: two writes, one member, one decision each. */
   it('does not undo a swap it has just made', async () => {
     const m = member('u-1', ['role-s']);
-    const tiers = new Map<string, TierId>([['u-1', 'xl']]);
+    const tiers = new Map<string, TierId>([['u-1', 'legendary']]);
     const { sut } = buildSut({ members: [m], tiers });
 
     await sut.syncMember('u-1');
-    expect(badges(m)).toEqual(['role-xl']);
+    expect(badges(m)).toEqual(['role-legendary']);
 
     await sut.syncMember('u-1');
-    expect(badges(m)).toEqual(['role-xl']);
+    expect(badges(m)).toEqual(['role-legendary']);
   });
 });
 
@@ -559,15 +576,15 @@ describe('reconcile versus the live path', () => {
     const pass = sut.reconcile();
     await Promise.resolve();
 
-    tiers.set('u-1', 'xl'); // they upgrade while the pass is mid-flight
+    tiers.set('u-1', 'legendary'); // they upgrade while the pass is mid-flight
     await sut.syncMember('u-1');
-    expect(badges(m)).toEqual(['role-xl']);
+    expect(badges(m)).toEqual(['role-legendary']);
 
     releaseBulk();
     await pass;
 
     // The pass still believed 's'. It must not have acted on that.
-    expect(badges(m)).toEqual(['role-xl']);
+    expect(badges(m)).toEqual(['role-legendary']);
     expect(sut.stats.deferredToLivePath).toBe(1);
   });
 });
@@ -615,10 +632,10 @@ describe('role usability', () => {
     const m = member('u-1');
     const { sut, guild } = buildSut({
       members: [m],
-      tiers: new Map<string, TierId>([['u-1', 'l']]),
+      tiers: new Map<string, TierId>([['u-1', 'epic']]),
     });
-    guild.roles.cache.set('role-l', {
-      id: 'role-l',
+    guild.roles.cache.set('role-epic', {
+      id: 'role-epic',
       name: 'L',
       managed: true,
       comparePositionTo: () => -1,
@@ -638,10 +655,10 @@ describe('role usability', () => {
     const m = member('u-1');
     const { sut, guild } = buildSut({
       members: [m],
-      tiers: new Map<string, TierId>([['u-1', 'xl']]),
+      tiers: new Map<string, TierId>([['u-1', 'legendary']]),
     });
-    guild.roles.cache.set('role-xl', {
-      id: 'role-xl',
+    guild.roles.cache.set('role-legendary', {
+      id: 'role-legendary',
       name: 'XL',
       managed: false,
       comparePositionTo: () => 1,
@@ -698,7 +715,7 @@ describe('churn and shutdown', () => {
     });
     const { sut } = buildSut({
       members: [m],
-      tiers: new Map<string, TierId>([['u-1', 'xl']]),
+      tiers: new Map<string, TierId>([['u-1', 'legendary']]),
       onSingleLookup: () => gate,
     });
 
@@ -753,11 +770,11 @@ describe('SupporterRoles.start', () => {
     const m = member('u-1');
     const { sut, handlers } = buildSut({
       members: [m],
-      tiers: new Map<string, TierId>([['u-1', 'l']]),
+      tiers: new Map<string, TierId>([['u-1', 'epic']]),
     });
     sut.start();
     handlers.get('guildMemberAdd')?.({ ...m, guild: { id: 'support' } } as never);
-    await vi.waitFor(() => expect(badges(m)).toEqual(['role-l']));
+    await vi.waitFor(() => expect(badges(m)).toEqual(['role-epic']));
     await sut.stop();
   });
 
@@ -767,8 +784,8 @@ describe('SupporterRoles.start', () => {
     const { sut, handlers } = buildSut({
       members: [m, bot],
       tiers: new Map<string, TierId>([
-        ['u-1', 'l'],
-        ['bot-1', 'l'],
+        ['u-1', 'epic'],
+        ['bot-1', 'epic'],
       ]),
     });
     sut.start();

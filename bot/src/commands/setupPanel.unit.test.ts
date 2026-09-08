@@ -131,7 +131,7 @@ describe('formatPlan', () => {
         ...base,
         memberCount: 40,
         status: 'trial',
-        billedTier: 'l',
+        billedTier: 'epic',
         shared: true,
       });
       expect(line).toContain('Free forever');

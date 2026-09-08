@@ -153,7 +153,7 @@ describe('payment prompts deep-link to the guild', () => {
     { key: 'a', kind: 'trial_warning', daysLeft: 7, requiredTier: 's' },
     { key: 'b', kind: 'grace_started', reason: 'trial_expired', daysLeft: 60, requiredTier: 'm' },
     { key: 'c', kind: 'grace_started', reason: 'subscription_lapsed', daysLeft: 60 },
-    { key: 'd', kind: 'grace_started', reason: 'over_limit', requiredTier: 'l', daysLeft: 60 },
+    { key: 'd', kind: 'grace_started', reason: 'over_limit', requiredTier: 'epic', daysLeft: 60 },
     { key: 'e', kind: 'grace_nudge', daysLeft: 12 },
     { key: 'f', kind: 'hard_gate' },
   ];
@@ -193,7 +193,7 @@ describe('copy rules', () => {
       { key: 'a', kind: 'trial_warning', daysLeft: 1, requiredTier: 's' },
       { key: 'b', kind: 'grace_started', reason: 'trial_expired', daysLeft: 60, requiredTier: 'm' },
       { key: 'c', kind: 'grace_started', reason: 'subscription_lapsed', daysLeft: 60 },
-      { key: 'd', kind: 'grace_started', reason: 'over_limit', requiredTier: 'l', daysLeft: 60 },
+      { key: 'd', kind: 'grace_started', reason: 'over_limit', requiredTier: 'epic', daysLeft: 60 },
       { key: 'e', kind: 'grace_nudge', daysLeft: 7 },
       { key: 'f', kind: 'hard_gate' },
       { key: 'g', kind: 'reactivated' },

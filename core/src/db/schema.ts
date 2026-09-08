@@ -450,7 +450,11 @@ export const subscriptions = pgTable(
      * name anywhere else in our schema. A stale name beats a bare snowflake id.
      */
     guildName: text('guild_name'),
-    /** The tier this subscription pays for (`s`/`m`/`l`/`xl`/`xxl`). */
+    /**
+     * The tier this subscription pays for: a `TIER_IDS` value, stored as plain
+     * text with no CHECK, so a write always succeeds and only the read
+     * validates. Retired ids are the hazard rather than unknown ones.
+     */
     tier: text('tier').notNull(),
     /** Paddle subscription status (e.g. active, past_due, canceled). */
     status: text('status').notNull(),

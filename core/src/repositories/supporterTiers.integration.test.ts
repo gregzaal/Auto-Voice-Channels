@@ -67,7 +67,7 @@ describe('SubscriptionRepository.listSupporterTiersFor (integration)', () => {
 
   it('answers only for the ids it was asked about', async () => {
     const userId = await makeUser('100000000000000002');
-    await guildSub({ purchaserUserId: userId, tier: 'l' });
+    await guildSub({ purchaserUserId: userId, tier: 'epic' });
 
     const map = await subs.listSupporterTiersFor(['999999999999999999']);
     expect(map.size).toBe(0);
@@ -82,11 +82,11 @@ describe('SubscriptionRepository.listSupporterTiersFor (integration)', () => {
   it('takes the highest tier when someone holds several subscriptions', async () => {
     const userId = await makeUser('100000000000000003');
     await guildSub({ purchaserUserId: userId, tier: 's' });
-    await guildSub({ purchaserUserId: userId, tier: 'xl' });
+    await guildSub({ purchaserUserId: userId, tier: 'legendary' });
     await guildSub({ purchaserUserId: userId, tier: 'm' });
 
     const map = await subs.listSupporterTiersFor(['100000000000000003']);
-    expect(map.get('100000000000000003')).toBe('xl');
+    expect(map.get('100000000000000003')).toBe('legendary');
   });
 
   it('covers pool subscriptions, which are how nearly everyone buys', async () => {
@@ -95,19 +95,19 @@ describe('SubscriptionRepository.listSupporterTiersFor (integration)', () => {
       id: 'pool-supporter-1',
       ownerUserId: userId,
       name: 'Subscription 1',
-      billedTier: 'l',
+      billedTier: 'epic',
     });
     await subs.upsertForPool({
       poolId: pool.id,
       paddleSubscriptionId: 'sub-pool-1',
       paddleCustomerId: 'cus-pool-1',
       purchaserUserId: userId,
-      tier: 'l',
+      tier: 'epic',
       status: 'active',
     });
 
     const map = await subs.listSupporterTiersFor(['100000000000000004']);
-    expect(map.get('100000000000000004')).toBe('l');
+    expect(map.get('100000000000000004')).toBe('epic');
   });
 
   /**
@@ -138,7 +138,7 @@ describe('SubscriptionRepository.listSupporterTiersFor (integration)', () => {
     const userId = await makeUser('100000000000000012');
     const paddleId = await guildSub({
       purchaserUserId: userId,
-      tier: 'l',
+      tier: 'epic',
       status: 'past_due',
     });
     await subs.recordRefund(paddleId, { status: 'approved', total: '39900' });
@@ -153,7 +153,7 @@ describe('SubscriptionRepository.listSupporterTiersFor (integration)', () => {
    */
   it('excludes a refunded subscription that Paddle still reports as active', async () => {
     const userId = await makeUser('100000000000000006');
-    const paddleId = await guildSub({ purchaserUserId: userId, tier: 'xl' });
+    const paddleId = await guildSub({ purchaserUserId: userId, tier: 'legendary' });
     await subs.recordRefund(paddleId, { status: 'approved', total: '1999' });
 
     const map = await subs.listSupporterTiersFor(['100000000000000006']);
@@ -162,11 +162,11 @@ describe('SubscriptionRepository.listSupporterTiersFor (integration)', () => {
 
   it('keeps the badge while a refund is only requested', async () => {
     const userId = await makeUser('100000000000000007');
-    const paddleId = await guildSub({ purchaserUserId: userId, tier: 'xl' });
+    const paddleId = await guildSub({ purchaserUserId: userId, tier: 'legendary' });
     await subs.recordRefund(paddleId, { status: 'pending_approval', total: '1999' });
 
     const map = await subs.listSupporterTiersFor(['100000000000000007']);
-    expect(map.get('100000000000000007')).toBe('xl');
+    expect(map.get('100000000000000007')).toBe('legendary');
   });
 
   /** Subscriptions predating the purchaser column are unreachable, not crashes. */

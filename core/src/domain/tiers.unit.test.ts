@@ -167,12 +167,29 @@ describe('TIER_IDS against TIERS', () => {
     expect([...PRICED_TIER_IDS, ...ACCEPT_ONLY_TIER_IDS].sort()).toEqual([...TIER_IDS].sort());
   });
 
-  it('carries exactly the RETIRED ids as accept-only after phase 1', () => {
-    // Phase A accepted the four rarity ids a release before TIERS priced them.
-    // Phase 1 has now moved them into TIERS, so the accept-only set flips to
-    // the ids TIERS has dropped; phase 7 empties this list once nothing older
-    // than phase 1 can run. Update it deliberately, one phase at a time.
-    expect([...ACCEPT_ONLY_TIER_IDS]).toEqual(['l', 'xl', 'xxl']);
+  it('has NO accept-only ids, which is the steady state', () => {
+    /**
+     * Phase A accepted the four rarity ids a release before `TIERS` priced
+     * them, phase 1 priced them, and phase 7 (2026-09-08) dropped `l`, `xl` and
+     * `xxl` once every fleet was past phase 1. So the accept set and the priced
+     * set are the same list again.
+     *
+     * **Empty is the state to defend, not a milestone reached.** A non-empty
+     * accept-only set means a repricing is mid-flight, and that is the only
+     * time it should be non-empty: every id in it is one that a read can
+     * encounter and no code can price, which is why both fallbacks around it
+     * lean lenient. If this assertion starts failing, either a repricing began
+     * or somebody widened the accept set without meaning to.
+     *
+     * Retiring these three was safe because all three write vectors were
+     * checked against production first, not reasoned about: zero rows in
+     * `guilds`, `subscriptions` or `member_pools` carried them, both live
+     * subscriptions are stamped `s` and `m` in Paddle so no renewal resolves
+     * one, and zero ACTIVE Paddle prices carry a retired `avc_tier`, so no new
+     * checkout can mint one either.
+     */
+    expect([...ACCEPT_ONLY_TIER_IDS]).toEqual([]);
+    expect([...PRICED_TIER_IDS].sort()).toEqual([...TIER_IDS].sort());
   });
 
   it('isTierId accepts every id and rejects anything else', () => {
@@ -183,6 +200,25 @@ describe('TIER_IDS against TIERS', () => {
   });
 });
 
+/**
+ * Ids this build cannot price, which is what every fallback below is about.
+ *
+ * **Why it is not just `ACCEPT_ONLY_TIER_IDS`.** That array is empty in the
+ * steady state, and phase 7 emptied it, so six tests here started looping zero
+ * times and passing while verifying nothing. An adversarial review caught it.
+ * They are the pin for a real phase-A defect (`tierRank` lenient while
+ * `tierById` still collapsed the same ids to `free`), so going dark between
+ * repricings is exactly when they are least likely to be missed and most
+ * likely to be needed.
+ *
+ * The synthetic entry is a genuinely retired id cast past the type. That is not
+ * a cheat: from the code's point of view an accept-only id IS a string it can
+ * encounter and cannot price, and `tierRank`, `tierById` and `pricedTierById`
+ * all key on "not found in `TIERS`", so it exercises the same branch a real one
+ * does. Real accept-only ids are included too, so a repricing tests both.
+ */
+const UNPRICEABLE_IDS: readonly TierId[] = [...ACCEPT_ONLY_TIER_IDS, 'l' as unknown as TierId];
+
 describe('tierRank', () => {
   it('ranks the priced tiers ascending, matching TIERS order', () => {
     const ranks = PRICED_TIER_IDS.map(tierRank);
@@ -190,8 +226,8 @@ describe('tierRank', () => {
     expect(new Set(ranks).size).toBe(ranks.length);
   });
 
-  it('ranks an accept-only tier past every priced one', () => {
-    for (const id of ACCEPT_ONLY_TIER_IDS) {
+  it('ranks an unpriceable tier past every priced one', () => {
+    for (const id of UNPRICEABLE_IDS) {
       for (const priced of PRICED_TIER_IDS) {
         expect(tierRank(id)).toBeGreaterThan(tierRank(priced));
       }
@@ -205,8 +241,8 @@ describe('tierRank', () => {
    * never read as over limit: under-escalating for one release beats telling a
    * paying customer they have outgrown the plan they just bought.
    */
-  it('never reads an accept-only billed tier as over limit', () => {
-    for (const billed of ACCEPT_ONLY_TIER_IDS) {
+  it('never reads an unpriceable billed tier as over limit', () => {
+    for (const billed of UNPRICEABLE_IDS) {
       for (const tier of TIERS) {
         expect(compareTiers(tier.id, billed)).toBeLessThanOrEqual(0);
       }
@@ -248,7 +284,7 @@ describe('supporter role keys', () => {
 describe('accept-only fallbacks point the lenient way', () => {
   it('tierById falls back to the largest priced tier, never free', () => {
     const largest = TIERS[TIERS.length - 1]!;
-    for (const id of ACCEPT_ONLY_TIER_IDS) {
+    for (const id of UNPRICEABLE_IDS) {
       expect(tierById(id)).toBe(largest);
       expect(tierById(id).id).not.toBe('free');
       // The old fallback was `free`, whose ceiling of 100 is what made every
@@ -263,23 +299,33 @@ describe('accept-only fallbacks point the lenient way', () => {
    * fallback that ceiling was 100, so a guild of any real size could never
    * leave `grace` -- silently, and forever.
    */
-  it('leaves a real guild under the ceiling of an accept-only billed tier', () => {
-    for (const id of ACCEPT_ONLY_TIER_IDS) {
+  it('leaves a real guild under the ceiling of an unpriceable billed tier', () => {
+    for (const id of UNPRICEABLE_IDS) {
       expect(tierById(id).maxExclusive).toBe(Number.POSITIVE_INFINITY);
     }
   });
 
   it('pricedTierById is the honest form and returns null instead', () => {
-    for (const id of ACCEPT_ONLY_TIER_IDS) expect(pricedTierById(id)).toBeNull();
+    for (const id of UNPRICEABLE_IDS) expect(pricedTierById(id)).toBeNull();
     for (const tier of TIERS) expect(pricedTierById(tier.id)).toBe(tier);
   });
 
   it('advises only on supporter keys that can badge somebody', () => {
-    // The env reader stays wide so a retired tier keeps its badge; the advice
-    // string must not send an operator to set a key that does nothing.
+    /**
+     * The real array here, not {@link UNPRICEABLE_IDS}, because this is the one
+     * property retirement genuinely changes rather than leaves intact: while an
+     * id is accept-only the env reader stays wide so a customer stamped with it
+     * keeps their badge, and retiring the id is precisely what drops its key.
+     * A synthetic id would assert the pre-retirement rule forever.
+     */
     for (const id of ACCEPT_ONLY_TIER_IDS) {
       expect(SUPPORTER_ROLE_ADVICE_KEYS).not.toContain(envKeyForSupporterRole(id));
       expect(SUPPORTER_ROLE_ENV_KEYS).toContain(envKeyForSupporterRole(id));
+    }
+    // In the steady state the two lists coincide: every accepted tier can be
+    // badged, so there is no key an operator would be sent to set in vain.
+    if (ACCEPT_ONLY_TIER_IDS.length === 0) {
+      expect([...SUPPORTER_ROLE_ADVICE_KEYS].sort()).toEqual([...SUPPORTER_ROLE_ENV_KEYS].sort());
     }
     expect(SUPPORTER_ROLE_ADVICE_KEYS).toContain('SUPPORT_ROLE_S');
   });

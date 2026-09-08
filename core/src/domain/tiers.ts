@@ -26,24 +26,21 @@
  * never gets entitlement. So every instance must accept an id before any
  * instance writes it, and this list is how.
  *
- * `epic`/`legendary`/`mythic`/`exotic` are therefore accepted here a release
- * before {@link TIERS} prices them, and `l`/`xl`/`xxl` stay accepted a release
- * after it stops (phase 7 retires them). **Append only** -- never insert, and
- * never reorder: nothing derives size from this array's order (see
- * {@link tierRank}), but `z.enum` and the admin surfaces both read it.
+ * The rarity ids were accepted here a release before {@link TIERS} priced
+ * them, and `l`/`xl`/`xxl` stayed accepted a release after it stopped. Phase 7
+ * dropped those three on 2026-09-08, so the accept set and the priced set are
+ * the same list again, which is the steady state.
+ *
+ * **Append only** -- never insert, and never reorder: nothing derives size from
+ * this array's order (see {@link tierRank}), but `z.enum` and the admin
+ * surfaces both read it. **And never SHRINK it without checking the three write
+ * vectors first**, because removal is the dangerous direction: every read is a
+ * `z.enum` with no `.catch()`, so `.parse` throws on the entitlement hot path
+ * and `listBatch` silently drops the row. Retiring the three above was preceded
+ * by measuring that no stored row carried them, that no live subscription was
+ * stamped with one in Paddle, and that no ACTIVE Paddle price could mint one.
  */
-export const TIER_IDS = [
-  'free',
-  's',
-  'm',
-  'l',
-  'xl',
-  'xxl',
-  'epic',
-  'legendary',
-  'mythic',
-  'exotic',
-] as const;
+export const TIER_IDS = ['free', 's', 'm', 'epic', 'legendary', 'mythic', 'exotic'] as const;
 export type TierId = (typeof TIER_IDS)[number];
 
 /** Whether an arbitrary value is a tier id this build accepts. */
@@ -89,9 +86,9 @@ export interface Tier {
  * yearly figures: $19 shows as $1.58, which the display decision forbids.
  *
  * `s` and `m` keep their ids: their member ranges are unchanged and only the
- * label and price move, so renaming them would be a data migration on three
- * rows for cosmetics. `l`, `xl` and `xxl` are gone from the ladder but stay in
- * {@link TIER_IDS} until phase 7, because rows still reference them.
+ * label and price moved, so renaming them would have been a data migration on
+ * three rows for cosmetics. `l`, `xl` and `xxl` are gone from both this table
+ * and {@link TIER_IDS} as of phase 7.
  */
 export const TIERS: readonly Tier[] = [
   { id: 'free', label: 'Free', maxExclusive: 100, pricePerYear: 0, pricePerMonth: null },
@@ -177,8 +174,14 @@ export const ACCEPT_ONLY_TIER_IDS: readonly TierId[] = TIER_IDS.filter(
  * Tiers that can carry a supporter role: every accepted id except `free`.
  *
  * `free` has no entry by construction. It is not a purchase, and a "supporter"
- * role on it would be the one badge that means nothing. Retired ids stay in the
- * list so a customer still stamped with one keeps their badge until phase 7.
+ * role on it would be the one badge that means nothing.
+ *
+ * Deriving from {@link TIER_IDS} rather than from `TIERS` is deliberate: while
+ * an id is accept-only, a customer stamped with it keeps their badge. The
+ * corollary bit when phase 7 retired three ids, and is worth knowing before
+ * retiring any more: dropping an id here drops its `SUPPORT_ROLE_<ID>` env key,
+ * so the bot stops MANAGING that Discord role and can no longer strip it from
+ * anyone still holding it. Check who holds it before retiring, not after.
  */
 export const SUPPORTER_ROLE_TIER_IDS = TIER_IDS.filter(
   (id): id is Exclude<TierId, 'free'> => id !== 'free',

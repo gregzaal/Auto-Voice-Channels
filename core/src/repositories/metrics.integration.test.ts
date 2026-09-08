@@ -299,14 +299,14 @@ describe('MetricsRepository (integration)', () => {
           guildId: 'g-3',
           paddleSubscriptionId: 'sub-3',
           paddleCustomerId: 'cus-3',
-          tier: 'l',
+          tier: 'epic',
           status: 'past_due',
         },
         {
           guildId: 'g-4',
           paddleSubscriptionId: 'sub-4',
           paddleCustomerId: 'cus-4',
-          tier: 'l',
+          tier: 'epic',
           status: 'active',
           refundStatus: 'approved',
         },
@@ -314,7 +314,7 @@ describe('MetricsRepository (integration)', () => {
           guildId: 'g-5',
           paddleSubscriptionId: 'sub-5',
           paddleCustomerId: 'cus-5',
-          tier: 'l',
+          tier: 'epic',
           status: 'active',
           refundStatus: 'requested',
         },
@@ -322,7 +322,7 @@ describe('MetricsRepository (integration)', () => {
 
       await metrics.collectGauges(HOUR);
       expect(await readHourly(METRICS.SUBSCRIPTIONS_ACTIVE)).toEqual([
-        { fleet: METRIC_SHARED_SCOPE, instance: '', key: 'l', value: 1 },
+        { fleet: METRIC_SHARED_SCOPE, instance: '', key: 'epic', value: 1 },
         { fleet: METRIC_SHARED_SCOPE, instance: '', key: 'm', value: 2 },
       ]);
     });

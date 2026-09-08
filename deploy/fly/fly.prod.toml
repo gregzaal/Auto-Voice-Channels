@@ -95,17 +95,35 @@ primary_region = "iad"
   # bots are in the support guild, and two writers would fight over one member's
   # roles. Config is the whole election.
   SUPPORT_GUILD_ID = "601015720200896512"
-  SUPPORT_ROLE_S = "1542449852992987146"
-  SUPPORT_ROLE_M = "1542450265217695834"
-  SUPPORT_ROLE_L = "1542450335056928788"
-  SUPPORT_ROLE_XL = "1542450395371020320"
-  # XXL is mapped and currently unreachable, deliberately rather than by
-  # oversight. It is not a checkout tier (`CHECKOUT_TIERS` is s/m/l/xl), so no
+  # One key per tier, named by `envKeyForSupporterRole` (SUPPORT_ROLE_<ID>), so
+  # the ids here are the rarity ladder's and `s`/`m` keep their short ids
+  # because renaming those two would have been a data migration for cosmetics.
+  #
+  # THREE OF THESE ROLES WERE RENAMED AND REUSED rather than recreated (owner,
+  # 2026-09-08), which is why some ids look older than the tier: the Discord
+  # role that used to read "L" is now "Epic", "XL" is now "Mythic", and "XXL" is
+  # now "Exotic". Only Legendary is a new role. That matters for one reason: a
+  # reused role keeps whoever already held it, so a member badged under the old
+  # ladder is silently re-badged as the new tier the same role now means. It was
+  # safe here because the support guild was measured first: 1,013 members, and
+  # the only supporter role held by anyone was Uncommon, held once.
+  SUPPORT_ROLE_S = "1542449852992987146"          # Uncommon
+  SUPPORT_ROLE_M = "1542450265217695834"          # Rare
+  SUPPORT_ROLE_EPIC = "1542450335056928788"       # was the "L" role
+  SUPPORT_ROLE_LEGENDARY = "1546805917880680468"  # new
+  SUPPORT_ROLE_MYTHIC = "1542450395371020320"     # was the "XL" role
+  # Exotic is mapped and unreachable automatically, deliberately rather than by
+  # oversight, exactly as XXL was before it: it has no `pricePerYear`, so no
   # Paddle price resolves to it and no `subscriptions` row can carry
-  # `tier = 'xxl'`. A bespoke XXL customer is entitled by agreement with no
-  # Paddle row at all, so they have to be badged by hand. Kept mapped so the
-  # config is already right if that ever changes.
-  SUPPORT_ROLE_XXL = "1542450467349594163"
+  # `tier = 'exotic'`. A bespoke Exotic customer is entitled by agreement with
+  # no Paddle row at all, so they are badged by hand. Kept mapped so the config
+  # is already right if that ever changes.
+  SUPPORT_ROLE_EXOTIC = "1542450467349594163"     # was the "XXL" role
+  #
+  # After the next prod deploy, check `/diagnostics` -> `supporterRoles`. The
+  # bot's own role must sit ABOVE all six or every write is a silent 403, and
+  # Legendary is newly created, so it is the one whose position nobody has
+  # confirmed. `unusableRoles` answers it without guessing.
 
 [deploy]
   strategy = "rolling"

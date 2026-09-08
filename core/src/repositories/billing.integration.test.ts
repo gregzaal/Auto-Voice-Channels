@@ -157,13 +157,13 @@ describe('billing repositories (integration)', () => {
         guildId: 'sub-1',
         paddleSubscriptionId: 'psub_1',
         paddleCustomerId: 'pcus_1',
-        tier: 'l',
+        tier: 'epic',
         status: 'past_due',
       });
-      expect(updated.tier).toBe('l');
+      expect(updated.tier).toBe('epic');
       expect(updated.status).toBe('past_due');
       expect(await subs.getByPaddleId('psub_1')).toMatchObject({ guildId: 'sub-1' });
-      expect(await subs.getByGuild('sub-1')).toMatchObject({ tier: 'l' });
+      expect(await subs.getByGuild('sub-1')).toMatchObject({ tier: 'epic' });
     });
 
     /**
