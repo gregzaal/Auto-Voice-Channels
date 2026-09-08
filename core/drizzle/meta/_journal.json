@@ -281,6 +281,13 @@
       "when": 1788441067365,
       "tag": "0039_late_strong_guy",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1788853854261,
+      "tag": "0040_same_mimic",
+      "breakpoints": true
     }
   ]
 }

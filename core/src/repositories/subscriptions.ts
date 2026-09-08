@@ -37,6 +37,8 @@ export const subscriptionRowSchema = z.object({
   tier: z.enum(TIER_IDS),
   status: z.string(),
   currentPeriodEnd: z.date().nullable(),
+  /** Paddle's billing interval (`month`/`year`); null on pre-column rows. */
+  billingInterval: z.string().nullish(),
   /** Actually-charged total (minor units, tax-inclusive). See schema.ts. */
   chargedTotal: z.string().nullish(),
   /** The transaction that bought the current period. See schema.ts for why it matters. */
@@ -120,6 +122,8 @@ export interface UpsertSubscriptionInput {
   tier: SubscriptionRow['tier'];
   status: string;
   currentPeriodEnd?: Date | null;
+  /** Paddle's `billing_cycle.interval`; omitted leaves the stored value alone. */
+  billingInterval?: string | null;
   scheduledChangeAction?: string | null;
   scheduledChangeAt?: Date | null;
   price?: string | null;
@@ -145,6 +149,8 @@ export interface UpsertPoolSubscriptionInput {
   tier: SubscriptionRow['tier'];
   status: string;
   currentPeriodEnd?: Date | null;
+  /** Paddle's `billing_cycle.interval`; a pool can be billed monthly too. */
+  billingInterval?: string | null;
   scheduledChangeAction?: string | null;
   scheduledChangeAt?: Date | null;
   price?: string | null;
@@ -375,6 +381,7 @@ export class SubscriptionRepository {
       tier: input.tier,
       status: input.status,
       currentPeriodEnd: input.currentPeriodEnd ?? null,
+      billingInterval: input.billingInterval ?? null,
       // Straight overwrite, NOT coalesced like purchaser/guildName: revoking a
       // scheduled cancellation is reported as `scheduled_change: null`, and
       // keeping the old value would leave the UI claiming it still ends.
@@ -539,6 +546,7 @@ export class SubscriptionRepository {
       tier: input.tier,
       status: input.status,
       currentPeriodEnd: input.currentPeriodEnd ?? null,
+      billingInterval: input.billingInterval ?? null,
       scheduledChangeAction: input.scheduledChangeAction ?? null,
       scheduledChangeAt: input.scheduledChangeAt ?? null,
       price: input.price ?? null,

@@ -31,6 +31,13 @@ export const RUNTIME_FLAGS = {
   BILLING_ADVANCE_DISABLED: 'billing.advance_disabled',
   /** Leniency grace-window length in days (number; default 60 — monetization.md §4). */
   BILLING_GRACE_DAYS: 'billing.grace_days',
+  /**
+   * Grace window for MONTHLY subscriptions, in days (default 14,
+   * `plans/pricing-ladder.md` §6.3). `billing.grace_days` keeps sizing the
+   * annual window, and an unknown interval falls back to it, so setting this
+   * above that one is possible and means what it says.
+   */
+  BILLING_GRACE_DAYS_MONTHLY: 'billing.grace_days_monthly',
   /** Consecutive daily over-limit samples before the grace clock starts (number; default 7). */
   BILLING_UPGRADE_BREACH_SAMPLES: 'billing.upgrade_breach_samples',
   /** Consecutive daily under-limit samples before a downgrade is offered (number; default 30). */

@@ -646,6 +646,7 @@ export class BillingReconciler {
       billedTier: pool.billedTier,
       hasSubscription: subscription !== undefined,
       subscriptionOk: subscription ? subscriptionInGoodStanding(subscription) : false,
+      billingInterval: subscription?.billingInterval,
       memberCount: null,
       pooledMemberCount: pooledSum,
       samples: meta.samples,
@@ -854,6 +855,10 @@ export class BillingReconciler {
     return {
       ...DEFAULT_LENIENCY_CONFIG,
       graceDays: num(RUNTIME_FLAGS.BILLING_GRACE_DAYS, DEFAULT_LENIENCY_CONFIG.graceDays),
+      graceDaysMonthly: num(
+        RUNTIME_FLAGS.BILLING_GRACE_DAYS_MONTHLY,
+        DEFAULT_LENIENCY_CONFIG.graceDaysMonthly,
+      ),
       upgradeBreachSamples: num(
         RUNTIME_FLAGS.BILLING_UPGRADE_BREACH_SAMPLES,
         DEFAULT_LENIENCY_CONFIG.upgradeBreachSamples,
@@ -1295,6 +1300,9 @@ export class BillingReconciler {
       // Gates the trial-resume branch only (§6.5a). A missing row reads as
       // charged, which is the direction that cannot give service away.
       subscriptionNeverCharged: subscriptionNeverCharged(subscription),
+      // Sizes the grace window (§6.3). Absent reads as annual, so a
+      // pre-column row keeps the 60 days it has always had.
+      billingInterval: subscription?.billingInterval,
       memberCount: row.memberCount,
       samples: meta.samples,
       guildCreatedAt: row.createdAt,

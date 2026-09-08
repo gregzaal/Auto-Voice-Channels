@@ -30,6 +30,16 @@ import {
 export interface LeniencyConfig {
   /** Grace window length in days (runtime-flags tunable; default 60). */
   graceDays: number;
+  /**
+   * Grace window for a MONTHLY subscription (default 14,
+   * `plans/pricing-ladder.md` §6.3).
+   *
+   * 60 days is sized for an annual subscription. On a monthly one it is two
+   * free months after a single paid month, which is the whole reason this
+   * exists. Read only through {@link graceDaysFor}, never directly, so the two
+   * drivers of the ladder cannot pick different windows for the same lapse.
+   */
+  graceDaysMonthly: number;
   /** Consecutive daily over-limit samples before the grace clock starts (default 7). */
   upgradeBreachSamples: number;
   /** Consecutive daily under-limit samples before a downgrade is offered (default 30). */
@@ -50,6 +60,7 @@ export interface LeniencyConfig {
 
 export const DEFAULT_LENIENCY_CONFIG: LeniencyConfig = {
   graceDays: 60,
+  graceDaysMonthly: 14,
   upgradeBreachSamples: 7,
   downgradeDropSamples: 30,
   warnDaysBefore: [30, 7, 1],
@@ -94,6 +105,17 @@ export interface LeniencyState {
    * anybody whose renewal fails inside their own trial window.
    */
   subscriptionNeverCharged?: boolean | undefined;
+  /**
+   * The subscription's billing interval, from `subscriptions.billing_interval`
+   * (Paddle's own `billing_cycle.interval`).
+   *
+   * Deliberately a loose `string` rather than a union: it arrives from a `text`
+   * column and from a third-party payload, and the one thing this must never do
+   * is throw or narrow wrongly on a value neither side anticipated.
+   * {@link graceDaysFor} recognises exactly `'month'` and treats everything
+   * else, absent included, as annual.
+   */
+  billingInterval?: string | null | undefined;
   /** Latest member-count sample (a hint — transitions re-validate via REST). */
   memberCount: number | null;
   /**
@@ -251,6 +273,36 @@ function alreadySent(state: LeniencyState, key: string): boolean {
  * test, which is how they would drift. Which driver sees a lapse first is a
  * race: the hourly tick and the Paddle webhook both act on it.
  */
+/**
+ * How long a grace window should be for THIS subscription
+ * (`plans/pricing-ladder.md` §6.3).
+ *
+ * **Absent or unrecognised means ANNUAL, and that direction is the whole safety
+ * of it.** Reading an unknown interval as monthly would gate a customer who
+ * paid for a year 46 days early, which is service they have already bought.
+ * Reading it as annual costs at most two months of a $3-to-$32 subscription,
+ * and Paddle's dunning usually resolves or cancels inside two weeks anyway. So
+ * the fallback is the generous one.
+ *
+ * That is the opposite polarity from `subscriptionNeverCharged`, whose absence
+ * means "assume it charged", and the two only look inconsistent until the
+ * shared rule is stated: **a default must never take service away from someone
+ * who might have paid for it.** For the charge markers that means assuming
+ * money moved. Here it means assuming the longer window.
+ *
+ * Exported because both drivers of the ladder need the same answer.
+ * {@link evaluateActive} and `transitionFor` in the web app's `paddle/sync.ts`
+ * both open grace windows, and whichever sees a lapse first decides, so a
+ * per-caller copy of this arithmetic is a race with two outcomes rather than
+ * one rule.
+ */
+export function graceDaysFor(
+  state: { billingInterval?: string | null | undefined },
+  config: { graceDays: number; graceDaysMonthly: number },
+): number {
+  return state.billingInterval === 'month' ? config.graceDaysMonthly : config.graceDays;
+}
+
 export function resumesUnconsumedTrial(
   input: {
     authExpiresAt?: Date | null | undefined;
@@ -313,11 +365,14 @@ function evaluateActive(state: LeniencyState, now: Date, config: LeniencyConfig)
         notifications: [],
       };
     }
+    // Sized to what they actually bought (§6.3). The notification quotes the
+    // same number, so the message and the deadline cannot disagree.
+    const lapsedGraceDays = graceDaysFor(state, config);
     return {
       transition: {
         toStatus: 'grace',
         reason: 'subscription_lapsed',
-        graceUntil: addDays(now, config.graceDays),
+        graceUntil: addDays(now, lapsedGraceDays),
         requiresCountValidation: false,
       },
       notifications: [
@@ -326,7 +381,7 @@ function evaluateActive(state: LeniencyState, now: Date, config: LeniencyConfig)
           kind: 'grace_started',
           reason: 'subscription_lapsed',
           requiredTier: required.id,
-          daysLeft: config.graceDays,
+          daysLeft: lapsedGraceDays,
         },
       ],
     };
@@ -345,6 +400,22 @@ function evaluateActive(state: LeniencyState, now: Date, config: LeniencyConfig)
       config.upgradeBreachSamples,
     )
   ) {
+    /**
+     * **Flat `graceDays`, and NOT interval-aware. Do not "finish the job" by
+     * routing this through {@link graceDaysFor}.**
+     *
+     * It was written that way and an adversarial review caught it. The
+     * commercial argument is real (60 days of over-limit grace on a monthly
+     * subscription is two months of serving a tier the customer is not paying
+     * for) and it loses to a promise already in force: Terms §5 and
+     * `/docs/billing` both say that if servers grow past a tier's ceiling
+     * "nothing changes for 60 days", with no carve-out for how often you are
+     * billed. `plans/pricing-ladder.md` §6.3 asks only for the PAYMENT-FAILURE
+     * window, and §6.4 quotes that same 60-day sentence as what the code does.
+     *
+     * Shortening this needs the Terms sentence changed first, which is a change
+     * to a live agreement rather than a code decision.
+     */
     const graceUntil = addDays(now, config.graceDays);
     return {
       transition: {
@@ -558,7 +629,7 @@ function evaluateGrace(state: LeniencyState, now: Date, config: LeniencyConfig):
       transition: {
         toStatus: 'grace',
         reason: 'grace_backfill',
-        graceUntil: addDays(now, config.graceDays),
+        graceUntil: addDays(now, graceDaysFor(state, config)),
         requiresCountValidation: false,
       },
       notifications: [],
@@ -598,7 +669,15 @@ function evaluateGrace(state: LeniencyState, now: Date, config: LeniencyConfig):
   // Weekly nudge while in grace. The key is stable; the job refreshes its
   // timestamp on every delivery, so "already sent" here means "sent recently".
   const lastNudge = state.notifications['grace_nudge'];
-  const graceStart = addDays(state.graceUntil, -config.graceDays);
+  /**
+   * The window this guild actually got, not the annual one. Reading
+   * `config.graceDays` here put `graceStart` 46 days in the PAST for a guild on
+   * a 14-day window, so `lastTouch` was already older than the nudge interval
+   * and the first weekly nudge fired on the very next hourly tick. Found by an
+   * adversarial review, three lines after the docstring that says this field is
+   * only ever read through {@link graceDaysFor}.
+   */
+  const graceStart = addDays(state.graceUntil, -graceDaysFor(state, config));
   const lastTouch = lastNudge ? Date.parse(lastNudge) : graceStart.getTime();
   if (!Number.isNaN(lastTouch) && now.getTime() - lastTouch >= config.graceNudgeDays * DAY_MS) {
     return {

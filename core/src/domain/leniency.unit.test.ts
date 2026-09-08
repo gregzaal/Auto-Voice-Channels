@@ -3,6 +3,7 @@ import type { MemberCountSample } from './billing.js';
 import {
   DEFAULT_LENIENCY_CONFIG,
   evaluateLeniency,
+  graceDaysFor,
   guildFloor,
   resumesUnconsumedTrial,
   shouldGrantPoolExit,
@@ -910,5 +911,174 @@ describe('subscriptionNeverCharged', () => {
     // that meets it is the webhook, where a lost row is a real possibility.
     expect(subscriptionNeverCharged(null)).toBe(false);
     expect(subscriptionNeverCharged(undefined)).toBe(false);
+  });
+});
+
+/**
+ * Grace sized to the billing interval (`plans/pricing-ladder.md` §6.3, phase 7).
+ *
+ * 60 days is an annual figure. On a monthly subscription it is two free months
+ * after a single paid month, which is what this closes. The interval comes from
+ * `subscriptions.billing_interval`, written from Paddle's own
+ * `billing_cycle.interval`.
+ *
+ * The fallback direction is the part worth protecting. An unknown interval must
+ * read as ANNUAL, because gating someone who paid for a year after 14 days
+ * takes away service they already bought, while giving a monthly subscriber 60
+ * days costs at most two months of a $3-to-$32 subscription.
+ */
+describe('graceDaysFor', () => {
+  const config = { graceDays: 60, graceDaysMonthly: 14 };
+
+  it('gives a monthly subscription the monthly window', () => {
+    expect(graceDaysFor({ billingInterval: 'month' }, config)).toBe(14);
+  });
+
+  it('gives a yearly subscription the annual window', () => {
+    expect(graceDaysFor({ billingInterval: 'year' }, config)).toBe(60);
+  });
+
+  it('treats an absent interval as annual, never as monthly', () => {
+    // Every row written before the column existed, which is both live
+    // subscriptions today. Reading these as monthly would gate two paid-up
+    // customers 46 days early.
+    expect(graceDaysFor({}, config)).toBe(60);
+    expect(graceDaysFor({ billingInterval: null }, config)).toBe(60);
+    expect(graceDaysFor({ billingInterval: undefined }, config)).toBe(60);
+  });
+
+  it('treats an interval it does not recognise as annual', () => {
+    // Paddle's own type admits `day` and `week`, which we never sell. The
+    // column is plain text, so anything can arrive. Only 'month' is monthly.
+    expect(graceDaysFor({ billingInterval: 'week' }, config)).toBe(60);
+    expect(graceDaysFor({ billingInterval: 'MONTH' }, config)).toBe(60);
+    expect(graceDaysFor({ billingInterval: '' }, config)).toBe(60);
+  });
+});
+
+describe('evaluateActive grace windows by interval', () => {
+  /** An active guild whose subscription has stopped paying its way. */
+  function lapsed(billingInterval?: string | null) {
+    return evaluateLeniency(
+      state({
+        authStatus: 'active',
+        authExpiresAt: null,
+        billedTier: 'm',
+        hasSubscription: true,
+        subscriptionOk: false,
+        // Excludes the trial-resume rung, so this reaches the grace branch.
+        subscriptionNeverCharged: false,
+        memberCount: 5_000,
+        samples: samplesAt(5_000, 10),
+        ...(billingInterval === undefined ? {} : { billingInterval }),
+      }),
+      NOW,
+      DEFAULT_LENIENCY_CONFIG,
+    );
+  }
+
+  it('opens a 14-day window for a lapsed monthly subscription', () => {
+    const decision = lapsed('month');
+    expect(decision.transition?.toStatus).toBe('grace');
+    expect(decision.transition?.graceUntil?.getTime()).toBe(NOW.getTime() + days(14));
+  });
+
+  it('opens a 60-day window for a lapsed yearly subscription', () => {
+    expect(lapsed('year').transition?.graceUntil?.getTime()).toBe(NOW.getTime() + days(60));
+  });
+
+  it('opens a 60-day window when the interval is unknown', () => {
+    expect(lapsed().transition?.graceUntil?.getTime()).toBe(NOW.getTime() + days(60));
+  });
+
+  it('quotes the same number in the notification as it wrote to the deadline', () => {
+    /**
+     * The message and the deadline are read by different people at different
+     * times, and a 60-day promise against a 14-day window is worse than either
+     * number alone. They come from one local now, so they cannot disagree.
+     */
+    const decision = lapsed('month');
+    const started = decision.notifications.find((n) => n.kind === 'grace_started');
+    expect(started?.daysLeft).toBe(14);
+    expect(decision.transition?.graceUntil?.getTime()).toBe(
+      NOW.getTime() + days(started?.daysLeft ?? 0),
+    );
+  });
+
+  it('leaves the OVER-LIMIT window flat at 60 days, whatever the interval', () => {
+    /**
+     * Deliberate, and the opposite of what this test first asserted. Terms §5
+     * and `/docs/billing` both promise that growing past a tier's ceiling
+     * changes nothing for 60 days, with no carve-out for billing frequency, and
+     * §6.3 asks only for the payment-failure window. The commercial argument for
+     * shortening it is real and loses to a promise already in force, so
+     * shortening it starts with the Terms sentence, not with this branch.
+     */
+    const decision = evaluateLeniency(
+      state({
+        authStatus: 'active',
+        authExpiresAt: null,
+        billedTier: 's',
+        hasSubscription: true,
+        subscriptionOk: true,
+        billingInterval: 'month',
+        memberCount: 5_000,
+        samples: samplesAt(5_000, 10),
+      }),
+      NOW,
+      DEFAULT_LENIENCY_CONFIG,
+    );
+    expect(decision.transition?.reason).toBe('over_limit');
+    expect(decision.transition?.graceUntil?.getTime()).toBe(NOW.getTime() + days(60));
+  });
+
+  it('does not fire the weekly nudge immediately on a short window', () => {
+    /**
+     * The nudge interval is anchored on when grace STARTED, derived by
+     * subtracting the window from its deadline. Subtracting the annual window
+     * from a 14-day deadline puts that anchor 46 days in the past, so the first
+     * weekly nudge fires on the very next hourly tick. Found by an adversarial
+     * review; the message content was right and only its timing was wrong,
+     * which is why nothing else caught it.
+     */
+    const decision = evaluateLeniency(
+      state({
+        authStatus: 'grace',
+        authExpiresAt: new Date(NOW.getTime() - days(1)),
+        // One day into a 14-day monthly window.
+        graceUntil: new Date(NOW.getTime() + days(13)),
+        billedTier: 'm',
+        hasSubscription: true,
+        subscriptionOk: false,
+        billingInterval: 'month',
+        memberCount: 5_000,
+        samples: samplesAt(5_000, 10),
+        notifications: { 'grace_started:subscription_lapsed': NOW.toISOString() },
+      }),
+      NOW,
+      DEFAULT_LENIENCY_CONFIG,
+    );
+    expect(decision.notifications.find((n) => n.kind === 'grace_nudge')).toBeUndefined();
+  });
+
+  it('leaves a TRIAL expiry on the annual window, since no subscription exists', () => {
+    /**
+     * `evaluateTrial`'s grace is not a payment failure and there is no interval
+     * to read, so it keeps `graceDays`. A monthly-shaped window there would
+     * shorten the runway of a server that has never paid anything.
+     */
+    const decision = evaluateLeniency(
+      state({
+        authStatus: 'trial',
+        authExpiresAt: new Date(NOW.getTime() - days(1)),
+        memberCount: 5_000,
+        samples: samplesAt(5_000, 10),
+        billingInterval: 'month',
+      }),
+      NOW,
+      DEFAULT_LENIENCY_CONFIG,
+    );
+    expect(decision.transition?.toStatus).toBe('grace');
+    expect(decision.transition?.graceUntil?.getTime()).toBe(NOW.getTime() + days(60));
   });
 });

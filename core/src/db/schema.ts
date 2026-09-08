@@ -456,6 +456,17 @@ export const subscriptions = pgTable(
     status: text('status').notNull(),
     currentPeriodEnd: timestamp('current_period_end', { withTimezone: true }),
     /**
+     * Paddle's `billing_cycle.interval` for the recurring item: `month` or
+     * `year` (`plans/pricing-ladder.md` §6.3).
+     *
+     * The grace window is sized from it, because 60 days is an annual figure
+     * and on a monthly subscription it is two free months after one paid month.
+     * Nullable and plain `text` on purpose: every row that predates this column
+     * has no interval, and `graceDaysFor` reads absence as annual, which is the
+     * direction that cannot gate a customer who paid for a year 46 days early.
+     */
+    billingInterval: text('billing_interval'),
+    /**
      * Paddle's pending `scheduled_change`, if any: `cancel`, `pause` or `resume`.
      *
      * Load-bearing, and easy to miss. A subscription the customer has cancelled
