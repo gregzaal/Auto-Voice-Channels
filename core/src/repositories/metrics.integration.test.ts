@@ -581,6 +581,54 @@ describe('MetricsRepository (integration)', () => {
         ]);
       });
 
+      /**
+       * The backfill window must be blind to rows written STRAIGHT into the
+       * daily table.
+       *
+       * `metrics_daily` holds two things: the rollup's output, and every
+       * daily-resolution metric, which each instance writes directly on every
+       * flush and dates today whether or not the rollup has run. Anchoring on
+       * `max(bucket)` over the whole table therefore pins the window to
+       * "yesterday and today" forever and deletes the backfill silently - the
+       * holes only appear months later, as gaps in charts, after the hourly
+       * source has aged out and nothing can recompute them.
+       */
+      it('ignores a directly-written daily metric when choosing the window', async () => {
+        for (let day = 16; day <= 19; day += 1) {
+          await metrics.writePoints(
+            [
+              {
+                metric: METRICS.ROOMS_CREATED,
+                value: 1,
+                bucket: new Date(`2026-08-${day}T05:00:00Z`),
+                instance: 'i-1',
+              },
+            ],
+            'beta',
+          );
+        }
+        await metrics.rollupDaily(
+          new Date('2026-08-16T00:00:00Z'),
+          new Date('2026-08-17T00:00:00Z'),
+        );
+        // The hot path, still counting happily while the rollup is broken.
+        await metrics.writePoints(
+          [
+            {
+              metric: METRICS.ROOMS_CREATED_BY_GUILD,
+              key: '123',
+              value: 4,
+              bucket: HOUR,
+              instance: 'i-1',
+            },
+          ],
+          'beta',
+        );
+
+        const window = await metrics.rollupWindow(HOUR);
+        expect(window.from.toISOString()).toBe('2026-08-16T00:00:00.000Z');
+      });
+
       it('starts at the oldest hourly bucket when nothing has been rolled up', async () => {
         await metrics.writePoints(
           [

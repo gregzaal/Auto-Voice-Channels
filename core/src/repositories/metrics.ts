@@ -54,6 +54,15 @@ const DERIVED_METRICS: MetricName[] = [
   METRICS.CHANNELS_CREATOR,
 ];
 
+/**
+ * Rows per INSERT in {@link MetricsRepository.writePoints}.
+ *
+ * Six bind parameters a row against the wire protocol's 65535, so the hard
+ * ceiling is about 10,900. Set well below it: the point is that no amount of
+ * install-base growth can walk a flush into a statement Postgres refuses.
+ */
+const WRITE_CHUNK_ROWS = 2_000;
+
 /** One point to write. */
 export interface MetricWrite {
   metric: MetricName;
@@ -118,9 +127,16 @@ export class MetricsRepository {
   /**
    * Upserts points, applying each metric's own write operator.
    *
-   * Grouped by operator rather than written one statement per point: a flush is
-   * a few dozen rows and one round trip per operator is the difference between a
-   * cheap background job and a chatty one.
+   * Grouped by operator rather than written one statement per point: one round
+   * trip per operator is the difference between a cheap background job and a
+   * chatty one.
+   *
+   * Chunked inside each group, because a flush is no longer "a few dozen rows".
+   * `rooms.created.by_guild` puts one row per active guild in a single flush,
+   * and every row spends six bind parameters against a protocol limit of 65535
+   * - so past about 10,900 rows the statement is rejected outright, the flush
+   * fails, and a failed flush is retained and fails again on every tick after.
+   * The chunk is well under that so the cliff cannot be reached by growth.
    */
   async writePoints(points: readonly MetricWrite[], writer: Fleet = DEFAULT_FLEET): Promise<void> {
     if (points.length === 0) return;
@@ -148,12 +164,15 @@ export class MetricsRepository {
         group.operator === 'greatest'
           ? sql`greatest(${table}.value, excluded.value)`
           : sql`excluded.value`;
-      await this.db.execute(sql`
-        INSERT INTO ${table} (bucket, metric, fleet, instance, key, value)
-        VALUES ${sql.join(group.rows, sql`, `)}
-        ON CONFLICT (bucket, metric, fleet, instance, key) DO UPDATE
-          SET value = ${value}, updated_at = now()
-      `);
+      for (let at = 0; at < group.rows.length; at += WRITE_CHUNK_ROWS) {
+        const chunk = group.rows.slice(at, at + WRITE_CHUNK_ROWS);
+        await this.db.execute(sql`
+          INSERT INTO ${table} (bucket, metric, fleet, instance, key, value)
+          VALUES ${sql.join(chunk, sql`, `)}
+          ON CONFLICT (bucket, metric, fleet, instance, key) DO UPDATE
+            SET value = ${value}, updated_at = now()
+        `);
+      }
     }
   }
 
@@ -165,19 +184,26 @@ export class MetricsRepository {
    * backwards, but on its own it would leave the counter stalled until the fresh
    * accumulator overtook the pre-restart total - which for a busy hour is most of
    * the hour. Reading the row back costs one query per boot.
+   *
+   * The daily table is read by the same call with `resolution: 'daily'`, and it
+   * is not optional there: a day's stall is a whole day, so every restart after
+   * a busy morning would leave `rooms.created.by_guild` pinned at the morning's
+   * total until midnight.
    */
   async readInstanceBucket(
     bucket: Date,
     instance: string,
     writer: Fleet = DEFAULT_FLEET,
+    resolution: 'hourly' | 'daily' = 'hourly',
   ): Promise<{ metric: string; key: string; value: number }[]> {
+    const daily = resolution === 'daily';
     const result = await this.db.execute<{
       metric: string;
       key: string;
       value: string | number;
     }>(sql`
-      SELECT metric, key, value FROM metrics_hourly
-       WHERE bucket = ${hourBucket(bucket)}
+      SELECT metric, key, value FROM ${daily ? sql`metrics_daily` : sql`metrics_hourly`}
+       WHERE bucket = ${daily ? dayBucket(bucket) : hourBucket(bucket)}
          AND instance = ${instance}
          AND fleet = ${writer}
     `);
@@ -438,14 +464,53 @@ export class MetricsRepository {
     const to = new Date(today.getTime() + 86_400_000);
     const floor = new Date(today.getTime() - retentionDays * 86_400_000);
 
-    const latest = await this.latestBucket();
+    /**
+     * The newest day the ROLLUP wrote, which is not the newest day in the table.
+     *
+     * `metrics_daily` now holds two different things, and only one of them is a
+     * watermark. A daily-resolution metric is written straight into it by every
+     * instance on every flush, dated today, whether or not the rollup has run
+     * for weeks - so `max(bucket)` over the whole table is pinned to today and
+     * the window below collapses to "yesterday and today" permanently. That
+     * silently deletes the self-healing backfill this method exists for: a
+     * rollup failing for four days (its own try block, so flushes keep
+     * succeeding) would leave three days with no daily rows for any hourly
+     * metric, nothing would revisit them, and at the 90-day hourly retention
+     * the hole becomes permanent. Every `/admin` chart reads daily rows.
+     */
+    const rolled = await this.latestRolledUpBucket();
     // An empty daily table means either a fresh store or a rollup that has never
     // run; start from the oldest hour anyone has written.
-    const anchor = latest.daily ?? (await this.oldestHourlyBucket());
+    const anchor = rolled ?? (await this.oldestHourlyBucket());
     if (!anchor) return { from: yesterday, to };
 
     const from = new Date(Math.min(dayBucket(anchor).getTime(), yesterday.getTime()));
     return { from: from < floor ? floor : from, to };
+  }
+
+  /**
+   * The newest daily bucket the ROLLUP produced, ignoring rows written directly.
+   *
+   * Selected by metric rather than by `instance = ''`, even though the rollup is
+   * the only writer that leaves the instance empty. Both work today; only this
+   * one keeps working if some future direct writer also has no instance, and the
+   * question being asked really is "which metrics does the rollup own".
+   */
+  private async latestRolledUpBucket(): Promise<Date | null> {
+    const rolledUp = Object.values(METRICS).filter(
+      (metric) => metricResolution(metric) !== 'daily',
+    );
+    /* istanbul ignore next -- unreachable while any metric is hourly. */
+    if (rolledUp.length === 0) return null;
+    const result = await this.db.execute<{ newest: string | null }>(sql`
+      SELECT max(bucket) AS newest FROM metrics_daily
+       WHERE metric IN (${sql.join(
+         rolledUp.map((metric) => sql`${metric}`),
+         sql`, `,
+       )})
+    `);
+    const newest = result.rows[0]?.newest;
+    return newest ? new Date(newest) : null;
   }
 
   /** The oldest hourly bucket still present, for {@link rollupWindow}. */

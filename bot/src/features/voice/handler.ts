@@ -194,8 +194,12 @@ export interface VoiceFeatureDeps {
    * existing" - a human deleting it, or reconcile dropping a stale row, are
    * deliberately not counted, or the number would stop answering whether
    * cleanup is working.
+   *
+   * The guild id is passed because a `created` event is also written per guild,
+   * daily, and that series is the only durable evidence a given server actually
+   * uses AVC - the row this call sits beside is gone as soon as the room empties.
    */
-  countRoom?: (event: 'created' | 'deleted') => void;
+  countRoom?: (event: 'created' | 'deleted', guildId: string) => void;
   /**
    * Defense in depth for the "cache says gone, delete the row" branches below.
    * `reconcileGuild` should only run for a guild whose shard this instance
@@ -663,7 +667,7 @@ export class VoiceFeature {
         originalCreatorName: member.displayName,
       },
     });
-    this.deps.countRoom?.('created');
+    this.deps.countRoom?.('created', guildId);
 
     // Default-private primaries: lock the new channel before the owner lands in
     // it (granting Connect to them by id, since their move isn't cached yet).
@@ -854,7 +858,7 @@ export class VoiceFeature {
     await this.deps.secondaries.remove(channelId);
     await this.deps.onSecondaryRemoved?.(guildId, channelId);
 
-    this.deps.countRoom?.('deleted');
+    this.deps.countRoom?.('deleted', guildId);
     this.deps.logger.info({ guildId, secondaryId: channelId }, 'deleted empty secondary channel');
     this.deps.serverLog?.(
       guildId,

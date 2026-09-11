@@ -406,10 +406,18 @@ async function main(): Promise<void> {
       privacy.makePrivateForCreation(gid, cid, ownerId, ownerName),
     serverLog: (gid, level, message) => serverLogger.log(gid, level, message),
     permissionProblems,
-    countRoom: (event) =>
+    countRoom: (event, guildId) => {
       metricsCollector.increment(
         event === 'created' ? METRICS.ROOMS_CREATED : METRICS.ROOMS_DELETED,
-      ),
+      );
+      // Creations only. "Has this server used AVC lately" is answered by rooms
+      // appearing; a cleanup is the bot tidying up after one that already
+      // counted, so counting both would double every guild's activity and add
+      // a second per-guild series for nothing.
+      if (event === 'created') {
+        metricsCollector.increment(METRICS.ROOMS_CREATED_BY_GUILD, guildId);
+      }
+    },
     // Defense in depth against a direct reconcile call for a guild this
     // instance's shards don't cover — see the deps doc in handler.ts.
     ownsGuild: (guildId) => leaseManager.ownsGuild(guildId),

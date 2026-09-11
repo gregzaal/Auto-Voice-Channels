@@ -122,6 +122,15 @@ export const METRICS = {
   // -- Per fleet, accumulated in memory on the hot path and flushed ----------
   /** Secondary channels created. */
   ROOMS_CREATED: 'rooms.created',
+  /**
+   * Secondary channels created, keyed by guild. Daily only.
+   *
+   * The only durable per-guild record that AVC did anything for a server:
+   * `secondary_channels` rows are deleted the moment a room empties, so that
+   * table answers "which rooms are live now" and can never answer "did this
+   * server use AVC this week". Nothing else survives a room's lifetime.
+   */
+  ROOMS_CREATED_BY_GUILD: 'rooms.created.by_guild',
   /** Secondary channels cleaned up. */
   ROOMS_DELETED: 'rooms.deleted',
   /** Slash commands invoked, keyed by command name. */
@@ -218,6 +227,25 @@ const DEFINITIONS: Record<MetricName, MetricDefinition> = {
     scope: 'fleet',
     dimension: null,
     describe: 'Secondary channels created.',
+  },
+  /**
+   * `daily`, which the cardinality rule above makes mandatory rather than
+   * preferred: at 10k guilds an hourly per-guild counter is 240k rows a day.
+   *
+   * `fleet` scope, like every other hot-path counter, even though the question
+   * it answers ("is this server using AVC") is about the customer. A guild
+   * running two of our bots gets a row per fleet, and the reader asks whether
+   * ANY fleet created a room for it - the same treatment `/admin`'s channel
+   * counts already give a two-bot guild. Writing it as `shared` would instead
+   * have two fleets' hot paths racing over one row.
+   */
+  [METRICS.ROOMS_CREATED_BY_GUILD]: {
+    kind: 'counter',
+    scope: 'fleet',
+    resolution: 'daily',
+    dimension: 'guild id',
+    describe:
+      'Secondary channels created per guild, per day. The only durable proof a server uses AVC.',
   },
   [METRICS.ROOMS_DELETED]: {
     kind: 'counter',
@@ -425,8 +453,22 @@ export function dayBucket(at: Date): Date {
 }
 
 /**
- * How long hourly rows are kept. Daily rows are kept forever, which is honest at
- * daily-per-fleet cardinality and is what cohort charts need.
+ * How long hourly rows are kept. Daily rows are kept forever, which is what
+ * cohort charts need.
+ *
+ * That was free while every daily row was per fleet. `rooms.created.by_guild`
+ * is the first per-guild one, so `metrics_daily` now grows by roughly one row
+ * per active guild per FLEET per day, and nothing prunes it. Per fleet rather
+ * than per machine, because a guild lives on exactly one shard and so is
+ * counted by exactly one instance - but the instance id is in the primary key
+ * and the rollup skips daily metrics, so a shard handoff mid-day does add a row
+ * and those ids are never collapsed. `metricsDaily`'s own schema comment says
+ * machine ids must not persist in this table; for this metric they currently
+ * do, which is half of what `metrics.daily_retention` in `deadlines.ts` exists
+ * to settle. At today's base this is a few hundred thousand rows a year, cheap
+ * to store and indexed for every read the console makes - but it is the term
+ * that decides when daily retention stops being free, and the thing to measure
+ * before adding a second per-guild metric.
  *
  * 90 days is the figure `plans/admin-dashboard.md` §7 decision 4 *proposes*, and
  * that decision is still recorded as the owner's to make. This constant is the

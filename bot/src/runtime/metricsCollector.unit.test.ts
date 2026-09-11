@@ -14,6 +14,8 @@ interface Harness {
   reserved: boolean;
   setNow: (at: Date) => void;
   instanceRows: { metric: string; key: string; value: number }[];
+  /** What the DAILY table holds for this instance, read separately on boot. */
+  instanceDailyRows: { metric: string; key: string; value: number }[];
 }
 
 function harness(overrides: Partial<MetricsCollectorDeps> = {}): Harness {
@@ -25,6 +27,7 @@ function harness(overrides: Partial<MetricsCollectorDeps> = {}): Harness {
     reserved: true,
     now: NOW,
     instanceRows: [] as { metric: string; key: string; value: number }[],
+    instanceDailyRows: [] as { metric: string; key: string; value: number }[],
     queueDepth: 0,
     trippedCircuits: 0,
   };
@@ -34,7 +37,12 @@ function harness(overrides: Partial<MetricsCollectorDeps> = {}): Harness {
       writePoints: async (points: readonly MetricWrite[]) => {
         state.writes.push([...points]);
       },
-      readInstanceBucket: async () => state.instanceRows,
+      readInstanceBucket: async (
+        _bucket: Date,
+        _instance: string,
+        _fleet: unknown,
+        resolution: 'hourly' | 'daily' = 'hourly',
+      ) => (resolution === 'daily' ? state.instanceDailyRows : state.instanceRows),
       collectGauges: async () => {
         state.gauges += 1;
         return {};
@@ -94,6 +102,7 @@ function harness(overrides: Partial<MetricsCollectorDeps> = {}): Harness {
       state.now = at;
     },
     instanceRows: state.instanceRows,
+    instanceDailyRows: state.instanceDailyRows,
   } as unknown as Harness;
 }
 
@@ -470,6 +479,162 @@ describe('MetricsCollector', () => {
       const flushed = h.writes.at(-1)!;
       expect(flushed).toHaveLength(1);
       expect(flushed[0]!.bucket.toISOString()).toBe('2026-08-19T15:00:00.000Z');
+    });
+  });
+
+  /**
+   * A daily-only metric accumulates on a DAY bucket, and both failures it
+   * prevents are invisible until they are total.
+   *
+   * `writePoints` day-truncates a daily point, so hour buckets would collapse
+   * onto one primary key inside a single INSERT - which Postgres rejects
+   * outright, failing the flush, and a failed flush is retained and fails again
+   * on every tick after. Survive that and the number is still wrong: `greatest`
+   * would keep the busiest hour rather than the day's total.
+   */
+  /**
+   * The flush writes CHANGED entries, not every entry.
+   *
+   * A single dirty flag could stand in for two dozen keys and cannot stand in
+   * for one key per active guild: the RSS peak moves on nearly every sample, so
+   * a flag-gated flush re-upserted every guild's frozen daily total 288 times a
+   * day, on every instance, against a table nothing prunes.
+   */
+  describe('write amplification', () => {
+    it('writes only the entries that moved since the last flush', async () => {
+      h.collector.increment(METRICS.ROOMS_CREATED_BY_GUILD, 'quiet');
+      h.collector.increment(METRICS.ROOMS_CREATED_BY_GUILD, 'busy');
+      await h.collector.tick();
+      expect(h.writes.at(-1)).toHaveLength(2);
+
+      // Only one guild does anything in the next interval.
+      h.collector.increment(METRICS.ROOMS_CREATED_BY_GUILD, 'busy');
+      await h.collector.tick();
+      const flushed = h.writes.at(-1)!;
+      expect(flushed.map((p) => p.key)).toEqual(['busy']);
+      expect(flushed[0]!.value).toBe(2);
+    });
+
+    it('stops writing an entry once it stops changing', async () => {
+      h.collector.increment(METRICS.ROOMS_CREATED_BY_GUILD, 'g1');
+      await h.collector.tick();
+      const after = h.writes.length;
+      // Three quiet intervals, with an unrelated metric keeping the flush busy.
+      for (let i = 0; i < 3; i += 1) {
+        h.collector.increment(METRICS.ROOMS_CREATED);
+        await h.collector.tick();
+      }
+      const since = h.writes.slice(after).flat();
+      expect(since.some((p) => p.metric === METRICS.ROOMS_CREATED_BY_GUILD)).toBe(false);
+      expect(since.every((p) => p.metric === METRICS.ROOMS_CREATED)).toBe(true);
+    });
+
+    /**
+     * The retry has to carry the entries the failed write carried, and no
+     * others: keeping them is what stops a flush failure losing counts nothing
+     * can recover.
+     */
+    it('retries exactly the entries whose write failed', async () => {
+      const failing = harness({
+        metrics: {
+          writePoints: async (points: readonly MetricWrite[]) => {
+            failing.writes.push([...points]);
+            if (failing.writes.length === 1) throw new Error('nope');
+          },
+          readInstanceBucket: async () => [],
+        } as unknown as MetricsCollectorDeps['metrics'],
+      });
+      failing.collector.increment(METRICS.ROOMS_CREATED_BY_GUILD, 'g1', 2);
+      await failing.collector.tick();
+      await failing.collector.tick();
+
+      expect(failing.writes).toHaveLength(2);
+      expect(failing.writes[1]!.map((p) => [p.key, p.value])).toEqual([['g1', 2]]);
+    });
+  });
+
+  describe('a daily-only metric', () => {
+    it('accumulates one running total for the whole day, not one per hour', async () => {
+      h.collector.increment(METRICS.ROOMS_CREATED_BY_GUILD, 'g1');
+      h.setNow(new Date('2026-08-19T18:40:00Z'));
+      h.collector.increment(METRICS.ROOMS_CREATED_BY_GUILD, 'g1');
+      h.setNow(new Date('2026-08-19T23:59:00Z'));
+      h.collector.increment(METRICS.ROOMS_CREATED_BY_GUILD, 'g1');
+      await h.collector.tick();
+
+      const rows = h.writes.at(-1)!.filter((p) => p.metric === METRICS.ROOMS_CREATED_BY_GUILD);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.value).toBe(3);
+      expect(rows[0]!.bucket.toISOString()).toBe('2026-08-19T00:00:00.000Z');
+    });
+
+    /**
+     * The hourly cutoff used to apply to everything, and a day bucket is more
+     * than an hour old from 01:00 UTC onwards - so the running total was dropped
+     * on the first tick after 1am and the day started again from zero, with
+     * `greatest` then pinning the stored value to whichever fragment was
+     * largest. Nothing failed; the count was simply a fraction of the day.
+     */
+    it('survives the prune for the rest of its own day', async () => {
+      h.collector.increment(METRICS.ROOMS_CREATED_BY_GUILD, 'g1', 4);
+      await h.collector.tick();
+
+      h.setNow(new Date('2026-08-19T22:10:00Z'));
+      h.collector.increment(METRICS.ROOMS_CREATED_BY_GUILD, 'g1');
+      await h.collector.tick();
+
+      expect(lastValue(h.writes, METRICS.ROOMS_CREATED_BY_GUILD, 'g1')).toBe(5);
+    });
+
+    /**
+     * Bounded at two day buckets, the same shape as the hourly prune: a stale
+     * one is written once more on the tick that discovers it, because
+     * re-writing a running total is idempotent and dropping it before the
+     * flush would discard counts whose earlier flush had failed.
+     */
+    it('forgets a day bucket that is two days stale', async () => {
+      h.collector.increment(METRICS.ROOMS_CREATED_BY_GUILD, 'g1');
+      await h.collector.tick();
+      h.setNow(new Date('2026-08-21T00:30:00Z'));
+      h.collector.increment(METRICS.ROOMS_CREATED_BY_GUILD, 'g1');
+      await h.collector.tick();
+      expect(h.collector.stats.pending).toBe(1);
+
+      h.collector.increment(METRICS.ROOMS_CREATED_BY_GUILD, 'g1');
+      await h.collector.tick();
+      const rows = h.writes.at(-1)!.filter((p) => p.metric === METRICS.ROOMS_CREATED_BY_GUILD);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.bucket.toISOString()).toBe('2026-08-21T00:00:00.000Z');
+    });
+
+    it('resumes from the daily table on boot, so a restart does not stall it all day', async () => {
+      const resumed = harness();
+      resumed.instanceDailyRows.push({
+        metric: METRICS.ROOMS_CREATED_BY_GUILD,
+        key: 'g1',
+        value: 12,
+      });
+      await resumed.collector.hydrate();
+      resumed.collector.increment(METRICS.ROOMS_CREATED_BY_GUILD, 'g1');
+      await resumed.collector.tick();
+
+      expect(lastValue(resumed.writes, METRICS.ROOMS_CREATED_BY_GUILD, 'g1')).toBe(13);
+    });
+
+    /**
+     * `metrics_daily` holds two different things: daily-only metrics written
+     * straight to it, and the rollup's summary of every hourly metric. Seeding
+     * an hourly counter from the latter would start the current HOUR at a whole
+     * day's total and `greatest` would hold it there.
+     */
+    it('never resumes an hourly counter from a rolled-up daily row', async () => {
+      const resumed = harness();
+      resumed.instanceDailyRows.push({ metric: METRICS.ROOMS_CREATED, key: '', value: 900 });
+      await resumed.collector.hydrate();
+      resumed.collector.increment(METRICS.ROOMS_CREATED);
+      await resumed.collector.tick();
+
+      expect(lastValue(resumed.writes, METRICS.ROOMS_CREATED)).toBe(1);
     });
   });
 

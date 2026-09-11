@@ -1,4 +1,5 @@
 import {
+  dayBucket,
   hourBucket,
   METRICS,
   METRICS_JOB_KEY,
@@ -6,6 +7,7 @@ import {
   METRICS_STALE_AFTER_MS,
   RUNTIME_FLAGS,
   metricDefinition,
+  metricResolution,
   type BillingRunRepository,
   type Fleet,
   type Logger,
@@ -162,6 +164,22 @@ function accumulatorKey(bucketMs: number, metric: MetricName, key: string): stri
   return `${bucketMs}${KEY_SEP}${metric}${KEY_SEP}${key}`;
 }
 
+/**
+ * The bucket a metric accumulates into: its OWN resolution, never the hour.
+ *
+ * A daily metric accumulated hourly is broken twice over, and both failures are
+ * silent until they are total. `writePoints` day-truncates a daily point, so
+ * twenty-four hour buckets collapse onto one primary key and land in a single
+ * INSERT - which Postgres rejects outright ("ON CONFLICT DO UPDATE command
+ * cannot affect row a second time"), failing the whole flush, and a failed
+ * flush is retained, so it then fails on every tick after. Survive that and the
+ * counter is still wrong: `greatest` would keep the single busiest hour rather
+ * than the day's total, because each hour starts its running total from zero.
+ */
+function bucketFor(metric: MetricName, at: Date): Date {
+  return metricResolution(metric) === 'daily' ? dayBucket(at) : hourBucket(at);
+}
+
 function parseAccumulatorKey(composite: string): {
   bucketMs: number;
   metric: MetricName;
@@ -188,25 +206,34 @@ export class MetricsCollector {
    * before it.
    *
    * Holds the bucket's **running total**, not a delta, which is what makes a
-   * re-flush idempotent: the same numbers land on the same rows. Bounded by
-   * metric cardinality (a couple of dozen keys) times two buckets, and pruned
-   * every tick whether or not the flush succeeded, so a long outage cannot turn
-   * it into a leak.
+   * re-flush idempotent: the same numbers land on the same rows. Pruned every
+   * tick whether or not the flush succeeded, so a long outage cannot turn it
+   * into a leak.
+   *
+   * Bounded by metric cardinality times two buckets, which was a couple of
+   * dozen keys until `rooms.created.by_guild` made it one entry per guild that
+   * created a room today. That is the term to watch: it scales with the active
+   * install base rather than with the metric list, and it is why `writePoints`
+   * chunks its INSERT rather than trusting a flush to fit in one statement.
    */
   private readonly accumulator = new Map<string, number>();
 
   /**
-   * Whether anything in the accumulator has changed since the last successful
-   * flush.
+   * Which accumulator entries have changed since the last successful flush.
    *
-   * Without it every tick rewrote every entry, so each hourly row was upserted a
-   * dozen times an hour to store the value it already held - and a quiet self-host
-   * with nothing happening wrote just as often as a busy fleet. Set only when a
-   * value actually changes (a peak that does not beat its own maximum is not a
-   * change) and cleared only on a *successful* write, so a failed flush stays
-   * pending.
+   * A SET of keys, not one flag. Without it every tick rewrote every entry, so
+   * each hourly row was upserted a dozen times an hour to store the value it
+   * already held - and a quiet self-host with nothing happening wrote just as
+   * often as a busy fleet. A single flag fixed the quiet case and not the busy
+   * one: any metric changing marked all of them, and the RSS peak changes on
+   * nearly every sample. That was tolerable at two dozen keys and is not at one
+   * key per active guild.
+   *
+   * Populated only when a value actually changes (a peak that does not beat its
+   * own maximum is not a change) and cleared only on a *successful* write, so a
+   * failed flush stays pending. Bounded by the accumulator it indexes.
    */
-  private dirty = false;
+  private readonly changed = new Set<string>();
 
   /** Last-seen kill-switch state, so `/diagnostics` can say why it is idle. */
   private paused = false;
@@ -274,12 +301,12 @@ export class MetricsCollector {
         this.deps.logger.warn({ metric, kind, expected }, 'metric recorded with the wrong verb');
         return;
       }
-      const composite = accumulatorKey(hourBucket(this.now()).getTime(), metric, key);
+      const composite = accumulatorKey(bucketFor(metric, this.now()).getTime(), metric, key);
       const current = this.accumulator.get(composite);
       const next = expected === 'peak' ? Math.max(current ?? 0, value) : (current ?? 0) + value;
       if (next === current) return;
       this.accumulator.set(composite, next);
-      this.dirty = true;
+      this.changed.add(composite);
     } catch (err) {
       this.deps.logger.warn({ err, metric }, 'metric not recorded');
     }
@@ -299,25 +326,56 @@ export class MetricsCollector {
    * accumulator is what makes the resume exact rather than a guess; the
    * `max` below is a belt-and-braces no-op in that ordering, guarding only
    * against a stray second call.
+   *
+   * **Both tables**, because a daily metric's bucket is a day: skipping the
+   * daily read would leave `rooms.created.by_guild` stalled from the restart
+   * until midnight rather than for the rest of an hour, and the stall lands on
+   * whichever guilds were busiest before the deploy.
    */
   async hydrate(): Promise<void> {
     try {
-      const bucket = hourBucket(this.now());
-      const rows = await this.deps.metrics.readInstanceBucket(
-        bucket,
-        this.deps.instanceId,
-        this.deps.fleet,
+      const at = this.now();
+      const reads = await Promise.all(
+        (['hourly', 'daily'] as const).map(async (resolution) => ({
+          resolution,
+          rows: await this.deps.metrics.readInstanceBucket(
+            at,
+            this.deps.instanceId,
+            this.deps.fleet,
+            resolution,
+          ),
+        })),
       );
-      for (const row of rows) {
-        if (!(row.metric in METRIC_BY_NAME)) continue;
-        const key = accumulatorKey(bucket.getTime(), row.metric as MetricName, row.key);
-        // Merged rather than assigned: see the ordering note above.
-        const merged = Math.max(this.accumulator.get(key) ?? 0, row.value);
-        if (merged !== this.accumulator.get(key)) this.dirty = true;
-        this.accumulator.set(key, merged);
+
+      let resumed = 0;
+      for (const read of reads) {
+        for (const row of read.rows) {
+          if (!(row.metric in METRIC_BY_NAME)) continue;
+          const metric = row.metric as MetricName;
+          /**
+           * Only rows belonging to the table's own resolution.
+           *
+           * `metrics_daily` holds two different things: the daily-only metrics
+           * written straight to it, and the rollup's summary of every hourly
+           * metric. Resuming an hourly counter from the latter would seed the
+           * current HOUR with a whole day's total, and `greatest` would then
+           * hold it there for the rest of the hour. The rollup stamps `instance
+           * = ''` so today's read misses those anyway, but that is a property of
+           * another method and this must not depend on it.
+           */
+          if (metricResolution(metric) !== read.resolution) continue;
+          // The metric's own bucket, so a daily row resumes the daily entry the
+          // hot path will add to rather than seeding a phantom hourly one.
+          const key = accumulatorKey(bucketFor(metric, at).getTime(), metric, row.key);
+          // Merged rather than assigned: see the ordering note above.
+          const merged = Math.max(this.accumulator.get(key) ?? 0, row.value);
+          if (merged !== this.accumulator.get(key)) this.changed.add(key);
+          this.accumulator.set(key, merged);
+          resumed += 1;
+        }
       }
-      if (rows.length > 0) {
-        this.deps.logger.info({ resumed: rows.length }, 'metrics accumulators resumed');
+      if (resumed > 0) {
+        this.deps.logger.info({ resumed }, 'metrics accumulators resumed');
       }
     } catch (err) {
       // A failed resume costs at most the current hour's already-flushed counts
@@ -488,9 +546,11 @@ export class MetricsCollector {
        * kill-switch paths rather than only the `metrics.disabled` one, is what
        * bounds the accumulator at two buckets: a fortnight of `global.pause` used
        * to accumulate a bucket per hour of it, and the flush that eventually ran
-       * would have been one INSERT of thousands of rows - past about 10,900 entries,
-       * more bind parameters than Postgres accepts, which fails the statement, and
-       * a failed flush is retained, so it would then fail on every tick.
+       * would have been one INSERT of thousands of rows. `writePoints` chunks
+       * its statements now, so that can no longer overrun the bind-parameter
+       * limit - but bounding the memory is why this call is here, and a
+       * guild-keyed entry per active guild makes each retained bucket much
+       * larger than the couple of dozen keys it used to hold.
        */
       this.pruneAccumulator();
       return;
@@ -571,14 +631,35 @@ export class MetricsCollector {
     }
   }
 
-  /** Writes every accumulator entry, then drops the ones that can no longer change. */
+  /**
+   * Writes the entries that have CHANGED, then drops the ones that can no longer
+   * change.
+   *
+   * Per entry rather than "everything, whenever anything changed", which is what
+   * this did while the accumulator held two dozen keys and one flag could stand
+   * in for all of them. It cannot stand in for a guild-keyed metric: `dirty` is
+   * set on essentially every tick by the RSS peak alone, so every entry was
+   * re-upserted 288 times a day, and `pruneAccumulator` keeps the previous
+   * period too - so an entry was still being rewritten long after the day it
+   * describes had ended and its value was frozen. At a few thousand active
+   * guilds that is hundreds of thousands of writes a day to store numbers
+   * nothing changed, on a table nothing prunes.
+   *
+   * The idempotency argument is untouched: each write is still the bucket's
+   * running total, so a retry lands on the same number, and an entry whose write
+   * failed stays marked and is retried next tick.
+   */
   private async flush(): Promise<void> {
-    if (this.accumulator.size === 0 || !this.dirty) {
+    if (this.changed.size === 0) {
       this.pruneAccumulator();
       return;
     }
     const points: MetricWrite[] = [];
-    for (const [composite, value] of this.accumulator) {
+    for (const composite of this.changed) {
+      const value = this.accumulator.get(composite);
+      // Pruned between being marked and being flushed. Nothing to write: the
+      // prune only drops periods that have already been written or lost.
+      if (value === undefined) continue;
       const { bucketMs, metric, key } = parseAccumulatorKey(composite);
       points.push({
         metric,
@@ -593,12 +674,13 @@ export class MetricsCollector {
      * Cleared BEFORE the await, not after.
      *
      * `points` is a snapshot, so a counter incremented while the write is in flight
-     * is a change this write does not carry. Clearing afterwards would wipe the flag
+     * is a change this write does not carry. Clearing afterwards would wipe the mark
      * that increment just set and strand it until the next unrelated change;
      * clearing first means it survives and the next tick sends it. Restored on
      * failure below, so a failed flush stays pending.
      */
-    this.dirty = false;
+    const sent = [...this.changed];
+    this.changed.clear();
     try {
       await this.deps.metrics.writePoints(points, this.deps.fleet);
       this.lastFlushAt = this.now();
@@ -610,7 +692,7 @@ export class MetricsCollector {
        * upsert of a running total, so retrying the same numbers next tick is
        * free, and dropping them would lose counts nothing can recover.
        */
-      this.dirty = true;
+      for (const composite of sent) this.changed.add(composite);
       this.lastFlushError = (err as Error).message;
       this.deps.logger.warn({ err, pending: this.accumulator.size }, 'metrics flush failed');
       this.deps.report?.('metrics.flush', 'Metrics flush failed', {
@@ -621,16 +703,45 @@ export class MetricsCollector {
   }
 
   /**
-   * Forgets buckets that are two or more hours old.
+   * Forgets buckets older than the previous one, at each metric's OWN
+   * resolution.
    *
-   * The previous bucket is kept because a flush can land after the hour rolls
-   * over and must still carry the finished hour's final total; anything older
+   * The previous bucket is kept because a flush can land after the period rolls
+   * over and must still carry the finished period's final total; anything older
    * than that has been written or lost already, and keeping it would only grow.
+   *
+   * Resolution-aware for the same reason {@link bucketFor} is, and the failure
+   * is quieter than that one: a daily entry's bucket is today's midnight, which
+   * is more than an hour old from 01:00 UTC onwards, so a flat hourly cutoff
+   * dropped every daily running total on the first tick after 1am and started
+   * the day again from zero. `greatest` then pins the stored value to whichever
+   * fragment was largest - a day's count reported as one hour of it, with
+   * nothing failing.
    */
   private pruneAccumulator(): void {
-    const cutoff = hourBucket(this.now()).getTime() - 3_600_000;
+    const now = this.now();
+    const hourly = hourBucket(now).getTime() - 3_600_000;
+    /**
+     * A day bucket is kept for one HOUR past midnight, not for a whole day.
+     *
+     * The rule being served is "a flush landing after the period rolls over must
+     * still carry the finished period's final total", and a flush interval is
+     * five minutes, so an hour of slack serves it just as well at either
+     * resolution. A symmetric full-day window would instead re-upsert yesterday's
+     * entire per-guild set on every one of the day's 288 ticks, on every
+     * instance: unchanged rows, written thousands of times, growing with the
+     * install base. The asymmetry is the point.
+     */
+    const today = dayBucket(now).getTime();
+    const daily = now.getTime() - today < 3_600_000 ? today - 86_400_000 : today;
     for (const composite of this.accumulator.keys()) {
-      if (parseAccumulatorKey(composite).bucketMs < cutoff) this.accumulator.delete(composite);
+      const { bucketMs, metric } = parseAccumulatorKey(composite);
+      const cutoff = metricResolution(metric) === 'daily' ? daily : hourly;
+      if (bucketMs < cutoff) {
+        this.accumulator.delete(composite);
+        // Or the set outlives the map and grows without bound.
+        this.changed.delete(composite);
+      }
     }
   }
 

@@ -142,13 +142,36 @@ describe('bucket truncation', () => {
 
 /**
  * Cardinality discipline (§3.4): fleet-wide metrics are hourly, per-guild
- * metrics are daily only. Nothing ships a per-guild metric yet, so this pins the
- * default rather than the exception.
+ * metrics are daily only. At 10k guilds an hourly per-guild metric is 240k rows
+ * a day, and the table stops being cheap.
+ *
+ * Pinned as the RULE rather than as a list, so the next per-guild metric added
+ * at hourly resolution fails here instead of quietly multiplying the store.
  */
 describe('resolution', () => {
-  it('defaults every current metric to hourly', () => {
+  it('keeps every guild-keyed metric out of the hourly table', () => {
     for (const name of METRIC_NAMES) {
+      if (metricDefinition(name).dimension === 'guild id') {
+        expect(metricResolution(name)).toBe('daily');
+      }
+    }
+  });
+
+  it('leaves everything else hourly, which is the default', () => {
+    for (const name of METRIC_NAMES) {
+      if (metricDefinition(name).dimension === 'guild id') continue;
       expect(metricResolution(name)).toBe('hourly');
     }
+  });
+
+  /**
+   * The per-guild series exists because no table can answer this after the
+   * fact: a `secondary_channels` row is deleted the moment its room empties, so
+   * "did this server use AVC last week" is unrecoverable unless it was counted.
+   */
+  it('counts rooms per guild, daily', () => {
+    expect(metricDefinition(METRICS.ROOMS_CREATED_BY_GUILD).dimension).toBe('guild id');
+    expect(metricDefinition(METRICS.ROOMS_CREATED_BY_GUILD).kind).toBe('counter');
+    expect(metricResolution(METRICS.ROOMS_CREATED_BY_GUILD)).toBe('daily');
   });
 });
