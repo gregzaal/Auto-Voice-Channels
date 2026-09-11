@@ -47,6 +47,18 @@ export const setupId = (action: string): string => `${SETUP_PREFIX}${action}`;
 export const SIGNUP_URL = 'https://auto-voice.io/signup';
 export const DOCS_URL = 'https://auto-voice.io/docs';
 /**
+ * The privacy policy, surfaced as a link button on every `/setup` panel and
+ * from `/source`.
+ *
+ * Discord's Developer Terms section 5(a) requires the policy to be "easily
+ * accessible to users from your Application", which the website footer alone
+ * does not satisfy: nothing in the bot linked it. Both surfaces are deliberate.
+ * `/setup` is where an admin already is, and the link row renders for members
+ * too, so the one person whose presence data the game tokens read can reach it
+ * without being an admin.
+ */
+export const PRIVACY_URL = 'https://auto-voice.io/privacy';
+/**
  * The support server invite lives in `features/billing/messages.ts`, which this
  * module already imports from, because the billing notices need it too and the
  * import can only run one way. Its comment there carries the history: an
@@ -722,7 +734,11 @@ function memberRows(): PanelRow[] {
 }
 
 function linkRow(): ActionRowBuilder<ButtonBuilder> {
-  return rowOf(linkButton('Docs', DOCS_URL, '📖'), linkButton('Support server', SUPPORT_URL, '💬'));
+  return rowOf(
+    linkButton('Docs', DOCS_URL, '📖'),
+    linkButton('Support server', SUPPORT_URL, '💬'),
+    linkButton('Privacy', PRIVACY_URL, '🔒'),
+  );
 }
 
 function rowOf(...buttons: ButtonBuilder[]): ActionRowBuilder<ButtonBuilder> {

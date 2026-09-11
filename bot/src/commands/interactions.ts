@@ -92,6 +92,7 @@ import {
   missingRenamePermissions,
   parseSetupPick,
   parseSetupPickArg,
+  PRIVACY_URL,
   SETUP_PREFIX,
   SETUP_SETTINGS_ID,
   setupId,
@@ -1581,7 +1582,10 @@ Already subscribed? Add the new server ` +
 
   async function handleSource(interaction: ChatInputCommandInteraction): Promise<void> {
     await interaction.reply({
-      content: `📜 AVC is open source, licensed AGPL-3.0: ${GITHUB_URL}`,
+      content: [
+        `📜 AVC is open source, licensed AGPL-3.0: ${GITHUB_URL}`,
+        `🔒 What it stores, and what it never touches: ${PRIVACY_URL}`,
+      ].join('\n'),
       ephemeral: true,
     });
   }
