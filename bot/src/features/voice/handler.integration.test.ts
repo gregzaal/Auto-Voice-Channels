@@ -435,8 +435,13 @@ describe('VoiceFeature (integration)', () => {
       const repairs = actions.ofType('reposition');
       expect(repairs).toHaveLength(1);
       expect(repairs[0]!.above).toBe(false);
-      // Oldest first, with the room this join created at the bottom.
-      expect(repairs[0]!.channelIds).toEqual(['room-1', 'room-2', 'sec-1']);
+      // Oldest first. The room this join creates is deliberately NOT in the list:
+      // the repair runs BEFORE the create, so the new room is placed into a block
+      // that is already right rather than being moved after the member can see it.
+      expect(repairs[0]!.channelIds).toEqual(['room-1', 'room-2']);
+      // ...and that ordering is the whole anti-flicker property, so pin it.
+      const order = actions.actions.map((a) => a.type);
+      expect(order.indexOf('reposition')).toBeLessThan(order.indexOf('create'));
     });
 
     it('never repairs a room that has been moved to another category', async () => {
@@ -540,7 +545,14 @@ describe('VoiceFeature (integration)', () => {
       expect(repairs[0]!.channelIds).toEqual(['room-1', 'room-2', 'sec-1']);
     });
 
-    it('spends exactly one reorder when the block is BOTH misordered and tied', async () => {
+    it('still repairs a tie that survived the pre-create repair', async () => {
+      // Two reorders here, and that is the point rather than a regression. They
+      // are no longer the same repair counted twice: the first fixes the block
+      // BEFORE the room is created, and the second only fires because the room
+      // then tied anyway - which in production means the re-space that would have
+      // opened a slot failed. Skipping it to keep the count at one would leave a
+      // tie with nothing left to repair it, and a tie is what decays into a
+      // permanent wrong order once Discord normalises it.
       await seedRooms();
       inOneCategory();
       voice.setPosition(PRIMARY, 60);
@@ -549,7 +561,29 @@ describe('VoiceFeature (integration)', () => {
       actions.collidingChannels.add('sec-1');
       await join();
 
-      expect(actions.ofType('reposition')).toHaveLength(1);
+      const repairs = actions.ofType('reposition');
+      expect(repairs).toHaveLength(2);
+      // The inherited block first, without the room that does not exist yet...
+      expect(repairs[0]!.channelIds).toEqual(['room-1', 'room-2']);
+      // ...then the tie, with it.
+      expect(repairs[1]!.channelIds).toEqual(['room-1', 'room-2', 'sec-1']);
+      const order = actions.actions.map((a) => a.type);
+      expect(order.indexOf('reposition')).toBeLessThan(order.indexOf('create'));
+    });
+
+    it('spends no reorder at all once the block is in order and has a free slot', async () => {
+      // The ordinary join, and the shape that makes the room appear in its final
+      // place: nothing to repair before the create, nowhere to tie, nothing to
+      // move after it.
+      await seedRooms();
+      inOneCategory();
+      voice.setPosition(PRIMARY, 60);
+      voice.setPosition('room-1', 61);
+      voice.setPosition('room-2', 62);
+      await join();
+
+      expect(actions.ofType('reposition')).toHaveLength(0);
+      expect(actions.ofType('repositionGroup')).toHaveLength(0);
     });
 
     it('does not reorder when the new room landed on a free slot', async () => {
@@ -1712,6 +1746,51 @@ describe('VoiceFeature (integration)', () => {
 
       // Appending a new channel never renames the existing ones (no churn).
       expect(actions.ofType('rename')).toHaveLength(0);
+    });
+
+    it('anchors a grouped create at the group, not at the primary joined', async () => {
+      // The three-jump case in the recording. A grouped block is positioned
+      // relative to EVERY creator channel in the category, so anchoring the
+      // create at whichever primary the member happened to join put the room
+      // somewhere the group rule then had to undo. Worse, it used that primary's
+      // own above flag, which here points the opposite way to the group's, so the
+      // room was placed above the primary and then moved below both of them.
+      await enableGroup(false); // the group sits BELOW every primary
+      await autoChannels.upsert(GUILD, A, { name: '## room' });
+      await autoChannels.upsert(GUILD, B, { name: '## room', above: true });
+      voice.setPosition(A, 10);
+      voice.setPosition(B, 20);
+
+      const bob = member('bob');
+      voice.put(B, bob);
+      await feature.handleVoiceStateUpdate({ guildId: GUILD, member: bob, afterChannelId: B });
+
+      const created = actions.ofType('create').at(-1)!;
+      // The GROUP's direction, never this primary's own (which says above).
+      expect(created.above).toBe(false);
+      // Anchored at the bottom-most primary of the group, where the block goes.
+      expect(created.anchorChannelId).toBe(B);
+      // ...but the room still BELONGS to the primary the member joined, which is
+      // what gives it its category and, by default, its permission overwrites.
+      // Collapsing the two is how a grouped room came to copy a different creator
+      // channel's permissions.
+      expect(created.nearChannelId).toBe(B);
+    });
+
+    it('anchors an above-group create at the topmost primary', async () => {
+      await enableGroup(true); // the group sits ABOVE every primary
+      voice.setPosition(A, 10);
+      voice.setPosition(B, 20);
+
+      const bob = member('bob');
+      voice.put(B, bob);
+      await feature.handleVoiceStateUpdate({ guildId: GUILD, member: bob, afterChannelId: B });
+
+      const created = actions.ofType('create').at(-1)!;
+      expect(created.above).toBe(true);
+      expect(created.anchorChannelId).toBe(A);
+      // Placed against A, but still B's room: B is what it inherits from.
+      expect(created.nearChannelId).toBe(B);
     });
 
     it('resyncCategory renumbers group-wide and repositions the block', async () => {

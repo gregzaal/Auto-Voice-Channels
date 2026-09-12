@@ -562,16 +562,63 @@ export class VoiceFeature {
     // This primary's existing rooms, oldest first. Their count is the new room's
     // index, their ids place it at the bottom of the block, and their current
     // display order says whether the block needs repairing (see below). A grouped
-    // category is positioned wholesale by `repositionGroup`, so it needs none of it.
+    // category numbers and places against the whole GROUP instead, so it reads all
+    // of that off `groupState` rather than off this one primary.
     const siblings = group ? [] : await this.deps.secondaries.listIdsByPrimary(channelId);
-    const above = primary?.template.above === true;
+    const groupState = group ? await this.groupMembers(guildId, categoryKey) : undefined;
+    /**
+     * Where the room is placed, and which way up.
+     *
+     * **A grouped category is anchored to the GROUP, not to the primary the member
+     * joined, and takes the GROUP's direction.** `repositionGroup` puts the block
+     * above every creator channel in the category or below every one of them, so
+     * anchoring the create at one primary and using that primary's own `above`
+     * flag placed the room somewhere the group rule then had to undo — twice over
+     * in a guild whose primary says `above` while its group says below, which is
+     * the three-jump case in the recording this fixes.
+     */
+    const above = group ? group.above : primary?.template.above === true;
+    const groupPrimaries = groupState
+      ? (this.deps.voice.displayOrderOf?.(groupState.primaryIds) ?? groupState.primaryIds)
+      : [];
+    const anchorId =
+      (above ? groupPrimaries[0] : groupPrimaries[groupPrimaries.length - 1]) ?? channelId;
+    // Plain room ids, deliberately not `companionBlock`: the walk that reads this
+    // already steps over a private room's companion (it sits directly above its
+    // room and is never the last thing in a block), so resolving companions here
+    // would add a Postgres read per room to the path a member waits on.
+    const blockIds = groupState ? groupState.secondaries.map((sec) => sec.channelId) : siblings;
     // Checked BEFORE the create, so it describes the block we inherited rather
     // than one this create has just added to.
     const misordered =
       !group && !gate?.orderRepairDisabled && this.blockMisordered(channelId, siblings, above);
-    const index = group
-      ? (await this.groupMembers(guildId, categoryKey)).secondaries.length
-      : siblings.length;
+    const index = groupState ? groupState.secondaries.length : siblings.length;
+    /**
+     * Repair an inherited misorder BEFORE creating, not after.
+     *
+     * The repair is the same single bulk reorder either way, but running it first
+     * means the new room is placed into a block that is already right, so its first
+     * appearance is its final position. Running it afterwards, as this did, moved
+     * the room the member was watching.
+     *
+     * Best-effort and contained: nothing has happened yet, so a failure here just
+     * means the create proceeds exactly as it would have before, and the
+     * collision check after the create is still the backstop.
+     */
+    if (misordered) {
+      this.deps.logger.info(
+        { guildId, primaryId: channelId },
+        'repairing out-of-order secondaries before creating',
+      );
+      try {
+        await this.repositionSecondaries(guildId, channelId, above);
+      } catch (err) {
+        this.deps.logger.warn(
+          { guildId, primaryId: channelId, err },
+          'could not repair secondary order',
+        );
+      }
+    }
     const template = primary?.template.name ?? settings.channelNameTemplate;
     // Generate the per-channel random seed once, here, so `[[random]]` picks are
     // fixed for this channel's lifetime and never trigger a later rename.
@@ -626,12 +673,20 @@ export class VoiceFeature {
                 : {}),
             }
           : {}),
-        // Place the secondary in the primary's category, above/below per config.
+        // The primary the member joined: its category, and the permissions the
+        // room inherits. Never the group's anchor, which is a different channel
+        // whose overwrites are none of this room's business.
         nearChannelId: channelId,
-        // Default is below the primary; only `above: true` positions above it.
+        // Where to PUT it: this primary, or the group's end primary when the
+        // category is grouped (see where the two are resolved, above).
+        anchorChannelId: anchorId,
+        // Default is below the anchor; only `above: true` positions above it.
         above,
-        // Below the primary means below its existing rooms too, not between them.
-        afterChannelIds: siblings,
+        // Below the anchor means below its existing rooms too, not between them.
+        afterChannelIds: blockIds,
+        // A default-private room's "join" companion is created moments later and
+        // has to sit directly above it, so keep that slot free now.
+        ...(primary?.template.defaultPrivate ? { reserveSlotAbove: true } : {}),
         // Inherit permissions from the primary by default (matching the legacy bot);
         // `/inheritpermissions` can switch the source to the category or a specific
         // channel. Unset must NOT fall through to Discord's category-sync.
@@ -752,17 +807,16 @@ export class VoiceFeature {
       );
     } else if (!gate?.orderRepairDisabled) {
       /**
-       * One bulk reorder, for either of two reasons, and never two.
+       * The backstop, for the one thing create-time placement cannot promise:
+       * this room having had nowhere unique to land.
        *
-       * `misordered` is the block we INHERITED being wrong, which create-time
-       * placement cannot undo on its own: it can only put THIS room in the right
-       * slot. `tied` is this room having had nowhere unique to land, which decays
-       * into the first problem if left, because a client renders a tie in an
-       * order of its own and Discord eventually makes that order permanent.
-       *
-       * Asked in that order so the cheap answer settles it: a block already known
-       * to be wrong is getting the reorder regardless, and the collision check is
-       * a cache read that would change nothing.
+       * A tie decays into a real misorder if left, because a client renders one in
+       * an order of its own and Discord eventually makes that order permanent. The
+       * INHERITED-misorder case is repaired before the create now, so the room is
+       * placed into a block that is already right and never has to be moved
+       * afterwards — but this still runs in that case rather than being skipped,
+       * because a pre-create repair that failed AND a re-space that failed would
+       * otherwise leave a tie with nothing left to repair it.
        *
        * The reorder also re-spaces the block, so the next create finds a free slot
        * and needs no reorder at all. That is what keeps this off the common path
@@ -777,13 +831,11 @@ export class VoiceFeature {
       // guard rather than above it for that reason, whatever its implementation
       // happens to do today.
       try {
-        const tied =
-          misordered ||
-          ((await this.deps.actions.positionCollides?.(guildId, newChannelId)) ?? false);
+        const tied = (await this.deps.actions.positionCollides?.(guildId, newChannelId)) ?? false;
         if (tied) {
           this.deps.logger.info(
-            { guildId, primaryId: channelId, secondaryId: newChannelId, misordered },
-            'repairing out-of-order secondaries',
+            { guildId, primaryId: channelId, secondaryId: newChannelId },
+            'repairing a secondary that had nowhere unique to land',
           );
           await this.repositionSecondaries(guildId, channelId, above);
         }
@@ -1561,7 +1613,9 @@ export class VoiceFeature {
     await this.deps.actions.repositionSecondaries(guildId, primaryChannelId, channelBlock, above);
     this.deps.logger.info(
       { guildId, primaryChannelId, above, count: ordered.length },
-      'repositioned secondaries',
+      // "asked for", not "did": `applyOrder` sends nothing when the category
+      // already renders this way, and it is the common case now.
+      'requested secondary reposition',
     );
     return ordered.length;
   }
@@ -1613,12 +1667,19 @@ export class VoiceFeature {
    * adjacent — the companion always sits just above its channel.
    */
   private async companionBlock(orderedSecondaryIds: string[]): Promise<string[]> {
+    // Concurrent, not sequential: `joinCompanionFor` is a Postgres read per room,
+    // and this sits on the path a member waits on while their room is created (the
+    // pre-create repair reaches it). Order comes from the index, never from which
+    // lookup answers first.
+    const companions = await Promise.all(
+      orderedSecondaryIds.map((id) => this.deps.joinCompanionFor?.(id)),
+    );
     const block: string[] = [];
-    for (const id of orderedSecondaryIds) {
-      const companion = await this.deps.joinCompanionFor?.(id);
+    orderedSecondaryIds.forEach((id, i) => {
+      const companion = companions[i];
       if (companion) block.push(companion);
       block.push(id);
-    }
+    });
     return block;
   }
 

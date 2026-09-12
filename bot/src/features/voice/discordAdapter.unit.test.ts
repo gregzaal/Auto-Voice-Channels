@@ -607,6 +607,17 @@ describe('DiscordVoiceActions create-time placement', () => {
           });
           return Promise.resolve(created);
         }),
+        // The other half Discord really does: a bulk reorder writes back the
+        // positions it was given, and discord.js patches its own cache from the
+        // request it sent (`GuildChannelsPositionUpdate`). Without this, a case
+        // that has to make room reads stale positions afterwards.
+        setPositions: vi.fn((list: { channel: string; position: number }[]) => {
+          for (const { channel, position } of list) {
+            const c = cache.get(channel) as { rawPosition: number } | undefined;
+            if (c) c.rawPosition = position;
+          }
+          return Promise.resolve(undefined);
+        }),
         cache,
       },
       members: { me: { permissions: { bitfield: FULL_BOT_PERMS } } },
@@ -634,6 +645,11 @@ describe('DiscordVoiceActions create-time placement', () => {
   }
   const positionOf = (guild: { channels: { create: ReturnType<typeof vi.fn> } }) =>
     (guild.channels.create.mock.calls[0][0] as { position?: number }).position;
+  /** The one bulk reorder a create had to make to open a slot for itself. */
+  const reorderOf = (guild: { channels: { setPositions: ReturnType<typeof vi.fn> } }) =>
+    guild.channels.setPositions.mock.calls[0][0] as { channel: string; position: number }[];
+  const positionIn = (written: { channel: string; position: number }[], id: string) =>
+    written.find((w) => w.channel === id)!.position;
 
   const create = async (client: Client, afterChannelIds?: string[], above?: boolean) =>
     new DiscordVoiceActions(client).createVoiceChannel({
@@ -650,10 +666,12 @@ describe('DiscordVoiceActions create-time placement', () => {
     expect(positionOf(guild)).toBe(61);
   });
 
-  it('creates at the bottom of the block once positions have drifted', async () => {
+  it('makes room rather than tying when the block has drifted shut', async () => {
     // The reported guild: the primary and two rooms tied at 60, the rest given
-    // unique positions by an earlier renumber. Creating at 60 would land the new
-    // room above rooms 1 and 4, which is the bug.
+    // unique positions by an earlier renumber. The slot under the block is taken,
+    // so this used to tie at 66 and buy a reorder AFTER the create. Now the
+    // category is re-spaced first, in the order it already renders in, and the
+    // create lands in the freed slot.
     const { client, guild } = makeClient([
       ['100', 60],
       ['150', 60],
@@ -663,7 +681,12 @@ describe('DiscordVoiceActions create-time placement', () => {
       ['170', 67],
     ]);
     await create(client, ['110', '140', '150', '160']);
-    expect(positionOf(guild)).toBe(66);
+    const reorder = reorderOf(guild);
+    // Order preserved exactly, which is what makes the re-space invisible.
+    expect(reorder.map((r) => r.channel)).toEqual(['100', '150', '160', '110', '140', '170']);
+    // The new room lands between the block and the channel that follows it.
+    expect(positionOf(guild)).toBeGreaterThan(positionIn(reorder, '140'));
+    expect(positionOf(guild)).toBeLessThan(positionIn(reorder, '170'));
   });
 
   it('stops at a foreign channel instead of anchoring below it', async () => {
@@ -678,7 +701,11 @@ describe('DiscordVoiceActions create-time placement', () => {
       ['120', 64],
     ]);
     await create(client, ['110', '120']);
-    expect(positionOf(guild)).toBe(61);
+    const reorder = reorderOf(guild);
+    expect(reorder.map((r) => r.channel)).toEqual(['100', '110', '130', '135', '120']);
+    // Directly under room 110, and still above the foreign channel 130.
+    expect(positionOf(guild)).toBeGreaterThan(positionIn(reorder, '110'));
+    expect(positionOf(guild)).toBeLessThan(positionIn(reorder, '130'));
   });
 
   it('walks past a join companion, which is not one of the rooms', async () => {
@@ -710,14 +737,16 @@ describe('DiscordVoiceActions create-time placement', () => {
     expect(positionOf(guild)).toBe(61);
   });
 
-  it('ties with the last room only when the slot below it is taken', async () => {
-    // Divider immediately under the block, so there is nowhere unique to land.
-    // The tie is unavoidable here; positionCollides is what gets it undone.
+  it('ties with the last room only when it cannot make room either', async () => {
+    // Divider immediately under the block, so there is nowhere unique to land AND
+    // the re-space that would open one fails. Falling back to a tie with the room
+    // above is what this always did, and positionCollides gets it undone.
     const { client, guild } = makeClient([
       ['100', 60],
       ['110', 61],
       ['170', 62],
     ]);
+    guild.channels.setPositions.mockRejectedValueOnce(new Error('nope'));
     await create(client, ['110']);
     expect(positionOf(guild)).toBe(61);
   });
@@ -732,16 +761,311 @@ describe('DiscordVoiceActions create-time placement', () => {
     expect(positionOf(guild)).toBe(62);
   });
 
-  it('still creates at the primary position for above, then reorders', async () => {
-    // "Above" hops the new channel over the primary by sorted index, which is
-    // drift-proof on its own, so the block bottom is not what it wants.
+  it('creates an above-mode room over the primary, with no reorder at all', async () => {
+    // This used to create at the primary's own position - a tie, which renders
+    // BELOW it - and then hop the channel up, which is the jump anyone joining an
+    // above-mode creator channel could watch happen. Discord honours a free
+    // position above an existing channel at create time, so one call does it.
     const { client, guild, created } = makeClient([
+      ['090', 30],
       ['100', 60],
-      ['110', 66],
     ]);
-    await create(client, ['110'], true);
+    await create(client, [], true);
+    expect(positionOf(guild)).toBeGreaterThan(30);
+    expect(positionOf(guild)).toBeLessThan(60);
+    expect(created.setPosition).not.toHaveBeenCalled();
+    expect(guild.channels.setPositions).not.toHaveBeenCalled();
+  });
+
+  it('takes the middle of an above-mode gap, so the next room still fits', async () => {
+    // Every above-mode room inserts into the same shrinking gap between the
+    // newest room and the primary. Hugging the primary would leave the next one
+    // nowhere at all; the midpoint is what buys more than one.
+    const { client, guild } = makeClient([['100', 64]]);
+    await create(client, [], true);
+    expect(positionOf(guild)).toBe(32);
+  });
+
+  it('makes room for an above-mode room when the primary sits at the top', async () => {
+    // Discord refuses a negative position outright (400, NUMBER_TYPE_MIN), so a
+    // primary at 0 has nowhere above it. Re-spacing first is what opens the slot.
+    const { client, guild } = makeClient([['100', 0]]);
+    await create(client, [], true);
+    expect(guild.channels.setPositions).toHaveBeenCalled();
+    expect(positionOf(guild)).toBeGreaterThanOrEqual(0);
+    expect(positionOf(guild)).toBeLessThan(positionIn(reorderOf(guild), '100'));
+  });
+
+  it('ties with the room above, never with the primary, when it cannot make room', async () => {
+    // The degraded above-mode path, and the one assertion that matters on it. The
+    // new channel always has the largest snowflake in the guild, so a tie sorts it
+    // BELOW its partner: tying with the primary would render the room on the wrong
+    // side of its own creator channel, which is the frame this work removes. Tying
+    // with the channel above renders correctly, and positionCollides still repairs
+    // it either way.
+    const { client, guild } = makeClient([
+      ['090', 59],
+      ['100', 60],
+    ]);
+    guild.channels.setPositions.mockRejectedValueOnce(new Error('nope'));
+    await create(client, [], true);
+    expect(positionOf(guild)).toBe(59);
+  });
+
+  it('falls back to the primary position when the category cannot be seen', async () => {
+    // An unhydrated guild has an empty channel cache, so the primary is not in its
+    // own sibling list. Reading that as index 0 would assert the room belongs at
+    // the very top of a category we know nothing about, and positionCollides reads
+    // the same blind cache so it would not notice.
+    const { client, guild } = makeClient([]);
+    // `near` resolves (a REST fetch would), but the guild's channel cache is empty.
+    (client.channels.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: '100',
+      isVoiceBased: () => true,
+      parentId: 'cat',
+      parent: { id: 'cat' },
+      rawPosition: 60,
+      position: 60,
+      guild,
+    });
+    await create(client, [], true);
     expect(positionOf(guild)).toBe(60);
-    expect(created.setPosition).toHaveBeenCalledWith(60);
+    expect(guild.channels.setPositions).not.toHaveBeenCalled();
+  });
+
+  it('reserves the companion slot on the room ABOVE it when it has to make room', async () => {
+    // The private-room case with no gap anywhere. The reserved slot is only any
+    // use to the companion if it is on the companion's side of the room.
+    const { client, guild } = makeClient([
+      ['100', 60],
+      ['170', 61],
+    ]);
+    await new DiscordVoiceActions(client).createVoiceChannel({
+      guildId: 'g1',
+      name: 'x',
+      nearChannelId: '100',
+      reserveSlotAbove: true,
+    });
+    const written = reorderOf(guild);
+    expect(written.map((w) => w.channel)).toEqual(['100', '170']);
+    // Room below the primary, with a clear slot between the two for the companion.
+    expect(positionOf(guild)).toBeGreaterThan(positionIn(written, '100') + 1);
+    expect(positionOf(guild)).toBeLessThan(positionIn(written, '170'));
+  });
+
+  it('leaves the slot above free when a join companion is coming', async () => {
+    const { client, guild } = makeClient([
+      ['100', 60],
+      ['170', 80],
+    ]);
+    await new DiscordVoiceActions(client).createVoiceChannel({
+      guildId: 'g1',
+      name: 'x',
+      nearChannelId: '100',
+      reserveSlotAbove: true,
+    });
+    // One clear position between the primary and the room, for the companion.
+    expect(positionOf(guild)).toBeGreaterThan(61);
+  });
+});
+
+describe('DiscordVoiceActions anchor and inheritance are different channels', () => {
+  /**
+   * A grouped category positions a room against the group's end creator channel,
+   * which is usually not the one the member joined. `nearChannelId` also picks the
+   * source for `inheritFrom: 'primary'`, so the two have to be separate inputs:
+   * with one field, a room spawned from creator channel B copied A's overwrites,
+   * and no test could see it.
+   */
+  it('positions against the anchor and inherits from the primary', async () => {
+    const ROLE = 'role-1';
+    const mkChannel = (id: string, rawPosition: number, deny: bigint) => ({
+      id,
+      isVoiceBased: () => true,
+      parentId: 'cat',
+      parent: { id: 'cat' },
+      rawPosition,
+      position: rawPosition,
+      permissionOverwrites: {
+        cache: new Map([
+          [ROLE, { id: ROLE, type: 0, allow: { bitfield: 0n }, deny: { bitfield: deny } }],
+        ]),
+      },
+    });
+    const cache = new Map<string, unknown>();
+    const guild = {
+      channels: {
+        create: vi.fn(() => Promise.resolve({ id: 'new' })),
+        setPositions: vi.fn().mockResolvedValue(undefined),
+        cache,
+      },
+      members: { me: { permissions: { bitfield: FULL_BOT_PERMS } } },
+    };
+    // The joined primary denies Connect; the group's anchor denies View. If the
+    // room ends up with the View deny, it inherited from the wrong channel.
+    const joined = { ...mkChannel('200', 48, CONNECT), guild };
+    const anchor = { ...mkChannel('100', 16, VIEW), guild };
+    cache.set('200', joined);
+    cache.set('100', anchor);
+    const client = {
+      user: { id: BOT },
+      guilds: { fetch: vi.fn().mockResolvedValue(guild), cache: new Map([['g1', guild]]) },
+      channels: { fetch: vi.fn((id: string) => Promise.resolve(cache.get(id) ?? null)), cache },
+    } as unknown as Client;
+
+    await new DiscordVoiceActions(client).createVoiceChannel({
+      guildId: 'g1',
+      name: 'x',
+      nearChannelId: '200',
+      anchorChannelId: '100',
+      above: true,
+      inheritFrom: 'primary',
+    });
+
+    const opts = guild.channels.create.mock.calls[0][0] as {
+      position?: number;
+      permissionOverwrites?: { id: string; deny: bigint }[];
+    };
+    // Positioned against the ANCHOR at 16, not the primary at 48.
+    expect(opts.position).toBeLessThan(16);
+    // ...and carrying the PRIMARY's Connect deny, not the anchor's View deny.
+    const rule = opts.permissionOverwrites!.find((o) => o.id === ROLE)!;
+    expect(rule.deny & CONNECT).toBe(CONNECT);
+    expect(rule.deny & VIEW).toBe(0n);
+  });
+
+  it('falls back to the primary when no anchor is given', async () => {
+    const { client, guild } = makeClientForAnchorless();
+    await new DiscordVoiceActions(client).createVoiceChannel({
+      guildId: 'g1',
+      name: 'x',
+      nearChannelId: '100',
+    });
+    expect((guild.channels.create.mock.calls[0][0] as { position?: number }).position).toBe(17);
+  });
+
+  function makeClientForAnchorless() {
+    const cache = new Map<string, unknown>();
+    const guild = {
+      channels: {
+        create: vi.fn(() => Promise.resolve({ id: 'new' })),
+        setPositions: vi.fn().mockResolvedValue(undefined),
+        cache,
+      },
+      members: { me: { permissions: { bitfield: FULL_BOT_PERMS } } },
+    };
+    const chan = {
+      id: '100',
+      isVoiceBased: () => true,
+      parentId: 'cat',
+      parent: { id: 'cat' },
+      rawPosition: 16,
+      position: 16,
+      guild,
+    };
+    cache.set('100', chan);
+    const client = {
+      user: { id: BOT },
+      guilds: { fetch: vi.fn().mockResolvedValue(guild), cache: new Map([['g1', guild]]) },
+      channels: { fetch: vi.fn((id: string) => Promise.resolve(cache.get(id) ?? null)), cache },
+    } as unknown as Client;
+    return { client, guild };
+  }
+});
+
+describe('DiscordVoiceActions.createJoinChannel', () => {
+  /**
+   * The companion mover had no test at any level, which is how it kept the
+   * create-then-hop shape long after the room's own create stopped needing it.
+   */
+  const makeClient = (entries: [string, number][]) => {
+    const cache = new Map<string, unknown>();
+    const guild = {
+      id: 'g1',
+      channels: {
+        create: vi.fn((opts: { position?: number }) =>
+          Promise.resolve({ id: 'join', rawPosition: opts.position ?? 0 }),
+        ),
+        setPositions: vi.fn((list: { channel: string; position: number }[]) => {
+          for (const { channel, position } of list) {
+            const c = cache.get(channel) as { rawPosition: number } | undefined;
+            if (c) c.rawPosition = position;
+          }
+          return Promise.resolve(undefined);
+        }),
+        cache,
+      },
+    };
+    for (const [id, rawPosition] of entries) {
+      cache.set(id, {
+        id,
+        isVoiceBased: () => true,
+        parentId: 'cat',
+        parent: { id: 'cat' },
+        rawPosition,
+        position: rawPosition,
+        guild,
+      });
+    }
+    const client = {
+      guilds: { fetch: vi.fn().mockResolvedValue(guild) },
+      channels: { fetch: vi.fn((id: string) => Promise.resolve(cache.get(id) ?? null)) },
+    } as unknown as Client;
+    return { client, guild };
+  };
+  const positionOf = (guild: { channels: { create: ReturnType<typeof vi.fn> } }) =>
+    (guild.channels.create.mock.calls[0][0] as { position?: number }).position;
+
+  it('lands strictly above the room it fronts', async () => {
+    const { client, guild } = makeClient([
+      ['100', 16],
+      ['110', 32],
+    ]);
+    await new DiscordVoiceActions(client).createJoinChannel('g1', 'join', '110');
+    expect(positionOf(guild)).toBeGreaterThan(16);
+    expect(positionOf(guild)).toBeLessThan(32);
+  });
+
+  it('takes a slot the room reserved for it, with no reorder', async () => {
+    // The room was created with `reserveSlotAbove`, so 62 is free and the
+    // companion costs one call.
+    const { client, guild } = makeClient([
+      ['100', 61],
+      ['110', 63],
+    ]);
+    await new DiscordVoiceActions(client).createJoinChannel('g1', 'join', '110');
+    expect(positionOf(guild)).toBe(62);
+    expect(guild.channels.setPositions).not.toHaveBeenCalled();
+  });
+
+  it('makes room when the slot above the room is taken', async () => {
+    const { client, guild } = makeClient([
+      ['100', 61],
+      ['110', 62],
+    ]);
+    await new DiscordVoiceActions(client).createJoinChannel('g1', 'join', '110');
+    expect(guild.channels.setPositions).toHaveBeenCalled();
+    const written = guild.channels.setPositions.mock.calls[0][0] as {
+      channel: string;
+      position: number;
+    }[];
+    // Order preserved, so the re-space itself is invisible.
+    expect(written.map((w) => w.channel)).toEqual(['100', '110']);
+    expect(positionOf(guild)).toBeGreaterThan(written[0]!.position);
+    expect(positionOf(guild)).toBeLessThan(written[1]!.position);
+  });
+
+  it('works for a room in the middle of a block', async () => {
+    // `/private` on a room with elders above it and younger rooms below.
+    const { client, guild } = makeClient([
+      ['100', 16],
+      ['110', 32],
+      ['120', 48],
+      ['130', 64],
+    ]);
+    await new DiscordVoiceActions(client).createJoinChannel('g1', 'join', '120');
+    expect(positionOf(guild)).toBeGreaterThan(32);
+    expect(positionOf(guild)).toBeLessThan(48);
   });
 });
 
@@ -755,8 +1079,10 @@ describe('DiscordVoiceView.displayOrderOf', () => {
   };
 
   it('sorts by position, then by id', async () => {
-    // Equal positions are the healthy steady state, and the id tie-break is what
-    // makes it render creator-then-oldest-to-newest without any reorder.
+    // This is the sort Discord documents and the one our own reasoning uses. It is
+    // NOT what a client was measured doing with a tie (a tied trio rendered 10, 9,
+    // 11), which is why placement goes out of its way to avoid ties rather than
+    // relying on this, and why `positionCollides` is a separate question.
     const v = view([
       ['300', 60],
       ['100', 60],
@@ -958,23 +1284,31 @@ describe('DiscordVoiceActions.positionCollides', () => {
 });
 
 describe('DiscordVoiceActions.repositionSecondaries', () => {
-  it('writes strictly increasing positions with a gap between each', async () => {
-    // The gap is what lets the NEXT create take a free slot instead of tying.
-    // Applied across the whole list, so the block never inverts against the
-    // channels either side of it.
+  const guildWith = (entries: [string, number][]) => {
     const cache = new Map<string, unknown>();
-    const add = (id: string, rawPosition: number) =>
+    for (const [id, rawPosition] of entries) {
       cache.set(id, { id, isVoiceBased: () => true, parentId: 'cat', rawPosition, name: id });
-    add('top', 0);
-    add('prim', 1);
-    add('r1', 2);
-    add('r2', 3);
-    add('bottom', 4);
+    }
     const setPositions = vi.fn().mockResolvedValue(undefined);
     const guild = { channels: { cache, setPositions } };
     const client = {
       guilds: { fetch: vi.fn().mockResolvedValue(guild) },
     } as unknown as Client;
+    return { client, setPositions };
+  };
+
+  it('writes strictly increasing positions with a gap between each', async () => {
+    // The gap is what lets the NEXT create take a free slot instead of tying.
+    // Applied across the whole list, so the block never inverts against the
+    // channels either side of it. The rooms start ABOVE the primary here, which
+    // is the below-mode block being wrong, so the reorder has work to do.
+    const { client, setPositions } = guildWith([
+      ['top', 0],
+      ['r1', 1],
+      ['r2', 2],
+      ['prim', 3],
+      ['bottom', 4],
+    ]);
 
     await new DiscordVoiceActions(client).repositionSecondaries('g1', 'prim', ['r1', 'r2'], false);
 
@@ -987,6 +1321,42 @@ describe('DiscordVoiceActions.repositionSecondaries', () => {
     for (let i = 1; i < written.length; i += 1) {
       expect(written[i]!.position).toBeGreaterThan(written[i - 1]!.position + 1);
     }
+    // Never zero, so an above-mode room always has somewhere to be created into.
+    expect(written[0]!.position).toBeGreaterThan(0);
+  });
+
+  it('writes nothing when the channels already render in this order', async () => {
+    // A create lands in its final slot now, so the repair that follows one is
+    // usually asking for the order that already holds. Issuing it anyway would
+    // spend a REST call per join to change nothing - and, in a grouped category,
+    // it is exactly the reorder that used to move the room the member was
+    // watching. Spacing is re-established on demand by the next create that
+    // actually needs a slot, not by a call on every join.
+    const { client, setPositions } = guildWith([
+      ['top', 0],
+      ['prim', 1],
+      ['r1', 2],
+      ['r2', 3],
+    ]);
+
+    await new DiscordVoiceActions(client).repositionSecondaries('g1', 'prim', ['r1', 'r2'], false);
+
+    expect(setPositions).not.toHaveBeenCalled();
+  });
+
+  it('still writes when two channels share a position', async () => {
+    // A tie is never "already correct" however close it looks: the client
+    // resolves one in an order of its own and Discord eventually makes that
+    // resolution permanent.
+    const { client, setPositions } = guildWith([
+      ['prim', 1],
+      ['r1', 2],
+      ['r2', 2],
+    ]);
+
+    await new DiscordVoiceActions(client).repositionSecondaries('g1', 'prim', ['r1', 'r2'], false);
+
+    expect(setPositions).toHaveBeenCalled();
   });
 });
 
@@ -1069,9 +1439,11 @@ describe('DiscordVoiceActions.repositionGroup', () => {
     const cache = new Map<string, unknown>();
     const add = (id: string, rawPosition: number) =>
       cache.set(id, { id, isVoiceBased: () => true, parentId: 'cat', rawPosition });
-    add('primA', 0);
-    add('primB', 1);
-    add('r1', 2);
+    // The room sits above both primaries, which is the group block on the wrong
+    // side of them, so the reorder has work to do.
+    add('r1', 0);
+    add('primA', 1);
+    add('primB', 2);
     const setPositions = vi.fn().mockResolvedValue(undefined);
     const guild = { channels: { cache, setPositions } };
     const client = { guilds: { fetch: vi.fn().mockResolvedValue(guild) } } as unknown as Client;
@@ -1079,9 +1451,30 @@ describe('DiscordVoiceActions.repositionGroup', () => {
     await new DiscordVoiceActions(client).repositionGroup('g1', ['primA', 'primB'], ['r1'], false);
 
     const written = setPositions.mock.calls[0][0] as { channel: string; position: number }[];
+    expect(written.map((w) => w.channel)).toEqual(['primA', 'primB', 'r1']);
     const steps = written.slice(1).map((w, i) => w.position - written[i]!.position);
     expect(new Set(steps).size).toBe(1);
     expect(steps[0]).toBeGreaterThan(4);
+    expect(written[0]!.position).toBeGreaterThan(0);
+  });
+
+  it('writes nothing when the group block is already where it belongs', async () => {
+    // The third jump in the recording: a grouped create reordered the whole
+    // category after the member had been moved in. The create places the room
+    // correctly now, so there is nothing left for this to do.
+    const cache = new Map<string, unknown>();
+    const add = (id: string, rawPosition: number) =>
+      cache.set(id, { id, isVoiceBased: () => true, parentId: 'cat', rawPosition });
+    add('primA', 16);
+    add('primB', 32);
+    add('r1', 48);
+    const setPositions = vi.fn().mockResolvedValue(undefined);
+    const guild = { channels: { cache, setPositions } };
+    const client = { guilds: { fetch: vi.fn().mockResolvedValue(guild) } } as unknown as Client;
+
+    await new DiscordVoiceActions(client).repositionGroup('g1', ['primA', 'primB'], ['r1'], false);
+
+    expect(setPositions).not.toHaveBeenCalled();
   });
 });
 

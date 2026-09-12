@@ -185,12 +185,15 @@ function toVoiceMember(member: GuildMember): VoiceMember {
  * an existing position. Spacing them means a create takes a free slot instead,
  * and needs no reorder at all.
  *
- * **The value is the headroom.** A block with something below it in its category
- * (a divider, another creator channel) absorbs exactly `POSITION_STEP - 1`
- * creates before the slot below its last room is taken and the next create has
- * to tie. At a step of 2 that is ONE create, so a busy category would reorder
- * every other join, which is barely better than reordering on every one. Sixteen
- * buys fifteen. A block with nothing below it never runs out at all.
+ * **The value is the headroom, and the two directions spend it differently.** A
+ * `below` block with something under it in its category (a divider, another
+ * creator channel) absorbs `POSITION_STEP - 1` creates before the slot beneath its
+ * last room is taken, so sixteen buys fifteen, and a block with nothing below it
+ * never runs out at all. An `above` block absorbs only `log2(POSITION_STEP)`,
+ * four, because every room inserts into the same gap between the newest room and
+ * the creator channel and takes its midpoint. Raising the step helps `above`
+ * logarithmically and `below` linearly. At a step of 2, `below` would reorder
+ * every other join, which is barely better than reordering on every one.
  *
  * Costs nothing to raise: positions are ordering values rather than indices,
  * Discord already tolerates gaps (a deleted room leaves one), and each category
@@ -200,16 +203,14 @@ function toVoiceMember(member: GuildMember): VoiceMember {
  * stays strictly increasing. Spacing only the block would reorder it relative to
  * the channels either side of it, which is the fault this is meant to prevent.
  *
- * **discord.js erases this whenever it repositions a channel by index.** Its
- * `setPosition` helper remaps the entire category to consecutive integers
- * (`Util.js`, `updatedItems.map((r, i) => ({ id: r.id, position: i }))`), which
- * `placeAboveSibling` calls for every `above` room and every private room's join
- * companion. Those categories therefore get no benefit from the spacing. They are
- * not left wrong, because the same helper sorts by `rawPosition` then id
- * ascending before renumbering, which is exactly the order intended here, so it
- * resolves the tie correctly rather than baking in an arbitrary one. The result
- * is that spacing is an optimisation for ordinary below-mode categories and inert
- * elsewhere.
+ * **Numbering starts at one step, not at zero, and that is load-bearing for
+ * `above`.** Discord refuses a negative position outright (400, `NUMBER_TYPE_MIN`,
+ * "int32 value should be greater than or equal to 0" — measured against the live
+ * API, on both create and bulk reorder). A room placed *above* its creator channel
+ * needs a free integer BELOW the topmost channel's position, so a category whose
+ * top channel sits at 0 has nowhere for one to go and every such create has to buy
+ * a reorder. Starting at `POSITION_STEP` leaves that headroom and costs nothing:
+ * positions are ordering values, not indices.
  */
 const POSITION_STEP = 16;
 
@@ -253,21 +254,29 @@ export class DiscordVoiceActions implements VoiceActions {
       ? await this.client.channels.fetch(input.nearChannelId).catch(() => null)
       : null;
     const placeAbove = input.above === true;
-    // Create the channel at the bottom of the primary's block: Discord breaks
-    // position ties by id, and the new channel always has the largest id, so it
-    // lands directly below whatever it shares a position with, in a single call.
-    // For the default "below" that is already correct, so we do no extra work
-    // (no reorder → no flicker). For "above" we then bulk-reorder it up one slot
-    // (Discord can't place a new channel above an existing one at create time —
-    // the id tie-break forbids it).
+    // Create the channel in the slot it is meant to END in, so the first thing
+    // anyone sees is its final position. Discord honours an arbitrary create-time
+    // position exactly and shifts no sibling to make room (measured against the
+    // live API), so the only thing that can stop this is the slot already being
+    // occupied — which `makeRoomAt` fixes by re-spacing the category first, in an
+    // order-preserving way nobody can see.
+    // The anchor is the channel the new one is positioned AGAINST, which for a
+    // grouped category is not the primary it belongs to. They are resolved apart
+    // because `near` also decides the inherited permissions below, and pointing
+    // that at the group's end primary copied a different creator channel's
+    // overwrites onto the room.
+    const anchor =
+      input.anchorChannelId && input.anchorChannelId !== input.nearChannelId
+        ? await this.client.channels.fetch(input.anchorChannelId).catch(() => null)
+        : near;
     let createPosition: number | undefined;
-    let reorderAboveIndex: number | undefined;
-    if (near?.isVoiceBased()) {
-      parentId ??= near.parent?.id;
-      createPosition = near.rawPosition;
-      if (placeAbove)
-        reorderAboveIndex = near.position; // captured before create
-      else createPosition = this.bottomOfBlock(near, input.afterChannelIds);
+    if (anchor?.isVoiceBased()) {
+      parentId ??= anchor.parent?.id;
+      const index = this.insertIndexFor(anchor, input.afterChannelIds, placeAbove);
+      createPosition =
+        index === -1
+          ? anchor.rawPosition
+          : await this.slotFor(anchor, index, placeAbove, input.reserveSlotAbove === true);
     }
 
     // Resolve the permission overwrites to create the channel with:
@@ -354,38 +363,46 @@ export class DiscordVoiceActions implements VoiceActions {
       );
       channel = await guild.channels.create(baseOptions);
     }
-    if (reorderAboveIndex !== undefined) {
-      await this.placeAboveSibling(channel, reorderAboveIndex);
-    }
     return channel.id;
   }
 
   /**
-   * The position to create a "below" secondary at: the free slot immediately
-   * under the primary's block, or, when there is no free slot, the bottom-most
-   * position the block already holds.
+   * The category's voice channels in the order Discord renders them.
    *
-   * **A shared position is not a safe place to land, and this is measured.** The
-   * documented sort is position then id, so a tie should render oldest-first, and
-   * for a while this relied on that. It does not hold in the client: a guild with
-   * rooms 9, 10 and 11 all on position 81 rendered them `10, 9, 11`, which is not
-   * id order in any direction. Discord then normalises such a tie into unique
-   * positions at some later point and bakes that arbitrary order in, at which
-   * point the block is genuinely out of order rather than merely ambiguous. So a
-   * tie is not a harmless steady state, it is the thing that decays into the bug.
-   *
-   * Preferring a free slot costs nothing when one exists. When none does, the tie
-   * is unavoidable here and {@link positionCollides} is what tells the caller to
-   * spend one bulk reorder undoing it, which also re-spaces the block so the next
-   * create finds a slot again.
+   * Positions in two categories are separate number spaces, so this is always
+   * scoped to one parent (`null` — the server root — is a real parent here).
    */
-  private bottomOfBlock(primary: VoiceBasedChannel, blockIds: string[] | undefined): number {
-    const block = new Set(blockIds ?? []);
-    const siblings = [...primary.guild.channels.cache.values()]
-      .filter((c): c is VoiceBasedChannel => c.isVoiceBased() && c.parentId === primary.parentId)
+  private sortedSiblings(anchor: VoiceBasedChannel): VoiceBasedChannel[] {
+    return [...anchor.guild.channels.cache.values()]
+      .filter((c): c is VoiceBasedChannel => c.isVoiceBased() && c.parentId === anchor.parentId)
       .sort((a, b) => a.rawPosition - b.rawPosition || (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
-    const start = siblings.findIndex((c) => c.id === primary.id);
-    if (start === -1) return primary.rawPosition;
+  }
+
+  /**
+   * Where the new room belongs, as an index into {@link sortedSiblings}: the
+   * slot it would occupy once it exists.
+   *
+   * `above` inserts immediately before the primary, because the block above a
+   * creator channel is ordered oldest-first and the newest room therefore sits
+   * directly against it (`blockMisordered` in the handler is the same rule from
+   * the other side). `below` inserts after the primary's existing block.
+   *
+   * Returns -1 when the primary is not in the sorted list at all, which means the
+   * channel cache cannot see this category. That is "cannot say", not "index 0":
+   * an unhydrated guild yields an EMPTY sibling list, and reading that as index 0
+   * would assert the room belongs at the very top of a category we know nothing
+   * about. {@link positionCollides} reads the same blind cache, so it would not
+   * notice either.
+   */
+  private insertIndexFor(
+    anchor: VoiceBasedChannel,
+    blockIds: string[] | undefined,
+    above: boolean,
+  ): number {
+    const siblings = this.sortedSiblings(anchor);
+    const start = siblings.findIndex((c) => c.id === anchor.id);
+    if (start === -1) return -1;
+    if (above) return start;
 
     // Walk DOWN from the primary and stop at the first channel that is not part
     // of this block, rather than taking the largest position any room holds.
@@ -393,11 +410,10 @@ export class DiscordVoiceActions implements VoiceActions {
     // the category as the end of the block, and then anchors every future room
     // below everything in between, including other creator channels and their
     // rooms. That would be a new fault, in a state the misorder check cannot see.
-    let position = primary.rawPosition;
+    const block = new Set(blockIds ?? []);
     let end = start;
     for (let i = start + 1; i < siblings.length; i += 1) {
       if (block.has(siblings[i]!.id)) {
-        position = siblings[i]!.rawPosition;
         end = i;
         continue;
       }
@@ -410,12 +426,120 @@ export class DiscordVoiceActions implements VoiceActions {
       if (block.has(siblings[i + 1]?.id ?? '')) continue;
       break;
     }
-    // One clear position below the block, when nothing already sits there.
-    // `end` is the last channel that belongs to this block, so the gap is judged
-    // against whatever follows it rather than against the largest position any
-    // room holds, which a room dragged elsewhere would distort.
-    const next = siblings[end + 1];
-    return !next || next.rawPosition > position + 1 ? position + 1 : position;
+    return end + 1;
+  }
+
+  /**
+   * The position to create a channel at so that it lands at `index` of the
+   * category's voice channels, with no reorder afterwards.
+   *
+   * **A shared position is not a safe place to land, and this is measured.** The
+   * documented sort is position then id, so a tie should render oldest-first, and
+   * for a while this relied on that. It does not hold in the client: a guild with
+   * rooms 9, 10 and 11 all on position 81 rendered them `10, 9, 11`, which is not
+   * id order in any direction. Discord then normalises such a tie into unique
+   * positions at some later point and bakes that arbitrary order in, at which
+   * point the block is genuinely out of order rather than merely ambiguous. So a
+   * tie is not a harmless steady state, it is the thing that decays into the bug.
+   * Every branch here therefore returns a position nothing else holds.
+   *
+   * **Which end of the gap to take is not a style choice.** A `below` room hugs
+   * the TOP of its gap, because the next room down will want the space underneath
+   * it and taking the middle would halve it for nothing. An `above` room takes the
+   * MIDDLE, because every later room inserts into that same shrinking gap between
+   * the newest room and the primary, so the midpoint is what buys more than one.
+   *
+   * When the gap is too small, {@link makeRoomAt} re-spaces the category and
+   * returns the slot it opened. Only if THAT fails do we tie deliberately, with
+   * the channel ABOVE the slot wherever there is one. The new channel has the
+   * largest snowflake in the guild, so a tie sorts it below its partner: tying
+   * upwards renders on the correct side, and tying downwards renders it on the
+   * wrong side of the very channel it was meant to sit against. Above-mode used to
+   * tie downwards on every single create, and that is the frame this work removes.
+   *
+   * **One tie is unavoidable and it is the only one left:** an `above` room whose
+   * anchor is the topmost voice channel of its category AND sits at position 0,
+   * when the re-space that would have moved it down has failed. There is nothing
+   * above position 0 to tie with, because Discord refuses a negative position, so
+   * the room ties with its own creator channel and renders under it until
+   * {@link positionCollides} buys the repair.
+   */
+  private async slotFor(
+    anchor: VoiceBasedChannel,
+    index: number,
+    above: boolean,
+    reserveSlotAbove: boolean,
+  ): Promise<number> {
+    const siblings = this.sortedSiblings(anchor);
+    // `-1` for "nothing above", so the first usable position is 0. Discord
+    // refuses anything lower (400 NUMBER_TYPE_MIN), which is why this floor
+    // exists rather than being allowed to go negative.
+    const lower = index > 0 ? siblings[index - 1]!.rawPosition : -1;
+    const upper = siblings[index]?.rawPosition;
+    // The companion of a private room has to fit in the slot directly above the
+    // room, so that room needs two free integers rather than one.
+    const need = reserveSlotAbove ? 2 : 1;
+
+    if (upper === undefined) return Math.max(lower + need, 0);
+    const gap = upper - lower;
+    if (gap > need) {
+      if (!above) return lower + need;
+      // The reserved slot goes between the predecessor and the room, never below
+      // it, because that is where the companion has to sit. So take the midpoint
+      // of what is left AFTER reserving rather than of the whole gap.
+      const first = lower + need;
+      return first + Math.floor((upper - first) / 2);
+    }
+    return (
+      (await this.makeRoomAt(anchor, siblings, index, need)) ??
+      (lower >= 0 ? lower : anchor.rawPosition)
+    );
+  }
+
+  /**
+   * Re-spaces the category's voice channels, opening `need` free slots at `index`,
+   * and returns the position for the new channel: the BOTTOM one of them, so any
+   * slot reserved beyond the first sits ABOVE the new channel, which is the side
+   * a private room's companion has to be on.
+   *
+   * **This is invisible, and that is the whole point of doing it here rather than
+   * afterwards.** The mapping is strictly increasing in the existing sort order, so
+   * the only thing it changes is the numbers behind the channels. Running it BEFORE
+   * the create means the new channel's first appearance is its final position; the
+   * reorder it replaces ran after, which is what anyone watching saw as a jump.
+   *
+   * The one case where it settles something rather than preserving it is a TIE,
+   * which is one of the two things that bring it here. A tie has no defined render
+   * order to preserve (a client was measured rendering one trio `10, 9, 11`), so
+   * resolving it the documented way is the point rather than a side effect.
+   *
+   * Best-effort: `undefined` means the caller should fall back to a tie rather
+   * than fail a create over placement.
+   */
+  private async makeRoomAt(
+    anchor: VoiceBasedChannel,
+    siblings: VoiceBasedChannel[],
+    index: number,
+    need: number,
+  ): Promise<number | undefined> {
+    try {
+      await anchor.guild.channels.setPositions(
+        siblings.map((c, i) => ({
+          channel: c.id,
+          position: (i < index ? i + 1 : i + 1 + need) * POSITION_STEP,
+        })),
+      );
+      return (index + need) * POSITION_STEP;
+    } catch (err) {
+      this.logger?.warn(
+        // `anchorChannelId`, not `primaryChannelId`: a join companion is
+        // positioned against its ROOM, so naming this a primary would put a
+        // secondary's id in a field an operator reads as a creator channel.
+        { err, guildId: anchor.guildId, anchorChannelId: anchor.id },
+        'could not make room for a new channel; creating at a shared position',
+      );
+      return undefined;
+    }
   }
 
   positionCollides(guildId: string, channelId: string): Promise<boolean> {
@@ -438,26 +562,6 @@ export class DiscordVoiceActions implements VoiceActions {
         c.rawPosition === channel.rawPosition,
     );
     return Promise.resolve(collides);
-  }
-
-  /**
-   * Moves a just-created voice `channel` directly above the sibling whose
-   * pre-create sorted index was `nearIndex`, via the bulk channel-reorder endpoint
-   * (discord.js rebuilds the full sibling list with unique sequential positions,
-   * so it's deterministic — no id tie-break). Only used for "above": "below" is
-   * already correct from the create-time position and needs no reorder. Best-
-   * effort: a failure leaves the channel created (just mis-ordered).
-   */
-  private async placeAboveSibling(channel: VoiceBasedChannel, nearIndex: number): Promise<void> {
-    try {
-      // `setPosition` removes the channel from the sorted list then re-inserts it
-      // at `nearIndex` of the *remaining* siblings — which equals the list as it
-      // was before this channel existed — landing it in the near channel's old
-      // slot (pushing near down → above).
-      await channel.setPosition(nearIndex);
-    } catch (err) {
-      this.logger?.warn({ err, channelId: channel.id }, 'failed to position new channel');
-    }
   }
 
   /** A category's overwrites by id (for the implicit-sync lock-out guard). */
@@ -670,6 +774,36 @@ export class DiscordVoiceActions implements VoiceActions {
     }
   }
 
+  /**
+   * Writes `desired` (top to bottom) back as positions, in ONE bulk reorder.
+   *
+   * **Skipped entirely when the channels already render in this order.** A create
+   * now lands in its final slot, so the repair that follows one is usually asking
+   * for the order that already holds, and issuing it anyway would spend a REST
+   * call per join to change nothing.
+   *
+   * "Already in this order" means strictly increasing positions, so a TIE is never
+   * treated as correct however close it looks. The client resolves a tie in an
+   * order of its own and Discord eventually makes that resolution permanent, which
+   * is the fault this whole mechanism exists to undo.
+   *
+   * Numbering starts at one step rather than zero, so the category keeps room
+   * above its topmost channel for an `above` room to be created into. See
+   * {@link POSITION_STEP}.
+   */
+  private async applyOrder(
+    guild: { channels: { setPositions(p: { channel: string; position: number }[]): unknown } },
+    desired: VoiceBasedChannel[],
+  ): Promise<void> {
+    const alreadyRight = desired.every(
+      (c, i) => i === 0 || desired[i - 1]!.rawPosition < c.rawPosition,
+    );
+    if (alreadyRight) return;
+    await guild.channels.setPositions(
+      desired.map((c, i) => ({ channel: c.id, position: (i + 1) * POSITION_STEP })),
+    );
+  }
+
   async repositionSecondaries(
     guildId: string,
     primaryChannelId: string,
@@ -706,13 +840,11 @@ export class DiscordVoiceActions implements VoiceActions {
       const pIdx = rest.findIndex((c) => c.id === primaryChannelId);
       if (pIdx === -1 || secs.length === 0) return;
       // Insert the block just above (pIdx) or just below (pIdx + 1) the primary,
-      // then reassign sequential positions and push it all in ONE bulk reorder
-      // (minimal flicker; deterministic — no id tie-break).
+      // then hand the whole list to `applyOrder`, which sends at most ONE bulk
+      // reorder and sends none at all when the category already renders this way.
       const insertAt = above ? pIdx : pIdx + 1;
       const desired = [...rest.slice(0, insertAt), ...secs, ...rest.slice(insertAt)];
-      await guild.channels.setPositions(
-        desired.map((c, i) => ({ channel: c.id, position: i * POSITION_STEP })),
-      );
+      await this.applyOrder(guild, desired);
     } catch (err) {
       this.logger?.warn({ err, primaryChannelId }, 'failed to reposition secondaries');
     }
@@ -761,9 +893,7 @@ export class DiscordVoiceActions implements VoiceActions {
       // Below → just under the bottommost primary; above → just over the topmost.
       const insertAt = above ? Math.min(...primaryIdxs) : Math.max(...primaryIdxs) + 1;
       const desired = [...rest.slice(0, insertAt), ...secs, ...rest.slice(insertAt)];
-      await guild.channels.setPositions(
-        desired.map((c, i) => ({ channel: c.id, position: i * POSITION_STEP })),
-      );
+      await this.applyOrder(guild, desired);
     } catch (err) {
       this.logger?.warn({ err, primaryChannelIds }, 'failed to reposition group');
     }
@@ -790,11 +920,14 @@ export class DiscordVoiceActions implements VoiceActions {
     const near = await this.client.channels.fetch(nearChannelId).catch(() => null);
     let parentId: string | undefined;
     let createPosition: number | undefined;
-    let nearIndex: number | undefined;
     if (near?.isVoiceBased()) {
       parentId = near.parent?.id;
-      createPosition = near.rawPosition; // land adjacent, then hop above
-      nearIndex = near.position;
+      // The companion sits directly above the room it fronts, so it wants the
+      // room's own slot in the sorted list. A room created with `reserveSlotAbove`
+      // has left one free and this costs nothing; otherwise `slotFor` re-spaces.
+      const index = this.sortedSiblings(near).findIndex((c) => c.id === near.id);
+      createPosition =
+        index === -1 ? near.rawPosition : await this.slotFor(near, index, true, false);
     }
     const channel = await guild.channels.create({
       name,
@@ -802,10 +935,6 @@ export class DiscordVoiceActions implements VoiceActions {
       ...(parentId ? { parent: parentId } : {}),
       ...(createPosition !== undefined ? { position: createPosition } : {}),
     });
-    // Sit the "⇩ Join" companion directly above its (private) channel.
-    if (nearIndex !== undefined) {
-      await this.placeAboveSibling(channel, nearIndex);
-    }
     return channel.id;
   }
 }

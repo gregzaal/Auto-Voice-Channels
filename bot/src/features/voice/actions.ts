@@ -20,20 +20,42 @@ export interface CreateVoiceChannelInput {
   /** Age-restricted ("NSFW") channel. */
   nsfw?: boolean;
   /**
-   * Position the new channel relative to this (primary) channel: inherit its
-   * category, and sit just above (`above: true`) or below it (default). "Below"
-   * is achieved purely via the create-time position (no extra reorder); "above"
-   * additionally bulk-reorders the new channel up one slot.
+   * The creator channel this room belongs to. Gives the new channel its category
+   * AND, for `inheritFrom: 'primary'`, its permission overwrites — so this must
+   * always be the primary the member actually joined.
+   *
+   * **Placement is a separate question, and `anchorChannelId` is where it lives.**
+   * Keeping both on one field is what made a grouped create copy the wrong creator
+   * channel's permissions: a grouped block is positioned against a different
+   * primary than the one that spawned the room.
    */
   nearChannelId?: string;
+  /**
+   * Position the new channel against THIS channel instead of `nearChannelId`: just
+   * above it (`above: true`) or below it (default). Defaults to `nearChannelId`.
+   *
+   * A GROUPED category is the reason it exists. Its block sits above every creator
+   * channel in the category or below every one of them, so the anchor is the
+   * topmost or bottommost primary and `above` is the group's direction, neither of
+   * which is a fact about the primary the member joined.
+   */
+  anchorChannelId?: string;
   above?: boolean;
   /**
-   * The primary's existing rooms. The new channel is created at the bottom-most
-   * position any of them holds, rather than at the primary's own, so it lands
-   * below them however their positions have drifted. Ignored for `above`, which
-   * reorders explicitly. See `bottomOfBlock` for why this matters.
+   * The existing rooms the new one goes after: the primary's own block, or the
+   * whole group's block in a grouped category. The new channel is placed below the
+   * last of them rather than at the anchor's own position, so it lands below its
+   * elders however their positions have drifted. Ignored for `above`, which
+   * inserts against the anchor. See `insertIndexFor`.
    */
   afterChannelIds?: string[];
+  /**
+   * Leave the position directly above the new channel free as well, for a private
+   * room's "⇩ Join" companion, which is created immediately afterwards and has to
+   * sit there. Without it that create finds the slot taken and has to re-space the
+   * category first, which is a second REST call on the join path.
+   */
+  reserveSlotAbove?: boolean;
   /**
    * Copy permission overwrites onto the new channel from a source resolved
    * relative to `nearChannelId`: `primary` (the near channel), `category` (its
@@ -144,6 +166,16 @@ export type RecordedAction =
       channelId: string;
       name: string;
       parentId?: string;
+      /**
+       * Recorded because placement is decided by the CALLER, not the adapter: the
+       * anchor and the direction are what a grouped category gets wrong, and
+       * without them here no handler test can see which channel a create was
+       * placed against.
+       */
+      nearChannelId?: string;
+      anchorChannelId?: string;
+      above?: boolean;
+      reserveSlotAbove?: boolean;
       afterChannelIds?: string[];
       bitrate?: number;
       rtcRegion?: string;
@@ -225,6 +257,10 @@ export class RecordingVoiceActions implements VoiceActions {
       channelId,
       name: input.name,
       ...(input.parentId ? { parentId: input.parentId } : {}),
+      ...(input.nearChannelId ? { nearChannelId: input.nearChannelId } : {}),
+      ...(input.anchorChannelId ? { anchorChannelId: input.anchorChannelId } : {}),
+      ...(input.above !== undefined ? { above: input.above } : {}),
+      ...(input.reserveSlotAbove !== undefined ? { reserveSlotAbove: input.reserveSlotAbove } : {}),
       ...(input.afterChannelIds ? { afterChannelIds: input.afterChannelIds } : {}),
       ...(input.bitrate !== undefined ? { bitrate: input.bitrate } : {}),
       ...(input.rtcRegion !== undefined ? { rtcRegion: input.rtcRegion } : {}),
