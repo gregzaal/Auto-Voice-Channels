@@ -15,7 +15,7 @@ import {
 import type { BackupStorage } from './storage.js';
 
 /**
- * The restore drill (`plans/backups.md` §9.2).
+ * The restore drill.
  *
  * "The upload succeeded" is not evidence that anything can be recovered. The
  * drill answers the only question that matters: if the database vanished right
@@ -477,7 +477,7 @@ async function drillRestore(
      * public" -- and it fails at the END of the drill, after the restore, so
      * the drill reported failure AND left the copy behind, which is precisely
      * the outcome the paragraph above exists to prevent. Found on Fly MPG
-     * 2026-08-19 (`plans/backups.md` §9).
+     * 2026-08-19.
      *
      * Filtering on `current_user` is what keeps this honest. The platform
      * installs its own objects in `public` (`pg_stat_monitor` is a view there),

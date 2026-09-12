@@ -13,8 +13,7 @@ import {
 } from '../ops/topgg.js';
 
 /**
- * Keeps the top.gg listing's server count and command list current
- * (`plans/marketing.md` beat 6).
+ * Keeps the top.gg listing's server count and command list current.
  *
  * Exists entirely because both numbers rot in the direction that looks like
  * abandonment. The listing has been showing a server count of zero and no
@@ -34,7 +33,7 @@ import {
  * It is **one instance in the steady state, not exactly one always.** Shard 0
  * moves between machines across a deploy, and an instance whose lease heartbeat
  * is failing keeps its `ownedShards` while a booting peer legitimately claims
- * the same shard (`plans/scaling.md` §6.1). So two machines can publish in the
+ * the same shard. So two machines can publish in the
  * same window. That is harmless here and is why this gate is enough: both calls
  * are idempotent, both read the same number from the same database, and two
  * requests is nothing against a 100-per-second limit. Do not read the gate as a

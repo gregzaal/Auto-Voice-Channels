@@ -72,7 +72,7 @@ export class PermissionProblemTracker {
 
   /**
    * Every guild with an incident seen within `sinceMs`, for the self-host
-   * watcher (`plans/agentic_management.md` step 4).
+   * watcher.
    *
    * **Filtered on age rather than returning the whole map**, because the map is
    * only ever pruned by a SUCCESSFUL operation on the same channel. A guild

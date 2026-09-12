@@ -237,7 +237,7 @@ describe('billing repositories (integration)', () => {
 
   describe('applyAdjustment (the ordering guard)', () => {
     /**
-     * `plans/refunds.md` §2.6. `recordRefund` is last-write-wins, so a second
+     * `recordRefund` is last-write-wins, so a second
      * refund request arriving `pending_approval` overwrote `'approved'`,
      * standing flipped back true and the ladder reactivated a guild whose money
      * we had already returned. The guard is in the WHERE clause rather than
@@ -288,7 +288,7 @@ describe('billing repositories (integration)', () => {
       expect(row?.refundSettledAt).not.toBeNull();
       expect(row?.refundAdjustmentId).toBe('adj_1');
 
-      // The §2.6 attack: a SECOND request, stamped earlier, arriving after.
+      // The ordering attack: a SECOND request, stamped earlier, arriving after.
       const stale = adj({
         adjustmentId: 'adj_2',
         status: 'pending_approval',
@@ -373,7 +373,7 @@ describe('billing repositories (integration)', () => {
 
   describe('claimRefundRequest (the self-serve cap)', () => {
     /**
-     * `plans/refunds.md` §11. The cap has to be claimed in the same statement
+     * The cap has to be claimed in the same statement
      * that tests it: `refund_status` is written by the webhook seconds to
      * minutes later, so two clicks 200ms apart would both read it as null and
      * both pass. Real Postgres, because that atomicity IS the feature.

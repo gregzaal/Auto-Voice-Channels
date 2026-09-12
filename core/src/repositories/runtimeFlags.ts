@@ -10,7 +10,7 @@ import { opsAudit, runtimeFlags } from '../db/schema.js';
  */
 export class RuntimeFlagsRepository {
   /**
-   * Flags are per fleet (`plans/fleets.md` §2): pausing beta must not pause
+   * Flags are per fleet: pausing beta must not pause
    * production, and that independence is the whole reason for having a beta.
    * Defaults to `prod`, so self-host and existing callers are unchanged.
    */
@@ -49,7 +49,7 @@ export class RuntimeFlagsRepository {
    * is not fleet-scoped. `guilds.settings` has no `fleet` column and
    * `avc_settings_invalidate` is one global channel, so an `/import` run through
    * the beta bot rewrites the row prod reads and tells every prod instance to
-   * pick it up, `enabled` included. 35 guilds have both bots installed.
+   * pick it up, `enabled` included.
    *
    * So an operator reaching for the kill switch during an incident needs one
    * click to stop every path into that blob, not one per fleet with no

@@ -2,7 +2,7 @@ name: Release
 
 # Deliberately its own workflow, not a step in ci.yml: this only runs when a
 # release tag is deliberately pushed, so it never blocks or interacts with the
-# normal push/PR test suite. See plans/versioning.md §5.
+# normal push/PR test suite. See scripts/checkReleaseTag.mjs for the checks.
 on:
   push:
     tags: ['v*']
@@ -25,9 +25,8 @@ jobs:
       # This workflow validates the tag's own consistency (below); it doesn't
       # re-run typecheck/lint/build/test, so nothing here confirms the tagged
       # commit ever passed ci.yml. A tag push doesn't trigger ci.yml on its
-      # own, so check it explicitly rather than assuming: golden rule 6 is
-      # "tests gate everything," and a release tag is the one artifact that's
-      # permanent on this public repo.
+      # own. Require main ancestry here and verify successful CI on the exact
+      # commit before tagging; ancestry alone does not establish that it passed.
       - name: Confirm the tagged commit is on origin/main
         run: |
           set -euo pipefail

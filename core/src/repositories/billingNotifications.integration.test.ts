@@ -8,7 +8,7 @@ import { GuildFleetPresenceRepository } from './guildFleetPresence.js';
 
 /**
  * The queue that lets the ladder advance on one fleet and be delivered by
- * another (`plans/fleets.md` §4).
+ * another.
  *
  * The interesting cases are all about *who may take a row*, so these run
  * against real Postgres: the fleet scoping is a join and the anti-double-send

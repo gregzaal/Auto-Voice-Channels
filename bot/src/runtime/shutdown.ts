@@ -120,7 +120,7 @@ export async function gracefulDrain(deps: ShutdownDeps): Promise<void> {
    *
    * Releasing first frees the shard ids in the database while this process
    * still holds their live WebSocket sessions, and a booting peer retries its
-   * claim every 2s (`plans/scaling.md` §6.2) — a window where a replacement
+   * claim every 2s — a window where a replacement
    * could legitimately claim a shard this instance is still actively serving.
    * Destroying first closes those sessions before the rows go free, so
    * nothing is ever claimable while still live here. Confirmed safe to

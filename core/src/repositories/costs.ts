@@ -21,8 +21,7 @@ export interface CostsInput {
 }
 
 /**
- * Hand-entered monthly infrastructure costs (`plans/admin-dashboard.md` §4.5,
- * "unit economics"). A tiny, narrow table by design: one row a month, four
+ * Hand-entered monthly infrastructure costs. A tiny, narrow table by design: one row a month, four
  * numbers, no history beyond what an operator chooses to type in.
  */
 export class CostsRepository {

@@ -16,8 +16,7 @@ import {
 import { LIST_NAME_MAX } from '../features/voice/nameTemplate.js';
 
 /**
- * The `/setup` panel for named `[[list:name]]` pools
- * (`plans/name-tokens.md` §10.2).
+ * The `/setup` panel for named `[[list:name]]` pools.
  *
  * Shaped after the `/alias` panel, with one deliberate difference: a list name
  * is validated to carry no `:`, so ids and select values carry the NAME rather

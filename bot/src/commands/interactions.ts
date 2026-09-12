@@ -225,7 +225,7 @@ export interface InteractionDeps {
    * collector switched off need not supply one.
    *
    * This is the one product question nothing else in the schema can answer:
-   * every other metric in the plan's §4.6 is derivable from a table after the
+   * most state metrics are derivable from a table after the
    * fact, and "which commands do people actually use" leaves no trace at all
    * unless it is counted as it happens.
    */
@@ -318,7 +318,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       return;
     }
 
-    // Hard gate (monetization.md §6): in an expired guild every interaction
+    // Hard gate: in an expired guild every interaction
     // gets the friendly reactivation message — except the read-only surfaces
     // that let an admin see the gated state and fix it (`/setup` & friends).
     const entitled = isEntitled({
@@ -1418,7 +1418,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
      * `/template` and `/name` accepted anything and an unknown `{{VARIABLE}}`
      * silently rendered the false branch. The admin got a plausible wrong name
      * with nothing telling them why, which is the harm class this whole release
-     * is about (`plans/name-tokens.md` §6.8). An admin with Manage Channels may
+     * is about. An admin with Manage Channels may
      * still set any name they like, so this only ever appends to the note.
      */
     const guildConfig = await run(guildId, 'editor:advice', () => deps.settings.getConfig(guildId));
@@ -2073,7 +2073,7 @@ Already subscribed? Add the new server ` +
    * `GuildRepository.isEntitled` throws the row away, and the refusal has to
    * know whether this server is covered by a subscription spanning several
    * servers: its admins are then very often not the person who can pay, so
-   * "reactivate at ..." is a dead end for them (§6.6).
+   * "reactivate at ..." is a dead end for them.
    */
   async function gateCheck(guildId: string): Promise<{ entitled: boolean; reply: string }> {
     const row = await deps.guilds.get(guildId);
@@ -2771,7 +2771,7 @@ Already subscribed? Add the new server ` +
     // guild then lands on an old one has buttons that old build cannot route,
     // and the admin has to re-run `/alias`. That is deliberate, since the fix
     // would be shipping the routing ahead of the feature in an earlier release.
-    // Removal is tracked in command-parity.md 3.1.
+    // Retire this compatibility route only after old instances and modals expire.
     if (interaction.customId === 'avc:alias') return handleAliasSubmit(interaction);
     if (interaction.customId === ALIAS_MODAL_ID) return handleAliasSubmit(interaction);
     if (interaction.customId.startsWith(ALIAS_PREFIX)) return handleAliasEditSubmit(interaction);

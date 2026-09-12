@@ -25,7 +25,7 @@ export interface GuildSettingsStore extends GuildSettingsReader {
    * Sets the billed-tier cache with invalidation, exactly like
    * `transitionAuth`. Needed by the billing reconciler's pool pass, which
    * fans a pool's `billed_tier` out to every member guild's `guilds.tier`
-   * (`plans/member-based-pricing.md` §5.1) — a plain `GuildRepository` write
+   * — a plain `GuildRepository` write
    * would leave every other instance's settings cache serving the old tier
    * for up to its TTL.
    */

@@ -11,8 +11,7 @@ import {
 import { isKnownStyleMode } from '../voice/stringTransforms.js';
 
 /**
- * Validation for a model-proposed template
- * (`plans/assisted_templates.md` §4 and §9 finding 3).
+ * Validation for a model-proposed template.
  *
  * The point of this file is that **"the engine didn't throw" is not a check**.
  * The renderer is deliberately forgiving: an unknown `{{VAR}}` is false, an
@@ -97,8 +96,7 @@ function variableOf(condition: string): string {
  *
  * The token half is the part that changed. A token on the left used to be
  * uniformly broken; now the numeric ones work and the rest still do not, so
- * this reads {@link OPERAND_TOKENS} rather than restating the list
- * (`plans/name-tokens.md` §5.1).
+ * this reads {@link OPERAND_TOKENS} rather than restating the list.
  */
 function resolvableOperand(text: string): boolean {
   const t = text.trim();
@@ -179,7 +177,7 @@ export function lintTemplate(template: string, field: TemplateField): TemplateIs
     if (variable === '') continue;
     if (resolvableOperand(variable)) continue;
     /**
-     * §9 finding 3 + finding 4: the model's most stubborn failure was putting a
+     * The model's most stubborn failure was putting a
      * token on the left of a condition, which rendered to nothing at all.
      *
      * Counting tokens is no longer the test, because the numeric ones now work.
@@ -270,7 +268,7 @@ export interface TemplateAdviceContext {
 /**
  * Advice a structural lint cannot give: the two ways a template that is
  * perfectly well formed still renders wrong because of what the GUILD has (or
- * has not) configured (`plans/name-tokens.md` §10.1, §10.2).
+ * has not) configured.
  *
  * Separate from {@link lintTemplate}, which is pure structure and is shared by
  * surfaces that have no guild context, and separate from the issue list, which
@@ -307,8 +305,7 @@ export function adviseTemplate(template: string, ctx: TemplateAdviceContext): st
 }
 
 /**
- * Checks a *rendered* result — the half a structural lint cannot see
- * (`plans/assisted_templates.md` §4).
+ * Checks a *rendered* result — the half a structural lint cannot see.
  *
  * @param rendered   the engine's output, already clamped
  * @param unclamped  the same render with the clamp lifted, to detect truncation
@@ -372,9 +369,8 @@ const MASS_MENTION_RE = /@(?:everyone|here)/gi;
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
 
 /**
- * Screens a model-generated template for things the admin did not ask for
- * (`plans/assisted_templates.md` §9 "not yet probed": the risk is not the token
- * bill, it is one screenshot).
+ * Screens a model-generated template for things the admin did not ask for.
+ * Unrequested content can cause harm even when generation costs little.
  *
  * The asymmetry that makes this worth having: an admin with Manage Channels can
  * already type any channel name they like via `/template`, so this is not about

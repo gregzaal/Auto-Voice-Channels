@@ -6,7 +6,7 @@
 
 /**
  * `MemberActivity` and `VoiceMember` are the engine's render inputs, so they
- * moved to `@avc/core/template` with it (`plans/name-tokens.md` §6.1) and are
+ * moved to `@avc/core/template` with it and are
  * re-exported here. Everything below this line is bot-only: it depends on a
  * live discord.js cache, which `core` deliberately knows nothing about.
  */

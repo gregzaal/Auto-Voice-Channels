@@ -9,11 +9,11 @@ import {
 } from './format.js';
 
 /**
- * Binds the three stored jsonb schemas to the wire schemas MECHANICALLY, which
- * `plans/import_command.md` §3 makes a requirement rather than a nicety.
+ * Binds the three stored jsonb schemas to the wire schemas mechanically, so
+ * adding a stored setting cannot silently omit it from export and import.
  *
  * **The failure this exists for is silent and has already happened once.** The
- * first version of §3's example omitted `status` and `defaultPrivate`, which
+ * first wire-schema example omitted `status` and `defaultPrivate`, which
  * would have cleared every creator channel's voice-status template and its
  * `/alwaysprivate` setting on every import. A hand-kept list of "fields the
  * exporter carries" cannot catch the next one: nothing fails, the field is

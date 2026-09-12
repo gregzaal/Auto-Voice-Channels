@@ -1,6 +1,5 @@
 /**
- * Live prompt-regression harness for `/templateassistant`
- * (`plans/assisted_templates.md` §7 step 7).
+ * Live prompt-regression harness for `/templateassistant`.
  *
  * This makes **real API calls**, so it is deliberately outside the test
  * projects and outside CI: `vitest.workspace.ts` only picks up

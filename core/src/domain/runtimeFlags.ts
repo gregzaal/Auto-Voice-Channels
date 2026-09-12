@@ -3,7 +3,7 @@
  *
  * These are the no-deploy levers an operator (agent or human) can toggle live;
  * every change is recorded in `ops_audit` by {@link RuntimeFlagsRepository.set}.
- * Defined in `core` so the bot, future dashboard, and ops tooling agree on names.
+ * Defined in `core` so the bot, dashboard, and ops tooling agree on names.
  */
 export const RUNTIME_FLAGS = {
   /** Master kill-switch: when true, no channel automation or reconcile acts. */
@@ -17,25 +17,25 @@ export const RUNTIME_FLAGS = {
   /** Disable the billing/trial reconcile job entirely (sampling + ladder + notifications). */
   BILLING_RECONCILE_DISABLED: 'billing.reconcile_disabled',
   /**
-   * Stop THIS fleet advancing the leniency ladder, without stopping it
-   * sampling or delivering (`plans/fleets.md` §4).
+   * Stop this fleet advancing shared billing state while retaining sampling and
+   * notification delivery. Enable advancement on exactly one designated fleet.
    *
-   * Advancing is fleet-wide work on shared rows and must happen on exactly one
-   * fleet; the shared `BILLING_ADVISORY_LOCK` already guarantees that by
-   * construction, so this is the *config* half §4 asks for rather than the
-   * only defence. It exists because `billing.reconcile_disabled` is
-   * all-or-nothing: setting that on prod to keep the ladder on beta would also
-   * stop prod delivering its own guilds' notifications, which is the failure
-   * the ladder/delivery split was built to prevent.
+   * The winner reads its own fleet's flags and applies them to every guild and
+   * pool. A reservation limits run frequency; it does not select the authorized
+   * fleet or make another fleet's billing policy safe. Non-owner fleets must
+   * keep this flag true, even when they share the reservation lock.
+   *
+   * Unlike `billing.reconcile_disabled`, this preserves each fleet's delivery
+   * work. The reservation transaction ends before advancement starts, so a run
+   * that exceeds its spacing window can overlap the next run.
    */
   BILLING_ADVANCE_DISABLED: 'billing.advance_disabled',
-  /** Leniency grace-window length in days (number; default 60 — monetization.md §4). */
+  /** Leniency grace-window length in days (number; default 60). */
   BILLING_GRACE_DAYS: 'billing.grace_days',
   /**
-   * Grace window for MONTHLY subscriptions, in days (default 14,
-   * `plans/pricing-ladder.md` §6.3). `billing.grace_days` keeps sizing the
-   * annual window, and an unknown interval falls back to it, so setting this
-   * above that one is possible and means what it says.
+   * Grace window for MONTHLY subscriptions, in days (default 14).
+   * `billing.grace_days` keeps sizing the annual window, and an unknown interval
+   * falls back to it. This monthly window can be configured longer than that one.
    */
   BILLING_GRACE_DAYS_MONTHLY: 'billing.grace_days_monthly',
   /** Consecutive daily over-limit samples before the grace clock starts (number; default 7). */
@@ -43,8 +43,8 @@ export const RUNTIME_FLAGS = {
   /** Consecutive daily under-limit samples before a downgrade is offered (number; default 30). */
   BILLING_DOWNGRADE_DROP_SAMPLES: 'billing.downgrade_drop_samples',
   /**
-   * Beta lever: when true, guilds enter/sit in `grace` but never advance to
-   * `expired` — run the messaging ladder before checkout exists (§0 Phase 2).
+   * Hold ordinary grace-to-expired advancement while leaving notices active.
+   * This does not override the refund floor, which may still expire a guild.
    */
   BILLING_HARD_GATE_DISABLED: 'billing.hard_gate_disabled',
 
@@ -73,9 +73,9 @@ export const RUNTIME_FLAGS = {
   BILLING_REFUND_REQUESTS_DISABLED: 'billing.refund_requests_disabled',
 
   /**
-   * Stops offering "subscribe now, first charge when your trial ends"
-   * (`plans/pricing-ladder.md` §6.5). Read by `avc-web` alone, like
-   * {@link BILLING_AUTO_CANCEL_DISABLED} above, so one row is the whole switch.
+   * Stops offering "subscribe now, first charge when your trial ends".
+   * Read by `avc-web` alone, like {@link BILLING_AUTO_CANCEL_DISABLED} above,
+   * so one row is the whole switch.
    *
    * Set, the dashboard offers the ordinary charge-now checkout instead and a
    * trialing server is sold exactly as it was before this shipped. Nothing
@@ -90,7 +90,7 @@ export const RUNTIME_FLAGS = {
    */
   BILLING_TRIAL_SUBSCRIBE_DISABLED: 'billing.trial_subscribe_disabled',
 
-  // -- AI-assisted templates (plans/assisted_templates.md §5) ----------------
+  // -- AI-assisted templates ----------------
   // NOT plan features. The per-guild cap is uniform on every tier and is never
   // raised by paying; it exists so a stuck client loop cannot run up a bill.
   /** Per-guild monthly `/templateassistant` build cap (number; default 200, <=0 = unlimited). */
@@ -104,7 +104,7 @@ export const RUNTIME_FLAGS = {
   /** Kill-switch for the assistant, independent of whether a key is configured. */
   AI_DISABLED: 'ai.disabled',
 
-  // -- Backups (plans/backups.md section 8) ----------------------------------
+  // -- Backups ----------------------------------
   /** Kill-switch for scheduled backups. Sibling of `sweep.disabled`. */
   BACKUP_DISABLED: 'backup.disabled',
   /**
@@ -132,11 +132,11 @@ export const RUNTIME_FLAGS = {
   /** Summary of the last drill: what was checked, and anything wrong with it. */
   BACKUP_LAST_DRILL_RESULT: 'backup.last_drill_result',
 
-  // -- Metric store (plans/admin-dashboard.md §3.4) ---------------------------
+  // -- Metric store ---------------------------
   /**
    * Kill-switch for the metrics collector, matching every other collector here.
    *
-   * Per fleet, like every flag, and that is the useful shape: the rollup is a
+   * Per fleet: the rollup is a
    * cluster singleton but the counter flush is per instance, so disabling one
    * fleet stops it reporting its own counters while the other fleet keeps the
    * shared gauges coming. `global.pause` stops both.
@@ -147,8 +147,7 @@ export const RUNTIME_FLAGS = {
   /**
    * Kill-switch for pushing permission problems to the guilds they affect.
    *
-   * The lever that matters most on this list, because it is the only flag
-   * guarding something that talks to customers unprompted: with it set, a
+   * Guards unsolicited customer notices: with it set, a
    * problem still lands in `/setup` and in a configured `/logging` channel, and
    * nothing is sent anywhere on its own. `global.pause` stops it too.
    *
@@ -158,7 +157,7 @@ export const RUNTIME_FLAGS = {
    */
   PROBLEM_NOTICE_DISABLED: 'problems.notify_disabled',
 
-  // -- Alerting (plans/agentic_management.md step 4) -------------------------
+  // -- Alerting -------------------------
   /**
    * Kill-switch for the in-process watcher on THIS fleet: no condition
    * evaluation, no alert rows, no watchdog ping.
@@ -190,7 +189,7 @@ export const RUNTIME_FLAGS = {
    */
   GATEWAY_SELF_RESTART_DISABLED: 'gateway.self_restart_disabled',
 
-  // -- Marketing (plans/marketing.md §5.1 item 5) ----------------------------
+  // -- Marketing ----------------------------
   /**
    * Suppresses automated marketing posts (release notes, social/top.gg
    * announcements) around a cutover window, so a routine auto-post cannot
@@ -225,7 +224,7 @@ export const RUNTIME_FLAGS = {
    */
   TOPGG_DISABLED: 'topgg.disabled',
 
-  // -- Supporter roles (plans/monetization.md section 13) ---------------------
+  // -- Supporter roles ---------------------
   /**
    * Kill-switch for supporter-role assignment in the support guild, on THIS
    * fleet.
@@ -239,7 +238,7 @@ export const RUNTIME_FLAGS = {
    */
   SUPPORT_ROLES_DISABLED: 'support.roles_disabled',
 
-  // -- Config import/export (plans/import_command.md section 9) ---------------
+  // -- Config import/export ---------------
   /**
    * Kill-switch for `/import`, checked in BOTH the command and the confirm
    * handler: checking only the first leaves every already-previewed import
@@ -249,7 +248,7 @@ export const RUNTIME_FLAGS = {
    * works that way.** `guilds.settings` has no `fleet` column and the
    * invalidation channel is one global name, so an import run through beta
    * rewrites the row prod reads and NOTIFYs every prod instance, `enabled`
-   * included. 35 guilds have both bots today. A per-fleet read would give an
+   * included. A per-fleet read would give an
    * operator one click that stops one of two paths into the same blob while
    * looking exactly like its neighbours on `/admin/ops`.
    *

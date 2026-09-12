@@ -5,8 +5,7 @@
  * - `active`  — paid / entitled.
  * - `grace`   — the trial/subscription window ended (or the tier was outgrown /
  *               a payment failed), but the guild keeps working at 100% during a
- *               generous buffer while admins are nudged to act (the leniency
- *               model, `plans/monetization.md` §4).
+ *               generous buffer while admins are nudged to act (the leniency model).
  * - `expired` — trial or subscription lapsed and the grace window ran out;
  *               features gated off (non-destructive: nothing is deleted).
  * - `blocked` — abuse/isolation kill-switch; never entitled, regardless of config.

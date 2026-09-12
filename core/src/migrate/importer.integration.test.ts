@@ -228,8 +228,7 @@ describe('importDump (integration)', () => {
     expect(summary.orphanedTextChannels).toEqual([]);
   }, 300_000);
   /**
-   * The welcome-suppression stamp (`plans/fleets.md` §7.1, owner decision
-   * 2026-08-19).
+   * The welcome-suppression stamp.
    *
    * Onboarding's welcome fires when a guild is on `trial`, has no
    * `onboardedAt`, and its row is under a week old. An imported guild is all
@@ -271,7 +270,7 @@ describe('importDump (integration)', () => {
   }, 300_000);
 
   /**
-   * The first-writer-wins merge (`plans/migration.md` §3.6).
+   * The first-writer-wins merge.
    *
    * `guilds.settings` and `guilds.auth_status` are shared columns, and this
    * importer runs once per bot identity: beta 2026-08-19, prod at the cutover,
@@ -405,7 +404,7 @@ describe('importDump (integration)', () => {
     }, 300_000);
 
     /**
-     * The delta pass (§6 step 3). The bulk import runs for as long as it takes
+     * The delta pass. The bulk import runs for as long as it takes
      * while the old bot is still serving; only the guilds whose config moved in
      * that window are re-imported during the dark minutes.
      */
@@ -418,9 +417,9 @@ describe('importDump (integration)', () => {
   });
 
   /**
-   * The delta pass (`plans/migration.md` §6 step 3).
+   * The delta pass.
    *
-   * §6 moved the bulk import ahead of the freeze, which makes the bulk pass its
+   * Running the bulk import ahead of the freeze makes the bulk pass its
    * own first writer: gap-filling then declines to apply exactly the settings the
    * delta pass exists for, while the per-primary templates DO update (same fleet,
    * wholesale upsert), leaving two halves of one guild's config disagreeing.
@@ -563,7 +562,7 @@ describe('importDump (integration)', () => {
   });
 
   /**
-   * Channel ids another fleet already owns (`plans/migration.md` §3.6).
+   * Channel ids another fleet already owns.
    *
    * `channel_id` is the SOLE primary key on all four channel tables and `fleet`
    * is an ordinary column, so two dumps naming one channel collide rather than

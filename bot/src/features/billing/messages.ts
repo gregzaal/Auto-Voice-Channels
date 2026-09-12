@@ -9,15 +9,14 @@ import {
 } from '@avc/core';
 
 /**
- * Every user-facing monetization string in one place (monetization.md §6):
+ * Every user-facing monetization string in one place:
  * onboarding per size band, the leniency-ladder notifications, and the
  * expired-interaction replies. Pure builders, unit-tested, no Discord types.
  *
  * Tone: warm, plain, honest about *why* we charge (our costs scale per user),
  * never pushy. These are the bot-side surfaces of the Afterglow voice.
  *
- * Copy rules (AGENTS.md "Writing rules for user-facing copy") apply to every
- * string in this file: no em or en dashes, no prose semicolons, straight
+ * Copy rules apply to every string in this file: no em or en dashes, no prose semicolons, straight
  * quotes. These are read by users, so they follow the same rules as the site.
  */
 
@@ -57,7 +56,7 @@ export const SUPPORT_URL = 'https://discord.gg/HT6GNhJ';
 /**
  * Price label for the tier a guild of `memberCount` members needs.
  *
- * The headline with its billed total, from core's one formatter (§5.1), plus
+ * The headline with its billed total, from core's one formatter, plus
  * the tier NAME on every notice: "Rare" means nothing to somebody reading a
  * warning about their own server, and the price without the name means nothing
  * to somebody comparing it against the pricing page.
@@ -69,7 +68,7 @@ function priceLabel(memberCount: number): string {
   return `${priceSentence(tier)} on the ${tier.label} plan`;
 }
 
-/** The one-time welcome when the bot joins a guild, by trial policy (§6). */
+/** The one-time welcome when the bot joins a guild, by trial policy. */
 export function onboardingMessage(
   policy: TrialPolicy,
   memberCount: number,
@@ -102,13 +101,11 @@ export function onboardingMessage(
     case 'hard_gate':
       /**
        * Promises nothing about infrastructure, and links the support server
-       * rather than the homepage (§5.3).
+       * rather than the homepage.
        *
-       * It used to say "we run servers this size on dedicated infrastructure",
-       * which owner decision 5 retracted: we do not know yet that we can serve
-       * a server that size, and saying so to the largest server that ever adds
-       * the bot is the worst place to find out. The homepage also names no
-       * contact route, so `SITE_URL` was an instruction to go looking.
+       * Capacity for a server this size needs individual verification before
+       * an infrastructure offer can be made. Link directly to support so the
+       * admin can discuss it without searching the homepage for a contact route.
        */
       return (
         `👋 **Thanks for your interest in Auto Voice Channels!** A server this size needs a ` +
@@ -124,7 +121,7 @@ export function onboardingMessage(
  * Needed because {@link onboardingMessage} announces a trial and quotes a
  * per-server price, and a customer can reach `GUILD_CREATE` after paying:
  * checkout can name servers the bot is not in yet, and the webhook sets
- * `pool_id` without fanning entitlement out (§6.4), so there is a real window
+ * `pool_id` without fanning entitlement out, so there is a real window
  * where a paid server joins and still reads `trial`. Telling someone who just
  * paid that their free trial has started, and then quoting them a second
  * price, is the worst thing this surface can say.
@@ -145,15 +142,15 @@ export function coveredWelcomeMessage(guildId: string): string {
  * covering several servers, DM'd to the one person who can pay it. Both of
  * those were already handled. `shared_member` is the one that was not, and it
  * is the awkward one: a service-stopping notice fanned out into every server on
- * a shared subscription (§6.6), read by admins who may have bought nothing and
+ * a shared subscription, read by admins who may have bought nothing and
  * who never received the warnings that came before it.
  */
 export type NotificationAudience = 'guild' | 'purchaser' | 'shared_member';
 
 /**
- * Renders a leniency-ladder notification (the §4 grace ladder) as message
+ * Renders a leniency-ladder notification as message
  * text. `guildId` deep-links to that server's dashboard card; a pool
- * notification (`plans/member-based-pricing.md` §6.6) has no one server to
+ * notification has no one server to
  * deep-link to, so `notifyPurchaser` passes the plain dashboard URL instead,
  * where the pool panel is what the purchaser actually needs to see.
  */
@@ -165,7 +162,7 @@ export function notificationMessage(
   audience: NotificationAudience = 'guild',
 ): string {
   const tierLine = n.requiredTier ? tierById(n.requiredTier) : tierFor(memberCount);
-  // Core's one formatter, like every other price the bot quotes (§5.1). This
+  // Core's one formatter, like every other price the bot quotes. This
   // was a third hand-written copy of the same three branches.
   const price = priceSentence(tierLine);
 
@@ -196,8 +193,8 @@ export function notificationMessage(
     case 'trial_warning': {
       const days = n.daysLeft ?? 0;
       /**
-       * Names the one thing that makes deciding early cost nothing
-       * (`plans/pricing-ladder.md` §6.5). The warning used to offer only
+       * Names the one thing that makes deciding early cost nothing.
+       * The warning used to offer only
        * "subscribe", which asked the admin to throw away the trial days they
        * had left in order to stop being reminded about them, so the rational
        * move was to ignore every warning until the last one.
@@ -221,8 +218,8 @@ export function notificationMessage(
          * A shared subscription's sum can cross a band because one server
          * grew, because several grew a little, or because a server was added.
          * "Your server has grown" gives a purchaser with eight servers nothing
-         * to look at, and §7.3 says the band step has to be said out loud, so
-         * name the number that actually moved.
+         * to look at. State the band step explicitly and name the number that
+         * actually moved.
          */
         if (audience === 'purchaser') {
           return (
@@ -271,7 +268,7 @@ export function notificationMessage(
     case 'grew_into_xxl':
       /**
        * 300,000, which is where the ladder now ends, and no infrastructure
-       * promise (§5.3, owner decision 5). The `grew_into_xxl` KEY keeps its old
+       * promise. The `grew_into_xxl` KEY keeps its old
        * name deliberately: it is stored text in `metadata.billing` and in
        * `billing_notifications.key`, so renaming it would re-send the notice to
        * every guild that has already had it.
@@ -285,7 +282,7 @@ export function notificationMessage(
 }
 
 /**
- * Ephemeral reply for any command in a hard-gated (expired) guild (§6).
+ * Ephemeral reply for any command in a hard-gated (expired) guild.
  *
  * `shared` when the server is covered by a subscription spanning several
  * servers: the admin running the command is then quite likely not the person

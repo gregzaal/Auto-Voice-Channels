@@ -20,7 +20,7 @@ import type { BillingNotifier } from './notifier.js';
 
 /**
  * The pool pass's convergence, idempotency-under-concurrency and stranding
- * guarantees (`plans/member-based-pricing.md` §10). Separate file from the
+ * guarantees. Separate file from the
  * per-guild ladder's own integration suite because these scenarios are
  * pool-shaped rather than guild-shaped from the start.
  */
@@ -218,7 +218,7 @@ describe('BillingReconciler pool pass (integration)', () => {
     expect(await poolGuilds.livePoolFor(left)).toBe(poolId);
 
     // Past the grace window: evicted, and granted the published fresh
-    // 60-day grace window rather than left stranded (§5.6).
+    // 60-day grace window rather than left stranded.
     const afterGrace = new Date(removedAt.getTime() + 7 * 24 * 60 * 60 * 1000 + 1000);
     await makeReconciler(() => afterGrace).reconciler.runOnce();
 
@@ -238,7 +238,7 @@ describe('BillingReconciler pool pass (integration)', () => {
 
   it('never writes over a blocked member, but still keeps its billed tier in step', async () => {
     /**
-     * `plans/refunds.md` §2.7. `advanceGuild` guards `blocked` but deliberately
+     * `advanceGuild` guards `blocked` but deliberately
      * skips pooled non-free guilds, so this pass is their only evaluator and
      * was laundering the abuse kill-switch into the pool's status.
      *
@@ -293,7 +293,7 @@ describe('BillingReconciler pool pass (integration)', () => {
 
   it("floors a refunded subscription's members and then writes NOTHING on later ticks", async () => {
     /**
-     * `plans/refunds.md` §12's three-tick test. A single tick cannot see thrash:
+     * A three-tick regression test. A single tick cannot see thrash:
      * the old fan-out wrote `pool.status` verbatim, so a per-guild floor written
      * by the refund webhook was overwritten within the hour, and re-applying it
      * would have alternated forever at two audit rows and a cache eviction per
@@ -440,7 +440,7 @@ describe('BillingReconciler pool pass (integration)', () => {
 
     /**
      * Two independent reconciler instances, same tick, run concurrently -
-     * exactly the overlap §6.5 warns the 55-minute spacing alone cannot
+     * exactly the overlap that the 55-minute spacing alone cannot
      * prevent once a pass runs long. Both read the guild's PRE-convergence
      * status and both decide a write is due.
      *
@@ -544,7 +544,7 @@ describe('BillingReconciler pool pass (integration)', () => {
     await reconciler.runOnce();
 
     // Untouched: still whatever a fresh guild row starts as, never fanned the
-    // pool's tier onto a server that is free regardless of pooling (§5.3).
+    // pool's tier onto a server that is free regardless of pooling.
     const row = await guilds.getOrThrow(freeGuild);
     expect(row.tier).toBeNull();
     expect(row.authStatus).toBe('trial');

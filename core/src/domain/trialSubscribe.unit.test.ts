@@ -70,7 +70,7 @@ describe('trialSubscribeWindow', () => {
   });
 
   it('refuses every status other than trial, however much time is on the clock', () => {
-    // `grace` is the one §6.5 names, and the others matter for the same reason:
+    // `grace` and the other non-trial states must all use ordinary checkout:
     // a guild that is not on a trial has no free period left to preserve, so
     // a trial on its checkout would be free service we never promised.
     const others: AuthStatus[] = ['active', 'grace', 'expired', 'blocked'];

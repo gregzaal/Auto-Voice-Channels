@@ -1,5 +1,5 @@
 /**
- * Backup CLI (`plans/backups.md` §10). The same code path the scheduler calls,
+ * Backup CLI. The same code path the scheduler calls,
  * so there is one implementation and two callers.
  *
  *   backup:run

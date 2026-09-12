@@ -8,7 +8,7 @@ import { SubscriptionRepository } from './subscriptions.js';
 import type { TierId } from '../domain/tiers.js';
 
 /**
- * Pool membership, with history (`plans/member-based-pricing.md` §6.1). The
+ * Pool membership, with history. The
  * durable record; `guilds.pool_id` is the denormalized pointer the hot paths
  * (the reconciler, the entitlement gate) read instead of joining here.
  */
@@ -47,8 +47,7 @@ export class GuildAlreadyPooledError extends Error {
 /**
  * Thrown when a removal names a guild that is not live in the pool given.
  *
- * The reason this is an error rather than a no-op is the whole of
- * `plans/refunds.md` §2.2: `remove` matching zero rows used to be silent, and
+ * A no-op is unsafe: `remove` matching zero rows used to be silent, and
  * `removeGuildFromPoolAtomically` went on to null `guilds.pool_id` anyway, so
  * owning any pool authorized a write against any guild id in existence. It
  * also closes the race, because the transaction rolls back before the pointer
@@ -68,7 +67,7 @@ export class MemberPoolGuildRepository {
 
   /**
    * Adds a guild to a pool, reviving a membership this pool previously
-   * released rather than refusing it forever (`plans/refunds.md` §2.10).
+   * released rather than refusing it forever.
    *
    * The primary key is `(pool_id, guild_id)` and `remove` stamps `removed_at`
    * instead of deleting, so a bare insert made "remove a server, change your
@@ -126,7 +125,7 @@ export class MemberPoolGuildRepository {
 
   /**
    * Marks a guild's live pool membership removed, wherever it is — for the
-   * `guildDelete` path (§5.6), which knows only the guild, not which pool.
+   * `guildDelete` path, which knows only the guild, not which pool.
    * Returns the pool id it was removed from, or null if it was in none.
    */
   async removeByGuildId(guildId: string, at = new Date()): Promise<string | null> {
@@ -202,8 +201,7 @@ export async function removeGuildFromPoolAtomically(
     /**
      * Refuse INSIDE the transaction, before the pointer write.
      *
-     * This is the load-bearing half of `plans/refunds.md` §2.2, and it is also
-     * what closes the race a caller-side check cannot. The `UPDATE` above
+     * This closes the race a caller-side check cannot. The `UPDATE` above
      * locks the membership row when it matches, so a concurrent add or remove
      * of the same guild serializes behind it; and if the guild has since moved
      * to another pool, nothing matches, this throws, and the rollback means
@@ -217,7 +215,7 @@ export async function removeGuildFromPoolAtomically(
 
 /**
  * The removal-axis sibling for a caller that knows only the guild (the bot's
- * `guildDelete` handler, §5.6). Returns the pool id the guild was removed
+ * `guildDelete` handler). Returns the pool id the guild was removed
  * from, or null if it was in none.
  */
 export async function removeGuildFromAnyPoolAtomically(
@@ -238,7 +236,7 @@ export async function removeGuildFromAnyPoolAtomically(
  *
  * The dashboard presents every subscription as a plain "subscription" a
  * customer can add servers to, whether or not it already covers more than
- * one (`plans/member-based-pricing.md` §7.4 addendum). A subscription that
+ * one. A subscription that
  * has never been added to is still guild-keyed under
  * `subscriptions_guild_xor_pool`, so the first "add a server" against it has
  * to create the pool it should have been from the start: a fresh

@@ -3,8 +3,7 @@ import type { VoiceMember } from '../voice/types.js';
 import { maxLengthFor, type TemplateField } from './validate.js';
 
 /**
- * Preview fixtures for the assistant (`plans/assisted_templates.md` §8, "what
- * sample members do we seed so the preview is representative?").
+ * Representative preview fixtures for the assistant.
  *
  * The live channel is previewed too, but the live channel is exactly one state
  * — usually "a couple of people, maybe playing something". The states that
@@ -198,8 +197,8 @@ export function previewScenarios(opts: ScenarioOptions): PreviewScenario[] {
    *
    * Without it `@@limit@@` previews as `0`, `@@slots@@` as blank and
    * `{{FULL}}` as false in every other scenario, so the grader cannot grade any
-   * of them and the admin sees a preview that reads like the tokens are broken
-   * (`plans/name-tokens.md` §6.7). One short of full rather than full, because
+   * of them and the admin sees a preview that reads like the tokens are broken.
+   * One short of full rather than full, because
    * a nearly-full room exercises both branches of the usual conditional.
    */
   scenarios.push({

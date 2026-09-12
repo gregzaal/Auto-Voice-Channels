@@ -6,7 +6,7 @@ import { SecondaryChannelRepository } from '../repositories/secondaryChannels.js
 import { preseedNames } from './preseed.js';
 
 /**
- * The pre-seed pass against a real database (`plans/migration.md` §5.2).
+ * The pre-seed pass against a real database.
  *
  * Discord is injected. What needs proving is not that `fetch` works, it is that
  * the pass touches exactly the rows it should: an adopted channel with no name

@@ -1,65 +1,30 @@
-# Fly.io deployment config for the GOLD fleet.
+# Fly.io deployment config for the gold fleet.
+# See README.md beside this file for deployment, scaling and recovery procedures.
+# Each fleet config is independent; inspect its values rather than assuming parity.
 #
-# The third sibling of `fly.toml` (`avc-beta`) and `fly.prod.toml` (`avc-prod`).
-# Everything not listed below is deliberately identical to prod's file, which is
-# itself deliberately identical to beta's -- the configuration validated against
-# a real userbase since 2026-08-19. Read beta's file for the reasoning behind the
-# region, the VM class, the memory and the DATABASE_URL rule.
+# Secrets: DISCORD_TOKEN, CLIENT_ID, DATABASE_URL, DIAGNOSTICS_TOKEN;
+# AVC_AI_API_KEY optionally enables /templateassistant.
+# Use the Postgres direct endpoint for LISTEN/NOTIFY and session advisory locks.
+# Give this fleet its own WATCHDOG_PING_URL: a heartbeat from another fleet cannot
+# prove this one is alive, and a one-shard fleet has no healthy peer when it fails.
+# AI usage is shared across fleets; ai.monthly_budget_usd compares cluster usage
+# against this fleet's threshold, not an isolated per-fleet spend total.
 #
-# This app carries the legacy patron bot's own application id, so the two can
-# never run at once (one token, one gateway session). `plans/migration.md` 7.
-#
-# What differs from prod, and why:
-#   app                = "avc-gold"
-#   FLEET              = "gold"
-#   TOTAL_SHARDS       = "1"   (prod: 4)
-#   EXPECTED_INSTANCES = "1"   (prod: 4)
-#   no SUPPORT_* group         -- prod owns supporter roles. Both bots are in the
-#                                 support guild and two writers would fight over
-#                                 one member's roles. Config is the whole
-#                                 election, so this file must never carry them.
-#
-# Secrets (`fly secrets set -a avc-gold ...`):
-#   DISCORD_TOKEN, CLIENT_ID  -> application 676755909468225577 (AVC Gold)
-#   DATABASE_URL              -> the shared cluster, `direct.`, never `pgbouncer.`
-#   DIAGNOSTICS_TOKEN         -> its OWN, not prod's or beta's
-#   ADMIN_CHANNEL_ID          -> the same #admin in the support guild
-#   AVC_AI_API_KEY            -> shared with prod and beta (plans/fleets.md decision 2).
-#                                NOTE the ceiling behind it is NOT per fleet in
-#                                practice: `ai_usage` has no fleet column and
-#                                `monthTotals` sums the whole table, so
-#                                `ai.monthly_budget_usd` compares CLUSTER spend
-#                                against THIS fleet's number.
-#
-#   WATCHDOG_PING_URL         -> its OWN monitor, and on a one-shard fleet this
-#                                is the ONLY thing that reports an outage, not a
-#                                second opinion. `/api/watch`'s `shard_coverage`
-#                                skips any fleet with zero covered rows, and gold
-#                                contributes exactly one row: covered, or
-#                                skipped. Its `shard_leases` sibling filters
-#                                `instance_id IS NOT NULL`, which a graceful
-#                                drain NULLs, and the zero-row fallback needs
-#                                EVERY fleet dark, which prod's four leases
-#                                prevent. Do not unset this thinking /api/watch
-#                                is behind it.
-#
-# Deliberately NOT set here:
-#   BACKUP_S3_* / BACKUP_ENCRYPTION_KEY / BACKUP_PREFIX / BACKUP_DRILL_DATABASE_URL
-#                             -> prod owns backups. `withBackupLock` uses
-#                                `fleetAdvisoryKey`, so leader election is PER
-#                                FLEET: a second configured fleet backs the same
-#                                database up twice and runs a second weekly drill
-#                                into the one scratch database.
-#   TOPGG_TOKEN               -> prod alone. `@me` resolves the project from the
-#                                token while the count comes from this fleet's
-#                                own `guild_fleet_presence` rows, so the same
-#                                secret here would publish 173 guilds to the
-#                                production listing, undetectably.
+# Gold must keep billing.advance_disabled=true. Prod alone advances shared
+# customer billing; the cluster reservation applies its winner's fleet-local policy.
+# Omit backup credentials, SUPPORT_* and TOPGG_TOKEN here. Prod owns scheduled
+# backups/drills, the shared supporter roles and the production listing.
+# Backup election is per fleet: configuring another owner duplicates database
+# backups and can make two drills compete for one scratch database.
+# If backup credentials are retained, set BOTH backup.disabled and
+# backup.drill_disabled to true.
 app = "avc-gold"
 
-# See prod's file: Fly's default is 5s and the drain releases shard leases last.
+# Allow in-flight work to drain and release leases, without waiting indefinitely
+# for retryable background work. Shutdown handles both SIGINT and SIGTERM.
 kill_timeout = "30s"
 
+# Keep database round trips and gateway WebSocket latency low.
 primary_region = "iad"
 
 [build]
@@ -71,38 +36,29 @@ primary_region = "iad"
   HTTP_PORT = "8080"
   LOG_LEVEL = "info"
   NODE_ENV = "production"
-  # One shard on one machine (cap = ceil(1/1) = 1).
-  #
-  # 173 guilds and 94,306 members measured 2026-09-02, against Discord's own
-  # floor of one shard per 2500 guilds. The member total is what actually
-  # decides this (~118MB of member cache at the measured 1.28 KB/member), not
-  # the guild count, and it leaves the fleet an order of magnitude inside its
-  # memory. A shard-count change later is a full stop-and-start of the fleet
-  # rather than a rolling deploy (plans/scaling.md 2.2), which is why it is
-  # settled here rather than raised when it hurts.
+  # Changing TOTAL_SHARDS requires a full fleet stop/start, not a rolling deploy.
+  # Size for member/presence cache memory as well as Discord's shard limit.
   TOTAL_SHARDS = "1"
+  # Claim cap per machine is ceil(TOTAL_SHARDS / EXPECTED_INSTANCES).
   EXPECTED_INSTANCES = "1"
-  # Keep V8 the thing that reports a memory problem, rather than the kernel.
+  # Leave room outside the V8 heap for native allocations and stacks.
   NODE_OPTIONS = "--max-old-space-size=1700"
   AVC_AI_BASE_URL = "https://api.openai.com/v1"
   AVC_AI_MODEL = "gpt-5.4-mini"
+  # Spend estimates: update these with the model's prices when changing models.
   AVC_AI_PRICE_INPUT_PER_MTOK = "0.75"
   AVC_AI_PRICE_OUTPUT_PER_MTOK = "4.50"
 
 [deploy]
-  # Nominal on a one-machine fleet: rolling is stop-then-start with no peer left
-  # serving, so `[[http_service.checks]]` gates nothing here and a bad image
-  # means 173 guilds dark until `[[restart]]` burns its retries. Kept so the
-  # three fleets read alike, and so it is already right if gold ever grows a
-  # second machine. Verify a gold deploy by reading /health yourself.
+  # A single-machine fleet has no serving peer during replacement. Verify its
+  # health and shard ownership explicitly after each deployment.
   strategy = "rolling"
 
 [[restart]]
   policy = "on-failure"
   max_retries = 10
 
-# INSTANCE_ID is deliberately unset: config falls back to Fly's per-machine
-# FLY_MACHINE_ID, which is unique and stable, and is the shard-lease identity.
+# Leave INSTANCE_ID unset: config uses Fly's unique per-machine FLY_MACHINE_ID.
 
 [http_service]
   internal_port = 8080
@@ -119,11 +75,7 @@ primary_region = "iad"
     grace_period = "30s"
 
 [[vm]]
-  # A DEDICATED core, matching both live fleets. Not a cost optimisation to
-  # revisit: beta's fleet-wide outage on 2026-08-20 was a shared-cpu burst
-  # balance hitting zero, and the dominant consumer is the gateway presence
-  # firehose, which is per MEMBER and which no runtime flag controls. 2gb is
-  # also Fly's floor for a performance vCPU, so there is no smaller dedicated
-  # shape to drop to.
+  # Dedicated CPU preserves headroom for boot/reconnect bursts and presence load.
+  # Re-evaluate peak demand and throttling before changing the machine class.
   size = "performance-1x"
   memory = "2gb"

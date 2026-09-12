@@ -14,7 +14,7 @@ import { mergeIntoExisting } from './merge.js';
 import { parseLegacyJson } from './parseLegacyJson.js';
 
 /**
- * The write half of the importer (`plans/migration.md` §5.1).
+ * The write half of the importer.
  *
  * Everything that *decides* anything lives in `legacy.ts` and is pure. This
  * only writes, through the same repositories the bot uses, so imported rows go
@@ -49,7 +49,7 @@ export interface ImportOptions {
    *
    * This is what makes the cutover's step-1 dry run able to answer "how many of
    * these guilds is another fleet already serving, and what would we leave
-   * alone", which is the question §3.6 exists for. It needs a database, so the
+   * alone", which is the merge policy's distinction. It needs a database, so the
    * CLI keeps it behind a flag: the plain dry run stays runnable with no
    * configuration at all.
    */
@@ -57,7 +57,7 @@ export interface ImportOptions {
   /**
    * Process only these guild ids, ignoring every other file in the dump.
    *
-   * The cutover's delta pass (§6 step 3): the bulk import runs for as long as it
+   * The cutover's delta pass: the bulk import runs for as long as it
    * takes while the old bot is still serving, then only the handful of guilds
    * whose config changed in that window are re-imported during the dark
    * minutes. Absent, every file is processed.
@@ -65,10 +65,10 @@ export interface ImportOptions {
   onlyGuildIds?: ReadonlySet<string>;
   /**
    * Treat this dump's `guilds.settings` as authoritative instead of filling
-   * gaps (§3.6). **Requires `onlyGuildIds`**, because the whole justification is
+   * gaps. **Requires `onlyGuildIds`**, because the whole justification is
    * that a human diffed the dumps and named the guilds whose config moved.
    *
-   * Without it the delta pass (§6 step 3) cannot apply a single changed
+   * Without it the delta pass cannot apply a single changed
    * guild-level setting: the bulk pass hours earlier is now the first writer, so
    * gap-filling declines to touch exactly the keys the delta exists to update,
    * while the per-primary templates DO update (same fleet, wholesale upsert) --
@@ -112,7 +112,7 @@ export interface ImportSummary {
    */
   foreignFleetChannels: { channelId: string; fleet: string; guildId: string }[];
   /**
-   * The first-writer-wins outcomes (§3.6). Populated on any run that inspects
+   * The first-writer-wins outcomes. Populated on any run that inspects
    * existing rows, so a dry run can report them before anything is written.
    */
   merge: {
@@ -371,12 +371,12 @@ export async function importDump(opts: ImportOptions): Promise<ImportSummary> {
       };
 
       /**
-       * The merge decision, and what another dump has already put here (§3.6).
+       * The merge decision, and what another dump has already put here.
        *
        * `undefined` must mean "nobody has imported this guild", never "the row we
        * just created ourselves", so the read has to see the table as it was. On a
        * real run `mergeSettings` does the read and the write in one transaction
-       * under `FOR UPDATE`, because §6's bulk pass now runs against guilds a live
+       * under `FOR UPDATE`, because the bulk pass can run against guilds a live
        * fleet is serving. A dry run reads without creating anything.
        */
       const merged = opts.apply
@@ -458,18 +458,18 @@ export async function importDump(opts: ImportOptions): Promise<ImportSummary> {
        * `row.createdAt` when it is null. For imported guilds that is the import
        * moment, so leaving it to onboarding would give all 1004 the same expiry
        * date and produce exactly the synchronized warning, grace and expiry
-       * waves the jitter exists to prevent (`migration.md` §5.1).
+       * waves the jitter exists to prevent.
        *
        * `expiresAtIfNull` is the DB-level "set exactly once" invariant, so a
        * re-run cannot move a clock that is already ticking. That is what makes
        * the whole importer safe to run twice.
        *
-       * 365 days for everyone (`TRIAL_YEAR_DAYS`, §5.1) rather than the
+       * 365 days for everyone (`TRIAL_YEAR_DAYS`) rather than the
        * member-count bands: the importer has no token and cannot count members,
        * and erring long is the only direction that cannot shorten someone's
        * trial.
        *
-       * **Skipped entirely for a guild that is not on `trial`** (§3.6).
+       * **Skipped entirely for a guild that is not on `trial`**.
        * `expiresAtIfNull` protects the date, not the status, so without this
        * guard the second and third dumps downgrade a paying guild to `trial`,
        * reset a `grace`/`expired` guild to a fresh year, and un-block a

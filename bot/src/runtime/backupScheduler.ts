@@ -16,7 +16,7 @@ import {
 import type { Logger } from 'pino';
 
 /**
- * The in-process backup scheduler (`plans/backups.md` §5).
+ * The in-process backup scheduler.
  *
  * In-process rather than a cron container, and that single choice is what makes
  * production and self-host genuinely the same system: a self-hoster gets
@@ -385,8 +385,8 @@ export class BackupScheduler {
   }
 
   /**
-   * Runs one restore drill if this instance wins the drill lock
-   * (`plans/backups.md` §9). Exposed so an operator can force one.
+   * Runs one restore drill if this instance wins the drill lock.
+   * Exposed so an operator can force one.
    *
    * **A failed drill is not a failed backup**, and the two are kept apart
    * deliberately: `backup.last_error` stays clear, `lastStatus` stays `ok`, and

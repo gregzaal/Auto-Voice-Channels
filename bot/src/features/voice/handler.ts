@@ -60,8 +60,7 @@ export interface RenderContextInput {
    *
    * Both, because caching the resolved name would freeze a nickname the server
    * can still change, and caching only the id would need a member fetch on the
-   * render path for somebody who has usually left
-   * (`plans/name-tokens.md` §10.4).
+   * render path for somebody who has usually left.
    */
   originalCreatorId?: string | null | undefined;
   originalCreatorName?: string | undefined;
@@ -1403,7 +1402,7 @@ export class VoiceFeature {
    * degraded to `0` on every re-render afterwards. That is not "somebody forgot
    * an argument", it is "there are eight places to forget", so
    * `renderContextGuard.unit.test.ts` reads this file and fails if a new call
-   * site hand-rolls one (`plans/name-tokens.md` §5.3).
+   * site hand-rolls one.
    *
    * The user limit is read LIVE rather than from `primary.template.limit`,
    * which is the configured default: `/limit` writes straight through to
@@ -1433,8 +1432,8 @@ export class VoiceFeature {
      * extra rename: without it the first render after the upgrade names the
      * CURRENT owner, the backfill then stores the real name, and the next sweep
      * renames again to the right one. Two renames and a wrong name in between,
-     * for a token justified on the grounds that it reduces churn
-     * (`plans/name-tokens.md` §10.4). The cache still wins when present, because
+     * for a token justified on the grounds that it reduces churn.
+     * The cache still wins when present, because
      * stability is the token's whole point.
      */
     const rawOriginalCreator =
@@ -1553,7 +1552,7 @@ export class VoiceFeature {
      * self-heal the first time the room is renamed while its creator happens to
      * be present. Never a write of its own: a state write per render on every
      * room in the install base, to fix a token most guilds do not use, is not a
-     * trade worth making (`plans/name-tokens.md` §10.4).
+     * trade worth making.
      */
     const creatorPresent = secondary.originalCreator
       ? members.find((m) => m.id === secondary.originalCreator)
@@ -1899,7 +1898,7 @@ export class VoiceFeature {
    *
    * It renders nothing. The {@link RenderContext} goes out intact so the panel
    * probes the real engine, which is the only way a token readout cannot drift
-   * from what the channel is actually named (`plans/name-tokens.md` §3).
+   * from what the channel is actually named.
    */
   async channelInfo(guildId: string, channelId: string): Promise<ChannelInfo> {
     const guild = await this.deps.guilds.ensure(guildId);

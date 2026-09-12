@@ -32,8 +32,8 @@ export interface ShardLeaseManagerOptions {
   /**
    * Reports a significant condition to the operational alert channel.
    *
-   * Added because a failing heartbeat was a `logger.error` and nothing else
-   * (`plans/scaling.md` §6.1): the instance keeps its gateway sessions and
+   * Added because a failing heartbeat was a `logger.error` and nothing else:
+   * the instance keeps its gateway sessions and
    * keeps serving while its row ages past the TTL and a booting peer
    * legitimately claims the same shard. Two instances then serve it, and the
    * only trace is one log line on a fleet running at info.
@@ -115,7 +115,7 @@ export class ShardLeaseManager {
    * `(guild_id >> 22) % total_shards` formula.
    *
    * Nothing in the tree computed a guild-to-shard mapping before this
-   * (`plans/scaling.md` §9.1 finding 1) — every fleet-wide Postgres read (the
+   * — every fleet-wide Postgres read (the
    * sweep, chiefly) had no way to scope itself to this instance's shards, and
    * fell back to deciding what to act on by reading the local discord.js
    * cache instead, which is wrong the moment an instance holds only some of
@@ -131,8 +131,8 @@ export class ShardLeaseManager {
   /**
    * Whether this instance can still PROVE it owns the shards it is serving.
    *
-   * **This is `plans/scaling.md` §6.1, and it is the difference between an alert
-   * and the process stepping aside.** A heartbeat that fails or hangs used to
+   * **An alert alone does not stop an instance from serving an expired lease.**
+   * A heartbeat that fails or hangs used to
    * increment a counter and log. The lease row then ages past its 30s TTL, a
    * booting peer legitimately claims the same shard, and this instance keeps its
    * gateway session and keeps serving it. Two instances then act on one guild:

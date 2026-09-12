@@ -1,5 +1,5 @@
 /**
- * `migrate-preseed` (`plans/migration.md` §5.2).
+ * `migrate-preseed`.
  *
  *   migrate-preseed [--apply]
  *

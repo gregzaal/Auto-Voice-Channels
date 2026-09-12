@@ -477,8 +477,7 @@ describe('buildWatchChecks', () => {
     });
   });
   /**
-   * The other wall, and AGENTS.md calls it the single term that decides how this
-   * scales: memory tracks the MEMBER count of the install base, at a measured
+   * Memory tracks the MEMBER count of the install base, at a measured
    * ~1.28 KB per cached member, and the caches driving it are deliberately
    * unbounded because naming a channel after a game needs the joiner's presence
    * at the instant they join. Beta already OOM-looped at 512MB.

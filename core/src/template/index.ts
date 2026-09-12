@@ -11,7 +11,7 @@
  *
  * Before this existed the site carried a hand-maintained 1:1 port of the
  * renderer, which had already drifted from the engine in two places with both
- * test suites green (`plans/name-tokens.md` §3).
+ * test suites green.
  */
 export * from './nameTemplate.js';
 export * from './stringTransforms.js';

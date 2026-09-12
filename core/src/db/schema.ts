@@ -31,7 +31,7 @@ const AUTH_STATUSES = ['trial', 'active', 'grace', 'expired', 'blocked'] as cons
  */
 const FLEETS = ['prod', 'beta', 'gold'] as const;
 
-/** A fleet-scoping column. See `plans/fleets.md` §2 for what gets one and why. */
+/** Bot-owned channels and coordination use this column; customer state is shared. */
 const fleet = () => text('fleet', { enum: FLEETS }).notNull().default('prod');
 
 /**
@@ -44,7 +44,7 @@ const fleet = () => text('fleet', { enum: FLEETS }).notNull().default('prod');
  * - Per-guild data is keyed by `guild_id`; a corrupt row quarantines to its
  *   guild without affecting others.
  *
- * Migrations follow strict expand/contract discipline (see AGENTS.md): add
+ * Migrations follow strict expand/contract discipline: add
  * columns/tables first; drop only in a later release once nothing references them.
  */
 
@@ -90,7 +90,7 @@ export const guilds = pgTable('guilds', {
   /** Icon hash only; the CDN URL is derived, so a CDN move is not a migration. */
   iconHash: text('icon_hash'),
   ownerId: text('owner_id'),
-  /** Latest member-count sample (a hint, never ground truth — see monetization.md §5). */
+  /** Latest member-count sample (a hint, never ground truth). */
   memberCount: integer('member_count'),
   memberCountUpdatedAt: timestamp('member_count_updated_at', { withTimezone: true }),
   /**
@@ -107,8 +107,7 @@ export const guilds = pgTable('guilds', {
   /**
    * The member pool this guild bills through, or null for a legacy guild-keyed
    * subscription (promoted into a pool on the first server added to it) or a
-   * guild with no subscription at all
-   * (`plans/member-based-pricing.md` §6.1). Denormalized pointer: the
+   * guild with no subscription at all. Denormalized pointer: the
    * durable record with history is `member_pool_guilds`, and this column is
    * what the reconciler and the entitlement gate read without a join. The two
    * are written together, in the same statement, by every add/remove path.
@@ -127,7 +126,7 @@ export const guilds = pgTable('guilds', {
 });
 
 /**
- * Which fleets are present in a guild, and since when (`plans/fleets.md` §6.1).
+ * Which fleets are present in a guild, and since when.
  *
  * `guilds.bot_removed_at` is a per-fleet fact wearing a shared column: with two
  * live bots, "the bot was removed" has to name which one. This table answers it,
@@ -174,7 +173,7 @@ export const guildAuthEvents = pgTable(
      * `transitionAuth` overwrites that column in place and this log recorded
      * only the statuses, so a wrong write DESTROYED a trial deadline with no
      * record anywhere and the only recovery was a backup restore, at up to a
-     * 24-hour RPO (`plans/refunds.md` §7.6). That matters most for exactly the
+     * 24-hour RPO. That matters most for exactly the
      * change that reads the column to decide entitlement.
      *
      * Both nullable: a null is a real value here (a guild with no deadline), so
@@ -302,15 +301,15 @@ export const aliases = pgTable(
 );
 
 // ---------------------------------------------------------------------------
-// Billing (monetization.md §7). Self-hosted deployments run these migrations
+// Billing. Self-hosted deployments run these migrations
 // too but never populate the tables (SELF_HOSTED bypasses entitlement).
 // ---------------------------------------------------------------------------
 
 /**
  * A member pool: one subscription covering any number of servers whose member
- * counts sum to under the band ceiling (`plans/member-based-pricing.md` §6.1).
+ * counts sum to under the band ceiling.
  *
- * **`status` is `active | grace | expired`, and NEVER `trial`** (§5.4). A pool
+ * **`status` is `active | grace | expired`, and NEVER `trial`**. A pool
  * comes into existence by completing checkout, so it always starts `active`;
  * giving it its own trial would let a guild launder an expired or mid-trial
  * state back to a full year by joining one.
@@ -319,7 +318,7 @@ export const aliases = pgTable(
  * subscription pays for. The *required* tier is always re-derived from
  * `member_count` (a hint, refreshed by the reconciler's pool sampler) and is
  * never stored here, for the same reason `guilds.tier` is never conflated with
- * `tierFor()` (§5.1).
+ * `tierFor()`.
  */
 export const memberPools = pgTable(
   'member_pools',
@@ -330,7 +329,7 @@ export const memberPools = pgTable(
     /** Auth.js `users.id` (a UUID), NOT a Discord snowflake. Who pays. */
     ownerUserId: text('owner_user_id').notNull(),
     /**
-     * Optional, defaulted, editable (`plans/member-based-pricing.md` §6.1).
+     * Optional, defaulted, editable.
      * Never read by any backend rule; it exists only so an owner with more
      * than one pool can tell them apart. Defaulted at creation to
      * "Server pool N" and never renumbered afterward.
@@ -349,7 +348,7 @@ export const memberPools = pgTable(
      * shape `domain/billing.ts`'s `BillingMeta` already validates
      * (`{ billing: { samples, notifications, pendingAnomaly? } }`) — reused
      * rather than re-invented, so the forward-only sampler and anti-flap
-     * counters are the same tested code as the per-guild path (§5.2a). Reset
+     * counters are the same tested code as the per-guild path. Reset
      * (samples cleared, notifications kept) on every membership change, so an
      * add or a remove can never fabricate history for a breach/drop the pool
      * did not actually sustain.
@@ -395,13 +394,11 @@ export const memberPoolGuilds = pgTable(
  * subscription, covering either one guild or one member pool (never both,
  * never neither, enforced by `subscriptions_guild_xor_pool` below).
  *
- * `id` is the primary key (`plans/member-based-pricing.md` §6.2, phase 2 —
- * the contract half of a two-release expand/contract: phase 1, migration
- * 0024, added `id` and `pool_id` while `guild_id` was still the primary key).
+ * `id` is the primary key (migration 0024 added `id` and `pool_id` before the primary-key change).
  * A pool subscription belongs to no single guild, so `guild_id` cannot stay
  * the identity column once pool rows exist: the rejected alternative was a
  * synthetic `guild_id` like `pool:<id>`, which leaks a dangling row into
- * every `subscriptions -> guilds` join in `/admin` (§6.2).
+ * every `subscriptions -> guilds` join in `/admin`.
  */
 export const subscriptions = pgTable(
   'subscriptions',
@@ -461,7 +458,7 @@ export const subscriptions = pgTable(
     currentPeriodEnd: timestamp('current_period_end', { withTimezone: true }),
     /**
      * Paddle's `billing_cycle.interval` for the recurring item: `month` or
-     * `year` (`plans/pricing-ladder.md` §6.3).
+     * `year`.
      *
      * The grace window is sized from it, because 60 days is an annual figure
      * and on a monthly subscription it is two free months after one paid month.
@@ -574,7 +571,7 @@ export const subscriptions = pgTable(
      * Paddle's `type: 'full'` describes a TRANSACTION, not the paid term, so
      * without this a goodwill refund of month one's charge on an annual
      * subscription reads as a full refund and gates a customer who is eight
-     * months paid up. That was found by review of `plans/refunds.md` §7.1.
+     * months paid up.
      */
     chargedTransactionId: text('charged_transaction_id'),
     /**
@@ -593,7 +590,7 @@ export const subscriptions = pgTable(
      *
      * `charged_at` moves to each renewal, so it cannot answer "is this still the
      * first charge", and the self-serve refund cap has to: `/refunds` §2 scopes
-     * the no-questions guarantee to a first subscription, and §11 notes the cap
+     * the no-questions guarantee to a first subscription, and the cap
      * must test the first CHARGE or a renewal reopens the window every year.
      *
      * Comparing it against `charged_at` for equality is that test, and it is
@@ -632,7 +629,7 @@ export const subscriptions = pgTable(
      * The adjustment's own `updated_at`, from Paddle. The ordering guard's
      * input: an incoming adjustment is applied only when its timestamp is at or
      * after what we hold, so a redelivered `created` cannot regress an
-     * `approved` (`plans/refunds.md` §2.6, §7.2).
+     * `approved`.
      */
     refundUpdatedAt: timestamp('refund_updated_at', { withTimezone: true }),
     /**
@@ -674,9 +671,8 @@ export const subscriptions = pgTable(
     updatedAt: updatedAt(),
   },
   (t) => [
-    // Exactly one of guild_id / pool_id, never both, never neither
-    // (`plans/member-based-pricing.md` §6.2). `num_nonnulls` is the concise
-    // Postgres builtin for "count how many of these are not null".
+    // Exactly one of guild_id / pool_id, never both, never neither.
+    // `num_nonnulls` counts how many of its arguments are not null.
     check('subscriptions_guild_xor_pool', sql`num_nonnulls(${t.guildId}, ${t.poolId}) = 1`),
   ],
 );
@@ -721,7 +717,7 @@ export const billingEvents = pgTable(
 
 /**
  * Operational alerts, as rows: a persisted row first, delivery a renderer
- * over it (`plans/agentic_management.md`). Before this table, alerting was
+ * over it. Before this table, alerting was
  * fire-and-forget into a Discord channel, so a delivery failure was
  * indistinguishable from quiet and every dedupe was in-process memory a
  * restart re-armed.
@@ -816,7 +812,7 @@ export const alerts = pgTable(
 );
 
 /**
- * Billing notifications waiting to be delivered (`plans/fleets.md` §4).
+ * Billing notifications waiting to be delivered.
  *
  * **Exists because advancing the ladder and delivering its message are done
  * by different bots.** Advancement is fleet-wide work on shared rows, so
@@ -838,7 +834,7 @@ export const billingNotifications = pgTable(
     /**
      * Null for a pool-billing notification (`pool_id` set instead) — payment
      * failed / over limit / renewal, addressed to the purchaser rather than a
-     * server (`plans/member-based-pricing.md` §6.6). Every notification still
+     * server. Every notification still
      * carries exactly one of the two: a hard-gate or reactivation notice is
      * fanned out as one ordinary guild-scoped row per affected member, same as
      * it always was, with `pool_id` stamped alongside for traceability.
@@ -930,12 +926,11 @@ export const billingNotifications = pgTable(
 );
 
 /**
- * `/templateassistant` usage, one row per guild per calendar month
- * (`plans/assisted_templates.md` §5).
+ * `/templateassistant` usage, one row per guild per calendar month.
  *
  * **Not a billing table.** The per-guild cap it backs is identical on every
  * tier and is never raised by paying — it is a runaway-cost backstop, and the
- * token columns exist only to enforce the fleet-wide spend ceiling (§5.2).
+ * token columns exist only to enforce the fleet-wide spend ceiling.
  *
  * The calendar-month key IS the reset mechanism: a new month simply gets a new
  * row, so "the cap resets on the 1st" holds with no job to run and no clock to
@@ -961,8 +956,7 @@ export const aiUsage = pgTable(
 
 /**
  * People who paid for the old gold/sapphire/diamond model, and are therefore
- * owed a **permanent 30% loyalty discount** on the new service
- * (`plans/monetization.md` §2, §0 Phase 7).
+ * owed a **permanent 30% loyalty discount** on the new service.
  *
  * **Keyed by the person, not the server.** The discount is loyalty to whoever
  * paid, so it follows them to any guild they subscribe for, and does NOT
@@ -1181,8 +1175,7 @@ export const opsAudit = pgTable(
 );
 
 /**
- * Hand-entered monthly infrastructure cost figures
- * (`plans/admin-dashboard.md` §4.5, "unit economics").
+ * Hand-entered monthly infrastructure cost figures.
  *
  * Fly, Postgres, model spend and Paddle fees are real dollar costs that live in
  * those providers' own billing, not ours, and none of them has an API this
@@ -1203,7 +1196,7 @@ export const costsMonthly = pgTable('costs_monthly', {
 });
 
 // ---------------------------------------------------------------------------
-// Metric store (plans/admin-dashboard.md §3.4). Two narrow tables hold every
+// Metric store. Two narrow tables hold every
 // operational time series; `domain/metrics.ts` owns what each name means.
 // ---------------------------------------------------------------------------
 
@@ -1293,7 +1286,7 @@ export const metricsDaily = pgTable(
 
 /**
  * Per-guild delivery record for a one-shot broadcast sent via
- * `bot/src/ops/announce.ts` (`plans/marketing.md` §5.1 item 6).
+ * `bot/src/ops/announce.ts`.
  *
  * Distinct from `billing_notifications`: a broadcast has no ladder
  * re-deriving it every tick, so this row is the only record of what a guild

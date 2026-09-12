@@ -4,7 +4,7 @@ import { startPostgres, type PgTestEnv } from '../test/pgContainer.js';
 import { withBackupLock, withDrillLock } from './scheduler.js';
 
 /**
- * Leader election, against a real Postgres (`plans/backups.md` §5).
+ * Leader election, against a real Postgres.
  *
  * Advisory locks are one of the few things a mock cannot usefully stand in for:
  * every property here is a property of the *connection*, and a fake would

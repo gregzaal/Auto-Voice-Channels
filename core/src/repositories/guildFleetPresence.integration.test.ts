@@ -4,7 +4,7 @@ import { startPostgres, type PgTestEnv } from '../test/pgContainer.js';
 import { GuildFleetPresenceRepository } from './guildFleetPresence.js';
 
 /**
- * Per-fleet guild presence (`plans/fleets.md` §6.1).
+ * Per-fleet guild presence.
  *
  * The table shipped with migration 0017 and was backfilled, then nothing wrote
  * to it for six days, so it was a frozen snapshot. These cover the writers that
@@ -65,8 +65,7 @@ describe('GuildFleetPresenceRepository (integration)', () => {
   });
 
   /**
-   * §6.1's first rule, and the bug it was written to prevent: the dashboard
-   * asks "is ANY fleet here", so a customer happily using beta with prod absent
+   * The dashboard must ask "is ANY fleet here", so a customer using beta with prod absent
    * must not be told the bot is missing.
    */
   it('reports every fleet present in a guild', async () => {

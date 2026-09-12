@@ -62,8 +62,8 @@ describe('OpenAiCompatClient', () => {
     // A trailing slash on the base url must not produce a double slash.
     expect(calls[0]!.url).toBe('https://api.example.com/v1/chat/completions');
     expect(calls[0]!.headers['authorization']).toBe('Bearer sk-test');
-    // temperature 0 for deterministic structured extraction (§7 step 1), and the
-    // GPT-5-series spelling of the completion cap (§4).
+    // temperature 0 for deterministic structured extraction, and the
+    // GPT-5-series spelling of the completion cap.
     expect(calls[0]!.body['temperature']).toBe(0);
     expect(calls[0]!.body['max_completion_tokens']).toBe(500);
     expect(calls[0]!.body['max_tokens']).toBeUndefined();

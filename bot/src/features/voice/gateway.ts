@@ -48,7 +48,7 @@ export interface VoiceGatewayDeps {
   /** Debounce window for dynamic renames (ms). Defaults to 4000. */
   renameDelayMs?: number;
   /**
-   * Sync entitlement gate (monetization.md §4 hard gate): when it returns
+   * Sync entitlement gate: when it returns
    * false the event is dropped BEFORE the dispatcher/queue, so non-entitled
    * guilds cost ~0 CPU/RAM. Omitted → all guilds pass (tests, self-host).
    */
@@ -69,11 +69,10 @@ export interface VoiceGatewayDeps {
   /**
    * Whether this instance can still prove it owns the shards it is serving.
    *
-   * **This is the half of `plans/scaling.md` §6.1 that the ownership primitive
-   * cannot reach, and without it the stand-aside does not stop the harm §6.1 is
-   * about.** `ownsGuild` is consulted by the reconcile sweep and the two
+   * **Live events need an ownership guard too.** `ownsGuild` is consulted by
+   * the reconcile sweep and the two
    * record-vanished branches, all of which are convergent and low-frequency. The
-   * live path had no ownership check at all: in the split-brain §6.1 describes,
+   * live path also needs protection against split-brain:
    * an instance whose lease has aged out still holds the shard's WebSocket, so it
    * still receives every join and still creates a room alongside the peer that
    * legitimately claimed that shard. Two real Discord channels, two rows, and
@@ -142,12 +141,11 @@ export function registerVoiceGateway(deps: VoiceGatewayDeps): () => void {
     if (event.beforeChannelId === event.afterChannelId) return; // mute/unmute
 
     // Ownership before anything else: creating or cleaning up a room on a lease
-    // this instance can no longer prove is what produces the duplicate rooms
-    // §6.1 describes. See the `serving` doc.
+    // this instance can no longer prove produces duplicate rooms. See `serving`.
     if (deps.serving && !deps.serving()) return;
 
     // Hard-gate short-circuit: a non-entitled guild's voice events never reach
-    // the dispatcher (enforcement + the §10 cost model). Joins are handed to
+    // the dispatcher, preventing writes and avoiding queued work. Joins are handed to
     // the gated-join hook so creator channels can post the reactivation notice.
     if (deps.entitled && !deps.entitled(event.guildId)) {
       if (event.afterChannelId) deps.onGatedJoin?.(event.guildId, event.afterChannelId);

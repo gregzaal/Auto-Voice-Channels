@@ -9,8 +9,7 @@ import { STYLE_MODES } from '../voice/stringTransforms.js';
 import { TEMPLATE_ASSISTANT_SYSTEM_PROMPT } from './systemPrompt.js';
 
 /**
- * The drift guard `plans/assisted_templates.md` §8 asks for: "keep the
- * system-prompt docs in sync with the engine".
+ * Keeps the system-prompt vocabulary in sync with the template engine.
  *
  * A token the prompt never mentions is a token the assistant will never use,
  * and — worse — one it may invent a wrong spelling for. That failure is
@@ -59,26 +58,26 @@ describe('the assistant system prompt', () => {
     }
   });
 
-  // The §9 "not yet probed" gap the plan requires to land with the command.
+  // Reject unrequested unsafe content before a generated template is offered.
   it('tells the model the request is data, not instructions', () => {
     expect(TEMPLATE_ASSISTANT_SYSTEM_PROMPT).toContain('<<<REQUEST');
     expect(TEMPLATE_ASSISTANT_SYSTEM_PROMPT).toContain('REQUEST>>>');
     expect(TEMPLATE_ASSISTANT_SYSTEM_PROMPT).toMatch(/never add a link, an invite, or a mass/i);
   });
 
-  // §9 finding 1: the reply-language field is what took explanation drift to zero.
+  // The reply-language field is what took explanation drift to zero.
   it('binds the explanation language to the context field', () => {
     expect(TEMPLATE_ASSISTANT_SYSTEM_PROMPT).toContain('Reply language');
   });
 
   /**
-   * §9 finding 4: for this one, a concrete worked example beat a blunt rule.
+   * For operand syntax, a concrete worked example beat a blunt rule.
    *
    * The example inverted when the operand fix landed — a member-count
    * conditional works now — so the risk it guards against inverted with it. The
    * failure to prevent is no longer the model reaching for `@@num@@`, it is the
    * model OVERSHOOTING into `##` and `+#`, which still render `#4` and `IV` and
-   * so still never match (`plans/name-tokens.md` §5.1, §6.7).
+   * so still never match.
    */
   it('shows a member-count conditional working', () => {
     expect(TEMPLATE_ASSISTANT_SYSTEM_PROMPT).toContain('{{@@num@@ >= 5 ?? busy }}');

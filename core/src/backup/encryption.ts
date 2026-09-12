@@ -8,7 +8,7 @@ import {
 import { Transform, type TransformCallback } from 'node:stream';
 
 /**
- * Client-side AES-256-GCM for backup objects (`plans/backups.md` §7).
+ * Client-side AES-256-GCM for backup objects.
  *
  * Client-side because the threat being defended against is the storage
  * provider, not the network: a dump holds every guild setting, every

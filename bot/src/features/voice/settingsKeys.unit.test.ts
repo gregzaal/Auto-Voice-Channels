@@ -6,14 +6,14 @@ import { EXPORT_SETTINGS_KEYS } from '@avc/core';
 import { SETTINGS_KEYS } from './guildSettings.js';
 
 /**
- * Binds the settings allow-list to the export format MECHANICALLY, in the two
- * halves `plans/import_command.md` §3.2 asks for, because one half is not enough.
+ * Binds the settings allow-list to the export format and checks actual writes.
+ * List equality alone cannot catch an unregistered key in an update patch.
  *
  * The list lives in two places on purpose: `SETTINGS_KEYS` is here in the bot,
  * beside the readers that give each key its meaning, and `EXPORT_SETTINGS_KEYS`
- * is in `core`, which cannot import this file because it would drag the template
- * engine into `core`. Without this test a twelfth key appears on one side and is
- * silently absent from every export, and nothing fails until a restore.
+ * is in `core`, which must not depend on the bot. Without this test a new key
+ * can appear on one side and be silently absent from every export, and
+ * nothing fails until a restore.
  *
  * **Half two is the one that matters.** Half one catches a key ADDED to
  * `SETTINGS_KEYS`, which is the disciplined path. The likelier drift is a key

@@ -296,8 +296,7 @@ function uwu(s: string): string {
  * The named modes {@link applyMode} acts on. Kept beside the switch so the two
  * can't drift (a unit test asserts every entry actually transforms), and read by
  * the template assistant's validator — an unknown mode is silently a no-op, so
- * a bare render check would never notice the model inventing one
- * (`plans/assisted_templates.md` §9).
+ * a bare render check would never notice the model inventing one.
  */
 export const STYLE_MODES: readonly string[] = [
   'caps',

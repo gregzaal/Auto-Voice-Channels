@@ -23,8 +23,7 @@ export interface LegacyCustomerSeed {
 }
 
 /**
- * Who is owed the permanent 30% loyalty discount (`plans/monetization.md` §2,
- * §0 Phase 7).
+ * Who is owed the permanent 30% loyalty discount.
  *
  * Read on the checkout path, so {@link isLegacy} is deliberately the narrowest
  * possible query: one indexed primary-key lookup returning a boolean. The

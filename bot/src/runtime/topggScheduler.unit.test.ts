@@ -286,8 +286,7 @@ describe('TopggScheduler', () => {
 
   describe('start and stop', () => {
     /**
-     * The behaviour finding 2 of the review turned on, so it gets a test rather
-     * than a comment. An immediate tick would read the presence table before
+     * An immediate tick would read the presence table before
      * this boot's `clientReady` had written it.
      */
     it('does not publish on start, only on the interval', async () => {

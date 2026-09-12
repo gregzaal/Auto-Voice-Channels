@@ -688,7 +688,7 @@ describe('MetricsCollector', () => {
   });
 
   /**
-   * §8: a collector that dies quietly leaves every chart downstream reading zero,
+   * A collector that dies quietly leaves every chart downstream reading zero,
    * and a zero looks exactly like an answer.
    */
   it('reports staleness once the newest bucket falls behind', async () => {

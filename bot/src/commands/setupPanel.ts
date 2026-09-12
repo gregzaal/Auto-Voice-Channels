@@ -136,7 +136,7 @@ export interface PlanInput {
    * had grown since paying: a guild that went from 900 to 1,500 members on an S
    * subscription was told "Subscribed, M tier ($59/yr)" while paying $19, right
    * as it entered over-limit grace. Billed tier and required tier are separate
-   * values everywhere else for exactly this reason (§5.1) and this surface has
+   * values everywhere else for exactly this reason and this surface has
    * to keep them separate too.
    */
   billedTier?: TierId | null;
@@ -149,7 +149,7 @@ export interface PlanInput {
 }
 
 /**
- * The panel's price line, from core's one formatter (§5.1).
+ * The panel's price line, from core's one formatter.
  *
  * "contact us" rather than core's "custom pricing" for the quoted tier: the
  * panel's sentence reads "your plan would be contact us" otherwise.
@@ -160,8 +160,8 @@ function priceOf(tier: Tier): string {
 }
 
 /**
- * A one-line, friendly summary of where this server sits in the pricing model
- * (see `plans/monetization.md`). **Display only** — it never gates anything; the
+ * A one-line, friendly summary of where this server sits in the pricing model.
+ * **Display only** — it never gates anything; the
  * `isEntitled` machinery remains the source of truth for access.
  */
 export function formatPlan(opts: PlanInput): string {
@@ -193,8 +193,8 @@ export function formatPlan(opts: PlanInput): string {
   /**
    * A free-sized server on a shared subscription, checked before any status.
    *
-   * Under 100 members contributes nothing to that subscription's sum (§5.5)
-   * and stays entitled whatever happens to it (§5.3), so the subscription's
+   * Under 100 members contributes nothing to that subscription's sum
+   * and stays entitled whatever happens to it, so the subscription's
    * tier is never this server's price. Before this branch, a 40-member server
    * inside an L subscription read "Subscribed through a server pool, L tier
    * ($399/yr)": `guilds.tier` is stamped at add time while the reconciler
@@ -269,7 +269,7 @@ export function formatPlan(opts: PlanInput): string {
   /**
    * Still `trial` while a subscription already covers it. Reachable in the gap
    * between the webhook writing `pool_id` and the next hourly pass fanning
-   * entitlement out (§6.4 keeps the webhook from fanning out deliberately), so
+   * entitlement out, so
    * it is a real state a customer can open `/setup` in, and quoting a
    * per-server trial price to someone who has just paid is the last thing it
    * should say.
@@ -290,11 +290,8 @@ export function formatPlan(opts: PlanInput): string {
    * quoted a price that does not exist. `pricePerYear === null` is the
    * definitional property of a quoted tier and cannot go stale that way.
    *
-   * The copy no longer promises dedicated infrastructure. Owner decision 5
-   * defers that until we know we can serve a server this size
-   * (`plans/pricing-ladder.md` §2), so promising it here was a claim the
-   * product no longer supports. Phase 4 owns the rest of this rewrite,
-   * including pointing it at the support server rather than the site.
+   * Do not promise dedicated infrastructure: capacity for a server this size
+   * needs individual verification before an offer can be made.
    */
   if (tier.pricePerYear === null) {
     return (
@@ -307,7 +304,7 @@ export function formatPlan(opts: PlanInput): string {
   const days = expiresAt ? daysUntil(now, expiresAt) : null;
   if (days !== null && days > 0) {
     /**
-     * Says that deciding early costs nothing (`plans/pricing-ladder.md` §6.5),
+     * Says that deciding early costs nothing,
      * the same fact the trial warnings now carry. "Manage anytime" was true and
      * useless: the panel's own reader is the admin weighing whether to subscribe
      * before the trial runs out, and the answer they need is that they do not
@@ -570,9 +567,8 @@ type PanelRow = ActionRowBuilder<ButtonBuilder> | ActionRowBuilder<StringSelectM
  * where "no game label" and "template assistant" stop being jargon, which a row
  * of buttons has nowhere to put.
  *
- * The i18n language picker is deliberately NOT an option here. It needs a select
- * of its own (`plans/i18n.md` §2.2, capped at 25 locales by trap 16), and there
- * is a spare row for it.
+ * A future language picker needs its own select rather than an entry in this
+ * settings menu. Keep the spare row available for it.
  */
 function settingsRow(
   input: SetupPanelInput,
@@ -607,7 +603,7 @@ function settingsRow(
       // The one description here that reports state rather than explaining the
       // setting. An unset zone renders the date tokens in UTC silently, which is
       // the wrong day for most of the install base, so the panel has to be able
-      // to say so without being opened (`plans/name-tokens.md` 10.1).
+      // to say so without being opened.
       .setDescription(
         input.timezone === undefined
           ? 'Date and time tokens use UTC. Set yours so the days line up'

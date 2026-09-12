@@ -173,12 +173,11 @@ describe('registerVoiceGateway (gateway → dispatcher → feature pipeline)', (
     expect(h.handleVoiceStateUpdate).not.toHaveBeenCalled();
   });
   /**
-   * **`plans/scaling.md` §6.1's live half, which the ownership primitive cannot
-   * reach.**
+   * **Live events need the ownership guard as well as reconcile work.**
    *
    * `ownsGuild` is consulted by the reconcile sweep and the two record-vanished
    * branches, all convergent and low-frequency. The live path had no ownership
-   * check at all, so in the split-brain §6.1 describes, an instance whose lease
+   * check at all, so during split-brain, an instance whose lease
    * has aged out still holds the shard's WebSocket, still receives every join,
    * and still creates a room alongside the peer that legitimately claimed that
    * shard. Two real Discord channels, two rows, duplicate renames on top. Three

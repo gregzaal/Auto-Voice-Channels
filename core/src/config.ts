@@ -60,10 +60,10 @@ export const configSchema = z
     selfHosted: booleanish.default(true),
 
     /**
-     * Which hosted fleet this process belongs to (`plans/fleets.md`).
+     * Which hosted fleet this process belongs to.
      *
-     * Two live bots share one database: `prod` and `beta`. Everything about the
-     * customer is shared between them (entitlement, subscriptions, settings);
+     * Multiple bot applications can share one database. Customer state is
+     * shared between them (entitlement, subscriptions, settings);
      * everything about a bot's own operation is scoped by this value — shard
      * leases, identify buckets, runtime flags, the channels it manages, and the
      * advisory-lock keys it coordinates on.
@@ -159,7 +159,7 @@ export const configSchema = z
     /**
      * AI-assisted templates (`/templateassistant`) — a single **OpenAI-compatible**
      * `/v1/chat/completions` endpoint, chosen over per-provider adapters so a
-     * self-hoster only has to set env vars (`plans/assisted_templates.md` §3).
+     * self-hoster only has to set env vars.
      *
      * The same three knobs cover OpenAI, OpenRouter, Groq/Together/Fireworks, and
      * a local Ollama / LM Studio / vLLM with no code change. The feature is
@@ -174,15 +174,14 @@ export const configSchema = z
 
     /**
      * Provider prices per 1M tokens, used only to turn the tracked token counts
-     * into the estimated spend the fleet-wide ceiling is enforced on
-     * (`plans/assisted_templates.md` §5.2). Defaults are the §6 `gpt-5.4-mini`
-     * list rates; a self-hoster on a local model sets both to `0`.
+     * into estimated spend for the fleet-wide ceiling. Defaults use the
+     * `gpt-5.4-mini` list rates; a self-hoster on a local model sets both to `0`.
      */
     aiPriceInputPerMTok: z.coerce.number().nonnegative().default(0.75),
     aiPriceOutputPerMTok: z.coerce.number().nonnegative().default(4.5),
 
     /**
-     * Data backups (`plans/backups.md`), optional and **all-or-nothing**.
+     * Data backups, optional and **all-or-nothing**.
      *
      * Absent unless every required S3 field is present; partial config fails
      * fast in the superRefine below rather than silently running unprotected,
@@ -217,7 +216,7 @@ export const configSchema = z
         }),
         /** Object-key namespace, so one bucket can hold unrelated backup sets. */
         prefix: z.string().optional(),
-        /** How often the restore drill runs. Weekly (`plans/backups.md` §9). */
+        /** How often the restore drill runs. Weekly. */
         drillIntervalHours: z.coerce.number().int().positive().default(168),
         /**
          * A scratch database the drill may restore into and then wipe.
@@ -234,7 +233,7 @@ export const configSchema = z
 
     /**
      * Supporter roles in the support guild, optional and hosted-only in
-     * practice (`plans/monetization.md` §13).
+     * practice.
      *
      * Recognition, not entitlement: nothing anywhere reads a supporter role to
      * decide what a guild may do, and it must stay that way. Every feature is
@@ -266,7 +265,6 @@ export const configSchema = z
              * `{ [K in TierId]?: string }` because every key is optional, so
              * adding a tier to the ladder leaves `roleFor` returning undefined
              * for it and nobody on that tier badged, with nothing failing.
-             * `plans/pricing-ladder.md` §8.2.
              */
             Object.fromEntries(
               SUPPORTER_ROLE_TIER_IDS.map((id) => [id, snowflake.optional()]),

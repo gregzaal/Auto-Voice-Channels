@@ -24,12 +24,12 @@ describe('lintTemplate', () => {
     }
   });
 
-  // §9 finding 3/4: the model's most stubborn failure. It renders to nothing,
+  // The model's most stubborn comparison failure. It renders to nothing,
   // so only a structural check can see it.
   /**
    * A token on the left of a condition used to be uniformly broken. The ones
    * that substitute a bare integer now work, so the lint has to tell the two
-   * halves apart rather than counting `@@` (`plans/name-tokens.md` §5.1).
+   * halves apart rather than counting `@@`.
    */
   it('accepts a numeric token on the left of a conditional', () => {
     expect(codes(lintTemplate('{{@@num@@ >= 5 ?? busy}}', 'name'))).not.toContain(

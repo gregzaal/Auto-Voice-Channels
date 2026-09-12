@@ -29,7 +29,7 @@ import {
 } from '@avc/core';
 
 /**
- * A per-guild, pre-targeted invite link (`plans/marketing.md` §5.1 item 4).
+ * A per-guild, pre-targeted invite link.
  *
  * `&guild_id=` pre-selects the server in Discord's authorize screen and
  * `&disable_guild_select=true` removes the picker entirely, so an admin
@@ -125,7 +125,7 @@ export function parseCopy(raw: string): Sections {
 }
 
 /**
- * The AGENTS.md copy rules, enforced on the thing actually being sent.
+ * Customer-facing copy rules, enforced on the thing actually being sent.
  *
  * `messages.unit.test.ts` does this for the strings compiled into the bot, and
  * this file is not one of them: it is read at runtime and edited by hand right
@@ -372,7 +372,7 @@ function arg(argv: string[], name: string): string | undefined {
 
 export async function main(rawArgv: string[]): Promise<number> {
   // pnpm 9 forwards a bare `--` as a literal argument, which turns every
-  // positional here into nonsense. Documented in AGENTS.md; filtered here.
+  // positional here into nonsense, so discard the separator before parsing.
   const argv = rawArgv.filter((a) => a !== '--');
 
   const apply = argv.includes('--apply');
@@ -381,7 +381,7 @@ export async function main(rawArgv: string[]): Promise<number> {
   const limit = Number(arg(argv, 'limit') ?? '0') || 0;
   /** Idempotency key. Change it only for a genuinely different announcement. */
   const key = arg(argv, 'key') ?? 'rewrite_2026_08';
-  /** Which staged touch of this announcement (`plans/marketing.md` §5.2), e.g. `heads_up`, `announcement`. */
+  /** Which staged touch of this announcement, e.g. `heads_up`, `announcement`. */
   const touch = arg(argv, 'touch') ?? 'default';
   const resend = argv.includes('--resend');
 

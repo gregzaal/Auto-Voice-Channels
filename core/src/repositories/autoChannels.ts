@@ -30,7 +30,7 @@ export const primaryTemplateSchema = z
      * permanent channels 1 to 3 can continue at 4, and it is a stored field
      * rather than a `$#+2` token suffix precisely because a suffix would have
      * to be parsed, documented and taught to every surface for what is one
-     * integer (`plans/name-tokens.md` §6.9).
+     * integer.
      */
     startAt: z.number().int().min(0).optional(),
     /** Position secondaries above (`true`) or below (default — absent/`false`) the primary. */
@@ -77,7 +77,7 @@ export class AutoChannelRepository {
    * safe because a snowflake is globally unique and are not: two fleets can
    * share a guild, and an unscoped `get(channelId)` would hand one fleet the
    * other's row, after which it would happily rename or delete a channel it
-   * does not own (`plans/fleets.md` §2).
+   * does not own.
    */
   private scoped(...conditions: (SQL | undefined)[]) {
     return and(eq(autoChannels.fleet, this.fleet), ...conditions);
@@ -160,7 +160,7 @@ export class AutoChannelRepository {
    * Un-registers a creator channel. Idempotent.
    *
    * Guild-bound like every other write here: `/import` deletes rows a native
-   * export omits (`plans/import_command.md` §5.5a), so a channel id from a file
+   * export omits, so a channel id from a file
    * reaches this, and nothing above it re-checks the guild.
    */
   async remove(guildId: string, channelId: string): Promise<void> {

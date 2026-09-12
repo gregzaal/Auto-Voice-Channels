@@ -14,7 +14,7 @@ import {
 const GUILD = '462606582367125509';
 const LINK = `${SITE_URL}/dashboard?guild=${GUILD}`;
 
-describe('onboardingMessage (§6 size bands)', () => {
+describe('onboardingMessage', () => {
   it('free-forever band celebrates, no upsell', () => {
     const msg = onboardingMessage('dormant', 50, GUILD);
     expect(msg).toContain('free forever');
@@ -38,7 +38,7 @@ describe('onboardingMessage (§6 size bands)', () => {
   it('hard-gate band asks to talk first, and promises no infrastructure', () => {
     const msg = onboardingMessage('hard_gate', 2_000_000, GUILD);
     expect(msg).toContain('needs a conversation');
-    // Owner decision 5 retracted the dedicated-infrastructure promise: we do
+    // Dedicated infrastructure is not an offered guarantee: we do
     // not know yet that we can serve a server that size, and this message goes
     // to the largest server that ever adds the bot. The test asserted the
     // retracted claim, which is what kept it alive here after `/setup` and
@@ -51,7 +51,7 @@ describe('onboardingMessage (§6 size bands)', () => {
   });
 });
 
-describe('notificationMessage (the §4 ladder)', () => {
+describe('notificationMessage', () => {
   it('trial warning carries days left and price', () => {
     const msg = notificationMessage(
       { key: 'trial_warning:7:x', kind: 'trial_warning', daysLeft: 7, requiredTier: 's' },
@@ -62,7 +62,7 @@ describe('notificationMessage (the §4 ladder)', () => {
     expect(msg).toContain('$1.50 a month, billed yearly ($18)');
   });
 
-  it('trial warning says deciding early costs nothing (§6.5)', () => {
+  it('trial warning says deciding early costs nothing', () => {
     /**
      * The message used to offer only "subscribe", which asked the admin to
      * throw away the trial days they had left in order to stop being reminded
@@ -172,7 +172,7 @@ describe('payment prompts deep-link to the guild', () => {
 });
 
 /**
- * Mechanical guard for the user-facing copy rules (AGENTS.md). A hand-kept list
+ * Mechanical guard for the user-facing copy rules. A hand-kept list
  * of "strings that must stay clean" rots; rendering every message and checking
  * the characters does not.
  */

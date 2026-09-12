@@ -11,10 +11,10 @@ import {
 } from './tiers.js';
 
 /**
- * The standardized leniency model (monetization.md §4) — a single, pure state
+ * The standardized leniency model — a single, pure state
  * machine governing every "you need to pay / pay more" situation:
  *
- * 1. trial expiry (the year — or 14 days — is up),
+ * 1. trial expiry (the applicable trial window is up),
  * 2. tier over-limit (member count outgrew the current paid tier),
  * 3. payment failure (Paddle dunning; the webhook moves the guild to `grace`,
  *    this machine only advances/ends the window).
@@ -23,16 +23,15 @@ import {
  * weekly nudges) → `expired` (hard gate, non-destructive) → reactivation at any
  * time. `evaluateLeniency` is pure: it inspects a guild's billing state at
  * `now` and returns at most one transition plus the notifications due — the
- * advisory-locked reconcile job applies them (with member-count validation
- * first, §5) and records notification keys for dedupe.
+ * reconcile job applies them after reserving a run (with member-count validation
+ * first) and records notification keys for dedupe.
  */
 
 export interface LeniencyConfig {
   /** Grace window length in days (runtime-flags tunable; default 60). */
   graceDays: number;
   /**
-   * Grace window for a MONTHLY subscription (default 14,
-   * `plans/pricing-ladder.md` §6.3).
+   * Grace window for a MONTHLY subscription (default 14).
    *
    * 60 days is sized for an annual subscription. On a monthly one it is two
    * free months after a single paid month, which is the whole reason this
@@ -51,9 +50,8 @@ export interface LeniencyConfig {
   /** Days between grace-period nudges (default 7 — weekly). */
   graceNudgeDays: number;
   /**
-   * Beta lever (`billing.hard_gate_disabled`): when true, guilds enter and sit
-   * in `grace` but are never advanced to `expired` — for running the messaging
-   * ladder against real guilds before checkout exists (§0 Phase 2).
+   * Hold ordinary grace-to-expired advancement while continuing notices.
+   * Refund-floor transitions are independent of this hold.
    */
   hardGateDisabled: boolean;
 }
@@ -69,8 +67,7 @@ export const DEFAULT_LENIENCY_CONFIG: LeniencyConfig = {
    *
    * The selector below picks these for any window of 30 days or less, so the
    * old offsets would leave a 30-day trial silent for 23 days and then warn at
-   * T-7, under a pricing page that promises T-30
-   * (`plans/pricing-ladder.md` §7). Only the most imminent unsent offset ever
+   * T-7, under a pricing page that promises T-30. Only the most imminent unsent offset ever
    * fires, so widening the first one bursts nothing.
    */
   shortWarnDaysBefore: [14, 7, 1],
@@ -99,8 +96,8 @@ export interface LeniencyState {
    * `first_charged_at`).
    *
    * Read only by the trial-resume branch in {@link evaluateActive}. Optional,
-   * and its absence means "assume it charged": every caller that predates
-   * `plans/pricing-ladder.md` §6.5a keeps the ordinary grace behaviour, which
+   * and its absence means "assume it charged": callers without this field
+   * keep the ordinary grace behaviour, which
    * is the safe direction, since the alternative default hands free months to
    * anybody whose renewal fails inside their own trial window.
    */
@@ -120,7 +117,7 @@ export interface LeniencyState {
   memberCount: number | null;
   /**
    * The pooled member-count sum, when this state represents a member pool
-   * rather than a single guild (`plans/member-based-pricing.md` §5.2). Takes
+   * rather than a single guild. Takes
    * priority over {@link memberCount} in {@link requiredTierOf} when present.
    * Every other field on this interface keeps meaning exactly what it already
    * means: a pool's own `authStatus`/`graceUntil`/`samples`/`notifications`,
@@ -164,7 +161,7 @@ export interface LeniencyTransition {
   graceUntil?: Date | null;
   /**
    * Billing-affecting transitions whose premise rests on the member count must
-   * be confirmed with a fresh authoritative REST read first (§5 steps 3–5).
+   * be confirmed with a fresh authoritative REST read first.
    */
   requiresCountValidation: boolean;
 }
@@ -186,7 +183,7 @@ function daysLeft(until: Date, now: Date): number {
 
 /**
  * True when the last `n` daily samples all sit at/above `ceiling` (the
- * sustained-breach anti-flap rule, §4 — a raid or one-off spike never triggers
+ * sustained-breach anti-flap rule — a raid or one-off spike never triggers
  * billing changes). Requires at least `n` samples.
  */
 export function sustainedBreach(
@@ -200,7 +197,7 @@ export function sustainedBreach(
 
 /**
  * True when the last `n` daily samples all sit strictly below `ceiling` (the
- * longer sustained-drop hysteresis for downgrade offers, §4).
+ * longer sustained-drop hysteresis for downgrade offers).
  */
 export function sustainedDrop(
   samples: readonly MemberCountSample[],
@@ -245,7 +242,7 @@ function alreadySent(state: LeniencyState, key: string): boolean {
 
 /**
  * Whether a lapsed subscription should hand a server back to its own trial
- * instead of opening a grace window (`plans/pricing-ladder.md` §6.5a).
+ * instead of opening a grace window.
  *
  * **TWO facts, and needing both is the whole correctness of it.** An earlier
  * version asked only whether `auth_expires_at` was still in the future, on the
@@ -274,8 +271,7 @@ function alreadySent(state: LeniencyState, key: string): boolean {
  * race: the hourly tick and the Paddle webhook both act on it.
  */
 /**
- * How long a grace window should be for THIS subscription
- * (`plans/pricing-ladder.md` §6.3).
+ * How long a grace window should be for THIS subscription.
  *
  * **Absent or unrecognised means ANNUAL, and that direction is the whole safety
  * of it.** Reading an unknown interval as monthly would gate a customer who
@@ -334,7 +330,7 @@ function evaluateActive(state: LeniencyState, now: Date, config: LeniencyConfig)
      * must never be left worse off than if it had never subscribed.
      *
      * The case that made this urgent is "subscribe during your trial, then
-     * cancel" (`plans/pricing-ladder.md` §6.5). Nothing has been charged, so
+     * cancel". Nothing has been charged, so
      * the counterfactual is plainly the trial they still hold, and a 60-day
      * grace window in its place silently eats up to a year of it. The defect
      * predates trial-subscribe (a charge-now subscribe followed by a cancel
@@ -365,7 +361,7 @@ function evaluateActive(state: LeniencyState, now: Date, config: LeniencyConfig)
         notifications: [],
       };
     }
-    // Sized to what they actually bought (§6.3). The notification quotes the
+    // Sized to what they actually bought. The notification quotes the
     // same number, so the message and the deadline cannot disagree.
     const lapsedGraceDays = graceDaysFor(state, config);
     return {
@@ -390,7 +386,7 @@ function evaluateActive(state: LeniencyState, now: Date, config: LeniencyConfig)
   // Over-limit: the guild outgrew what it pays for, sustained across the
   // breach window → start the grace clock. (Never the other way: a guild may
   // hold any tier at or above its required tier — voluntary over-provisioning
-  // is simply not prevented, §5.)
+  // is simply not prevented.)
   if (
     state.billedTier &&
     compareTiers(required.id, state.billedTier) > 0 &&
@@ -410,8 +406,7 @@ function evaluateActive(state: LeniencyState, now: Date, config: LeniencyConfig)
      * for) and it loses to a promise already in force: Terms §5 and
      * `/docs/billing` both say that if servers grow past a tier's ceiling
      * "nothing changes for 60 days", with no carve-out for how often you are
-     * billed. `plans/pricing-ladder.md` §6.3 asks only for the PAYMENT-FAILURE
-     * window, and §6.4 quotes that same 60-day sentence as what the code does.
+     * billed. Interval-aware grace applies only to payment failure.
      *
      * Shortening this needs the Terms sentence changed first, which is a change
      * to a live agreement rather than a code decision.
@@ -449,7 +444,7 @@ function evaluateTrial(state: LeniencyState, now: Date, config: LeniencyConfig):
   /**
    * Growing into the top, hard-gated tier during a trial: a leniency-model
    * tier transition, so we reach out to arrange it and the trial window itself
-   * is untouched (§3). One-time heads-up once the breach is sustained.
+   * is untouched. One-time heads-up once the breach is sustained.
    *
    * **The floor is derived from the table, never named by id.** Naming the
    * second tier (`tierById('mythic')`) is how this branch would go silently
@@ -460,9 +455,8 @@ function evaluateTrial(state: LeniencyState, now: Date, config: LeniencyConfig):
    *
    * **The dedupe key keeps its `_xxl` name deliberately.** It is stored text
    * in `metadata.billing.notified` and `billing_notifications.key`, so
-   * renaming it would strand any queued row mid-deploy for no gain
-   * (`plans/pricing-ladder.md` §7). The tier it refers to is now Exotic at
-   * 300,000; only the copy changes, in phase 4.
+   * renaming it would strand queued rows during a rolling deploy. The copy
+   * follows the current top tier while the persisted key stays compatible.
    */
   const topTier = TIERS[TIERS.length - 1]!;
   const topTierFloor = TIERS[TIERS.length - 2]?.maxExclusive ?? Number.POSITIVE_INFINITY;
@@ -534,8 +528,8 @@ function trialWindowDays(state: LeniencyState, expiresAt: Date): number | null {
 }
 
 /**
- * Sustained-under check for LEAVING grace on a member-count premise (§4/§5:
- * validation applies to billing-affecting transitions "up *or* down"). Uses
+ * Sustained-under check for leaving grace on a member-count premise.
+ * Billing-affecting transitions require validation in both directions. Uses
  * the long downgrade window, relaxed to the available history but never below
  * the upgrade window — so a one-day dip can never reset the grace clock,
  * while a guild whose entire (≥7-day) history sits under the ceiling (e.g.
@@ -584,7 +578,7 @@ function evaluateGrace(state: LeniencyState, now: Date, config: LeniencyConfig):
 
   // Reactivation paths. In grace, service was never interrupted — the only
   // effect of leaving is clearing the deadline — so member-count-premised
-  // exits need the §4 sustained-drop hysteresis: a one-day dip below the
+  // exits need sustained-drop hysteresis: a one-day dip below the
   // ceiling must never reset the grace clock (else a guild could dodge the
   // ladder forever by shedding members for a day each cycle).
   if (required.id === 'free' && sustainedUnder(state, tierById('free').maxExclusive, config)) {
@@ -700,7 +694,7 @@ function evaluateExpired(state: LeniencyState): LeniencyDecision {
   if (required.id === 'free') {
     /**
      * ...but a POOL with nothing billable left is not a free server, and must
-     * not reactivate itself off a dead subscription (`plans/refunds.md` §2.5).
+     * not reactivate itself off a dead subscription.
      *
      * `requiredTierOf` reads `pooledMemberCount` first, so a pool whose
      * billable set empties for one tick, by shrinkage or because the customer
@@ -754,7 +748,7 @@ function evaluateExpired(state: LeniencyState): LeniencyDecision {
       ],
     };
   }
-  // The §4 hard gate promises a ONE-TIME admin notification — re-emit it until
+  // The hard gate promises a ONE-TIME admin notification — re-emit it until
   // a delivery succeeds. Only for guilds that actually walked the ladder
   // (grace evidence in the dedupe map): a guild hard-gated at join time (XXL)
   // was already messaged by onboarding and must not get a "grace ended" notice.
@@ -776,7 +770,7 @@ function utcDay(date: Date): string {
 /**
  * What state a server would have been in **if the payment had never happened**.
  *
- * `plans/refunds.md` §5. The question every caller here used to ask was "what
+ * The question every caller here used to ask was "what
  * state does this event produce", which is why a refund could leave a server
  * worse off than never having paid: `applyRefund` wrote `expired` while
  * `auth_expires_at` still held an unconsumed trial deadline, because that column
@@ -885,16 +879,17 @@ function floorRung(
  * Whether leaving a pool should grant the exiting guild an entitled window at
  * all. Shared by every caller, because they had already diverged once.
  *
- * `plans/refunds.md` §2.3. `poolExitTransition` reads only the member count, so
+ * `poolExitTransition` reads only the member count, so
  * it hands out `grace` plus a fresh 60 days regardless of whether anything is
- * still paying, and `billing.hard_gate_disabled` on prod means that window never
- * closes. Two ways that was exploitable, and a third the first fix created:
+ * still paying. If `billing.hard_gate_disabled` is set, that window never
+ * closes through ordinary ladder advancement. Two ways that was exploitable, and a third the first
+ * fix created:
  *
  *  - **Refunded and emptied.** Buy a multi-server subscription, refund it, then
  *    remove each server: every one lands entitled indefinitely.
  *  - **Kicked and re-invited.** The `guildDelete` path does the same thing with
  *    no site login at all, which made it the cheaper route.
- *  - **Farmed.** Once a removed membership could be re-added (§2.10), add and
+ *  - **Farmed.** Once a removed membership could be re-added, add and
  *    remove the same server every 59 days to renew its window forever.
  *
  * So: no grant while the pool cannot entitle anything, and never an extension of
@@ -923,14 +918,13 @@ export function shouldGrantPoolExit(
 }
 
 /**
- * What a guild's own state should become on leaving a pool
- * (`plans/member-based-pricing.md` §5.6): never a silent `expired`, and never
+ * What a guild's own state should become on leaving a pool: never a silent `expired`, and never
  * merely an absence of a transition. `evaluateExpired`'s machine has no
  * `expired -> trial`/`grace` edge except `shrunk_to_free`, so a guild removed
  * from a lapsed (or simply left) pool with no explicit handling is stranded
  * hard-gated forever.
  *
- * Free forever (§5.3) reactivates exactly like shrinking under the line
+ * Free forever reactivates exactly like shrinking under the line
  * always has. Everyone else lands on `grace` with a FRESH window — "where
  * that is not derivable, it lands on grace", and under-charging (a longer
  * runway than the guild might strictly be owed) is the acceptable failure

@@ -257,8 +257,8 @@ export function readProblemAlerts(settings: Record<string, unknown>): ProblemAle
  * The line confirming what a guild just chose, appended to the `/logging` reply.
  *
  * Lives here rather than inline in `GuildSettingsService` so the copy-rules
- * test can enumerate all three without a hand-copied list of literals, which is
- * the thing AGENTS.md says rots.
+ * test can enumerate all three without a hand-copied list of literals that
+ * could drift from the messages actually sent.
  *
  * Never says "here": the notice goes to the server's system channel or a DM,
  * not to the log channel this panel is otherwise about.

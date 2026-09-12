@@ -243,7 +243,7 @@ describe('Reconciler (integration)', () => {
   });
 
   /**
-   * The partial-cache case (`plans/scaling.md` §9.1 finding 1). `scopedGuildIds`
+   * The partial-cache case. `scopedGuildIds`
    * selects fleet-wide from Postgres with no shard predicate; this asserts the
    * `ownsGuild` filter actually removes a foreign guild from the sweep's scope,
    * so a channel this instance's (fake, in this test) cache knows nothing about

@@ -39,7 +39,7 @@ describe('buildCommandDefinitions', () => {
   });
 
   /**
-   * One tier above the configuration commands, per decision 1: `/import`
+   * One permission tier above the configuration commands: `/import`
    * replaces another admin's work from a file, and `/export` discloses channel
    * ids, the recorded contact and every self-chosen nickname. `/docs/commands`
    * publishes "Manage Server" for both, so this is a published commitment.
@@ -108,7 +108,7 @@ describe('buildCommandDefinitions', () => {
     const withAssistant = buildCommandDefinitions({ includeAssistant: true });
     const assistant = withAssistant.find((d) => d.name === 'templateassistant');
     expect(assistant).toBeDefined();
-    // Admin-gated exactly like /template, and nothing else gates it (§5).
+    // Admin-gated exactly like /template, and nothing else gates it.
     expect(assistant!.default_member_permissions).toBe(
       PermissionFlagsBits.ManageChannels.toString(),
     );

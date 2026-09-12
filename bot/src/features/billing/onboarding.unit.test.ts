@@ -22,7 +22,7 @@ function row(overrides: Partial<GuildRow> = {}): GuildRow {
   };
 }
 
-describe('decideOnboarding (§3/§6)', () => {
+describe('decideOnboarding', () => {
   it('under 100 members: dormant policy, 1-year clock still starts', () => {
     const d = decideOnboarding(row(), 50, NOW);
     expect(d.policy).toBe('dormant');

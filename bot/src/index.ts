@@ -209,11 +209,9 @@ async function main(): Promise<void> {
   const claimed = await leaseManager.claimWithRetry();
 
   /**
-   * An over-provisioned fleet (`EXPECTED_INSTANCES` ahead of the real machine
-   * count) or Step B's own deliberate window - a spare machine created ahead
-   * of a config flip, `plans/scaling.md` §9.3 - ends boot-time claiming with
-   * zero owned shards. discord.js cannot represent that: `buildGatewayClient`
-   * would pass `shards: []`, which `Client._validateOptions` rejects outright
+   * A surplus machine, including one created ahead of a scaling config change,
+   * can end boot-time claiming with zero owned shards. discord.js cannot
+   * represent that: `buildGatewayClient` would pass `shards: []`, which `Client._validateOptions` rejects outright
    * (`ClientInvalidProvidedShards`), crash-looping the process forever. Every
    * subsystem below this point is built around a live gateway client, so
    * there is no cheap partial bring-up - idle instead, without building one.
@@ -302,7 +300,7 @@ async function main(): Promise<void> {
   const alertRepo = config.selfHosted ? undefined : new AlertRepository(db, config.fleet);
   /**
    * Hosted posts AND records, correlated, so the row knows what happened to
-   * the post (`plans/agentic_management.md` step 4b) instead of every row
+   * the post instead of every row
    * reading permanently undelivered. A plain `Tee` (fire both, no
    * correlation) is still right when there's no channel to correlate with: a
    * persisted row alone beats nothing.
@@ -319,7 +317,7 @@ async function main(): Promise<void> {
       : new PersistentErrorReporter({ alerts: alertRepo, logger });
   opsReport.report = (kind, message, context) => errorReporter.report(kind, message, context);
   const creationGate = new RuntimeCreationGate({
-    // The live half of §6.1: `ownsGuild` scopes the sweep and nothing else, so
+    // Guard live creation too: `ownsGuild` scopes the sweep and nothing else, so
     // without this an instance with a stale lease keeps creating rooms while a
     // peer that legitimately claimed the shard creates them too.
     leasesProven: () => leaseManager.leasesProven(),
@@ -438,7 +436,7 @@ async function main(): Promise<void> {
     logger,
     entitled: (guildId) => entitlementGate.check(guildId),
     /**
-     * The live half of `plans/scaling.md` §6.1. `ownsGuild` reaches only the
+     * Guard live gateway events too. `ownsGuild` reaches only the
      * reconcile paths, so without this an instance whose lease has aged out keeps
      * receiving joins on a shard a peer has legitimately claimed and creates a
      * second room for each one.
@@ -486,7 +484,7 @@ async function main(): Promise<void> {
   // enabled iff a key is configured — the self-host default is off, and in that
   // case `/templateassistant` is never even registered (see registerCommands).
   // Deliberately NOT entitlement-gated: free on every tier, including
-  // free-forever guilds (plans/assisted_templates.md §5).
+  // free-forever guilds.
   const assistant = config.aiApiKey
     ? new TemplateAssistant({
         client: new OpenAiCompatClient({
@@ -604,7 +602,7 @@ async function main(): Promise<void> {
 
   // Monetization (dormant when SELF_HOSTED): new-guild onboarding + the
   // advisory-locked trial/billing reconcile job (samples member counts,
-  // advances the leniency ladder, sends the §6 notifications).
+  // advances the leniency ladder, sends billing notifications).
   const subscriptionsRepo = new SubscriptionRepository(db);
   const billingNotifier = new DiscordBillingNotifier({ client, logger });
   const disposeOnboarding = config.selfHosted
@@ -625,7 +623,7 @@ async function main(): Promise<void> {
   const disposeGuildIdentity = registerGuildIdentity({ client, guilds: guildsRepo, logger });
 
   /**
-   * Scheduled Postgres backups (`plans/backups.md`). Absent unless the operator
+   * Scheduled Postgres backups. Absent unless the operator
    * configured storage, which is the whole enablement switch: `config.backup`
    * is undefined until every required BACKUP_S3_* var is set. Runs on self-host
    * too, deliberately, so a self-hoster gets backups from the same image.
@@ -647,9 +645,9 @@ async function main(): Promise<void> {
         appVersion: VERSION,
         commit: COMMIT,
         /**
-         * The four backup conditions keep distinct kinds. AGENTS.md states the
-         * invariant directly: "A failed drill is never reported as a failed
-         * backup." Collapsing them onto one key would also make each occurrence
+         * The four backup conditions keep distinct kinds: a failed drill is
+         * never reported as a failed backup. Collapsing them onto one key would
+         * also make each occurrence
          * overwrite the previous message on the same alert row.
          */
         report: (kind, message, context) => errorReporter.report(kind, message, context),
@@ -657,7 +655,7 @@ async function main(): Promise<void> {
       })
     : undefined;
   /**
-   * The metric store's collector (`plans/admin-dashboard.md` §3.4).
+   * The metric store's collector.
    * Unconditional, like the backup scheduler and unlike the billing job: what
    * it counts is deleted-with-the-row or leaves no trace at all, so an
    * uncounted event is unrecoverable, on self-host too. `metrics.disabled` is
@@ -731,7 +729,7 @@ async function main(): Promise<void> {
             guildId: g.id,
             memberCount: g.memberCount ?? 0,
           })),
-        // §5 step 3: the authoritative tie-breaker before any billing-affecting
+        // The authoritative tie-breaker before any billing-affecting
         // transition. REST works for any guild the bot is in, on any shard.
         fetchAuthoritativeCount: async (guildId) => {
           try {
@@ -805,7 +803,7 @@ async function main(): Promise<void> {
   }
 
   /**
-   * The in-process watcher (`plans/agentic_management.md` step 4).
+   * The in-process watcher.
    * Unconditional, like the metrics collector: its conditions are as true on
    * self-host as here, and the watchdog ping is the only down-detection a
    * self-hoster has. `alerts.disabled` is the off switch, `global.pause`
@@ -947,7 +945,7 @@ async function main(): Promise<void> {
    * ever see the old fleet gone and the new one not yet arrived. The billing
    * reconciler's pool-advance pass (`features/billing/reconciler.ts`) is the
    * only place that decides a pool exit now, on a grace window
-   * (`guildDepartedLongEnough`, `member-based-pricing.md` §5.6) long enough
+   * (`guildDepartedLongEnough`) long enough
    * to cover a deliberate swap, checked fresh on every tick rather than once
    * at the moment of departure.
    */
@@ -979,8 +977,7 @@ async function main(): Promise<void> {
       ?.reconcile()
       .catch((err: unknown) => supporterRoles.noteFailure(err, 'supporter role reconcile failed'));
     /**
-     * Presence, from the guild list rather than from the event stream
-     * (`plans/fleets.md` §6.1).
+     * Presence, from the guild list rather than from the event stream.
      *
      * `guildCreate`/`guildDelete` are missable: a kick while the process is
      * down is never replayed, and neither is one that lands during a gateway
@@ -1100,7 +1097,7 @@ async function main(): Promise<void> {
           gateway,
           /**
            * Held AND provable. An instance whose heartbeat has not landed inside
-           * the lease TTL has stopped serving those shards (`scaling.md` §6.1),
+           * the lease TTL has stopped serving those shards,
            * so reporting the leases up would be the same lie `gateway` used to
            * tell: a machine that looks healthy and is doing nothing.
            */
@@ -1123,8 +1120,7 @@ async function main(): Promise<void> {
         claimedShards: leaseManager.ownedShards,
         // Without these, `claimedShards: [0]` is byte-identical whether this
         // is a healthy single-shard fleet or one machine of a misconfigured
-        // multi-instance one silently serving half the guilds
-        // (`plans/scaling.md` §9.1 finding 3).
+        // multi-instance one silently serving half the guilds.
         totalShards: config.totalShards,
         expectedInstances: config.expectedInstances,
         /**
@@ -1266,7 +1262,7 @@ async function main(): Promise<void> {
   // `PUT` replacement of the global command set on every boot, so with two
   // instances an old-image machine restarting mid-rolling-deploy would
   // otherwise re-register the OLD command body over the new one the other
-  // instance just registered (`plans/scaling.md` §9.1). At one instance,
+  // instance just registered. At one instance,
   // shard 0 is always in `ownedShards`, so this is a no-op restriction.
   if (leaseManager.ownedShards.includes(0)) {
     try {

@@ -1,19 +1,12 @@
 /**
- * Hosted fleets (`plans/fleets.md`).
+ * Fleet identities for multiple bot applications sharing one database.
  *
- * Three live bots share one database: production, an opt-in beta that is
- * deliberately indistinguishable from production to the people using it, and
- * gold, which carries the legacy patron bot's own application id
- * (`plans/migration.md` 7).
+ * Customer state is shared: entitlement, subscriptions, billing and guild
+ * settings. Bot operations are scoped by fleet: leases, identify buckets,
+ * runtime flags and owned channels. Shared jobs need explicit ownership
+ * because their winning instance still reads fleet-scoped configuration.
  *
- * The split follows one rule: **anything about the customer is shared, anything
- * about the bot's own operation is per fleet.** So entitlement, subscriptions,
- * billing and guild settings live on shared rows and are identical whichever bot
- * a guild is running; shard leases, identify buckets, runtime flags and the
- * channels a bot manages are scoped by fleet.
- *
- * Self-host is always `prod`, is the only fleet in its own database, and never
- * notices any of this.
+ * Self-hosted installations default to `prod` in their own database.
  */
 /**
  * **Append only, never insert or reorder.** {@link fleetOrdinal} is the array
@@ -66,7 +59,7 @@ export function fleetAdvisoryKey(base: number, fleet: Fleet, slot = 0): bigint {
 
 /**
  * How long a guild may be fully absent from every one of our fleets before a
- * pool membership loss is treated as real (`member-based-pricing.md` §5.6).
+ * pool membership loss is treated as real.
  *
  * A bot swap invites the new fleet's identity DAYS after removing the old
  * one, not at the same instant — a paying customer's guild lost its pool
@@ -75,7 +68,7 @@ export function fleetAdvisoryKey(base: number, fleet: Fleet, slot = 0): bigint {
  * sibling fleet present RIGHT NOW", which is never true mid-swap (the new
  * fleet has no presence row yet). Long enough to cover a deliberate swap
  * taken at a customer's own pace; short enough that a genuine departure is
- * still noticed well inside the pool's own sample windows (§5.2a).
+ * still noticed well inside the pool's own sample windows.
  */
 export const POOL_EXIT_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 

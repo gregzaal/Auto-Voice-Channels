@@ -8,33 +8,20 @@ import {
 } from '../repositories/secondaryChannels.js';
 
 /**
- * The pre-seed pass (`plans/migration.md` §5.2).
+ * Record the current Discord name for imported rooms before reconciliation.
  *
- * An adopted channel arrives with no `state.name`, and the reconciler renames
- * anything whose rendered name differs from what it has recorded
- * (`handler.ts:708`). Undefined differs from everything, so an adopted channel
- * is renamed on the first pass even when its name is already exactly right.
- * Writing the current Discord name in first prevents that: a channel that
- * already matches is left alone, and one that genuinely renders differently is
- * renamed once, which is correct.
+ * An imported channel can have no `state.name`. Reconciliation compares the
+ * rendered name against that stored value, so even an already-correct name
+ * causes a write without this seed. Matching rooms can then remain untouched;
+ * a room that renders differently still receives its necessary rename.
  *
- * **This is a small pass, and the number matters more than the principle.**
- * Reconcile deletes empty secondaries before it renames anything
- * (`handler.ts:502`), and `rerenderSecondary` bails on an empty channel, so
- * only channels still *occupied* when reconcile runs are affected at all. The
- * cutover stops the old bot first, so rooms drain during the window, and
- * `migration.md` §2.1 measured 7 live secondaries fleet-wide. The realistic
- * count is zero to a handful. An earlier version of this comment called it a
- * "fleet-wide burst of writes", which contradicted §2.1 in the same document.
- * The command is still worth having, because it is cheap, correct and
- * re-runnable, but a failure here does not block a cutover.
+ * Reconciliation deletes empty rooms before renaming, and `rerenderSecondary`
+ * skips empty rooms. The affected population is therefore occupied rooms, and
+ * must be observed for each migration rather than inferred from an old count.
  *
- * **Separate from the importer, on purpose.** The importer holds no token and
- * that is a property worth keeping: it can be run and re-run by anyone with a
- * database, and a dry run needs no configuration at all. This reads Discord, so
- * it is its own command, and it works from the rows that were imported rather
- * than from the dump, which makes it re-runnable and independent of where the
- * data came from.
+ * This is separate from the importer because it reads Discord and requires a
+ * bot token. The importer can remain database-only. Reading imported rows
+ * rather than the original dump makes this pass repeatable.
  */
 
 export interface PreseedOptions {
@@ -116,7 +103,7 @@ export function discordGuildChannels(
       });
 
       // The bot is not in this guild any more. Not an error: the dump is older
-      // than the fleet and `left` is unreliable (§2.1).
+      // than the fleet and `left` is unreliable.
       if (response.status === 403 || response.status === 404) return null;
 
       if (response.status === 429 || response.status >= 500) {

@@ -18,7 +18,7 @@ export interface RecordBillingEventInput {
 
 /**
  * Append-only Paddle webhook log. `recordOnce` is the idempotency gate for
- * webhook processing (monetization.md §9): the unique `paddle_event_id`
+ * webhook processing: the unique `paddle_event_id`
  * constraint makes a redelivered event a no-op, and the caller only applies
  * side effects when `inserted` is true.
  */

@@ -4,9 +4,8 @@ import type { RuntimeFlagsRepository, TierId } from '@avc/core';
 import { SupporterRoles, planRoleChange } from './supporterRoles.js';
 
 /**
- * Keyed by the CURRENT tier ids. It was `{ s, m, l, xl, xxl }`, which phase 7
- * retired; the ids and the role-id strings have to move together or a test
- * asks for a tier the fixture has no role for.
+ * Keyed by the current tier ids. Keep the tier ids and role-id fixtures in
+ * step so tests never request a tier with no configured role.
  */
 const ROLES = {
   s: 'role-s',

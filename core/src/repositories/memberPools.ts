@@ -13,11 +13,11 @@ import { TIER_IDS, type TierId } from '../domain/tiers.js';
 
 /**
  * A member pool: one subscription covering any number of servers whose member
- * counts sum to under the band ceiling (`plans/member-based-pricing.md`).
+ * counts sum to under the band ceiling.
  *
- * `status` is never `'trial'` (§5.4) — a pool is a paid construct only, and
+ * `status` is never `'trial'` — a pool is a paid construct only, and
  * the type below is intentionally narrower than `AuthStatus` for exactly that
- * reason. `billedTier` is written only by the Paddle webhook (§5.1); the
+ * reason. `billedTier` is written only by the Paddle webhook; the
  * *required* tier is always re-derived from `memberCount` via `tierFor()`.
  */
 export const POOL_STATUSES = ['active', 'grace', 'expired'] as const;
@@ -108,12 +108,12 @@ export class MemberPoolRepository {
 
   /**
    * Creates a new pool. Idempotent on `id` (a checkout retry must not create
-   * two pools for one purchase). Always `active` (§5.4) — there is no other
+   * two pools for one purchase). Always `active` — there is no other
    * entry point, because a pool comes into existence by completing checkout.
    *
    * `name` defaults to `"Server pool N"`, `N` computed by the caller
    * (`select count(*) from member_pools where owner_user_id = $1`) at
-   * creation time and never renumbered afterward (§6.1).
+   * creation time and never renumbered afterward.
    */
   async create(input: {
     id: string;
@@ -153,7 +153,7 @@ export class MemberPoolRepository {
       .where(eq(memberPools.id, poolId));
   }
 
-  /** Sets the billed-tier cache. Written only by the Paddle webhook (§5.1). */
+  /** Sets the billed-tier cache. Written only by the Paddle webhook. */
   async setBilledTier(poolId: string, tier: TierId | null): Promise<void> {
     await this.db
       .update(memberPools)
@@ -264,7 +264,7 @@ export class MemberPoolRepository {
 
   /**
    * Clears the daily sample history (notifications kept) — called on every
-   * membership change (§5.2a). Never reinterpreted, only reset: an add or a
+   * membership change. Never reinterpreted, only reset: an add or a
    * remove must not let 45 days of history computed under the OLD membership
    * decide today's breach/drop verdict for the NEW one.
    */
@@ -289,7 +289,7 @@ export class MemberPoolRepository {
     });
   }
 
-  /** Records a delivered pool-level notification's dedupe stamp (§6.6). */
+  /** Records a delivered pool-level notification's dedupe stamp. */
   async recordNotification(poolId: string, key: string, at = new Date()): Promise<void> {
     await this.db.transaction(async (tx) => {
       const [current] = await tx

@@ -14,9 +14,8 @@ import { describe, expect, it } from 'vitest';
  * grace of the callers: `primaryFor` checks `primary.guildId === guildId` and
  * `setManagedName` refuses unless `row.guildId === guildId`, both in the service
  * layer. `/import` takes channel ids from a file an admin uploads and writes
- * them without passing through either, which is the same shape as
- * `plans/refunds.md` §2.2 (owning one thing authorized a write to another) and
- * gets the same treatment: bind the id where a new caller cannot forget.
+ * them without passing through either. Owning one channel must not authorize
+ * writes to another: bind the guild id where a new caller cannot forget.
  *
  * `fleet` is already bound by each repository's own `scoped` helper and is not
  * what this file checks. Guild is.
@@ -36,8 +35,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
  * Tables whose channel ids can arrive from outside the gateway, so a write on
  * them must bind the guild itself.
  *
- * `/import` writes exactly these two (`plans/import_command.md` §5.3 keeps it
- * out of the ephemeral tables), and they are also the two a native export
+ * `/import` writes exactly these two (never the ephemeral channel tables), and they are also the
+ * two a native export
  * carries, so an id in them can have come from a file.
  */
 const USER_SUPPLIED = ['autoChannels.ts', 'managedChannels.ts'];

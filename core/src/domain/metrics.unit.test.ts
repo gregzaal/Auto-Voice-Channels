@@ -141,7 +141,7 @@ describe('bucket truncation', () => {
 });
 
 /**
- * Cardinality discipline (§3.4): fleet-wide metrics are hourly, per-guild
+ * Cardinality discipline: fleet-wide metrics are hourly, per-guild
  * metrics are daily only. At 10k guilds an hourly per-guild metric is 240k rows
  * a day, and the table stops being cheap.
  *

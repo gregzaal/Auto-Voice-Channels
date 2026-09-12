@@ -30,7 +30,7 @@ export interface ReconcilerDeps {
   /**
    * Entitlement gate: non-entitled (hard-gated) guilds are skipped — the gate
    * is non-destructive, so reconcile must never "clean up" (delete) a gated
-   * guild's now-unmanaged channels (monetization.md §4). Omitted → all guilds
+   * guild's now-unmanaged channels. Omitted → all guilds
    * reconcile (tests, self-host).
    */
   entitled?: (guildId: string) => boolean | Promise<boolean>;
@@ -43,7 +43,7 @@ export interface ReconcilerDeps {
    * otherwise be reconciled anyway, and `channelExists` reading the local
    * discord.js cache would read every one of them as gone — deleting live
    * `secondary_channels`/`managed_channels` rows the other instance is
-   * actively serving (`plans/scaling.md` §9.1 finding 1). Omitted → every
+   * actively serving. Omitted → every
    * guild is in scope (tests, self-host, a single-instance fleet).
    */
   ownsGuild?: (guildId: string) => boolean;

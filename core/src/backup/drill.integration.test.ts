@@ -9,7 +9,7 @@ import { manifestKey } from './manifest.js';
 import { runDrill } from './drill.js';
 
 /**
- * The drill, against a real bucket and a real archive (`plans/backups.md` §9).
+ * The drill, against a real bucket and a real archive.
  *
  * The point of a drill is to notice a backup that cannot be restored, so the
  * tests that matter here are the failing ones: a corrupted object, a missing
@@ -187,7 +187,7 @@ describe.skipIf(!hasPgTools())('runDrill (integration)', () => {
      * "must be owner of schema public", and it fails at the END of the drill --
      * so the drill reported failure and left the full copy of production behind,
      * which is the exact outcome the test above exists to prevent. Found in
-     * production 2026-08-19 (`plans/backups.md` §9).
+     * production 2026-08-19.
      *
      * This reproduces that privilege shape: a role that may create and drop its
      * own objects in `public` but does not own the schema.

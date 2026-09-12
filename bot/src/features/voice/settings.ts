@@ -242,7 +242,7 @@ export class GuildSettingsService {
    * `Europe/Amsterdam` and the deprecated alias `Japan` reads back as
    * `Asia/Tokyo`. An empty submit REMOVES the key rather than writing `'UTC'`:
    * the two are the same render and a different fact, and `/setup` says "not
-   * set" only for the absent one (`plans/name-tokens.md` §10.1).
+   * set" only for the absent one.
    */
   async setTimeZone(guildId: string, raw: string, now = new Date()): Promise<CommandResult> {
     const value = raw.trim();
@@ -662,7 +662,7 @@ export class GuildSettingsService {
    * `primary.template.limit` straight into `createVoiceChannel`, but nothing
    * ever set it, so every spawned channel came out unlimited. The legacy Python
    * bot had `defaultlimit` and 446 primaries across 180 live guilds still use
-   * it (`plans/migration.md` §2.1), so the importer writes the field and this is
+   * it, so the importer writes the field and this is
    * how an admin changes it afterwards. Without this command those guilds would
    * carry a limit they could not edit or remove.
    *

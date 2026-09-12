@@ -7,7 +7,7 @@ export type DeliveryTarget = 'system_channel' | 'owner_dm' | 'creator_channel' |
 
 /**
  * Per-guild delivery tracking for a one-shot broadcast
- * (`bot/src/ops/announce.ts`, `plans/marketing.md` §5.1 item 6).
+ * (`bot/src/ops/announce.ts`).
  *
  * Replaces the earlier `guilds.metadata.announcements` dedupe stamp: that
  * blob answered "sent or not" but recorded no delivery method and had no

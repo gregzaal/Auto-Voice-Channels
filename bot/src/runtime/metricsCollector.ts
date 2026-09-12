@@ -18,7 +18,7 @@ import {
 } from '@avc/core';
 
 /**
- * The metrics collector (`plans/admin-dashboard.md` §3.4). Two jobs in one
+ * The metrics collector. Two jobs in one
  * timer, split by the nature of what they measure:
  *
  * 1. **Flush** (every instance): counters and peaks accumulated in memory on
@@ -126,7 +126,7 @@ export interface MetricsCollectorStats {
   /**
    * Whether the store looks abandoned.
    *
-   * §8's risk row in the plan: a collector that dies quietly leaves every chart
+   * A collector that dies quietly leaves every chart
    * downstream reading zero, and a zero looks exactly like an answer. This is the
    * signal that makes that visible, and it is reported, never returned as
    * unhealthy - a gap in telemetry must not roll back a deploy.
@@ -433,8 +433,7 @@ export class MetricsCollector {
    * A flag read that throws is treated as "not disabled": the collector's job is to
    * record, and losing telemetry because the flags table was briefly unreachable is
    * the worse of the two failures. It also caches the answer for `stats`, so
-   * `/diagnostics` can say *why* nothing is being written - which is exactly what
-   * AGENTS.md sends an operator to that block to find out.
+   * `/diagnostics` can say *why* nothing is being written.
    */
   private async writesDisabled(): Promise<boolean> {
     const flags = await this.deps.flags.getAll().catch(() => ({}) as Record<string, unknown>);
@@ -590,8 +589,8 @@ export class MetricsCollector {
    * idempotent by construction. Putting this behind the cluster-singleton
    * rollup lock would be actively wrong: that lock is not fleet-namespaced, so
    * one fleet would win it cluster-wide and the other fleet's gateway numbers
-   * would never be written at all. That is the same shape as the ladder and
-   * delivery bug `plans/fleets.md` section 4 exists to fix.
+   * would never be written at all. If polling is ever elected, scope that
+   * reservation to the fleet that can observe the application's limits.
    *
    * **Nothing written on failure.** Boot falls back to `max_concurrency: 1`
    * when this call fails, which is right for throttling and wrong to record: a

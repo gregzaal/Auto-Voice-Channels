@@ -7,13 +7,12 @@ export interface RuntimeCreationGateOptions {
   /**
    * Whether this instance can still prove it holds the shard lease.
    *
-   * **This is the half of `plans/scaling.md` §6.1 that `ownsGuild` does not
-   * cover, and without it the fix does not do what it says.** `ownsGuild` is
+   * **Live creation needs its own ownership guard.** `ownsGuild` is
    * consulted by the reconcile sweep and by nothing on the live join path, so an
    * instance whose lease had aged out would stop pruning rows and carry on
    * creating rooms. Discord delivers the same VOICE_STATE_UPDATE to every open
    * session for a shard, so once a peer has claimed the same shard both
-   * instances create a room on the same join: the exact harm §6.1 describes.
+   * instances create a room on the same join.
    *
    * Optional, so a self-host and every existing test are unchanged: absent means
    * ownership is never in doubt, which for one instance holding every shard is

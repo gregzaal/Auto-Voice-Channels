@@ -9,7 +9,7 @@ import { Upload } from '@aws-sdk/lib-storage';
 import type { Readable } from 'node:stream';
 
 /**
- * A thin S3 façade for the backup pipeline (`plans/backups.md` §2).
+ * A thin S3 façade for the backup pipeline.
  *
  * Deliberately small and provider-agnostic: one S3 API covers Backblaze B2,
  * Cloudflare R2, AWS S3 and MinIO, which is what lets a self-hoster pick a
@@ -172,7 +172,7 @@ export class BackupStorage {
             await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
             deleted.push(key);
           } catch (error) {
-            // A provider with delete disabled (the object-lock model in §6)
+            // A provider with delete disabled (for example, with object locking)
             // lands here. That is a retention misconfiguration, not a backup
             // failure, so it is reported with its reason rather than thrown.
             failed.push(key);

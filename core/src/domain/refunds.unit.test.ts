@@ -10,9 +10,7 @@ import {
 } from './refunds.js';
 
 /**
- * `plans/refunds.md` §7.1 and §7.2. Each case here is a rule that was wrong at
- * some point, so the test names say what goes wrong rather than what the
- * function returns.
+ * Regression cases describe the failure each adjustment rule prevents.
  */
 const NOW = new Date('2026-08-31T12:00:00.000Z');
 
@@ -96,7 +94,7 @@ describe('classifyAdjustment', () => {
     expect(classifyAdjustment(adjustment({ type: null }), CURRENT).kind).toBe('settle');
   });
 
-  describe('actions other than refund never reach entitlement', () => {
+  describe('chargebacks, warnings, credits and reversals', () => {
     it('GATES a chargeback, exactly like a refund', () => {
       /**
        * Decision, 2026-08-31. The money and Paddle's dispute fee are both gone,
@@ -178,7 +176,7 @@ describe('classifyAdjustment', () => {
 
     it('does NOT let a DIFFERENT adjustment clear the marker', () => {
       /**
-       * This is §2.6 from the other direction. A customer files a second refund
+       * A customer files a second refund
        * request, it is rejected, and without the id test that rejection would
        * clear the marker set by the first, approved one, putting a guild whose
        * money we already returned straight back into service.

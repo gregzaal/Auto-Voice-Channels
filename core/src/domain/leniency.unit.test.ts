@@ -237,7 +237,7 @@ describe('evaluateLeniency — active (dunning backstop)', () => {
 
   it('hands an UNCONSUMED trial back rather than replacing it with grace', () => {
     /**
-     * `plans/pricing-ladder.md` §6.5a. Subscribe during a trial, then cancel
+     * Subscribe during a trial, then cancel
      * before the first charge: the counterfactual is plainly the trial the
      * server still holds, and a 60-day grace window in its place eats up to a
      * year of it. The `state` helper's own default is a 200-day trial, which
@@ -286,7 +286,7 @@ describe('evaluateLeniency — active (dunning backstop)', () => {
   });
 
   it('treats an unknown charge history as charged', () => {
-    // The field is optional, so every caller written before §6.5a keeps the
+    // The field is optional, so callers that omit it keep the
     // ordinary grace behaviour rather than silently handing out free time.
     const decision = evaluateLeniency(state({ ...paying, subscriptionOk: false }), NOW);
     expect(decision.transition?.toStatus).toBe('grace');
@@ -423,7 +423,7 @@ describe('evaluateLeniency — grace', () => {
   });
 
   it('shrinking under 100 members reactivates — after a SUSTAINED drop', () => {
-    // A short dip is not enough (§4 hysteresis)…
+    // A short dip is not enough (sustained-drop hysteresis)…
     const brief = evaluateLeniency(graceState({ memberCount: 80, samples: samplesAt(80, 3) }), NOW);
     expect(brief.transition).toBeUndefined();
     // …a sustained one is.
@@ -523,7 +523,7 @@ describe('evaluateLeniency — expired (reactivation)', () => {
   });
 });
 
-describe('evaluateLeniency — expired pool does not reactivate itself (refunds.md §2.5)', () => {
+describe('evaluateLeniency — expired pool does not reactivate itself', () => {
   /**
    * A pool always sets `pooledMemberCount`, and `requiredTierOf` reads it
    * first, so an expired pool whose billable set empties for one tick lands in
@@ -600,7 +600,7 @@ describe('evaluateLeniency — blocked', () => {
   });
 });
 
-describe('pooledMemberCount (member-based-pricing.md §5.2)', () => {
+describe('pooledMemberCount', () => {
   it('requiredTierOf prefers pooledMemberCount over memberCount when present', () => {
     // A tiny guild's own count (50, free) would never breach anything on its
     // own — only the pool's aggregate should decide the required tier.
@@ -619,7 +619,7 @@ describe('pooledMemberCount (member-based-pricing.md §5.2)', () => {
   });
 
   it('over-limit still fires for a pool that grew, exactly like a guild would', () => {
-    // Regression for the first-draft defect (§5.1, §12 #1): if the pool pass
+    // Regression for the first-draft defect: if the pool pass
     // ever collapsed required and billed tier onto the same source, this can
     // never be true and a pool could grow unboundedly on its starting tier.
     const decision = evaluateLeniency(
@@ -683,7 +683,7 @@ describe('pooledMemberCount (member-based-pricing.md §5.2)', () => {
   });
 });
 
-describe('shouldGrantPoolExit (refunds.md §2.3)', () => {
+describe('shouldGrantPoolExit', () => {
   const active = { status: 'active' };
   const expired = { status: 'expired' };
 
@@ -732,7 +732,7 @@ describe('shouldGrantPoolExit (refunds.md §2.3)', () => {
   });
 });
 
-describe('guildFloor (refunds.md §5)', () => {
+describe('guildFloor', () => {
   const g = (over: Partial<Parameters<typeof guildFloor>[0]> = {}) => ({
     authStatus: 'active' as const,
     memberCount: 5_000,
@@ -866,8 +866,8 @@ describe('guildFloor (refunds.md §5)', () => {
 });
 
 /**
- * The predicate both drivers of the ladder share (`plans/pricing-ladder.md`
- * §6.5a). Tested directly as well as through `evaluateLeniency`, because the
+ * The predicate both drivers of the ladder share. Tested directly as well as through
+ * `evaluateLeniency`, because the
  * bug it exists to prevent was a MISSING condition rather than a wrong one, and
  * a missing condition is invisible from the outside until the one population
  * that trips it shows up.
@@ -925,7 +925,7 @@ describe('subscriptionNeverCharged', () => {
 });
 
 /**
- * Grace sized to the billing interval (`plans/pricing-ladder.md` §6.3, phase 7).
+ * Grace sized to the billing interval.
  *
  * 60 days is an annual figure. On a monthly subscription it is two free months
  * after a single paid month, which is what this closes. The interval comes from
@@ -1020,7 +1020,7 @@ describe('evaluateActive grace windows by interval', () => {
      * Deliberate, and the opposite of what this test first asserted. Terms §5
      * and `/docs/billing` both promise that growing past a tier's ceiling
      * changes nothing for 60 days, with no carve-out for billing frequency, and
-     * §6.3 asks only for the payment-failure window. The commercial argument for
+     * Interval-aware grace applies only to the payment-failure window. The commercial argument for
      * shortening it is real and loses to a promise already in force, so
      * shortening it starts with the Terms sentence, not with this branch.
      */

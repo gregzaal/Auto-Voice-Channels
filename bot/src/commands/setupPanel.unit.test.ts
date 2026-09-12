@@ -38,7 +38,7 @@ describe('formatPlan', () => {
     expect(line).toContain('$1.50 a month, billed yearly ($18)');
     expect(line).toContain(LINK);
     /**
-     * §6.5: the panel's reader is the admin weighing whether to subscribe
+     * The panel's reader is the admin weighing whether to subscribe
      * before the trial runs out, and the fact they need is that they do not
      * have to wait for it to. "Manage anytime" was true and useless.
      */
@@ -64,7 +64,7 @@ describe('formatPlan', () => {
     const line = formatPlan({ ...base, memberCount: 400_000 });
     expect(line).toContain('self-serve');
     expect(line).toContain('auto-voice.io');
-    // Owner decision 5 defers dedicated infrastructure, so nothing may promise it.
+    // Dedicated infrastructure is not an offered guarantee.
     expect(line).not.toContain('dedicated');
   });
 
@@ -76,7 +76,7 @@ describe('formatPlan', () => {
     expect(formatPlan({ ...base, memberCount: 5_000, selfHosted: true })).toContain('Self-hosted');
   });
 
-  describe('a subscription covering several servers (member-based-pricing.md §7.4)', () => {
+  describe('a subscription covering several servers', () => {
     // Regression for the critical false alarm: a 200-member server on a
     // shared subscription must never quote a price derived from its OWN size.
     it('quotes the billed tier, not one derived from this server alone', () => {
@@ -140,7 +140,7 @@ describe('formatPlan', () => {
 
     /**
      * Reachable between the webhook writing `pool_id` and the next hourly pass
-     * fanning entitlement out (§6.4), so a customer who has just paid can open
+     * fanning entitlement out, so a customer who has just paid can open
      * `/setup` here. It must not announce a trial or quote a second price.
      */
     it('does not offer a trial to a server a subscription already covers', () => {
@@ -158,7 +158,7 @@ describe('formatPlan', () => {
   });
 
   /**
-   * The other half of the §5.1 separation, on a surface that had it backwards:
+   * Separate the billed tier from the tier the current member count requires:
    * a guild that grew since paying was quoted the tier its size now REQUIRES
    * rather than the one it is billed for, so an S subscriber at 1,500 members
    * read "Subscribed, M tier ($59/yr)" while paying $19.

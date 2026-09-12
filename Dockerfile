@@ -34,7 +34,7 @@ RUN pnpm install --frozen-lockfile --prod
 # --- Runtime ---
 FROM base AS runtime
 ENV NODE_ENV=production
-# `pg_dump` and `pg_restore` for the backup pipeline (plans/backups.md). Pinned
+# `pg_dump` and `pg_restore` for the backup pipeline in core/src/backup. Pinned
 # to the PG 16 client series to match the server; a client older than the server
 # refuses the dump outright. ~20MB, and it ships in both profiles so a
 # self-hoster gets backups from the same image with no extra moving parts.

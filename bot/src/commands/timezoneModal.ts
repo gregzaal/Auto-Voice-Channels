@@ -26,8 +26,7 @@ const ZONE_INPUT_MAX = 64;
  * are ~350 zones with anything like a distinct offset history and a Discord
  * select holds 25 options. A shortlist would be right for the servers it
  * happened to cover and silently wrong for everyone else, which is the exact
- * failure mode the whole setting exists to remove
- * (`plans/name-tokens.md` §10.1).
+ * failure mode the whole setting exists to remove.
  *
  * Not required, because clearing it is a real choice: an empty submit removes
  * the setting and the date tokens go back to UTC.

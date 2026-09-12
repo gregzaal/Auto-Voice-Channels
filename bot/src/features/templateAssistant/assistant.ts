@@ -29,7 +29,7 @@ import {
 
 /**
  * `/templateassistant` — natural language in, a validated channel-name template
- * out (`plans/assisted_templates.md`).
+ * out.
  *
  * The deterministic renderer is what makes a cheap model safe here: every
  * proposal is linted, rendered against fixture scenarios, and re-checked before
@@ -39,7 +39,7 @@ import {
  *
  * Two things this deliberately does **not** do:
  *
- * - **No entitlement check.** Not a tier feature, on any tier, ever (§5). The
+ * - **No entitlement check.** Not a tier feature, on any tier, ever. The
  *   only limit is the per-guild monthly cap, which is uniform and is not raised
  *   by paying, and `SELF_HOSTED` skips even that.
  * - **No applying.** It only *produces* a template. The admin sees a preview and
@@ -47,7 +47,7 @@ import {
  *   route uses.
  */
 
-/** Discord locale to a language name the model reliably honours (§9 finding 1). */
+/** Discord locale to a language name the model reliably honours. */
 const LOCALE_NAMES: Record<string, string> = {
   id: 'Indonesian',
   da: 'Danish',
@@ -85,7 +85,7 @@ const LOCALE_NAMES: Record<string, string> = {
 
 /**
  * Resolves a Discord locale to a language name. Passing this explicitly is the
- * single biggest reliability win from the §9 eval: letting the model infer the
+ * single biggest reliability win from the live evals: letting the model infer the
  * language from the request drifted *deterministically* to Spanish or French on
  * English requests, and worse on longer prompts. With the field, drift was zero.
  */
@@ -111,7 +111,7 @@ export interface AssistantContext {
    * Passed because the prompt tells the model to say so: a date token in an
    * unset guild silently renders in UTC, which is the wrong day for most of the
    * install base, and the model is the only thing in the loop that can warn
-   * before the template is saved (`plans/name-tokens.md` §10.1).
+   * before the template is saved.
    */
   timezone?: string;
   /**
@@ -184,9 +184,9 @@ export interface TemplateAssistantDeps {
   client: ChatClient;
   usage: AiUsageRepository;
   flags: RuntimeFlagsRepository;
-  /** Self-host skips the cap entirely: their key, their cost (§5). */
+  /** Self-host skips the cap entirely: their key, their cost. */
   selfHosted: boolean;
-  /** USD per 1M tokens, used only for the fleet-wide ceiling (§5.2). */
+  /** USD per 1M tokens, used only for the fleet-wide ceiling. */
   prices: { inputPerMTok: number; outputPerMTok: number };
   logger: Logger;
   /** Where the budget alert goes (the admin-channel reporter in production). */
@@ -241,7 +241,7 @@ export class TemplateAssistant {
    * Builds a proposal for `request`. Consumes one build from the guild's monthly
    * allowance up front, and gives it back if the provider itself never answered.
    *
-   * `history` carries earlier turns of a refinement. Kept short on purpose (§4):
+   * `history` carries earlier turns of a refinement. Kept short on purpose:
    * the current template is nearly all the state that matters, so a long history
    * buys little and breaks the cached prefix's economics.
    */
@@ -257,7 +257,7 @@ export class TemplateAssistant {
 
     const month = utcMonthKey(this.now());
     // The fleet-wide ceiling is the control that actually bounds exposure: a
-    // per-guild cap bounds one guild and says nothing about guild count (§5.2).
+    // per-guild cap bounds one guild and says nothing about guild count.
     if (!this.deps.selfHosted && (await this.overBudget(flags, month))) {
       this.counters.refusalsBudget++;
       return { ok: false, reason: 'budget', message: budgetExhaustedMessage() };
@@ -310,7 +310,7 @@ export class TemplateAssistant {
       if (err instanceof UnsafeProposalError) {
         this.counters.unsafeProposals++;
         // Worth an operator's attention: the model introduced something the
-        // admin did not ask for, which is the injection signal (§9).
+        // admin did not ask for, which is the injection signal.
         this.deps.logger.warn(
           { guildId: context.guildId, violations: err.violations },
           'template assistant produced disallowed content',
@@ -524,7 +524,7 @@ interface ParsedProposal {
 }
 
 /**
- * Leniently pulls the JSON object out of a completion (§4). Models wrap it in
+ * Leniently pulls the JSON object out of a completion. Models wrap it in
  * prose or fences often enough that insisting on a bare object would burn
  * retries on a reply that is otherwise perfect.
  */
@@ -573,7 +573,7 @@ function historyTurns(history: AssistantTurn[]): ChatMessage[] {
 
 /**
  * The variable half of the prompt. Everything stable lives in the system
- * message, so this goes last and the cached prefix stays intact (§3).
+ * message, so this goes last and the cached prefix stays intact.
  *
  * The admin's own words are fenced and explicitly labelled as a description
  * rather than as instructions. Every field here is admin-authored (the current
@@ -588,7 +588,7 @@ export function buildUserTurn(context: AssistantContext, request: string): strin
     `- No-game label: ${context.general}`,
   ];
   // The field is ALWAYS a concrete language, even when the locale is unknown.
-  // Live eval runs reproduced §9 finding 1 twice over: with the line omitted an
+  // Live eval runs reproduced explanation-language drift: with the line omitted an
   // English request came back explained in Spanish, and with the line present
   // but hedged ("the same language as the request") it drifted to Spanish
   // again. Only naming a language works. Discord always sends a locale in

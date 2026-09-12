@@ -136,7 +136,7 @@ describe('parseProposalJson', () => {
 });
 
 describe('languageFor', () => {
-  // §9 finding 1: the single biggest reliability win. Detection from prose
+  // Explicit reply-language routing. Detection from prose
   // drifted deterministically; the explicit field took drift to zero.
   it('maps Discord locales to language names, falling back to the base tag', () => {
     expect(languageFor('es-ES')).toBe('Spanish');
@@ -209,7 +209,7 @@ describe('TemplateAssistant.propose', () => {
 
   it('feeds a bad template back and accepts the correction', async () => {
     const client = scriptedClient([
-      // §9's stubborn failure, narrowed: `@@num@@` on the left works now, but a
+      // The stubborn comparison failure, narrowed: `@@num@@` on the left works now, but a
       // token that does not substitute a bare integer still renders to nothing.
       '{"name":"{{## = 1 ?? first}}","status":null,"explanation":"first"}',
       '{"name":"@@creator@@ room","status":null,"explanation":"owner room"}',
@@ -345,7 +345,7 @@ describe('TemplateAssistant safety screen', () => {
 });
 
 describe('TemplateAssistant monthly cap', () => {
-  // §5: uniform on every tier, never raised by paying, and not an entitlement
+  // Uniform on every tier, never raised by paying, and not an entitlement
   // check. The only job it has is bounding a runaway loop.
   it('refuses at the cap with copy that disclaims the paywall reading', async () => {
     const assistant = build({ usage: fakeUsage({ startAt: 200 }) });
@@ -411,7 +411,7 @@ describe('TemplateAssistant monthly cap', () => {
 });
 
 describe('TemplateAssistant fleet-wide spend ceiling', () => {
-  // §5.2: a per-guild cap bounds one guild and says nothing about guild count.
+  // A per-guild cap bounds one guild and says nothing about guild count.
   it('refuses everyone once the estimated month spend passes the ceiling', async () => {
     const reportAlert = vi.fn();
     const assistant = build({

@@ -6,7 +6,7 @@ import type { HealthServer } from '../ops/health.js';
 import { fakeLogger } from './testUtils.js';
 
 /**
- * `plans/scaling.md` §9.1: an instance ending boot-time claiming with zero
+ * An instance ending boot-time claiming with zero
  * owned shards used to crash-loop (discord.js's `Client` rejects an empty
  * `shards: []`, `ClientInvalidProvidedShards`). `runIdle` is the fix — it is
  * never given a gateway client at all.

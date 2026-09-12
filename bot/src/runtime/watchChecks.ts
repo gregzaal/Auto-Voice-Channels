@@ -7,8 +7,7 @@ import {
 import type { WatchCheck, WatchProblem } from './alertScheduler.js';
 
 /**
- * The conditions the in-process watcher evaluates
- * (`plans/agentic_management.md` step 4).
+ * The conditions the in-process watcher evaluates.
  *
  * Built here rather than inline in `index.ts` so each one is a small pure-ish
  * function over injected readers, and so the list of things we actually watch
@@ -210,9 +209,8 @@ export function buildWatchChecks(deps: WatchCheckDeps): WatchCheck[] {
     },
     {
       /**
-       * Names the guild, which is the gap the plan's own table calls out: a
-       * tripped breaker was previously a number on `/diagnostics` and an alert
-       * that "probably fires but cannot say where".
+       * Name the affected guild so an operator can find the tripped breaker.
+       * An aggregate count on `/diagnostics` cannot identify where to act.
        *
        * `warn`, so it never suppresses the watchdog ping. One guild in trouble
        * is exactly the case per-guild isolation exists to contain, and
@@ -336,8 +334,7 @@ export function buildWatchChecks(deps: WatchCheckDeps): WatchCheck[] {
       /**
        * Heap approaching the ceiling V8 will not grow past.
        *
-       * **The other wall, and AGENTS.md calls it the single term that decides
-       * how this scales.** Memory here tracks the MEMBER count of the install
+       * Memory here tracks the MEMBER count of the install
        * base rather than the guild count, at a measured ~1.28 KB per cached
        * member, and the caches that drive it are deliberately unbounded because
        * naming a channel after a game needs the joiner's presence at the instant

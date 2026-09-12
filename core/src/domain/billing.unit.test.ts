@@ -30,7 +30,7 @@ describe('parseBillingMeta', () => {
   });
 });
 
-describe('sanitizeMemberCountSample (§12 clamps)', () => {
+describe('sanitizeMemberCountSample (anomaly clamps)', () => {
   const day = '2026-07-04';
 
   it('accepts the first sample ever', () => {
@@ -83,7 +83,7 @@ describe('sanitizeMemberCountSample (§12 clamps)', () => {
   });
 });
 
-describe('isCountDiscrepant (§5 authoritative-read threshold)', () => {
+describe('isCountDiscrepant (authoritative-read threshold)', () => {
   it('uses max(50, 5%) of the cached count', () => {
     expect(isCountDiscrepant(100, 149)).toBe(false); // within 50
     expect(isCountDiscrepant(100, 151)).toBe(true);

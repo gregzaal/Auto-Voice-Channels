@@ -16,7 +16,7 @@ import { TIER_IDS, compareTiers, type TierId } from '../domain/tiers.js';
  */
 export const subscriptionRowSchema = z.object({
   /**
-   * Surrogate key (`plans/member-based-pricing.md` §6.2). Added alongside the
+   * Surrogate key. Added alongside the
    * primary-key change that made `guild_id` nullable; not used by any guild
    * read path yet, kept for parity with the row shape and for callers that
    * want a stable id independent of which axis (guild or pool) it bills.
@@ -184,8 +184,7 @@ export interface RefundContext {
 
 /**
  * Paddle subscription statuses that count as "in good standing" for
- * entitlement purposes (dunning states are not — they ride the leniency
- * ladder instead; monetization.md §9).
+ * entitlement purposes (dunning states ride the leniency ladder instead).
  */
 /**
  * Advisory-lock namespace for the self-serve refund claim, keyed per purchaser.
@@ -245,8 +244,7 @@ export function subscriptionInGoodStanding(sub: {
  * Three markers, all written by the same statement (`recordChargedTotals`), so
  * in practice they agree and any one of them would do. All three are read
  * anyway because the question is asked in the direction where being wrong is
- * expensive: this gates the trial-resume branch
- * (`plans/pricing-ladder.md` §6.5a), so a false "never charged" hands a
+ * expensive: this gates the trial-resume branch, so a false "never charged" hands a
  * customer whose renewal failed the rest of their own trial window for free.
  * `charged_total` is the one `recordChargedTotals` cannot skip (the amount is
  * required), `first_charged_at` is the set-once marker, and `charged_at` moves
@@ -363,8 +361,8 @@ export function subscriptionEarnsRecognition(sub: {
  *
  * The two axes are not interchangeable at the call site: `upsert` conflicts on
  * `guildId` and `upsertForPool` on `poolId`, and pointing a pool row at "the
- * guild checkout started from" would clobber that guild's own subscription
- * (`plans/member-based-pricing.md` §6.2). Same boundary-validation style as
+ * guild checkout started from" would clobber that guild's own subscription. Same
+ * boundary-validation style as
  * GuildRepository.
  */
 export class SubscriptionRepository {
@@ -737,7 +735,7 @@ export class SubscriptionRepository {
    * Records an adjustment and applies its verdict, ORDER-GUARDED.
    *
    * `recordRefund` above is last-write-wins and its docblock says overwriting is
-   * the point. That is `plans/refunds.md` §2.6: a second refund request arrives
+   * the point. Without an ordering guard, a second refund request arrives
    * `pending_approval`, overwrites `'approved'`, standing flips back true and the
    * ladder reactivates a guild whose money we already returned. A `rejected` or
    * `reversed` adjustment did the same.
@@ -854,8 +852,7 @@ export class SubscriptionRepository {
    *
    * The conditions ARE the policy, so they are worth reading as a list:
    *
-   * - the caller must be the recorded purchaser, which `plans/refunds.md` §2.1
-   *   had to be fixed before it meant anything;
+   * - the caller must be the recorded purchaser;
    * - no refund may already be requested or settled on this subscription;
    * - it must still be the FIRST charge, or a renewal would reopen the window
    *   every year;
@@ -982,8 +979,8 @@ export class SubscriptionRepository {
   /**
    * Re-keys an existing GUILD subscription onto a pool, in place: same Paddle
    * subscription and customer, now billing a pool instead of one guild
-   * (`plans/member-based-pricing.md` §7.4 addendum, "add to subscription" from
-   * an ordinary server row). One statement setting both columns together,
+   * ("add to subscription" from an ordinary server row). One statement setting both columns
+   * together,
    * same reasoning `addGuildToPoolAtomically`'s docblock gives:
    * `subscriptions_guild_xor_pool` is checked against the finished row, and
    * clearing `guild_id` before setting `pool_id` in two statements would fail

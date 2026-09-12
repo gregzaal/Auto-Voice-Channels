@@ -62,8 +62,8 @@ export interface TransitionAuthInput {
   expiresAt?: Date | null;
   /**
    * Sets `authExpiresAt` ONLY when it is currently null — the DB-level
-   * "trial window is set exactly once" invariant (monetization.md §3: the
-   * clock starts at FIRST add). Ignored when `expiresAt` is also given.
+   * "trial window is set exactly once" invariant (the clock starts at FIRST add). Ignored when
+   * `expiresAt` is also given.
    */
   expiresAtIfNull?: Date;
   /** New grace-window end. Omit to leave unchanged; null clears it. */
@@ -78,10 +78,9 @@ export interface TransitionAuthInput {
    * The one caller that needs it is the pool fan-out, whose diff-before-write
    * is a read followed by a write and so is not atomic: two concurrent advance
    * passes converging the same guild could each decide a write was due and each
-   * insert a `guild_auth_events` and an `ops_audit` row
-   * (`plans/member-based-pricing.md` §6.5). Setting this closes that, because
+   * insert a `guild_auth_events` and an `ops_audit` row. Setting this closes that, because
    * the check runs inside this method's own transaction, after its
-   * `SELECT ... FOR UPDATE`: the second pass blocks on the row lock, then reads
+   * `SELECT... FOR UPDATE`: the second pass blocks on the row lock, then reads
    * the state the first one committed and returns without writing.
    */
   skipIfUnchanged?: boolean;
@@ -95,7 +94,7 @@ function instantsDiffer(a: Date | null, b: Date | null): boolean {
 
 export interface RecordSampleResult {
   row: GuildRow;
-  /** False when the anomaly clamps held the value back (monetization.md §12). */
+  /** False when the anomaly clamps held the value back. */
   accepted: boolean;
 }
 
@@ -323,7 +322,7 @@ export class GuildRepository {
         actor: input.actor ?? 'system',
         /**
          * The expiry either side, because this method overwrites that column in
-         * place and nothing recorded it (`plans/refunds.md` §7.6). Read from
+         * place and nothing recorded it. Read from
          * `updated` rather than recomputed, so it is what actually landed and
          * not what the caller intended.
          */
@@ -381,10 +380,8 @@ export class GuildRepository {
    * `FOR UPDATE`, the same shape `recordMemberCountSample` uses below and for the
    * same reason.
    *
-   * This stopped being theoretical when `plans/migration.md` §6 moved the bulk
-   * import ahead of the freeze: it now runs for minutes against guilds a live
-   * fleet is serving, so an `/alias` landing mid-pass is a real sequence rather
-   * than an imagined one.
+   * A bulk import can run against guilds a live fleet is serving. An `/alias`
+   * edit landing mid-pass must survive the import's merge.
    *
    * `decide` receives `undefined` when the guild had no row, which is how the
    * caller tells "nobody has imported this guild" from "a row exists with empty
@@ -429,8 +426,8 @@ export class GuildRepository {
          * `channel_status_template` and `problem_alerts` all fall back to a
          * default when absent, so writing today's default in place of removing
          * the key would pin the guild to it forever. `/import` restoring a
-         * pre-import snapshot has to be able to put a key back to absent
-         * (`plans/import_command.md` §3), so the minus is not optional.
+         * pre-import snapshot has to be able to put a key back to absent, so the minus is not
+         * optional.
          *
          * Applied after the concat, so a key in both is removed: no caller does
          * that, and "the patch wins" would make an unnoticed collision silent.
@@ -453,10 +450,10 @@ export class GuildRepository {
   /**
    * Records a member-count sample: updates `member_count` (+timestamp) and
    * appends/replaces the day's entry in the rolling daily history kept in
-   * `metadata.billing.samples`. The §12 anomaly clamps run inside — a lone
+   * `metadata.billing.samples`. The anomaly clamps run inside — a lone
    * ~0 sample or >50% single-day swing is held back as `pendingAnomaly` until
    * a later sample confirms it. `authoritative: true` (a fresh REST
-   * `with_counts` read, §5 step 3) bypasses the clamps — it IS ground truth.
+   * `with_counts` read) bypasses the clamps — it IS ground truth.
    *
    * Runs read-modify-write under `FOR UPDATE` so concurrent writers (the
    * owning shard's sampler vs. the reconcile job) can't clobber the history.
@@ -669,8 +666,7 @@ export class GuildRepository {
 
   /**
    * Sets or clears which pool this guild bills through, and the tier cache
-   * together, in one statement (`plans/member-based-pricing.md` §6.1: "the
-   * two are written together"). `poolId: null` is the leaving-a-pool case.
+   * together, in one statement. `poolId: null` is the leaving-a-pool case.
    */
   async setPoolId(guildId: string, poolId: string | null, tier: TierId | null): Promise<GuildRow> {
     await this.ensure(guildId);

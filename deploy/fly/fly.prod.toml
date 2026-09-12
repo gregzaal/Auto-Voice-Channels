@@ -1,60 +1,26 @@
-# Fly.io deployment config for the PRODUCTION fleet.
+# Fly.io deployment config for the production fleet.
+# See README.md beside this file for deployment, scaling and recovery procedures.
+# Each fleet config is independent; inspect its values rather than assuming parity.
 #
-# The sibling of `fly.toml` (which is `avc-beta`). Everything that is not one of
-# the four values below is deliberately identical to beta's file, because beta's
-# is the configuration that has been validated against a real userbase since
-# 2026-08-19. Read that file for the reasoning behind the region, the VM class,
-# the memory, and the DATABASE_URL rule -- all of it applies here unchanged and
-# is not repeated.
+# Secrets: DISCORD_TOKEN, CLIENT_ID, DATABASE_URL, DIAGNOSTICS_TOKEN;
+# AVC_AI_API_KEY optionally enables /templateassistant.
+# Give this fleet its own WATCHDOG_PING_URL so another fleet cannot mask an outage.
+# Use the Postgres direct endpoint for LISTEN/NOTIFY and session advisory locks.
 #
-# What differs from beta, and only this:
-#   app                = "avc-prod"   (beta: "avc-beta")
-#   FLEET              = "prod"       (beta: "beta")
-#   TOTAL_SHARDS       = "4"          (beta: "2")
-#   EXPECTED_INSTANCES = "4"          (beta: "2")
-#
-# Secrets (`fly secrets set -a avc-prod ...`), same set beta carries:
-#   DISCORD_TOKEN, CLIENT_ID  -> application 479393422705426432
-#   DATABASE_URL              -> the shared cluster, `direct.`, never `pgbouncer.`
-#   DIAGNOSTICS_TOKEN         -> its OWN, not beta's
-#   ADMIN_CHANNEL_ID          -> the same #admin in the support guild
-#   AVC_AI_API_KEY            -> shared with beta (plans/fleets.md decision 2)
-#   WATCHDOG_PING_URL         -> its OWN monitor. A shared one would let a
-#                                healthy beta mask a dead prod, which is the
-#                                dead-man's switch failing silently.
-#   BACKUP_S3_* + BACKUP_ENCRYPTION_KEY + BACKUP_PREFIX + BACKUP_DRILL_DATABASE_URL
-#                             -> prod owns backups from the cutover on, and
-#                                beta's are switched off once prod has taken one
-#                                successfully. `withBackupLock` uses
-#                                `fleetAdvisoryKey`, so leader election is PER
-#                                FLEET: both fleets configured means both back up
-#                                the same database, doubling B2 cost and running
-#                                two drills into one scratch database.
-#
-# This app takes over the legacy Python bot's identity, so the two can never run
-# at once (one token, one gateway session). See plans/migration.md 6.
+# Prod is the sole billing advancer for the shared database. Other fleets must
+# keep billing.advance_disabled=true: the cluster reservation applies its winner's
+# fleet-local policy to shared customers.
+# Prod owns scheduled backups and restore drills. Their advisory locks are per
+# fleet, so other fleets must omit backup credentials or disable BOTH jobs.
+# Only this fleet may carry TOPGG_TOKEN for the production listing: the token
+# chooses the listing, while published counts come from the sending fleet.
 app = "avc-prod"
-# How long Fly waits for a graceful drain before SIGKILL. **Fly's default is 5
-# seconds, and this drain needs more than that.**
-#
-# The drain releases shard leases LAST, after stopping the watcher, the billing
-# pass, the collectors and the per-guild queues (`bot/src/runtime/shutdown.ts`).
-# The watcher's stop alone can spend up to 10s on an in-flight watchdog ping, so
-# at 5s a machine was routinely killed before `leaseManager.releaseAll()` ran,
-# and its replacement then waited out the full 30s lease TTL before it could
-# claim those shards. That is a self-inflicted gap on every deploy.
-#
-# 30s, matching the lease TTL: enough for the realistic worst case, and if a
-# drain ever does exceed it the outcome is exactly what happens today, so the
-# ceiling costs nothing. Deliberately not longer -- an in-flight backup is
-# awaited by the drain and can run for minutes, and blocking a rolling deploy on
-# one is worse than killing it, since backups are idempotent and retried while a
-# stalled deploy is not.
-#
-# `kill_signal` is left at Fly's default (SIGINT). `installShutdown` handles
-# SIGINT and SIGTERM identically, so there is nothing to configure.
+
+# Allow in-flight work to drain and release leases, without waiting indefinitely
+# for retryable background work. Shutdown handles both SIGINT and SIGTERM.
 kill_timeout = "30s"
 
+# Keep database round trips and gateway WebSocket latency low.
 primary_region = "iad"
 
 [build]
@@ -66,64 +32,33 @@ primary_region = "iad"
   HTTP_PORT = "8080"
   LOG_LEVEL = "info"
   NODE_ENV = "production"
-  # 4 shards over 4 machines, one each (cap = ceil(4/4) = 1).
-  #
-  # Sized in plans/scaling.md 9 from beta's measured constants against the
-  # production identity's real guild count (4,999 confirmed at the cutover, from
-  # the Discord API): ~4.2GB projected need against 8GB of fleet memory.
-  #
-  # Discord's own floor is one shard per 2500 guilds, so 2 would technically
-  # serve 4,999. Four is for the memory, not the shard limit, and a shard-count
-  # change later is a full stop-and-start of the fleet rather than a rolling
-  # deploy (scaling.md 2.2) -- which is why it is settled here, before the
-  # fleet ever boots, rather than raised when it hurts.
+  # Changing TOTAL_SHARDS requires a full fleet stop/start, not a rolling deploy.
+  # Size for cache memory and gateway load as well as Discord's shard limit.
   TOTAL_SHARDS = "4"
+  # Claim cap per machine is ceil(TOTAL_SHARDS / EXPECTED_INSTANCES).
   EXPECTED_INSTANCES = "4"
-  # Keep V8 the thing that reports a memory problem, rather than the kernel.
-  # See beta's fly.toml for the measurement behind this number.
+  # Leave room outside the V8 heap for native allocations and stacks.
   NODE_OPTIONS = "--max-old-space-size=1700"
   AVC_AI_BASE_URL = "https://api.openai.com/v1"
   AVC_AI_MODEL = "gpt-5.4-mini"
+  # Spend estimates: update these with the model's prices when changing models.
   AVC_AI_PRICE_INPUT_PER_MTOK = "0.75"
   AVC_AI_PRICE_OUTPUT_PER_MTOK = "4.50"
-  # Supporter roles in the support guild. Recognition only: nothing reads these
-  # to decide what anyone may do, and nothing may start.
-  #
-  # In [env] rather than as secrets because none of it is one -- every id here
-  # is visible to anyone in the server -- and because this is the file that
-  # answers "which fleet does this". Beta must NOT carry the same group: both
-  # bots are in the support guild, and two writers would fight over one member's
-  # roles. Config is the whole election.
+  # Supporter roles are recognition, never entitlement. Only one fleet may manage
+  # these roles: two writers would overwrite each other's decisions.
   SUPPORT_GUILD_ID = "601015720200896512"
-  # One key per tier, named by `envKeyForSupporterRole` (SUPPORT_ROLE_<ID>), so
-  # the ids here are the rarity ladder's and `s`/`m` keep their short ids
-  # because renaming those two would have been a data migration for cosmetics.
-  #
-  # THREE OF THESE ROLES WERE RENAMED AND REUSED rather than recreated (owner,
-  # 2026-09-08), which is why some ids look older than the tier: the Discord
-  # role that used to read "L" is now "Epic", "XL" is now "Mythic", and "XXL" is
-  # now "Exotic". Only Legendary is a new role. That matters for one reason: a
-  # reused role keeps whoever already held it, so a member badged under the old
-  # ladder is silently re-badged as the new tier the same role now means. It was
-  # safe here because the support guild was measured first: 1,013 members, and
-  # the only supporter role held by anyone was Uncommon, held once.
+  # Keys follow envKeyForSupporterRole. Existing role members retain membership
+  # when a role is renamed, so audit holders before changing a role's meaning.
   SUPPORT_ROLE_S = "1542449852992987146"          # Uncommon
   SUPPORT_ROLE_M = "1542450265217695834"          # Rare
-  SUPPORT_ROLE_EPIC = "1542450335056928788"       # was the "L" role
-  SUPPORT_ROLE_LEGENDARY = "1546805917880680468"  # new
-  SUPPORT_ROLE_MYTHIC = "1542450395371020320"     # was the "XL" role
-  # Exotic is mapped and unreachable automatically, deliberately rather than by
-  # oversight, exactly as XXL was before it: it has no `pricePerYear`, so no
-  # Paddle price resolves to it and no `subscriptions` row can carry
-  # `tier = 'exotic'`. A bespoke Exotic customer is entitled by agreement with
-  # no Paddle row at all, so they are badged by hand. Kept mapped so the config
-  # is already right if that ever changes.
-  SUPPORT_ROLE_EXOTIC = "1542450467349594163"     # was the "XXL" role
-  #
-  # After the next prod deploy, check `/diagnostics` -> `supporterRoles`. The
-  # bot's own role must sit ABOVE all six or every write is a silent 403, and
-  # Legendary is newly created, so it is the one whose position nobody has
-  # confirmed. `unusableRoles` answers it without guessing.
+  SUPPORT_ROLE_EPIC = "1542450335056928788"       # Epic
+  SUPPORT_ROLE_LEGENDARY = "1546805917880680468"  # Legendary
+  SUPPORT_ROLE_MYTHIC = "1542450395371020320"     # Mythic
+  # Exotic has no catalogue price and is badged manually. Keep it mapped so the
+  # role synchronizer knows the full set of roles it manages.
+  SUPPORT_ROLE_EXOTIC = "1542450467349594163"     # Exotic
+  # The bot needs Manage Roles and a role above every managed role. Verify
+  # /diagnostics -> supporterRoles.unusableRoles after configuration changes.
 
 [deploy]
   strategy = "rolling"
@@ -132,8 +67,7 @@ primary_region = "iad"
   policy = "on-failure"
   max_retries = 10
 
-# INSTANCE_ID is deliberately unset: config falls back to Fly's per-machine
-# FLY_MACHINE_ID, which is unique and stable, and is the shard-lease identity.
+# Leave INSTANCE_ID unset: config uses Fly's unique per-machine FLY_MACHINE_ID.
 
 [http_service]
   internal_port = 8080
@@ -150,9 +84,7 @@ primary_region = "iad"
     grace_period = "30s"
 
 [[vm]]
-  # A DEDICATED core. Not a cost optimisation to revisit: beta's fleet-wide
-  # outage on 2026-08-20 was a shared-cpu burst balance hitting zero, and the
-  # dominant consumer is the gateway presence firehose, which is per MEMBER and
-  # which no runtime flag controls. Prod carries five times beta's population.
+  # Dedicated CPU preserves headroom for boot/reconnect bursts and presence load.
+  # Re-evaluate peak demand and throttling before changing the machine class.
   size = "performance-1x"
   memory = "2gb"

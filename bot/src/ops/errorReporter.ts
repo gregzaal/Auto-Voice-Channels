@@ -3,7 +3,7 @@ import type { AlertAudience, AlertRepository, Fleet, Logger } from '@avc/core';
 
 /**
  * Reports significant operational errors to an admin Discord channel. This is a
- * thin seam (per rewrite.md): today it posts to `ADMIN_CHANNEL_ID`; a Sentry-style
+ * thin seam: today it posts to `ADMIN_CHANNEL_ID`; a Sentry-style
  * sink can be slotted in behind the same interface later. A `null` channel id
  * (self-host default) makes it a no-op, and reporting failures never throw —
  * error reporting must not itself become a failure mode.
@@ -197,7 +197,7 @@ export class AdminChannelReporter implements ErrorReporter {
        * exactly the case for an instance that doesn't hold the support
        * guild's shard. That instance would then log "not found" and lose
        * push alerting for everything it reports, silently to anyone but the
-       * logs (`plans/scaling.md` §9.1 finding 4). REST doesn't care which
+       * logs. REST doesn't care which
        * shard this instance holds, or whether the guild is cached at all.
        *
        * This also folds in the old "wrong channel type" check: Discord's API
@@ -298,7 +298,7 @@ export interface RecordingReporterOptions {
 
 /**
  * Posts to Discord AND records the row, then stamps the row with what happened
- * to the post (`plans/agentic_management.md` step 4b).
+ * to the post.
  *
  * Replaces tee-ing a persistent reporter and a channel reporter as two
  * strangers. They were doing the right two things in the right order and simply

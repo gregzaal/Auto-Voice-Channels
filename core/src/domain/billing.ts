@@ -3,7 +3,7 @@ import { z } from 'zod';
 /**
  * Billing bookkeeping stored in `guilds.metadata.billing` (jsonb):
  * daily member-count samples, notification dedupe records, and the
- * pending-anomaly holdover for the sample clamps (monetization.md §5, §12).
+ * pending-anomaly holdover for the sample clamps.
  *
  * Parsed defensively — corrupt metadata degrades to empty defaults and
  * quarantines to its guild rather than throwing on the hot path.
@@ -24,7 +24,7 @@ export interface BillingMeta {
   samples: MemberCountSample[];
   /** Notification dedupe map: key → ISO timestamp of last delivery. */
   notifications: Record<string, string>;
-  /** A clamped anomalous sample awaiting next-day confirmation (§12 clamps). */
+  /** A clamped anomalous sample awaiting next-day confirmation (anomaly clamps). */
   pendingAnomaly?: MemberCountSample;
   /** ISO timestamp of the one-time new-guild onboarding message. */
   onboardedAt?: string;
@@ -67,7 +67,7 @@ export interface SampleDecision {
 }
 
 /**
- * Anomaly clamps for a new member-count sample (monetization.md §12): a single
+ * Anomaly clamps for a new member-count sample: a single
  * sample of ~0, or a >50% single-day swing, is never acted on alone. A clamped
  * value is remembered as `pendingAnomaly`; if the next (different-day) sample
  * agrees with it, the change is real and is accepted. Small absolute moves
@@ -100,8 +100,8 @@ function agrees(a: number, b: number): boolean {
 
 /**
  * Whether a cached gateway count and an authoritative REST count disagree
- * enough to prefer the authoritative one and log a `member_count.discrepancy`
- * (§5 step 4). Threshold: `max(50 members, 5% of the cached count)` (§12).
+ * enough to prefer the authoritative one and log a `member_count.discrepancy`. Threshold: `max(50
+ * members, 5% of the cached count)`.
  */
 export function isCountDiscrepant(cached: number, authoritative: number): boolean {
   return Math.abs(cached - authoritative) > Math.max(50, cached * 0.05);

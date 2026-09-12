@@ -24,15 +24,14 @@ export interface AiMonthUsage {
 }
 
 /**
- * Per-guild-per-month `/templateassistant` usage
- * (`plans/assisted_templates.md` §5).
+ * Per-guild-per-month `/templateassistant` usage.
  *
  * Two things live here and they are deliberately different in kind:
  *
  * - **{@link reserveBuild}** is a runaway-cost backstop. The cap is uniform on
  *   every tier, is never raised by paying, and is not an entitlement check —
  *   `SELF_HOSTED` skips it entirely at the call site.
- * - **{@link monthTotals}** feeds the fleet-wide spend ceiling (§5.2), which is
+ * - **{@link monthTotals}** feeds the fleet-wide spend ceiling, which is
  *   the control that actually bounds total exposure; a per-guild cap never can.
  *
  * The month key is the reset mechanism (a new month is a new row), so nothing
@@ -123,7 +122,7 @@ export class AiUsageRepository {
     };
   }
 
-  /** Fleet-wide totals for a month — the input to the global spend ceiling (§5.2). */
+  /** Fleet-wide totals for a month — the input to the global spend ceiling. */
   async monthTotals(month: string): Promise<AiMonthUsage> {
     const result = await this.db.execute(sql`
       SELECT

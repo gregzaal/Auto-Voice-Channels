@@ -55,7 +55,7 @@ describe('parseCopy', () => {
   });
 
   /**
-   * `marketing.md` §5.1 item 4: the reinvite fix-it link is meant to be in
+   * The reinvite fix-it link is meant to be in
    * every touch of the announcement, not an afterthought a human forgets to
    * paste in. Mirrors the {{PRICING}} guard immediately above.
    */
@@ -113,7 +113,7 @@ describe('checkCopyRules', () => {
 });
 
 describe('reinviteUrlFor', () => {
-  it('is guild-scoped and disables the guild picker (marketing.md §5.1 item 4)', () => {
+  it('is guild-scoped and disables the guild picker', () => {
     const url = reinviteUrlFor('123', '456');
     const parsed = new URL(url);
     expect(parsed.origin + parsed.pathname).toBe('https://discord.com/oauth2/authorize');
@@ -126,7 +126,7 @@ describe('reinviteUrlFor', () => {
    * The permission set and scope have been hand-copied into three places
    * (`web/src/lib/env.ts`, `web/src/app/dashboard/page.tsx`, and
    * `commands/interactions.ts`'s `/invite`). This is the bot-side half of
-   * `marketing.md` §5.1 item 3 ("assert the invite scope in CI"): a drift
+   * Assert the invite scope in CI: a drift
    * here would silently under- or over-request permissions, or drop the
    * `applications.commands` scope that made the whole rewrite cutover work
    * without anyone re-authorizing.

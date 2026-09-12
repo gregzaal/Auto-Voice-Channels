@@ -4,7 +4,7 @@ import { guildFleetPresence } from '../db/schema.js';
 import type { Fleet } from '../domain/fleets.js';
 
 /**
- * Which fleets are in which guilds (`plans/fleets.md` §6.1).
+ * Which fleets are in which guilds.
  *
  * The table shipped with the fleet migration (0017) and was backfilled from
  * `guilds.bot_removed_at`, but **nothing wrote to it afterwards**, so it has
@@ -16,7 +16,7 @@ import type { Fleet } from '../domain/fleets.js';
  *
  * `guilds.bot_removed_at` is still written alongside these rows and still read
  * by the dashboard and the admin console. That is expand/contract, not
- * duplication: the shared column goes away in a later release, once §6.1's
+ * duplication: remove the shared column only after a
  * cross-fleet presence read has replaced every use of it.
  */
 /** Rows per bulk upsert. Bounded so one statement stays a sane size. */
@@ -120,7 +120,7 @@ export class GuildFleetPresenceRepository {
    * base. `guilds` is a SHARED table, so anything iterating it and acting per
    * guild must intersect with this or it will act on guilds whose bot is a
    * different fleet entirely. That is the same mistake the billing
-   * ladder/delivery split exists to prevent (`plans/fleets.md` §4).
+   * ladder/delivery split exists to prevent.
    */
   async presentGuildIds(): Promise<Set<string>> {
     const rows = await this.db
@@ -154,7 +154,7 @@ export class GuildFleetPresenceRepository {
   /**
    * Every fleet currently in the guild.
    *
-   * The dashboard's question, per §6.1: "is *any* fleet here". Asking per fleet
+   * The dashboard's question: "is *any* fleet here". Asking per fleet
    * is how a subscribed customer happily running beta gets told the bot is not
    * in their server.
    */

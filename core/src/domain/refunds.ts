@@ -1,24 +1,19 @@
 /**
- * What a Paddle adjustment means for a subscription, decided purely.
+ * Pure policy for how a Paddle adjustment affects a subscription.
  *
- * `plans/refunds.md` §7.1 and §7.2. Three things live here rather than in the
- * webhook, because each of them is a rule that was wrong once and would be
- * invisible if it stayed spread across a handler:
+ * Approved, complete refunds and chargebacks can revoke paid entitlement.
+ * Credits and chargeback warnings only update the record; qualifying reversals
+ * restore entitlement. Callers apply the verdict through `guildFloor` so free
+ * access and an unconsumed trial survive the loss of paid service.
  *
- * 1. **Only a refund touches entitlement.** Chargebacks and credits are
- *    adjustments too, and they are recorded and attributed without ever
- *    reaching the entitlement path.
- * 2. **Read Paddle's own `full` / `partial` label, never amounts.** Comparing
- *    amounts is a trap with five separate failure modes: both stored columns are
- *    `text` so `'900' >= '3900'`, the stored total is the latest charge rather
- *    than the one refunded, there is no refund currency, a refund can target any
- *    completed transaction, and Canada, Thailand and Vietnam add tax on top so a
- *    genuine full refund compares as partial.
- * 3. **But the label describes a TRANSACTION, not the paid term.** An annual
- *    customer in month eight whose month-one charge is refunded as goodwill gets
- *    `type: 'full'`, and gating them would violate the rule that a refund
- *    restores and never punishes. So a full refund only revokes access when it
- *    names the transaction that bought the current period.
+ * Determine completeness from Paddle's top-level and item labels, never amount
+ * comparisons: amounts may refer to different transactions, currencies or tax
+ * totals, and stored numeric text does not have numeric ordering.
+ *
+ * A complete adjustment for a known older transaction must not revoke the
+ * current paid period. When transaction identity or completeness is unknown,
+ * the classifier deliberately errs toward revoking paid service; the branches
+ * below document those fallbacks.
  */
 
 /** The adjustment fields any decision here needs, extracted from the webhook. */
@@ -34,13 +29,9 @@ export interface AdjustmentRecord {
   /** One of four: pending_approval, approved, rejected, reversed. */
   status: string;
   /**
-   * Paddle's top-level label, 'full' or 'partial'. **Not sufficient on its own,
-   * and believing it was is the worst mistake in this file's history.**
-   *
-   * It describes HOW the adjustment was created, not whether it is economically
-   * complete. An adjustment made item-scoped from the Paddle dashboard, which is
-   * how the only real refund in production was made, carries `partial` at the
-   * top level while refunding the entire charge. See {@link adjustmentIsComplete}.
+   * Paddle's top-level `full` / `partial` label is not sufficient alone.
+   * An item-scoped adjustment can be labelled `partial` while returning the
+   * whole charge. See {@link adjustmentIsComplete}.
    */
   type: string | null;
   /** Per-line-item labels, which are what actually say how much was refunded. */
@@ -61,18 +52,9 @@ export type RefundVerdict =
   | { kind: 'record_only'; reason: string };
 
 /**
- * Actions that take money we had, and so must stop paid service.
- *
- * **A chargeback gates, exactly like a refund** (decision, 2026-08-31). We are
- * not being paid, so paid service stops, or the invariant in §1 is broken in the
- * direction that costs us. Two things make that fair rather than punitive: it
- * goes through `guildFloor`, so a free-sized server stays free and an unconsumed
- * trial resumes and nobody loses anything they would have had without paying;
- * and a reversal restores it immediately, so a customer whose card was used
- * fraudulently by someone else is not left worse off once the dispute settles.
- *
- * Before this a chargeback reached no branch at all, which meant it left service
- * running while the money and Paddle's dispute fee were both gone.
+ * Refunds and chargebacks both remove payment, so both can revoke paid service.
+ * `guildFloor` preserves free access and any unconsumed trial; a qualifying
+ * reversal restores the entitlement that the adjustment removed.
  */
 const REVOKING_ACTIONS: ReadonlySet<string> = new Set(['refund', 'chargeback']);
 
@@ -88,27 +70,17 @@ const REVOKING_ACTIONS: ReadonlySet<string> = new Set(['refund', 'chargeback']);
 const RESTORING_ACTIONS: ReadonlySet<string> = new Set(['chargeback_reverse']);
 
 /**
- * Whether an adjustment returns the WHOLE charge, as opposed to part of it.
+ * Whether an adjustment returns the whole charge.
  *
- * **The top-level `type` cannot answer this alone.** Verified against the one
- * real refund in production (adjustment `adj_01kzvab95th397pt0kjev05169`): top
- * level `partial`, one item of `type: 'full'` for `3900`, against a
- * `charged_total` of `3900`. A complete refund of the entire charge, labelled
- * partial because it was created item-scoped from the Paddle dashboard, which is
- * how an operator makes one and therefore the only route ever used. Reading the
- * top-level label alone classified it as goodwill and gated nothing.
+ * A top-level `full` label is complete. An item-scoped adjustment may say
+ * `partial` at the top level while every named item says `full`, so those
+ * item labels must also be checked. Missing labels default to complete.
  *
- * So: complete when Paddle says so at the top level, OR when every line item it
- * names is itself `full`.
- *
- * **The assumption that makes the second clause sound is one line item per
- * transaction**, which holds by construction here: one subscription is one tier
- * is one price, and `chargedTotalsOf` already relies on it ("the first line item
- * is the price charged"). A multi-line transaction could name one of several
- * items as `full` and read as complete when it is not. Nothing in this product
- * creates one, and the fix if that changes is to compare the item count against
- * the transaction's, NOT to start comparing amounts, which §7.1 rejects for five
- * separate reasons that all still hold.
+ * **The item-label rule assumes one line item per transaction.** A subscription
+ * currently carries one tier and one price. With multiple items, refunding one
+ * in full would not imply refunding the transaction. If that model changes,
+ * compare the covered items with the transaction's items; do not substitute
+ * amount comparisons, which can mix transactions, currencies and tax totals.
  */
 export function adjustmentIsComplete(adjustment: {
   type: string | null;
@@ -162,7 +134,7 @@ export function classifyAdjustment(
     /**
      * Only the adjustment that revoked access may restore it.
      *
-     * Without the id test this was the §2.6 defect from the other direction: a
+     * Without the id test, another request could clear the marker: a
      * SECOND refund request arriving `rejected` would clear the marker set by
      * the FIRST, approved one, and the ladder would reactivate a guild whose
      * money we had already returned.

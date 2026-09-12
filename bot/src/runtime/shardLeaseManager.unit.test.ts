@@ -99,7 +99,7 @@ describe('ShardLeaseManager', () => {
   });
 
   /**
-   * `plans/scaling.md` §9.1 finding 2: an unfiltered heartbeat re-adopts every
+   * An unfiltered heartbeat re-adopts every
    * row bearing this instance id, including a shard it no longer serves after
    * a config change between restarts. Filtering by the currently-owned set is
    * what lets that stale row age out and become reclaimable by the peer that's
@@ -131,7 +131,7 @@ describe('ShardLeaseManager', () => {
     });
     await mgr.claim(); // owns [1]
     // (462606582367125509n >> 22n) % 2n === 1n — a real guild id, verified
-    // against the live beta database (plans/scaling.md §9.4).
+    // against the live beta database.
     expect(mgr.ownsGuild('462606582367125509')).toBe(true);
     // (332246283601313794n >> 22n) % 2n === 0n
     expect(mgr.ownsGuild('332246283601313794')).toBe(false);
@@ -190,9 +190,7 @@ describe('ShardLeaseManager', () => {
     expect(cleared).toContain(123);
   });
   /**
-   * `plans/scaling.md` §6.1, which the roadmap called "visible, unfixed" and
-   * summarised as: an alert is a human being told, not the process stepping
-   * aside.
+   * An alert alone does not stop an instance from serving an expired lease.
    *
    * A heartbeat that fails leaves the lease row ageing past its 30s TTL while
    * this instance keeps its gateway session. A booting peer then legitimately

@@ -11,7 +11,7 @@ import type { BackupStorage } from './storage.js';
 const STDERR_LIMIT = 16384;
 
 /**
- * Download, decrypt, verify, `pg_restore` (`plans/backups.md` §10).
+ * Download, decrypt, verify, `pg_restore`.
  *
  * Written to be usable under pressure, which shapes two things: it refuses
  * anything ambiguous rather than guessing, and every refusal names what to do
@@ -318,8 +318,8 @@ export async function restoreBackup(opts: RestoreOptions): Promise<RestoreResult
  * Integrity check without touching a database: stream the object, verify the
  * checksum, and confirm it decrypts to something `pg_dump` produced.
  *
- * This is what the weekly drill and `backup:verify` share, and it is the cheap
- * half of §9: it catches silent corruption in storage without needing a scratch
+ * The weekly drill and `backup:verify` share this check. It catches silent
+ * corruption in storage without needing a scratch
  * database.
  */
 export async function verifyBackup(

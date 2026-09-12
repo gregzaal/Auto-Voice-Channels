@@ -1,5 +1,5 @@
 {
-  "$comment": "Live prompt-regression cases for /templateassistant (plans/assisted_templates.md §7 step 7, §9). Run with `pnpm run eval`. Real API calls: needs AVC_AI_API_KEY. `expect` is checked in addition to the always-on lint + render + safety screen.",
+  "$comment": "Live prompt-regression cases for /templateassistant. Run with `pnpm run eval`. Real API calls: needs AVC_AI_API_KEY. `expect` is checked in addition to the always-on lint + render + safety screen.",
   "cases": [
     {
       "group": "simple",
@@ -94,7 +94,7 @@
       }
     },
     {
-      "$comment": "Was §1's cautionary decline case. {{PRIVATE}} exists now (plans/name-tokens.md §6.4), so the honest answer inverted: the model must USE it rather than apologise. What this case measures is whether it reaches for the variable at all. `renders-empty` is allowed because the request invites a name that is ONLY the word 'private', and the model writes `{{PRIVATE ?? private}}` with no else branch on roughly half of first shots. That is the same empty-name trap the intermediate group already records, it is caught by `inspectRendered` every time, and the loop re-prompts, so production never ships it. The locale mirrors production, where Discord always supplies one.",
+      "$comment": "The model must use the supported {{PRIVATE}} token rather than decline the request. `renders-empty` is allowed here because a private-only name can have no public-room branch; inspectRendered must reject that empty result and trigger another proposal. The locale fixture represents the locale Discord supplies in production.",
       "group": "conditionals",
       "locale": "en-GB",
       "request": "Make the name say 'private' when the channel is locked.",

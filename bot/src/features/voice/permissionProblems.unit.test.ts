@@ -206,13 +206,13 @@ function alertReplyLines(): string[] {
 }
 
 /**
- * Mechanical guard for the user-facing copy rules (AGENTS.md), modelled on
+ * Mechanical guard for the user-facing copy rules, modelled on
  * `messages.unit.test.ts`. A hand-kept list of "strings that must stay clean"
  * rots; rendering every message and checking the characters does not.
  *
- * In scope because every string here is read by a server admin in Discord, and
- * AGENTS.md is explicit that the bot's own messages are covered, not just the
- * website. Code comments in these modules are NOT in scope and do use em dashes.
+ * Every string here is read by a server admin in Discord. The rules cover
+ * these messages as well as website copy. This render-time check does not
+ * inspect code comments, which may contain em dashes.
  */
 describe('copy rules', () => {
   const everyMessage = (): string[] => [

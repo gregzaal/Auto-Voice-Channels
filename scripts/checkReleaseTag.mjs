@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Validates a release tag per plans/versioning.md §5:
+// Validates a release tag:
 //   - the tag name matches the root package.json's version at that commit
 //   - it's strictly greater (real SemVer ordering) than the previous release
 //   - at least one change under the versioned paths exists since the
@@ -13,8 +13,7 @@
 // Deliberately single-branch: "previous" is the highest other vX.Y.Z tag in
 // the whole repo, not the highest ancestor of this commit. That's correct for
 // this project's one-branch, no-backport workflow and wrong for a project
-// that maintains older release lines — see plans/versioning.md §5's own
-// framing of what this checks and doesn't.
+// that maintains older release lines.
 import { execFileSync } from 'node:child_process';
 
 /* eslint-disable no-console */

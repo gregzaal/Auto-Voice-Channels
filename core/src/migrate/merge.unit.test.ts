@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mergeIntoExisting } from './merge.js';
 
 /**
- * The first-writer-wins policy (`plans/migration.md` §3.6).
+ * The first-writer-wins policy.
  *
  * These are the cases that only exist because the importer runs three times
  * into one shared `guilds` table (beta, then prod at the cutover, then Gold).
@@ -142,7 +142,7 @@ describe('mergeIntoExisting', () => {
   });
 
   /**
-   * The delta pass (`migration.md` §6 step 3). Gap-filling makes it a no-op for
+   * The delta pass. Gap-filling makes it a no-op for
    * exactly the settings it exists to apply, because the bulk pass hours earlier
    * is now the first writer.
    */

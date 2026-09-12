@@ -20,7 +20,7 @@ export interface EntitlementGateOptions {
 
 /**
  * Synchronous entitlement answers for the hot paths (presence intake, voice
- * events) — the §4 hard-gate short-circuit that makes non-entitled guilds cost
+ * events) — the hard-gate short-circuit that makes non-entitled guilds cost
  * ~0 CPU/RAM. `check()` never blocks: it serves a cached boolean and refreshes
  * in the background, **failing open** for unknown guilds — the authoritative
  * `isEntitled` check downstream (`VoiceFeature.maybeCreate`) still gates any

@@ -290,7 +290,7 @@ describe('BillingReconciler (integration)', () => {
     );
   });
 
-  it('backfills a grown guild with the YEAR window, never the 14-day clock (§3)', async () => {
+  it('backfills a grown guild with the YEAR window, never the 14-day clock', async () => {
     const guildId = 'backfill-grown-1';
     const now = new Date('2026-07-04T12:00:00.000Z');
     const { reconciler } = makeReconciler({ now: () => now, counts: new Map() });
@@ -365,7 +365,7 @@ describe('BillingReconciler (integration)', () => {
     expect(reconciler.stats.sampled).toBe(1);
   });
   /**
-   * The ladder/delivery split (`plans/fleets.md` §4).
+   * The ladder/delivery split.
    *
    * The advance pass is a cluster singleton across BOTH fleets, so the fleet
    * that transitions a guild may not be in it. Before the split, delivery ran

@@ -100,7 +100,7 @@ describe('gracefulDrain', () => {
   });
 
   /**
-   * `plans/scaling.md` §6.2. The old order released a shard's lease row while
+   * The old order released a shard's lease row while
    * this process still held its live WebSocket session, so a booting peer's
    * 2s-interval claim retry could poach it while both were momentarily "live"
    * for the same shard. Destroying the gateway first closes those sessions

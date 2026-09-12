@@ -16,7 +16,7 @@ import { secondaryChannels } from '../db/schema.js';
  * It ships AHEAD of the first field that depends on it, deliberately: the
  * stripper is the OLD image, which by definition does not carry this change, so
  * adding a field in the same release would still lose it for the length of the
- * rollout (`plans/name-tokens.md` §6.5).
+ * rollout.
  */
 export const secondaryStateSchema = z
   .object({
@@ -57,7 +57,7 @@ export const secondaryStateSchema = z
      * token is rendered, and a member fetch on the render path is not an
      * option. Raw, not resolved: `displayName()` applies the per-user `/nick`
      * override, so storing its output would freeze a nickname the server can
-     * still change (`plans/name-tokens.md` §10.4).
+     * still change.
      *
      * Only safe to write because this schema is `passthrough` (above), which
      * shipped a release earlier for exactly this reason: the stripper during a
@@ -95,7 +95,7 @@ export interface CreateSecondaryInput {
    * the reconciler derives `##` numbering from sibling `createdAt` order, so
    * adopting channels with today's date would renumber every room in a guild on
    * the first reconcile. It passes the channel's real creation time, recovered
-   * from its snowflake (`plans/migration.md` §3.3).
+   * from its snowflake.
    */
   createdAt?: Date;
 }
@@ -117,7 +117,7 @@ export class SecondaryChannelRepository {
    * safe because a snowflake is globally unique and are not: two fleets can
    * share a guild, and an unscoped `get(channelId)` would hand one fleet the
    * other's row, after which it would happily rename or delete a channel it
-   * does not own (`plans/fleets.md` §2).
+   * does not own.
    */
   private scoped(...conditions: (SQL | undefined)[]) {
     return and(eq(secondaryChannels.fleet, this.fleet), ...conditions);

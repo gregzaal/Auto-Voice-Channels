@@ -13,8 +13,7 @@ import type { PgTestEnv } from '../test/pgContainer.js';
 import { startPostgres } from '../test/pgContainer.js';
 
 /**
- * `promoteSubscriptionToPool` (`plans/member-based-pricing.md` §7.4
- * addendum): converting an ordinary guild subscription into a pool the first
+ * `promoteSubscriptionToPool`: converting an ordinary guild subscription into a pool the first
  * time a second server is added to it. Real Postgres, because the whole
  * point is the `subscriptions_guild_xor_pool` check constraint and the
  * partial unique index backing pool membership, neither of which a mock
@@ -128,8 +127,7 @@ describe('promoteSubscriptionToPool (integration)', () => {
 });
 
 /**
- * The containment half of `plans/refunds.md` §2.2 and §2.10, both of which are
- * about what the repository does when the ids it is handed do not describe a
+ * Containment when the ids handed to the repository do not describe a
  * real membership. Integration rather than unit, because the behaviour IS the
  * primary key, the partial unique index and the transaction boundary.
  */
@@ -163,7 +161,7 @@ describe('pool membership guards (integration)', () => {
     await poolGuilds.add(victimPoolId, victim);
     await guilds.setPoolId(victim, victimPoolId, 'm');
 
-    // The attack in §2.2: authorized on one pool, naming a guild in another.
+    // The authorization attack: authorized on one pool, naming a guild in another.
     await expect(removeGuildFromPoolAtomically(env.handle.db, poolId, victim)).rejects.toThrow(
       GuildNotInPoolError,
     );
@@ -207,7 +205,7 @@ describe('pool membership guards (integration)', () => {
     await removeGuildFromPoolAtomically(env.handle.db, poolId, guildId);
     expect(await poolGuilds.livePoolFor(guildId)).toBeNull();
 
-    // §2.10: the primary key made this a permanent refusal.
+    // A retained primary key must not permanently refuse a former member.
     await poolGuilds.add(poolId, guildId);
     expect(await poolGuilds.livePoolFor(guildId)).toBe(poolId);
     expect((await poolGuilds.listLive(poolId)).map((m) => m.guildId)).toEqual([guildId]);

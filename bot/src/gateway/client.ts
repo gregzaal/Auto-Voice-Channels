@@ -33,7 +33,7 @@ export interface GatewayOptions {
  * Builds a discord.js client tuned for "DB is the source of truth": caches are
  * aggressively disabled/limited, and only the intents we need are requested.
  *
- * Presence is handled *lazily* (rewrite.md decision 12): we keep no presence
+ * Presence is handled *lazily*: we keep no presence
  * *event* bookkeeping of our own and only act when a member in a tracked voice
  * channel changes activity (debounced). We do retain discord.js's presence and
  * guild-member caches, because the game-name template reads each in-channel

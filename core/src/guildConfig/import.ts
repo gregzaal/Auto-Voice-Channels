@@ -192,7 +192,7 @@ export interface IncomingConfig {
    * True for a native export, which is a machine-written snapshot of one moment,
    * so a row it omits is one the admin has said should not exist. False for a
    * legacy file, which cannot express the rewrite's state and whose guild check
-   * is weaker, so it may only add and update (`plans/import_command.md` §5.5a).
+   * is weaker, so it may only add and update.
    */
   authoritative: boolean;
   legacy?: LegacyExtras;
@@ -330,8 +330,7 @@ const MANAGED_STATE_FIELDS = ['seed', 'name', 'status'] as const;
 /**
  * The only template fields a legacy config can express.
  *
- * Anything outside this list is UNTOUCHED by a legacy import, which is the whole
- * of `plans/import_command.md` §5.6 defect (a): the legacy schema has no
+ * Anything outside this list is UNTOUCHED by a legacy import: the legacy schema has no
  * `status` and no `defaultPrivate`, and `autoChannels.upsert` writes the whole
  * column, so a wholesale write would silently clear the voice-status template
  * and `/alwaysprivate` on every creator channel the file names.
@@ -767,8 +766,7 @@ function settingChange(key: ExportSettingsKey, before: unknown, after: unknown):
     entriesChanged: [],
   };
 
-  // Entry-level detail for the dictionary keys. The removals are the reason
-  // `plans/import_command.md` §5.5 makes listing them a hard requirement: a key
+  // Entry-level detail must show removals before confirmation: a key
   // the file carries replaces the stored value entirely, so entries it does not
   // list are gone, and that has to be visible before the button is pressed.
   const beforeMap = asRecord(before);

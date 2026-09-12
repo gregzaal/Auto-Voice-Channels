@@ -111,7 +111,7 @@ describe('the readout covers the engine vocabulary', () => {
    * The whole point of probing rather than re-deriving is that the readout
    * cannot report a value the engine disagrees with. It can still fall SILENT
    * on a token the engine gains later, which this catches, in the same shape as
-   * `systemPrompt.unit.test.ts` (`plans/name-tokens.md` §3).
+   * `systemPrompt.unit.test.ts`.
    */
   it('lists or excuses every @@token@@', () => {
     for (const token of AT_TOKENS) {

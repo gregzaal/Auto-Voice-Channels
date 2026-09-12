@@ -6,8 +6,7 @@ import type { RESTPostAPIApplicationCommandsJSONBody } from 'discord.js';
  *
  * Both are visible on the public listing and both go stale on their own. A
  * listing that says "0 servers" and lists no commands reads as an abandoned
- * bot, which is the specific impression this exists to prevent
- * (`plans/marketing.md` beat 6).
+ * bot, which is the specific impression this exists to prevent.
  *
  * Scope is deliberately these two calls. The same token can also write the
  * long description (`PATCH /projects/@me`, `headline` + `page_content`, per

@@ -16,7 +16,7 @@ export const IDENTIFY_ADVISORY_LOCK = 0x5a7c_0001;
  * identifies and respect Discord `max_concurrency`) and atomic conditional
  * UPDATEs (so two instances never both claim the same shard).
  *
- * **Everything here is fleet-scoped** (`plans/fleets.md` §2). Two live bots
+ * **Everything here is fleet-scoped**. Two live bots
  * shard independently, so shard 0 exists once per fleet and the two must never
  * contend for it. The identify throttle is scoped for a sharper reason:
  * Discord's `max_concurrency` is per APPLICATION, so a shared throttle would
@@ -135,8 +135,8 @@ export class ShardLeaseRepository {
    * restarts, e.g. Step A's `[0,1]` down to a Step B `[0]`) can still hold a
    * stale row for a shard it no longer serves if its own drain wasn't clean; an
    * unfiltered heartbeat would refresh that row forever, so the peer that is
-   * supposed to own that shard can never claim it (`plans/scaling.md` §9.1
-   * finding 2). Filtering by the caller's own believed-owned set is what makes
+   * supposed to own that shard can never claim it. Filtering by the caller's own believed-owned set
+   * is what makes
    * that row age out and become reclaimable instead.
    */
   async heartbeat(instanceId: string, shardIds: number[]): Promise<number[]> {

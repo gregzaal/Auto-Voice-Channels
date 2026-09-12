@@ -3,8 +3,7 @@
  * from discord.js.
  *
  * These live in `core` rather than in the bot because the marketing site's live
- * demos render real templates through the same engine
- * (`plans/name-tokens.md` §4.1). The bot re-exports them from
+ * demos render real templates through the same engine. The bot re-exports them from
  * `bot/src/features/voice/types.ts`, which keeps the rest of the voice feature
  * importing from where it always did.
  */

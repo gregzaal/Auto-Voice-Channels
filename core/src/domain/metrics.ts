@@ -1,5 +1,5 @@
 /**
- * The metric store's vocabulary (`plans/admin-dashboard.md` §3.4).
+ * The metric store's vocabulary.
  *
  * Two narrow tables (`metrics_hourly`, `metrics_daily`) hold every operational
  * time series, and this module is the only place that says what a metric *means*.
@@ -73,7 +73,7 @@ export type MetricFleet = Fleet | typeof METRIC_SHARED_SCOPE;
 /**
  * Which table a metric lives in.
  *
- * **Cardinality discipline** (§3.4): fleet-wide metrics are hourly, per-guild
+ * **Cardinality discipline**: fleet-wide metrics are hourly, per-guild
  * metrics are **daily only**. At 10k guilds an hourly per-guild metric is 240k
  * rows a day and the table stops being cheap. A metric whose `key` is a guild id
  * must declare `daily`, and {@link metricDefinition} is what makes that a
@@ -206,8 +206,7 @@ const DEFINITIONS: Record<MetricName, MetricDefinition> = {
    * A gauge's day is its last hourly sample, which for rooms is the value at
    * midnight UTC - the daily trough almost everywhere people play games. "Most
    * rooms live at once today" is both the more useful operator number and the
-   * honest one to publish, and it is what `marketing.md` wants for peak
-   * concurrency. The hourly row is still an instantaneous sample; only the
+   * honest measure of peak concurrency. The hourly row is still an instantaneous sample; only the
    * summary differs.
    */
   [METRICS.ROOMS_TRACKED]: {
@@ -470,10 +469,8 @@ export function dayBucket(at: Date): Date {
  * that decides when daily retention stops being free, and the thing to measure
  * before adding a second per-guild metric.
  *
- * 90 days is the figure `plans/admin-dashboard.md` §7 decision 4 *proposes*, and
- * that decision is still recorded as the owner's to make. This constant is the
- * default it ships with, not a ruling: longer is cheap now and expensive later at
- * per-guild cardinality, which is the trade the decision is about.
+ * Retention defaults to 90 days. Reassess storage cost before extending it or
+ * adding per-guild metrics: retained rows grow with both duration and cardinality.
  */
 export const METRICS_HOURLY_RETENTION_DAYS = 90;
 
@@ -481,8 +478,8 @@ export const METRICS_HOURLY_RETENTION_DAYS = 90;
  * How stale the newest hourly bucket may be before the collector counts as
  * broken.
  *
- * §8's risk table is explicit that a collector dying quietly is the failure mode
- * worth engineering against, because every chart downstream reads zero and looks
+ * A collector dying quietly is a dangerous failure mode, because every chart
+ * downstream can read zero and look
  * like a real answer. Two buckets of slack absorbs a deploy and a missed tick;
  * past that, the reader must render staleness instead of a shape.
  */

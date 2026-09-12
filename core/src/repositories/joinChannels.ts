@@ -40,7 +40,7 @@ export class JoinChannelRepository {
    * safe because a snowflake is globally unique and are not: two fleets can
    * share a guild, and an unscoped `get(channelId)` would hand one fleet the
    * other's row, after which it would happily rename or delete a channel it
-   * does not own (`plans/fleets.md` §2).
+   * does not own.
    */
   private scoped(...conditions: (SQL | undefined)[]) {
     return and(eq(joinChannels.fleet, this.fleet), ...conditions);

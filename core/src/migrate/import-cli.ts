@@ -1,5 +1,5 @@
 /**
- * `migrate-import` (`plans/migration.md` §5.1).
+ * `migrate-import`.
  *
  *   migrate-import <dir> --live-guilds <file> [--apply]
  *                        [--only-guilds <file>] [--overwrite-settings]
@@ -10,17 +10,17 @@
  * evidence rather than hope.
  *
  * `--only-guilds` restricts the run to a subset, which is what the cutover's
- * delta pass uses (§6 step 3): the bulk import runs while the old bot is still
+ * delta pass uses: the bulk import runs while the old bot is still
  * serving, and only the guilds whose config changed in that window are
  * re-imported during the dark minutes. That pass also passes
  * `--overwrite-settings`, because by then the bulk pass is itself the first
  * writer and gap-filling would decline the very changes it exists to apply.
  *
  * `--check-existing` makes the dry run read the `guilds` table and report what
- * the first-writer-wins merge (§3.6) would leave alone. It needs a database, so
+ * the first-writer-wins merge would leave alone. It needs a database, so
  * it is opt-in: the plain dry run stays runnable with no configuration at all.
  *
- * **DB-only, no Discord token**, as §5.1 requires. The live guild list is a
+ * **DB-only, no Discord token**. The live guild list is a
  * file, produced separately by whoever does hold a token, by paginating
  * `GET /users/@me/guilds?limit=200` with `after=<last id>`.
  *
@@ -76,16 +76,16 @@ function positionals(): string[] {
   return process.argv.slice(2).filter((a) => a !== '--');
 }
 
-/** Prints the first-writer-wins outcomes (§3.6). Shared by both run paths. */
+/** Prints the first-writer-wins outcomes. Shared by both run paths. */
 function reportMerge(summary: ImportSummary): void {
   const { merge } = summary;
   /**
    * "Already had a row", not "already imported by another fleet".
    *
    * A row can pre-exist from the web app, an admin action, or THIS fleet's own
-   * earlier pass -- which is every guild in a delta run, since §6 step 3 always
-   * follows step 1. Labelling it as another fleet's work would make the delta
-   * pass's normal output read as a cross-fleet overlap.
+   * earlier pass. The delta pass follows the initial bulk import, so every
+   * guild in a delta run already has a row. Labelling it as another fleet's work
+   * makes the delta pass's normal output read as a cross-fleet overlap.
    */
   console.log(`\n  guilds that already had a row: ${merge.existed}`);
   const statuses = Object.entries(merge.keptStatus);
@@ -262,7 +262,7 @@ async function main(): Promise<void> {
     if (purge > 0) {
       console.log(
         `\n  ${purge} legacy Gold text channels and roles need deleting on Discord ` +
-          `(migration.md §5.3). They are not cleaned up by the new bot.`,
+          `manually. They are not cleaned up by the new bot.`,
       );
     }
     if (summary.failures.length > 0) process.exitCode = 1;

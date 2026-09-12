@@ -25,7 +25,7 @@ export interface BillingNotifier {
      * Set when this is one copy of a fan-out into a server on a shared
      * subscription. Changes the copy, not the delivery: these readers were
      * never sent the warnings that came first, and cannot act on the
-     * subscription themselves (§6.6).
+     * subscription themselves.
      */
     audience?: NotificationAudience,
   ): Promise<boolean>;
@@ -37,8 +37,8 @@ export interface BillingNotifier {
   welcomeCoveredGuild(guildId: string): Promise<boolean>;
   /**
    * DMs a pool's purchaser directly, for a billing event that concerns the
-   * pool as a whole rather than any one server (`plans/member-based-pricing.md`
-   * §6.6). Unlike {@link notifyGuild} there is no system-channel fallback
+   * pool as a whole rather than any one server. Unlike {@link notifyGuild}
+   * there is no system-channel fallback
    * step: a pool has no one server whose channels would make sense here.
    */
   notifyPurchaser(
@@ -54,7 +54,7 @@ export interface DiscordBillingNotifierOptions {
 }
 
 /**
- * Discord delivery per monetization.md §6: post in the guild's system channel
+ * Discord delivery: post in the guild's system channel
  * where possible, else DM the owner. All failures are contained — billing
  * messaging must never become a failure mode for the bot.
  */
@@ -114,9 +114,8 @@ export class DiscordBillingNotifier implements BillingNotifier {
       // inserted into `client.guilds.cache` permanently (discord.js's
       // `GuildManager.fetch` default), which corrupts the "my cache only
       // covers my own shards" invariant every other partial-cache fix here
-      // depends on (`plans/scaling.md` §9.1). Once that guild is cached, its
-      // channels read as real to `channelExists` too, turning finding 1's
-      // otherwise-harmless no-op into an actual cross-shard channel delete.
+      // depends on. Once that guild is cached, its channels read as real to
+      // `channelExists` too, allowing cross-shard channel deletion.
       const guild = await this.opts.client.guilds.fetch({ guild: guildId, cache: false });
       if (guild.systemChannelId) {
         // Same reasoning, same option: `GuildChannelManager.fetch` caches by

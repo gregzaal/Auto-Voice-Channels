@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 /**
  * The legacy Python bot's per-guild JSON, and the pure mapping onto the new
- * schema (`plans/migration.md` §2, §3, §4).
+ * schema.
  *
  * Pure on purpose: every decision that could silently corrupt 1862 real guilds
  * is a function of its input, so it can be tested exhaustively rather than
@@ -18,7 +18,7 @@ const DISCORD_EPOCH = 1_420_070_400_000;
  * `.passthrough()` and near-total optionality are deliberate: this is eight
  * years of accreted files written by several versions of a bot that never
  * validated anything. Rejecting an unexpected key would mean refusing to
- * migrate a guild over a field we already decided to drop (§4).
+ * migrate a guild over a field we already decided to drop.
  */
 /**
  * **The schema discovers shape; it does not validate.** Every field a value is
@@ -77,7 +77,7 @@ export const legacyGuildSchema = z
 
 export type LegacyGuild = z.infer<typeof legacyGuildSchema>;
 
-/** Fields we knowingly do not carry (§4), used to report what a guild loses. */
+/** Fields we knowingly do not carry, used to report what a guild loses. */
 export const DROPPED_FIELDS = [
   'custom_bitrates',
   'requiredrole',
@@ -124,7 +124,7 @@ export interface GuildPlan {
   primaries: PlannedPrimary[];
   secondaries: PlannedSecondary[];
   joinChannels: PlannedJoinChannel[];
-  /** Discord objects the legacy Gold feature left behind (§5.3). */
+  /** Discord objects the legacy Gold feature left behind. */
   orphanedTextChannels: string[];
   orphanedRoles: string[];
   droppedFields: string[];
@@ -268,7 +268,7 @@ export function planGuild(guildId: string, raw: unknown, options: PlanOptions = 
   const record = raw as Record<string, unknown>;
   const droppedFields = DROPPED_FIELDS.filter((f) => record[f] !== undefined);
 
-  // -- settings (§3.1) ------------------------------------------------------
+  // -- settings ------------------------------------------------------
   const settings: Record<string, unknown> = {};
   if (typeof guild.enabled === 'boolean') settings.enabled = guild.enabled;
   if (typeof guild.general === 'string') settings.general = guild.general;
@@ -311,7 +311,7 @@ export function planGuild(guildId: string, raw: unknown, options: PlanOptions = 
     }
     const p = primary.data;
 
-    // -- template (§3.2) ----------------------------------------------------
+    // -- template ----------------------------------------------------
     const template: Record<string, unknown> = {};
     if (typeof p.template === 'string' && p.template.length > 0) {
       template.name = p.template;
@@ -420,7 +420,7 @@ export function planGuild(guildId: string, raw: unknown, options: PlanOptions = 
  *
  * Two jobs. It buys every imported guild at least 60 extra free days, and it
  * spreads the expiry wave across 31 days so the T-30, T-7 and T-1 notification
- * runs are not a single fleet-wide event a year out (`migration.md` §5.1).
+ * runs are not a single fleet-wide event a year out.
  *
  * **Widened from 10-30 for the production cutover.** Beta's 1004 guilds were
  * imported under the narrower window, which put ~48 expiries on the busiest

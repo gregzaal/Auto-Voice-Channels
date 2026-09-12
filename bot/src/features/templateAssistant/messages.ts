@@ -1,8 +1,7 @@
 /**
  * User-facing copy for `/templateassistant`.
  *
- * Written to `plans/assisted_templates.md` §5.1, which is explicit about the
- * tone: the cap is an infrastructure backstop, **not a product tier**, so none
+ * The cap is an infrastructure backstop, **not a product tier**, so none
  * of this may read as an upsell. There is nothing to upsell to. Every tier gets
  * the same allowance and paying more does not raise it, so both cap messages
  * say so outright and the refusal hands back the manual path rather than simply

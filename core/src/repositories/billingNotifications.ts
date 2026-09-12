@@ -5,7 +5,7 @@ import type { Fleet } from '../domain/fleets.js';
 import type { LeniencyNotification } from '../domain/leniency.js';
 
 /**
- * The billing-notification queue (`plans/fleets.md` §4).
+ * The billing-notification queue.
  *
  * Sits between the cluster-singleton advance pass, which decides a guild is
  * owed a message, and whichever fleet is actually in that guild, which is the
@@ -43,9 +43,9 @@ export interface PendingNotification {
   /** When the advance pass queued it. The dedupe re-check compares against it. */
   enqueuedAt: Date;
   /**
-   * Set when this guild-scoped row is one copy of a pool's fan-out notice
-   * (`plans/member-based-pricing.md` §6.6). Lets the deliverer stamp the
-   * POOL's own dedupe key once any one copy is confirmed delivered, rather
+   * Set when this guild-scoped row is one copy of a pool's fan-out notice.
+   * Lets the deliverer stamp the POOL's own dedupe key once any one copy is
+   * confirmed delivered, rather
    * than at enqueue time — a fan-out notice must keep re-emitting if every
    * copy fails, exactly like a single guild's own notice does.
    */
@@ -108,7 +108,7 @@ export class BillingNotificationRepository {
       .insert(billingNotifications)
       .values({
         guildId,
-        // Traceability only (`plans/member-based-pricing.md` §6.6): this row
+        // Traceability only: this row
         // is still keyed and delivered exactly like any other guild-scoped
         // notification (`billing_notifications_pending_key` is on
         // `(guild_id, key)`, unaffected by `pool_id`). The deliverer reads it
@@ -128,7 +128,7 @@ export class BillingNotificationRepository {
 
   /**
    * The pool-axis sibling of {@link enqueue}, for a purchaser-targeted
-   * billing notification (`plans/member-based-pricing.md` §6.6). Idempotent
+   * billing notification. Idempotent
    * against `billing_notifications_pool_pending_key`, same reasoning as the
    * guild form: the pool pass re-derives the same pending notification every
    * tick until delivery stamps the pool's own dedupe map.
@@ -235,7 +235,7 @@ export class BillingNotificationRepository {
    * The pool-axis sibling of {@link claimForFleet}: deliverable means this
    * fleet is present in at least one of the pool's LIVE member guilds — the
    * bot must share a server with the purchaser to DM them at all. A pool may
-   * cover guilds on different fleets (§6.1 q4, resolved), so members do not
+   * cover guilds on different fleets, so members do not
    * all share one fleet; the `EXISTS` below already asks the right question
    * either way — any ONE reachable member is enough to deliver.
    */

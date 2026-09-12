@@ -809,7 +809,7 @@ describe('MetricsRepository (integration)', () => {
     });
 
     /**
-     * §8: a collector that dies quietly makes every chart downstream read zero,
+     * A collector that dies quietly makes every chart downstream read zero,
      * and a zero is indistinguishable from an answer. Freshness is what lets a
      * reader render staleness instead of a shape.
      */

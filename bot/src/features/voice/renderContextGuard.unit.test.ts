@@ -15,7 +15,7 @@ import { describe, expect, it } from 'vitest';
  * wrong forever. The cause was not a forgotten argument, it was eight
  * hand-assembled context literals: any field added later would be forgotten the
  * same way, and `{{FULL}}` reading a stale limit is worse than
- * `@@party_size@@` doing it (`plans/name-tokens.md` §5.3).
+ * `@@party_size@@` doing it.
  *
  * Residual limits, stated rather than papered over. This reads source text, so
  * a call built somewhere it cannot follow needs an exemption below. And it

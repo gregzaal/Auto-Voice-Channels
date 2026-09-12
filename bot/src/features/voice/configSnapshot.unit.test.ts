@@ -214,7 +214,7 @@ describe('buildExportFile', () => {
 
 describe('the round trip', () => {
   /**
-   * The claim decision 13 rests on. Exporting a guild and importing the file
+   * The round-trip invariant. Exporting a guild and importing the file
    * back must be a no-op, or the "undo" attached to every import is a lie.
    */
   it('changes nothing when a guild imports its own export', () => {

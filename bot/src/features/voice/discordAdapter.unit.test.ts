@@ -543,7 +543,7 @@ describe('DiscordVoiceActions.setPrivacy', () => {
 
   // Reproduces the prod incident: without this, denying @everyone Connect also
   // denies it to the bot (a member of @everyone), and the very next grant to the
-  // room's owner fails with Missing Access -- see AGENTS.md's privacy section.
+  // room's owner fails with Missing Access.
   it('grants the bot its own access before denying @everyone Connect', async () => {
     const { client, edit } = clientWithChannel();
     await new DiscordVoiceActions(client).setPrivacy('g1', 'c1', true);

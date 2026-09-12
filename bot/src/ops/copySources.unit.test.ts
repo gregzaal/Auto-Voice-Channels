@@ -18,12 +18,12 @@ import { describe, expect, it } from 'vitest';
  *
  * That gap let 60 curly characters accumulate across 11 production files,
  * including `/setup` panel titles and most of the voice command replies. A
- * hand-kept list of "strings that must stay clean" rots, which AGENTS.md says
- * explicitly; this does not.
+ * hand-kept list of "strings that must stay clean" can drift; scanning the
+ * modules checks the actual strings.
  *
- * **Comments are held to the same standard here, deliberately.** AGENTS.md
- * exempts them, and a check that honoured the exemption would have to strip
- * comments first, which cannot be done reliably with a regex: a line
+ * **Comments are held to the same standard here, deliberately.** Although
+ * comments are not customer-facing copy, exempting them would require stripping
+ * them first, which cannot be done reliably with a regex: a line
  * containing `https://` inside a string looks like a line comment, so
  * stripping would hide any violation after it. Holding every line to straight
  * quotes costs nothing (this codebase already has zero elsewhere) and makes

@@ -8,7 +8,7 @@ import {
 } from '@avc/core';
 
 /**
- * The in-process watcher (`plans/agentic_management.md` step 4). The
+ * The in-process watcher. The
  * companion to `/api/watch`, deliberately not a duplicate: `/api/watch` runs
  * in `avc-web`, reads Postgres, and survives this process being dead, which
  * makes it blind to anything that never reaches a table (a tripped breaker,

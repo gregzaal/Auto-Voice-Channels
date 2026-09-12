@@ -70,7 +70,7 @@ describe('RuntimeCreationGate', () => {
     expect(getAll).toHaveBeenCalledTimes(1);
   });
   /**
-   * `plans/scaling.md` §6.1's live half, which `ownsGuild` does not cover.
+   * Guard live room creation as well as the reconcile paths using `ownsGuild`.
    *
    * `ownsGuild` is consulted by the reconcile sweep and by nothing on the join
    * path, so an instance whose lease had aged out stopped pruning rows and

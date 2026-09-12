@@ -17,7 +17,7 @@ export interface OnboardingDecision {
   policy: TrialPolicy;
   /** Start the trial clock (only when no window exists yet — re-adds keep theirs). */
   setExpiresAt?: Date;
-  /** ≥1M members joining fresh: no trial — hard-gate until a deal is arranged (§3). */
+  /** At the bespoke tier threshold: no trial until a deal is arranged. */
   hardGate: boolean;
   /** Send the one-time welcome message. */
   welcome: boolean;
@@ -31,7 +31,7 @@ export interface OnboardingDecision {
 const STALE_WELCOME_MS = 7 * 86_400_000;
 
 /**
- * Decides the §3 onboarding path for a `GUILD_CREATE`. Idempotent by design:
+ * Decides the onboarding path for a `GUILD_CREATE`. Idempotent by design:
  * the welcome is one-shot (`metadata.billing.onboardedAt`), the trial window is
  * only ever set once (the clock starts at FIRST add), and a returning guild
  * keeps whatever auth state it had.
@@ -64,7 +64,7 @@ export function decideOnboarding(
    * Pooling being the default billing unit reopened the exact hole the
    * `authStatus === 'trial'` guard above was added to close, because checkout
    * can name servers the bot is not in yet and the webhook deliberately does
-   * NOT fan entitlement out (§6.4). So a customer pays, invites the bot, and
+   * NOT fan entitlement out. So a customer pays, invites the bot, and
    * arrives here with `pool_id` set and `auth_status` still `trial` until the
    * next hourly pass. Without this the bot then tells them their free trial
    * just started, quotes a second per-server price for a server they have
@@ -87,8 +87,8 @@ export function decideOnboarding(
       decision.hardGate = true;
     } else if (!covered) {
       const duration = trialDurationMs(policy);
-      // Anchor on the ROW's creation, not "now" (§3: the clock starts at
-      // first add) — identical for fresh joins, and it keeps this writer in
+      // Anchor on the ROW's creation, not "now": the clock starts at
+      // first add. This is identical for fresh joins and keeps this writer in
       // agreement with the reconcile job's backfill for old re-added rows.
       if (duration !== null) decision.setExpiresAt = new Date(row.createdAt.getTime() + duration);
     }
@@ -109,7 +109,7 @@ export interface OnboardingDeps {
 }
 
 /**
- * New-guild onboarding (§6): on `GUILD_CREATE`, ensure the row, sample the
+ * New-guild onboarding: on `GUILD_CREATE`, ensure the row, sample the
  * member count, start the trial clock (or hard-gate an XXL join), and send the
  * size-appropriate welcome. Runs through the per-guild dispatcher, and every
  * step is idempotent — a redelivered GUILD_CREATE is a no-op.
@@ -145,7 +145,7 @@ async function onboardGuild(deps: OnboardingDeps, guild: Guild, at: Date): Promi
 
   if (decision.setExpiresAt) {
     // Set-once at the DB level: a concurrent backfill/onboarding writer can
-    // never overwrite an existing window (§3 first-add semantics).
+    // never overwrite an existing window.
     await deps.store.transitionAuth({
       guildId: guild.id,
       toStatus: 'trial',

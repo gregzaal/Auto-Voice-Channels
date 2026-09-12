@@ -378,7 +378,7 @@ describe('diffGuildConfig: settings', () => {
   });
 
   /**
-   * The hard requirement in §5.5, and the whole reason replace is safe to offer:
+   * Replacement is safe only if its removals are visible before confirmation:
    * a key the file carries replaces the stored value entirely, so entries it
    * does not list are gone and that must be visible before the button.
    */
@@ -715,7 +715,7 @@ describe('diffGuildConfig: creator channels', () => {
   });
 
   /**
-   * §5.5a: a native file is a complete-state document, so a row it omits is one
+   * A native file is a complete-state document, so a row it omits is one
    * the admin has said should not exist. That is what makes the snapshot a real
    * undo in both directions.
    */
@@ -769,7 +769,7 @@ describe('diffGuildConfig: creator channels', () => {
 
 describe('diffGuildConfig: legacy templates', () => {
   /**
-   * §5.6 defect (a), the one that was live on the headline path. `planGuild`
+   * A legacy import must preserve fields its format cannot express. `planGuild`
    * structurally cannot emit `status` or `defaultPrivate`, and
    * `autoChannels.upsert` writes the whole column, so a wholesale write would
    * silently clear the voice-status template and `/alwaysprivate` on every
@@ -1037,7 +1037,7 @@ describe('the differ writes no auth state, by construction', () => {
      *   construction and asserted so by its own barrel: no repositories, no
      *   `pg`, no node builtins. The differ borrows `canonicalTimeZone` from it
      *   rather than keeping a second copy, which is the lesson the shared
-     *   engine was extracted to learn (`plans/name-tokens.md` §4.1).
+     * engine was extracted to learn.
      *
      * Widening this list is a real decision. The forbidden-call checks below
      * are the teeth and stay whatever it contains.

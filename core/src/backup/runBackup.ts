@@ -16,7 +16,7 @@ import {
 import type { BackupStorage } from './storage.js';
 
 /**
- * The dump-encrypt-upload-manifest-prune pipeline (`plans/backups.md` §4).
+ * The dump-encrypt-upload-manifest-prune pipeline.
  *
  * Streamed end to end so memory stays bounded regardless of database size. This
  * runs in-process inside the bot, which is also serving Discord events, so

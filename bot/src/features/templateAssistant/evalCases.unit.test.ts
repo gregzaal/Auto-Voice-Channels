@@ -8,7 +8,7 @@ import { type TemplateField } from './validate.js';
  * Structural guard for `eval/cases.json`.
  *
  * The eval harness itself is deliberately outside CI, because it makes real API
- * calls (`plans/assisted_templates.md`). **This is not the harness**: it reads
+ * calls. **This is not the harness**: it reads
  * the case file and checks nothing but its shape, so the expensive half stays
  * out of CI while the half that can be checked for free comes in.
  *

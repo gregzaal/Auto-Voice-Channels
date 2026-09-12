@@ -24,10 +24,8 @@ import { adviseTemplate, lintTemplate } from '../features/templateAssistant/vali
  *
  * **Every value here is produced by rendering a probe through the real engine**
  * (`probeToken`, `probeVariable`), never by re-deriving what the engine would
- * say. A hand-written second implementation of the token vocabulary is exactly
- * what `plans/name-tokens.md` §3 exists to stop: the previous one drifted three
- * times with both test suites green. Probing cannot drift, because it is the
- * same function that names the channel.
+ * say. A second implementation can drift while its own tests stay green.
+ * Probing uses the same function that names the channel.
  *
  * This module never CONSTRUCTS a `RenderContext`. It receives one that
  * `VoiceFeature.buildRenderContext` assembled, which is what keeps
@@ -148,10 +146,8 @@ function probeVariable(name: string, ctx: RenderContext): boolean {
  *
  * Every string reaching here is Discord-supplied (a game name, a party line, a
  * stream title, a display name, a rendered channel name), and slicing one mid
- * surrogate pair emits a lone surrogate into the embed JSON. AGENTS.md records
- * this trap and `guildInitial()` in `web/` exists because of it: 410 of 6,939
- * guild names in the snapshot begin above the BMP, and game names and nicknames
- * are no different.
+ * surrogate pair emits a lone surrogate into the embed JSON. Truncate by
+ * code point so emoji and other characters above the BMP remain valid.
  */
 function truncate(s: string, max = 60): string {
   const points = [...s];

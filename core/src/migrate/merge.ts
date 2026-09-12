@@ -1,15 +1,13 @@
 import type { AuthStatus } from '../domain/auth.js';
 
 /**
- * What the importer is allowed to change about a guild that already exists
- * (`plans/migration.md` §3.6).
+ * What the importer is allowed to change about a guild that already exists.
  *
  * The importer was written for one fleet importing one dump into an empty
  * `guilds` table. It is now run once per bot identity into a SHARED table:
  * beta's dump landed 2026-08-19, prod's lands at the cutover, and Gold's a few
  * days after that. A guild that has two of those bots installed appears in two
- * dumps, and `guilds.settings` / `guilds.auth_status` are shared columns
- * (`plans/fleets.md` §2), not fleet-scoped ones.
+ * dumps, and `guilds.settings` / `guilds.auth_status` are shared columns, not fleet-scoped ones.
  *
  * With last-writer-wins, **import order silently decides that guild's
  * configuration**, and the third run can un-block a blocked guild or downgrade
@@ -35,11 +33,11 @@ import type { AuthStatus } from '../domain/auth.js';
  * order is the union: no key and no alias is ever lost, whichever dump runs
  * first. That is the property `merge.unit.test.ts` asserts.
  *
- * The same policy is what makes the two-phase cutover import safe (§6): the
+ * The same policy is what makes the two-phase cutover import safe: the
  * bulk pass runs while the old bot is still live and the other fleets are still
  * serving, so it has to be incapable of changing anything they depend on.
  *
- * **The one deliberate exception is `overwrite`** (§6 step 3's delta pass). The
+ * **The one deliberate exception is `overwrite`** (the cutover delta pass). The
  * bulk pass becomes its own first writer, so gap-filling would make the delta
  * pass a no-op for exactly the settings it exists to apply. `overwrite` treats
  * the dump as authoritative for the guilds the operator explicitly named. It

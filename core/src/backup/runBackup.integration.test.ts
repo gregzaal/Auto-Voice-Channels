@@ -14,8 +14,7 @@ import { isManifestKey, manifestKey, parseManifest } from './manifest.js';
  * The round trip that matters: a real Postgres dumped by a real `pg_dump`,
  * encrypted, streamed into a real S3 implementation, and read back.
  *
- * `plans/backups.md` §9: "a backup you can't restore isn't a backup". Every
- * piece here is exercised for real because the failures this is guarding
+ * Every piece is exercised for real because the failures this is guarding
  * against -- multipart uploads, streaming bodies, pagination, a client/server
  * version mismatch -- do not exist against a mock.
  */

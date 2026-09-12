@@ -8,7 +8,7 @@ import { startPostgres } from '../test/pgContainer.js';
 import { autoChannels, joinChannels, managedChannels, secondaryChannels } from '../db/schema.js';
 
 /**
- * Channel-table isolation between fleets (`plans/fleets.md` §2).
+ * Channel-table isolation between fleets.
  *
  * This is the failure the fleet column exists to prevent, and it is the worst
  * one available: two bots in one guild, each reconciling from the same rows,

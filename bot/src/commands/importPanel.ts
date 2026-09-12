@@ -441,8 +441,8 @@ function channelLine(change: ChannelChange, isPublic: boolean): string {
 }
 
 /**
- * The removal list, which §5.5 makes a hard requirement and which is the whole
- * reason replace is safe to offer.
+ * Show the removal list before offering replace so admins can review the
+ * destructive part of the import.
  *
  * `custom_nicks` is a COUNT on every surface including this one, because the
  * entries are names members chose for themselves.
@@ -541,7 +541,7 @@ function composeWithFooter(
 /**
  * The system-channel announcement.
  *
- * Categories and counts, with a few examples, which is what decision 4 can
+ * Categories and counts, with a few examples, are what we can
  * actually deliver in a 2000-character public post that may not carry an
  * attachment. No member data, and every channel and user as a mention so
  * Discord redacts per viewer.

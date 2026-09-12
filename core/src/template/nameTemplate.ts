@@ -204,8 +204,7 @@ export function resolveGames(
    * rename. Here the name does not move, so an owner-dependent representative
    * would make `/transfer`, `/reclaim` and the automatic handover when an owner
    * leaves each rename the room, for any template reading a party token, in a
-   * guild that opted into nothing. That is the no-op guard `plans/name-tokens.md`
-   * §2 says must not be weakened.
+   * guild that opted into nothing. Stable names must not become owner-dependent.
    */
   return { names: tied, representative: tied[0]! };
 }
@@ -293,7 +292,7 @@ export const LIST_PREFIX = 'list:';
  * `[[list:animals]]` reads a NAMED pool from the guild's settings. It exists
  * because a 100-character template cannot hold forty options inline: the
  * built-in default already spends 130 characters, almost all of it one
- * `[[…]]` group (`plans/name-tokens.md` §10.2). An unknown name is left
+ * `[[…]]` group. An unknown name is left
  * literal rather than rendered empty, for the same reason a `[[…]]` with no
  * `/` is: a visible mistake beats a silently missing word.
  */
@@ -616,7 +615,7 @@ export interface ExpressionVars {
    * ask about the OWNER and are kept exactly as they were, because changing
    * them would silently alter every deployed template that uses them; `ANY_`
    * asks about anyone in the room, and `MEMBER` asks whether one specific
-   * person is in it (`plans/name-tokens.md` §5.4).
+   * person is in it.
    */
   ANY_LIVE: boolean;
   ANY_ROLE: string[];
@@ -645,11 +644,9 @@ export interface ExpressionVars {
    */
   FULL: boolean;
   /**
-   * The room is not public. Deliberately "not public" rather than "locked", so
-   * it stays correct if the three-state privacy model in
-   * `plans/feature-parity.md` §3.1 ships and `{{HIDDEN}}` arrives as a
-   * narrowing. Always false for an adopted standalone channel, which has no
-   * privacy model.
+   * The room is not public. This describes privacy without distinguishing
+   * locking from hiding, so a future narrower token can coexist with it.
+   * Always false for an adopted standalone channel, which has no privacy model.
    */
   PRIVATE: boolean;
   /**
@@ -658,8 +655,8 @@ export interface ExpressionVars {
    * There is deliberately no minute or second anywhere in this family. A
    * minute-granular value changes on nearly every 5-minute sweep tick, which is
    * the whole rename budget spent on a clock, forever, on every managed channel
-   * in the guild (`plans/name-tokens.md` §2). The hour is the finest thing
-   * admitted, and it is `@@hour@@` rather than an `HOUR` variable: §5.1's rule
+   * in the guild. The hour is the finest thing
+   * admitted, and it is `@@hour@@` rather than an `HOUR` variable: the rule
    * is that a variable must express something a comparison of tokens cannot, and
    * `{{@@hour@@>=18 ?? …}}` already says it. These three earn their place
    * because `=` and `:` on a STRING is not something any token can be compared
@@ -678,7 +675,7 @@ type ExpressionValue = ExpressionVars[keyof ExpressionVars];
  * type, not by a test: adding a field to {@link ExpressionVars} without listing
  * it here (or listing one that doesn't exist) fails to compile. The template
  * assistant's validator reads this to reject an invented variable, which would
- * otherwise render as a silently-false condition (`plans/assisted_templates.md` §9).
+ * otherwise render as a silently-false condition.
  */
 const CONDITION_VARIABLE_SET: Record<keyof ExpressionVars, true> = {
   ROLE: true,
@@ -744,8 +741,7 @@ export const AT_TOKENS: readonly string[] = [
  *
  * `GAME` is the supported way to test the first of them: a VARIABLE carries the
  * value into the comparison without putting it into the template string, so it
- * is safe by construction. The other three have no such counterpart
- * (`plans/name-tokens.md` §5.1).
+ * is safe by construction. The other three have no such counterpart.
  */
 export const LATE_TOKENS: readonly string[] = [
   '@@game_name@@',
@@ -764,7 +760,7 @@ export const LATE_TOKENS: readonly string[] = [
  * emoji, and `##` produces `#5` while `+#` produces `V`. None of those parse, so
  * they take the false branch exactly like an unknown variable would. Exported
  * because the assistant's validator lints against it and the system prompt is
- * tested against it (`plans/name-tokens.md` §5.1).
+ * tested against it.
  */
 export const OPERAND_TOKENS: readonly string[] = [
   '@@num@@',
@@ -788,8 +784,7 @@ export const OPERAND_TOKENS: readonly string[] = [
  *
  * Exported because every surface that can see a guild's settings has to be able
  * to say "this renders in UTC until you set a zone": with no zone the render
- * still succeeds, silently, on the wrong day for most of the install base
- * (`plans/name-tokens.md` §10.1).
+ * still succeeds, silently, on the wrong day for most of the install base.
  */
 export const DATE_TOKENS: readonly string[] = ['@@weekday@@', '@@month@@', '@@hour@@'];
 
@@ -1002,7 +997,7 @@ export function dateParts(now: Date | undefined, timezone: string | undefined): 
  * with details `x ?? EVIL // y` rendered `[x ?? EVIL`), or introduce a
  * construct the admin never wrote: a whole `{{…}}` condition, a `""upper:…""`
  * transform, a `<<one/many>>` group, or another `@@token@@`. All five were
- * reproduced against the running engine (`plans/name-tokens.md` §5.2).
+ * reproduced against the running engine.
  *
  * `[[…]]` and `__…__` resolve at steps 1 and 0, before any substitution, so
  * they are unreachable and deliberately absent.
@@ -1073,8 +1068,7 @@ const COMPARATORS: [string, (a: number, b: number) => boolean][] = [
  * **Integers only, never bare strings.** Treating an unknown NAME as a string
  * literal would flip existing behaviour: `{{PLAYERZ!=5 ?? yes // no}}` renders
  * `no` today and would render `yes`, because the string `PLAYERZ` genuinely is
- * not `5`. A typo'd variable has to keep failing safe
- * (`plans/assisted_templates.md` §9 leans on it).
+ * not `5`. A typo'd variable has to keep failing safe.
  */
 function operandValue(raw: string, vars: ExpressionVars): ExpressionValue | undefined {
   const name = raw.trim();
@@ -1108,7 +1102,7 @@ export function evalExpression(text: string, vars: ExpressionVars): string {
   // The LEFT side resolves to a variable or an integer. Tokens have already
   // been substituted by the time this runs (step 5 vs step 7), so
   // `{{@@num@@>=2}}` genuinely arrives as `3>=2` and now compares instead of
-  // silently taking the false branch (`plans/name-tokens.md` §5.1).
+  // silently taking the false branch.
   const value = operandValue(name, vars);
   if (value === undefined) return falsy;
 
@@ -1269,8 +1263,7 @@ export interface RenderContext {
    * Every render path must supply it, which is why they all go through
    * `buildRenderContext` and a guard test binds them there: it used to be
    * passed only on the create path, so `@@party_size@@`'s fallback worked once
-   * and silently degraded to `0` on every re-render after that
-   * (`plans/name-tokens.md` §5.3).
+   * and silently degraded to `0` on every re-render after that.
    */
   userLimit?: number;
   /** Whether the room is locked, for `{{PRIVATE}}`. Adopted channels: false. */
@@ -1279,8 +1272,7 @@ export interface RenderContext {
    * Added to the sibling index before every number token renders, so a guild
    * can start its rooms at 4 (or at 0). Comes from the primary's `startAt`
    * (`offset = startAt - 1`), so it applies uniformly to `##`, `$#`, `$0#…`,
-   * `+#` and `@@nato@@` rather than being a suffix on one token
-   * (`plans/name-tokens.md` §6.9).
+   * `+#` and `@@nato@@` rather than being a suffix on one token.
    */
   numberOffset?: number;
   /**
@@ -1299,8 +1291,7 @@ export interface RenderContext {
    * The guild's IANA time zone for `now`. Absent, or unrecognised, means UTC.
    *
    * "Friday night" ends at 2pm Friday in Los Angeles, so a UTC-only date token
-   * is wrong for most of the install base. That is the whole reason this exists
-   * (`plans/name-tokens.md` §10.1).
+   * is wrong for most of the install base. That is the whole reason this exists.
    */
   timezone?: string;
   /**
@@ -1315,7 +1306,7 @@ export interface RenderContext {
    *
    * Cached on the row at creation rather than resolved here, because the
    * original creator has usually left by the time it matters and a member fetch
-   * on the render path is not an option (`plans/name-tokens.md` §10.4).
+   * on the render path is not an option.
    */
   originalCreatorName?: string;
 }
@@ -1361,8 +1352,8 @@ export function renderChannelName(
   opts: RenderOptions = {},
 ): string {
   let name = template;
-  // `numberOffset` shifts every index-derived token together (`plans/name-tokens.md`
-  // §6.9). `natoWord` is clamped at 0 so `startAt: 0` still yields Alpha.
+  // `numberOffset` shifts every index-derived token together.
+  // `natoWord` is clamped at 0 so `startAt: 0` still yields Alpha.
   const offset = ctx.numberOffset ?? 0;
   const displayIndex = ctx.index === -1 ? -1 : ctx.index + offset;
   const iStr = ctx.index === -1 ? '?' : String(displayIndex + 1);

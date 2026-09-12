@@ -260,8 +260,8 @@ describe('registerInteractionHandler (router)', () => {
   });
 
   /**
-   * Decision 3 and decision 15, which are a pair and are the reason both are
-   * asserted here rather than left to the allow-list reading correctly.
+   * Export stays available while gated, but import cannot mutate configuration.
+   * Test both paths rather than relying on the allow-list looking correct.
    *
    * Refusing to let somebody take their own configuration with them because
    * they stopped paying is exactly what the AGPL positioning rules out, so
@@ -303,7 +303,7 @@ describe('registerInteractionHandler (router)', () => {
   /**
    * The registration default is a DEFAULT, not a gate: a server admin can
    * re-open either command to any role in Server Settings > Integrations, so
-   * this in-code check is the only thing enforcing decision 1.
+   * this in-code check must enforce the Manage Server requirement.
    */
   it.each(['export', 'import'])('refuses /%s without Manage Server', async (commandName) => {
     const env = setup({});
@@ -632,7 +632,7 @@ describe('registerInteractionHandler (router)', () => {
 });
 
 /**
- * `/templateassistant` routing (`plans/assisted_templates.md` §2 and §5).
+ * `/templateassistant` routing.
  *
  * The behaviours worth pinning here are the ones that are easy to get subtly
  * wrong: the command is admin-gated and nothing else gates it, an expired guild
@@ -692,7 +692,7 @@ describe('registerInteractionHandler (/templateassistant)', () => {
     expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('avc:setup:pick:templateassistant');
   });
 
-  // Admin-gated exactly like /template, and that is the *only* gate (§5).
+  // Admin-gated exactly like /template, and that is the *only* gate.
   it('refuses a caller without Manage Channels', async () => {
     const env = assistantEnv();
     dispose = env.dispose;

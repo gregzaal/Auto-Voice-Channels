@@ -1,44 +1,24 @@
 /**
- * Pricing tiers, derived from the member count a subscription covers (see
- * `plans/monetization.md` §2), plus the trial policy applied at bot-add (§3).
+ * Pricing tiers use the member count covered by a subscription. For a pool,
+ * this is the sum across its billable servers.
  *
- * That count is a sum across the servers on the subscription, not one server's
- * size: pooling is the default billing unit
- * (`plans/member-based-pricing.md`). `tierFor()` derives the **required**
- * tier from it; the **billed** tier (what the subscription actually covers) is
- * cached on `guilds.tier`, written from Paddle for a guild-keyed subscription
- * and fanned out from `member_pools.billed_tier` by the reconciler for a
- * pooled one. Keeping the two apart is load-bearing: computing one from the
- * other disables over-limit detection permanently (§5.1).
+ * `tierFor` derives the required tier. The billed tier is stored separately
+ * on the subscription or member pool and mirrored onto guilds. Deriving the
+ * billed tier from current size would silently disable over-limit detection.
+ * Trial policy is evaluated separately at the first bot add.
  */
 /**
- * Every tier id any build in the fleet may legitimately hold, which during a
- * repricing is deliberately a SUPERSET of the ids {@link TIERS} prices.
+ * Accepted stored tier ids. During a repricing this can be a superset of the
+ * ids {@link TIERS} prices.
  *
- * This is the expand half of an expand/contract change (`plans/pricing-ladder.md`
- * §8.2, phase A). Ids are stored text in `guilds.tier`, `subscriptions.tier` and
- * `member_pools.billed_tier`, and **every read of those columns is a
- * `z.enum(TIER_IDS)` with no `.catch()`**: `GuildRepository.ensure`/`.get`
- * `.parse` it and would throw on the hot path behind the entitlement gate
- * (silencing the guild), while `listBatch` in the guild, subscription and pool
- * repositories `safeParse` and **drop** the row, which in the reconciler's
- * ladder walk and the pool fan-out means a customer on a newer tier silently
- * never gets entitlement. So every instance must accept an id before any
- * instance writes it, and this list is how.
+ * Expand before writing: every instance must accept a new id before any
+ * instance stores it. Repository `z.enum(TIER_IDS)` parsing otherwise throws
+ * on a single read or drops the row from batch reads, skipping entitlement.
  *
- * The rarity ids were accepted here a release before {@link TIERS} priced
- * them, and `l`/`xl`/`xxl` stayed accepted a release after it stopped. Phase 7
- * dropped those three on 2026-09-08, so the accept set and the priced set are
- * the same list again, which is the steady state.
- *
- * **Append only** -- never insert, and never reorder: nothing derives size from
- * this array's order (see {@link tierRank}), but `z.enum` and the admin
- * surfaces both read it. **And never SHRINK it without checking the three write
- * vectors first**, because removal is the dangerous direction: every read is a
- * `z.enum` with no `.catch()`, so `.parse` throws on the entitlement hot path
- * and `listBatch` silently drops the row. Retiring the three above was preceded
- * by measuring that no stored row carried them, that no live subscription was
- * stamped with one in Paddle, and that no ACTIVE Paddle price could mint one.
+ * Append new ids without reordering. Size comparisons use {@link tierRank},
+ * never this array's position. Remove an id only after verifying that stored
+ * rows, live subscriptions and active catalogue prices can no longer supply it.
+ * The accepted and priced sets are equal in the steady state.
  */
 export const TIER_IDS = ['free', 's', 'm', 'epic', 'legendary', 'mythic', 'exotic'] as const;
 export type TierId = (typeof TIER_IDS)[number];
@@ -65,30 +45,24 @@ export interface Tier {
    * the yearly price over 12 and is what every surface shows by default. This
    * is the higher figure a customer pays for the convenience of paying monthly,
    * exactly one tenth of the yearly price, so "pay yearly, get two months free"
-   * is arithmetically exact rather than approximately true
-   * (`plans/pricing-ladder.md` §3).
+   * is arithmetically exact rather than approximately true.
    *
    * Uncommon has none because below a yearly price of $28.95 Paddle's fixed 50
    * cents per transaction eats the difference: twelve charges would net less
-   * than one (§3.1).
+   * than one.
    */
   pricePerMonth: number | null;
 }
 
 /**
- * The tier table, ascending by size. The last entry is the unbounded top tier.
+ * The tier table, ascending by size, ending in an unbounded bespoke tier.
  *
- * **The rarity ladder** (`plans/pricing-ladder.md` §3, approved 2026-09-07).
- * Every yearly price is a multiple of 6, so the headline (yearly over 12) is a
- * whole dollar or a half; where monthly billing is offered the yearly price is
- * a multiple of 30, so the monthly price is a whole dollar too. That is rule 4
- * of §4 and it is why these are the exact numbers rather than round-looking
- * yearly figures: $19 shows as $1.58, which the display decision forbids.
+ * Yearly prices are multiples of six so the monthly headline is a whole dollar
+ * or half dollar. Where monthly billing is offered, yearly prices are also
+ * multiples of thirty so the monthly charge is a whole dollar.
  *
- * `s` and `m` keep their ids: their member ranges are unchanged and only the
- * label and price moved, so renaming them would have been a data migration on
- * three rows for cosmetics. `l`, `xl` and `xxl` are gone from both this table
- * and {@link TIER_IDS} as of phase 7.
+ * `s` and `m` retain stable storage ids despite their customer-facing labels.
+ * Renaming a label does not require renaming persisted ids.
  */
 export const TIERS: readonly Tier[] = [
   { id: 'free', label: 'Free', maxExclusive: 100, pricePerYear: 0, pricePerMonth: null },
@@ -115,8 +89,8 @@ export const TIERS: readonly Tier[] = [
 /**
  * A tier's price as one line of prose, for every message the bot sends.
  *
- * The HEADLINE with the billed total beside it, never the yearly figure alone
- * (`plans/pricing-ladder.md` §5.1, §5.3): "$7.50 a month, billed yearly ($90)".
+ * The HEADLINE with the billed total beside it, never the yearly figure alone: "$7.50 a month,
+ * billed yearly ($90)".
  * A bot message has no room for a two-line card and no toggle to offer, so it
  * states the default and the total it comes from.
  *
@@ -139,9 +113,9 @@ export function priceSentence(tier: Tier): string {
  * The headline price: the monthly figure for a tier paid YEARLY.
  *
  * **This is what every customer-facing surface shows**, with the billed yearly
- * total beside it in the same line and never as a footnote
- * (`plans/pricing-ladder.md` §5.1). Derived here rather than stored, so it can
- * never disagree with `pricePerYear`, and exact to the cent by rule 4.
+ * total beside it in the same line and never as a footnote. Derived here rather
+ * than stored, so it never disagrees with `pricePerYear`. The tier table keeps
+ * it exact to the cent.
  *
  * `null` for Free (there is no monthly framing of nothing) and Exotic (quoted).
  */
@@ -151,12 +125,10 @@ export function headlinePerMonth(tier: Tier): number | null {
 }
 
 /**
- * The ids {@link TIERS} actually prices, ascending by size.
- *
- * Use this, never {@link TIER_IDS}, wherever the ladder itself is being
- * rendered or enumerated: during a repricing `TIER_IDS` also carries the ids of
- * the neighbouring release, and {@link tierById} answers `free` for those, so
- * iterating `TIER_IDS` paints phantom rows labelled "Free".
+ * Priced tier ids, ascending by size. Use this list to render or enumerate the
+ * price ladder. {@link TIER_IDS} can include compatibility ids with no price in
+ * this build; {@link tierById}'s lenient largest-tier fallback is an access
+ * safeguard, not a purchasable row to display.
  */
 export const PRICED_TIER_IDS: readonly TierId[] = TIERS.map((t) => t.id);
 
@@ -318,7 +290,7 @@ export function compareTiers(a: TierId, b: TierId): number {
 }
 
 // ---------------------------------------------------------------------------
-// Trial policy (monetization.md §3) — how the trial applies at bot-add time,
+// Trial policy — how the trial applies at bot-add time,
 // by member count. The trial clock starts the moment the bot is FIRST added
 // and runs 1 year; a large guild instead gets a short taste; a huge guild is
 // hard-gated until a subscription is arranged.
@@ -328,11 +300,9 @@ export const TRIAL_YEAR_DAYS = 365;
 /**
  * The short trial, for guilds already large when the bot is added.
  *
- * **30 days, up from 14** (`plans/pricing-ladder.md` §7). A $90-to-$390
- * decision inside a community team needs a purchase cycle, and 30 days of a
- * 300k server costs us about $20. Raising it also changes the warning cadence:
- * `leniency.ts` picks its short offsets for any window of 30 days or less, and
- * the old `[7, 2, 1]` would leave a 30-day trial silent for 23 days.
+ * The warning cadence must cover this whole window: `leniency.ts` selects
+ * short-trial offsets for windows of 30 days or less. Changing the duration
+ * without reviewing those offsets can leave most of the trial silent.
  */
 export const TRIAL_SHORT_DAYS = 30;
 
@@ -350,9 +320,8 @@ export type TrialPolicy =
  * The trial policy for a guild of `memberCount` members at bot-add time.
  *
  * Keyed off the tier id rather than the count so the bounds live in exactly one
- * place. The hard gate moved from 1,000,000 to 300,000 with the rarity ladder
- * (§7, owner decision 5): self-serve ends where rule 2's quarter-margin closes,
- * and a server above it is a conversation before the bot is switched on.
+ * place. Exotic requires an arranged subscription before the bot is enabled;
+ * smaller paid tiers receive the trial window defined below.
  */
 export function trialPolicyFor(memberCount: number): TrialPolicy {
   const tier = tierFor(memberCount);

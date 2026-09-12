@@ -105,13 +105,13 @@ export interface MetricsFreshness {
 }
 
 /**
- * The metric store (`plans/admin-dashboard.md` §3.4).
+ * The metric store.
  *
  * Everything here is written by the bot and only read by the web app - the bot
- * is the only process that sees the events, and §3.3 is explicit that the web
+ * is the only process that sees the events, and the web
  * app never caches diagnostics into this store.
  *
- * **Every aggregation happens server-side**, as `INSERT ... SELECT` and grouped
+ * **Every aggregation happens server-side**, as `INSERT... SELECT` and grouped
  * reads. That is a cost decision as much as a tidiness one: the alternative
  * (pull rows out, reduce in TS, write them back) would move tens of thousands of
  * rows across the wire every hour to produce a few dozen, and per-read pricing is
@@ -241,9 +241,8 @@ export class MetricsRepository {
    * empties should keep the peak it reached. Two rollups land in the same clock
    * hour routinely (the reservation spacing is 55 minutes and the tick is 5), so
    * sweeping and overwriting `rooms.tracked` published whichever sample happened to
-   * be last instead of the largest - understating the exact number
-   * `marketing.md` wants for peak concurrency, in the exact direction that flatters
-   * nothing. Peaks therefore skip the delete and upsert with `greatest`, which is
+   * be last instead of the largest, understating peak concurrency. Peaks therefore skip the delete
+   * and upsert with `greatest`, which is
    * the same operator {@link writeOperator} already gives them on the flush path.
    *
    * The delete is scoped to `instance = ''` - the singleton's own rows - so it
@@ -586,7 +585,7 @@ export class MetricsRepository {
   /**
    * How current the store is, per metric or across all of them.
    *
-   * The reason this exists at all is §8's risk row: a collector that dies quietly
+   * A collector that dies quietly
    * makes every chart downstream read zero, and a zero is indistinguishable from
    * an answer. Anything rendering a series is expected to show staleness in place
    * of a shape, so it needs a number to decide that from.

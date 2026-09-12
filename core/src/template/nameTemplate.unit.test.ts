@@ -721,7 +721,7 @@ describe('resolveEmptyOccupied (__empty/occupied__)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Conditional operands (plans/name-tokens.md §5.1)
+// Conditional operands
 // ---------------------------------------------------------------------------
 
 describe('conditional operands', () => {
@@ -779,7 +779,7 @@ describe('conditional operands', () => {
     }
   });
 
-  /** A typo has to keep failing safe: `assisted_templates.md` §9 leans on it. */
+  /** Unknown operands stay falsy, including templates produced by the assistant. */
   it('keeps an unknown name falsy rather than treating it as a string literal', () => {
     expect(renderChannelName('{{PLAYERZ!=5 ?? Y // N}}', ctx())).toBe('N');
     expect(renderChannelName('{{PLAYERZ ?? Y // N}}', ctx())).toBe('N');
@@ -800,7 +800,7 @@ describe('conditional operands', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Member-controlled text (plans/name-tokens.md §5.2)
+// Member-controlled text
 // ---------------------------------------------------------------------------
 
 describe('substituted member text cannot form engine delimiters', () => {
@@ -883,7 +883,7 @@ describe('substituted member text cannot form engine delimiters', () => {
 });
 
 // ---------------------------------------------------------------------------
-// The new vocabulary (plans/name-tokens.md §5.4)
+// The new vocabulary
 // ---------------------------------------------------------------------------
 
 describe('capacity tokens and FULL', () => {
@@ -1200,7 +1200,7 @@ describe('date and time parts', () => {
     );
     /**
      * `@@hour@@` as the OPERAND, and there is deliberately no `HOUR` variable:
-     * §5.1's rule is that a variable must express something a comparison of
+     * A variable must express something a comparison of
      * tokens cannot, and this comparison already says it. `WEEKDAY` and `MONTH`
      * do earn theirs, because `=` and `:` on a string is not something any token
      * can be compared with.

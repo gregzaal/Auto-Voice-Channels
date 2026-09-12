@@ -43,7 +43,7 @@ describe('ShardLeaseRepository (integration)', () => {
   });
 
   /**
-   * `plans/fleets.md` §2: two live bots shard independently against one
+   * Two live bots shard independently against one
    * database, so shard 0 exists once per fleet. Before the fleet column this was
    * impossible by construction, and getting it wrong in either direction is
    * severe: shared, and beta starves prod of shards; unscoped reads, and an
@@ -129,7 +129,7 @@ describe('ShardLeaseRepository (integration)', () => {
   });
 
   /**
-   * `plans/scaling.md` §9.1 finding 2. Simulates an instance whose own belief
+   * Simulates an instance whose own belief
    * of what it owns has shrunk (e.g. a restart under a smaller cap between
    * Step A and Step B) while the database still carries its stale claim on a
    * shard it no longer serves. Before this fix, an unfiltered heartbeat would

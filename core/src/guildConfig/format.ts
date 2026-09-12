@@ -9,9 +9,8 @@ import { z } from 'zod';
  * > Any other value is the stored value verbatim.
  *
  * That is what makes the round trip exact, and an exact round trip is what makes
- * the pre-import snapshot a real undo rather than an approximation
- * (`plans/import_command.md` §6.3). Two failure modes it closes, both of which
- * an "omit what is unset" format has:
+ * the pre-import snapshot a real undo rather than an approximation. It closes
+ * two failure modes of an "omit what is unset" format:
  *
  * - **`""` and absent are different values, and the runtime distinguishes them at
  *   three levels.** An absent `channel_status_template` means "use
@@ -207,8 +206,7 @@ export const guildConfigFileSchema = z.object({
    *
    * **A mismatch is never a refusal.** In the flow this whole feature exists for
    * it differs by construction: the hosted bot exports and the self-hoster's own
-   * application imports. It is the trigger for the two-bots warning
-   * (`plans/import_command.md` §5.9), nothing else.
+   * application imports. It is the trigger for the two-bots warning, nothing else.
    */
   source_application_id: z.string().nullable(),
   /**
@@ -313,7 +311,7 @@ export type ParseNativeResult = { ok: true; file: GuildConfigFile } | { ok: fals
  *
  * The failure reason names the path and the problem and **never the value**: an
  * error from here can reach the admin channel through `reportError`, and file
- * content must not travel that way (`plans/import_command.md` §9).
+ * content must not travel that way.
  */
 export function parseNativeFile(parsed: unknown): ParseNativeResult {
   const result = guildConfigFileSchema.safeParse(parsed);

@@ -2,7 +2,7 @@ import type { DbPool } from '../db/client.js';
 import { fleetAdvisoryKey, type Fleet } from '../domain/fleets.js';
 
 /**
- * Leader election and the "is a backup due" decision (`plans/backups.md` §5).
+ * Leader election and the "is a backup due" decision.
  *
  * Pure-ish and in `core` rather than the bot, so it can be tested against a
  * real Postgres without booting a gateway. The bot supplies the timer; this
@@ -16,9 +16,8 @@ import { fleetAdvisoryKey, type Fleet } from '../domain/fleets.js';
 /**
  * Advisory-lock namespace for backups.
  *
- * `0x5a7c_0002` is taken by the billing reconcile job, despite `backups.md` §5
- * naming it for this. Next free base, rather than a collision that would make
- * the billing advance and a backup mutually exclusive at random.
+ * `0x5a7c_0002` belongs to the billing reconcile job. Backups use a distinct
+ * namespace so an unrelated billing reservation cannot delay backup election.
  */
 export const BACKUP_ADVISORY_LOCK = 0x5a7c_0003;
 

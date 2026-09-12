@@ -24,8 +24,8 @@ export interface HealthReport {
   instanceId: string;
   /**
    * True for an instance holding zero shard leases *by design* — an
-   * over-provisioned fleet, or a spare machine ahead of a config change
-   * (`plans/scaling.md` §9). `subsystems.leases` still reads `down` (that
+   * over-provisioned fleet, or a spare machine ahead of a config change.
+   * `subsystems.leases` still reads `down` (that
    * part is a fact), but `status` reads `up` regardless, specifically so
    * this case doesn't collide with a genuinely broken instance failing to
    * hold leases it's supposed to. Absent (not merely `false`) on the normal
@@ -58,7 +58,7 @@ export interface DiagnosticsReport {
    */
   ai: Record<string, unknown> | null;
   /**
-   * Scheduled-backup state (`plans/backups.md` §8). `{ enabled: false }` when no
+   * Scheduled-backup state. `{ enabled: false }` when no
    * storage is configured, which is the self-host default.
    *
    * Reported here rather than in `/health` on purpose: `stale` is informational

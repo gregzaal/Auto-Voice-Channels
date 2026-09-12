@@ -1,8 +1,8 @@
 import { z } from 'zod';
 
 /**
- * Object keys, the manifest sidecar, and grandfather-father-son retention
- * (`plans/backups.md` §4 and §6). Pure: no S3, no filesystem, no clock of its
+ * Object keys, the manifest sidecar, and grandfather-father-son retention. Pure: no S3, no
+ * filesystem, no clock of its
  * own. Everything that decides what to delete lives here so it can be tested
  * exhaustively rather than observed in production.
  */
@@ -113,8 +113,7 @@ function weekKey(d: Date): string {
  * than three independent lists.
  *
  * **The newest backup is always kept, unconditionally**, even with a policy of
- * all zeroes. Pruning to nothing is never what an operator meant, and §6 is
- * explicit that we never end up with no backup.
+ * all zeroes. Retention must never prune away every recoverable backup.
  */
 export function planRetention(
   entries: readonly BackupEntry[],

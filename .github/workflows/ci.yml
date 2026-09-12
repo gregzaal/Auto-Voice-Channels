@@ -71,9 +71,8 @@ jobs:
       - name: Runtime assets present in dist
         run: test -f bot/dist/features/templateAssistant/systemPrompt.md
 
-      # Guards against the Dockerfile bug this module was rewritten to fix
-      # (plans/versioning.md §6): a stale build-arg silently pinning the
-      # reported version regardless of what package.json says.
+      # The built module must read the root package version, not a stale
+      # build-arg or an internal workspace package's version.
       - name: Version module matches package.json
         run: node scripts/checkVersionModule.mjs
 

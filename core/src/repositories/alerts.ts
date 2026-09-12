@@ -61,7 +61,7 @@ export interface AlertRow {
 
 /**
  * Operational alerts as rows, so a missed delivery is a retry rather than a
- * lost signal (`plans/agentic_management.md`).
+ * lost signal.
  *
  * Fleet-scoped through the constructor, like every other repository here.
  * Pass the fleet explicitly at every call site: the default exists so tests and

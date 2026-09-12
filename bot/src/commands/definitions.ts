@@ -10,7 +10,7 @@ import type { Logger } from '@avc/core';
 import { MAX_USER_LIMIT } from '../features/voice/index.js';
 
 /**
- * Slash-command surface. A hybrid (rewrite.md decision 11): direct commands for
+ * Slash-command surface. A hybrid: direct commands for
  * the frequent per-channel actions, plus an admin `/settings` panel for guild
  * configuration. Admin commands are gated with `ManageChannels`; the per-channel
  * owner check lives in the command logic.
@@ -21,7 +21,7 @@ export interface CommandBuildOptions {
   /**
    * Include `/templateassistant`. Registered only when a model endpoint is
    * configured (`AVC_AI_API_KEY`), so a self-hoster who hasn't set one never
-   * sees a command that could only apologise (`plans/assisted_templates.md` §3).
+   * sees a command that could only apologise.
    */
   includeAssistant?: boolean;
 }

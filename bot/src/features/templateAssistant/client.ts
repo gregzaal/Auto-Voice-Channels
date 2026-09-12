@@ -1,7 +1,6 @@
 /**
  * The LLM seam for `/templateassistant` — one **OpenAI-compatible**
- * `/v1/chat/completions` call, configured by env
- * (`plans/assisted_templates.md` §3).
+ * `/v1/chat/completions` call, configured by env.
  *
  * Deliberately not the Anthropic SDK and deliberately not a set of per-provider
  * adapters: the driving requirement is self-host UX, where "set three env vars"
@@ -36,7 +35,7 @@ export interface ChatClient {
 /**
  * A provider-side failure: the call never produced a usable completion. Callers
  * distinguish this from a *bad* completion, because only the former refunds the
- * guild's reserved build (`plans/assisted_templates.md` §5).
+ * guild's reserved build.
  */
 export class AiProviderError extends Error {
   constructor(
@@ -56,7 +55,7 @@ export interface OpenAiCompatOptions {
   timeoutMs?: number;
   /**
    * Cap on the completion. ~500 is safe: reasoning tokens count against it and
-   * observed visible completions were only ~35-85 tokens (§9).
+   * observed visible completions were only ~35-85 tokens.
    */
   maxCompletionTokens?: number;
   /** Attempts on a retryable failure (429 / 5xx / network). */
@@ -72,7 +71,7 @@ interface ChatCompletionBody {
   temperature?: number;
   max_completion_tokens?: number;
   max_tokens?: number;
-  /** Nudges providers that support it toward a bare JSON object (§4). */
+  /** Nudges providers that support it toward a bare JSON object. */
   response_format?: { type: 'json_object' };
 }
 

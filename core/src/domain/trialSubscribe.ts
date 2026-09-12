@@ -1,8 +1,7 @@
 import type { AuthStatus } from './auth.js';
 
 /**
- * Whether a server can commit today and be charged when its trial ends
- * (`plans/pricing-ladder.md` §6.5, decision 9).
+ * Whether a server can commit today and be charged when its trial ends.
  *
  * A server in its free year should be able to subscribe without forfeiting the
  * months it has left, and a server in its 30 days should be able to stop the
@@ -56,7 +55,7 @@ export interface TrialSubscribeWindow {
  * Null for four reasons, all of which mean "the ordinary checkout is correct":
  * the guild is not on a trial at all (`active`, `grace`, `expired`, `blocked`),
  * its clock never started, the trial is already spent, or there is less than a
- * day left. §6.5 names the last two explicitly: a trial with hours left has
+ * day left. A trial with hours left has
  * nothing left to preserve, and a Paddle trial is measured in whole days, so
  * there is no shorter one to ask for.
  *

@@ -44,7 +44,7 @@ import type { BillingNotifier } from './notifier.js';
  * Leniency reasons whose notification stops service (or is the flip side of
  * that: service resuming) rather than merely nudging the purchaser about
  * money. These fan out to every live member guild, one row each, through the
- * ordinary guild-scoped queue (`plans/member-based-pricing.md` §6.6) — every
+ * ordinary guild-scoped queue — every
  * affected server must hear it, not one representative. Everything else
  * (payment failed, over limit, renewal reminders) is a billing event and goes
  * to the purchaser alone.
@@ -94,7 +94,7 @@ export interface BillingReconcilerDeps {
   memberPoolGuilds: MemberPoolGuildRepository;
   /**
    * Cross-fleet presence, for deciding whether a pool member has actually
-   * left (§5.6) — a plain query, not scoped to this instance's own fleet
+   * left — a plain query, not scoped to this instance's own fleet
    * (`presentFleets`/`fullyAbsentSince` read every fleet's row regardless).
    */
   presence: GuildFleetPresenceRepository;
@@ -104,15 +104,15 @@ export interface BillingReconcilerDeps {
    * member's departure grace window has elapsed.
    */
   db: Database;
-  /** The Discord snowflake behind an Auth.js user id, for purchaser DMs (§6.6). */
+  /** The Discord snowflake behind an Auth.js user id, for purchaser DMs. */
   resolveDiscordUserId: (authUserId: string) => Promise<string | null>;
   opsAudit: OpsAuditRepository;
   notifier: BillingNotifier;
   /** Member counts from this instance's gateway cache (the daily sampler). */
   listCachedGuildCounts: () => { guildId: string; memberCount: number }[];
   /**
-   * Fresh authoritative count via REST `GET /guilds/{id}?with_counts=true`
-   * (§5 step 3). Null = unavailable → the transition is skipped this run.
+   * Fresh authoritative count via REST `GET /guilds/{id}?with_counts=true`.
+   * Null = unavailable → the transition is skipped this run.
    */
   fetchAuthoritativeCount: (guildId: string) => Promise<number | null>;
   logger: Logger;
@@ -166,24 +166,24 @@ export interface BillingRunStats {
 const JOB_KEY = 'billing.advance';
 
 /**
- * The trial/billing reconcile job (monetization.md §7): the background half of
- * decision 10's "time-based transitions". Three phases per tick:
+ * The trial/billing reconcile job applies time-based transitions.
+ * Three phases per tick:
  *
  * 1. **Sample** (every instance): record a daily member-count sample for each
  *    guild in this instance's gateway cache — each instance covers exactly the
  *    guilds its shards own.
- * 2. **Advance** (cluster singleton): under the billing advisory lock +
- *    durable spacing (`billing_runs`), walk every guild in the DB, backfill
- *    missing trial windows, run the pure leniency machine, validate any
- *    billing-affecting transition against a fresh authoritative member count
- *    (§5), apply it via `transitionAuth`, and **queue** the notifications due.
+ * 2. **Advance** (one authorized fleet): claim a shared, durably spaced
+ *    reservation (`billing_runs`), then walk the database, backfill missing
+ *    trial windows and run the pure leniency machine. Validate billing-affecting
+ *    transitions against a fresh member count, apply them via `transitionAuth`,
+ *    and **queue** the notifications due. The lock protects the reservation
+ *    transaction, not the entire pass.
  * 3. **Deliver** (every instance, its own fleet only): drain the queue for
  *    guilds this fleet is actually in, send, and stamp the dedupe key.
  *
- * **Phases 2 and 3 are separate because different bots do them**
- * (`plans/fleets.md` §4). Advancement is fleet-wide work on shared rows, so
- * exactly one instance in the whole cluster may do it, across both fleets.
- * Delivery needs a bot that is in the guild, and the winner of that lock may
+ * **Phases 2 and 3 are separate because different bots do them**.
+ * Advancement changes shared customer rows using the authorized fleet's flags.
+ * Delivery needs a bot that is in the guild, and the reservation winner may
  * not be: a single loop would mean a guild advanced by a fleet that cannot
  * see it is never told, silently and permanently, whenever more than one
  * fleet is running.
@@ -277,12 +277,13 @@ export class BillingReconciler {
       /**
        * Advancing is opt-out per fleet, delivering is not.
        *
-       * The shared advisory lock already makes advancement a cluster
-       * singleton, so this flag is belt to that braces: it lets an operator
-       * say which fleet is allowed to try, which is what `plans/fleets.md` §4
-       * means by "config decides which". Checked here rather than inside
-       * `advancePhase` so a disabled fleet does not consume the reservation
-       * window and leave the enabled one waiting for the next one.
+       * `reserveRun` serializes a shared reservation, not the whole pass:
+       * its transaction lock is released before `advancePhase` runs. The
+       * reservation spaces attempts but is not a full-duration mutex.
+       * This flag selects the sole authorized fleet because advancement reads
+       * that fleet's flags while changing customer state shared by every fleet.
+       * Keep advancement disabled on all other fleets. Checked here so they
+       * cannot consume the authorized fleet's reservation window.
        */
       if (!(await this.deps.flags.getBool(RUNTIME_FLAGS.BILLING_ADVANCE_DISABLED))) {
         const reserved = await this.deps.runs.reserveRun(
@@ -328,7 +329,7 @@ export class BillingReconciler {
     }
   }
 
-  /** Phase 2 — advance the leniency ladder for every guild (cluster singleton). */
+  /** Phase 2 — advance shared customer state after claiming the reservation. */
   private async advancePhase(): Promise<void> {
     const config = await this.readConfig();
     this.stats.lastAdvanceAt = this.now().toISOString();
@@ -336,7 +337,7 @@ export class BillingReconciler {
     /**
      * Pools first: pool aggregation is a prerequisite computation for the same
      * walk, not a separate job, so it belongs inside this one reservation
-     * rather than racing it (`plans/member-based-pricing.md` §6.5). Standard,
+     * rather than racing it. Standard,
      * unconditional behaviour — `global.pause` and
      * `billing.reconcile_disabled` already gate the whole job upstream of
      * this, and pooling carries no kill-switch of its own.
@@ -351,8 +352,8 @@ export class BillingReconciler {
       for (const row of rows) {
         if (this.stopping) return;
         // Pooled guilds are evaluated exactly once per tick, by the pool pass
-        // above, never by this walk too (§6.5). A guild whose OWN size is
-        // still free (§5.3) is excluded from that pass and stays here,
+        // above, never by this walk too. A guild whose OWN size is
+        // still free is excluded from that pass and stays here,
         // because pooling never touches a free-forever guild's own state.
         if (row.poolId && tierFor(row.memberCount ?? 0).id !== 'free') continue;
         try {
@@ -389,8 +390,8 @@ export class BillingReconciler {
   }
 
   /**
-   * Pool aggregation, walked before the per-guild loop
-   * (`plans/member-based-pricing.md` §6.5). Runs inside the SAME reservation
+   * Pool aggregation, walked before the per-guild loop.
+   * Runs inside the SAME reservation
    * as the per-guild walk — the pool pass is a prerequisite computation for
    * that walk, not a separate job — and must therefore be idempotent under
    * concurrent execution: the advisory lock only serializes the *reservation*
@@ -424,9 +425,9 @@ export class BillingReconciler {
 
   /**
    * Evaluates and converges ONE pool: aggregate its live, billable members'
-   * counts, run the SAME pure leniency machine the per-guild walk uses (§5.2,
-   * treating the pool as a single virtual entity), then fan the result out to
-   * every member guild it actually changes something for.
+   * counts and treat the pool as one virtual entity in the same pure leniency
+   * machine the per-guild walk uses. Fan the result out only to member guilds
+   * whose state needs to change.
    */
   private async advancePool(pool: MemberPoolRow, config: LeniencyConfig): Promise<void> {
     const now = this.now();
@@ -450,7 +451,7 @@ export class BillingReconciler {
       memberGuilds.push(guild);
     }
     /**
-     * §5.3: a guild whose OWN count is still free-forever is entitled
+     * A guild whose OWN count is still free-forever is entitled
      * regardless of the pool and contributes 0 to the pooled sum, whatever
      * else happens. Excluded here rather than merely zero-valued, so it is
      * never a fan-out target either — its own dormant trial state is untouched.
@@ -459,7 +460,7 @@ export class BillingReconciler {
     const pooledSum = billableGuilds.reduce((sum, g) => sum + (g.memberCount ?? 0), 0);
 
     /**
-     * The pool's own forward-only sampler (§5.2a). `authoritative: true`
+     * The pool's own forward-only sampler. `authoritative: true`
      * always: this sum is freshly derived from every live member's own count
      * on every tick, never a cached hint, so there is nothing for the anomaly
      * clamps to protect against.
@@ -475,7 +476,7 @@ export class BillingReconciler {
 
     if (decision.transition?.requiresCountValidation) {
       /**
-       * The asymmetric resolution (§5.2b): capping the reads breaks the
+       * The asymmetric resolution: capping the reads breaks the
        * upgrade invariant, so an upgrade needs a fresh read for EVERY live
        * member and defers the whole pool if any is unavailable. A downgrade
        * or reactivation proceeds on the samples alone — it fails in the
@@ -520,7 +521,7 @@ export class BillingReconciler {
     }
 
     if (decision.transition) {
-      // A pool never holds `trial` (§5.4) or `blocked`. `evaluateLeniency`'s
+      // A pool never holds `trial` or `blocked`. `evaluateLeniency`'s
       // free-forever reactivation path returns `trial`, which for a POOL
       // (a paid construct that shrank to nothing billable) means "keep
       // billing, nothing to gate" rather than a state the enum even has.
@@ -557,7 +558,7 @@ export class BillingReconciler {
 
   /**
    * Evicts one pool member whose absence from EVERY fleet has passed the
-   * grace window (`guildDepartedLongEnough`, §5.6), and returns whether it
+   * grace window (`guildDepartedLongEnough`), and returns whether it
    * did, so the caller excludes an evicted guild from this tick's pooled sum.
    *
    * This is the ONLY place a pool exit is decided now. It used to be decided
@@ -582,12 +583,12 @@ export class BillingReconciler {
     // Raced with another remover (the dashboard, or a concurrent advance
     // pass) between `listLive` and here — nothing left for this call to do.
     if (!poolId) return false;
-    // Reset, not reinterpret (§5.2a): the pool's sample history was recorded
+    // Reset, not reinterpret: the pool's sample history was recorded
     // under a membership this guild is no longer part of.
     await this.deps.memberPools.resetSamples(poolId);
 
     // `blocked` outranks billing everywhere, and a kick-then-reinvite must
-    // never launder the abuse kill-switch into `grace` (`plans/refunds.md` §2.3).
+    // never launder the abuse kill-switch into `grace`.
     if (guild.authStatus === 'blocked') return true;
 
     const current = { authStatus: guild.authStatus, graceUntil: guild.graceUntil };
@@ -641,7 +642,7 @@ export class BillingReconciler {
     const meta = parseBillingMeta(pool.metadata);
     return {
       authStatus: pool.status,
-      authExpiresAt: null, // a pool has no trial window, ever (§5.4)
+      authExpiresAt: null, // a pool has no trial window, ever
       graceUntil: pool.graceUntil,
       billedTier: pool.billedTier,
       hasSubscription: subscription !== undefined,
@@ -673,11 +674,9 @@ export class BillingReconciler {
    *
    * A null floor hands the guild to its own ladder, which is where the trial
    * warnings, the 60-day grace, `hard_gate_disabled` and the notification dedupe
-   * all live. That is the part of this design with the least margin: §6.5 and
-   * the pooled-skip in the per-guild walk exist to say a pooled guild is
-   * evaluated by exactly one thing, and this points that hazard the other way.
-   * Every branch was checked, but it is still an argument that a documented
-   * hazard is safe in one direction.
+   * all live. The per-guild walk skips pooled non-free guilds, so this branch
+   * must be their only evaluator. Do not also route them through the per-guild
+   * walk, which would let two evaluations overwrite each other's transitions.
    */
   private async convergePoolMembers(
     poolId: string,
@@ -790,7 +789,7 @@ export class BillingReconciler {
   }
 
   /**
-   * Splits the pool's due notifications by audience (§6.6): service-stopping
+   * Splits the pool's due notifications by audience: service-stopping
    * kinds fan out to every live member guild through the ordinary per-guild
    * queue (each gets its own dedupe/retry/expiry, and carries `sourcePoolId`
    * so the deliverer knows which pool to stamp); everything else is a billing
@@ -876,14 +875,14 @@ export class BillingReconciler {
     if (row.authStatus === 'blocked') return;
 
     let current = row;
-    // Backfill the trial window for rows that predate onboarding (§0 Phase 1:
-    // the clock started when the bot was first added — the row's creation).
+    // Backfill the trial window for rows that predate onboarding. The clock
+    // started when the bot was first added, recorded as the row's creation.
     if (current.authStatus === 'trial' && current.authExpiresAt === null) {
       // No sample yet → no signal to pick a policy; leave the row for
       // onboarding (fresh joins) or a later pass once sampling caught up.
       if (current.memberCount === null) return;
       const policy = trialPolicyFor(current.memberCount);
-      // The at-add count is unrecorded for pre-onboarding rows, and §3 says a
+      // The at-add count is unrecorded for pre-onboarding rows. A
       // guild that GREW past 10k keeps its year window (the 14-day clock is
       // only for servers that join already large) — so never retro-apply it.
       const effectivePolicy = policy === 'short' ? 'year' : policy;
@@ -905,8 +904,7 @@ export class BillingReconciler {
          * This used to be a bare `return`, which meant no window, no warning,
          * no gate and no record, permanently and silently. It was unreachable
          * while the gate sat at 1,000,000; the rarity ladder moved it to
-         * 300,000, so it is now merely improbable (`plans/pricing-ladder.md`
-         * §7 lists it as the edge case phase 1 has to close).
+         * 300,000, so it is now merely improbable.
          *
          * Still no retro-gate: this guild has been working, and cutting it off
          * because a boundary moved under it is the one outcome the leniency
@@ -923,8 +921,7 @@ export class BillingReconciler {
          * without bound, but the readers are the harm: `loadRecentOps(25)`,
          * `opsAudit.recent(50)` and `v_recent_ops` ("the last hour") would show
          * nothing else within a day, so the row meant to make one guild visible
-         * would hide every other operator action. Same reasoning as the
-         * permission-problem backoff in AGENTS.md, and `hasActionSince` bounds
+         * would hide every other operator action. `hasActionSince` bounds
          * the check in SQL rather than reading a page and filtering.
          */
         const alreadyToday = await this.deps.opsAudit
@@ -960,7 +957,7 @@ export class BillingReconciler {
     let decision = await this.evaluate(current, now, config);
 
     if (decision.transition?.requiresCountValidation) {
-      // §5 steps 3–5: the fresh authoritative read is THE tie-breaker before
+      // The fresh authoritative read is THE tie-breaker before
       // any billing-affecting transition — always adopted and re-evaluated,
       // even inside the discrepancy threshold (a small disagreement can still
       // straddle a tier boundary). Unavailable → wait for the next run.
@@ -1140,7 +1137,7 @@ export class BillingReconciler {
          * before its hard gate is the failure this phase exists to prevent.
          */
         await this.deps.guilds.recordBillingNotification(row.guildId, row.key, now);
-        // This row is one copy of a pool's fan-out (§6.6). Stamp the POOL's
+        // This row is one copy of a pool's fan-out. Stamp the POOL's
         // own dedupe key on this, the first confirmed delivery — restamping
         // on a later copy's delivery is harmless (same key, newer timestamp).
         // Never stamped at enqueue time: a pool whose every copy fails must
@@ -1185,7 +1182,7 @@ export class BillingReconciler {
 
   /**
    * The pool-axis sibling of the delivery loop above: purchaser-targeted
-   * billing notifications (grace_started, grace_nudge — §6.6). Service-
+   * billing notifications (grace_started, grace_nudge). Service-
    * stopping notifications never reach here; `queuePoolNotifications` already
    * fanned those out as ordinary guild-scoped rows, delivered by the loop
    * above like any other guild notice.
@@ -1297,10 +1294,10 @@ export class BillingReconciler {
       billedTier: row.tier,
       hasSubscription: subscription !== undefined,
       subscriptionOk: subscription ? subscriptionInGoodStanding(subscription) : false,
-      // Gates the trial-resume branch only (§6.5a). A missing row reads as
+      // Gates the trial-resume branch only. A missing row reads as
       // charged, which is the direction that cannot give service away.
       subscriptionNeverCharged: subscriptionNeverCharged(subscription),
-      // Sizes the grace window (§6.3). Absent reads as annual, so a
+      // Sizes the grace window. Absent reads as annual, so a
       // pre-column row keeps the 60 days it has always had.
       billingInterval: subscription?.billingInterval,
       memberCount: row.memberCount,

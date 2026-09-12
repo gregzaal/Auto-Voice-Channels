@@ -43,7 +43,7 @@ describe('tierFor', () => {
     expect(tierFor(Number.NaN).id).toBe('free');
   });
 
-  it('exposes the rarity ladder prices (pricing-ladder.md §3)', () => {
+  it('exposes the rarity ladder prices', () => {
     expect(tierFor(50).pricePerYear).toBe(0);
     expect(tierFor(500).pricePerYear).toBe(18);
     expect(tierFor(5_000).pricePerYear).toBe(30);
@@ -54,7 +54,7 @@ describe('tierFor', () => {
   });
 
   /**
-   * Rule 4 (§4): the headline is a whole dollar or a half, and where monthly
+   * Rule 4: the headline is a whole dollar or a half, and where monthly
    * billing is offered the monthly price is a whole dollar. This is the test
    * that makes a price nobody can display fail the build, which is the whole
    * reason the yearly figures are multiples of 6 and 30 rather than round.
@@ -79,7 +79,7 @@ describe('tierFor', () => {
 
   it('offers monthly billing only where twelve charges beat one', () => {
     // Below a yearly price of $28.95 Paddle's fixed 50c per transaction eats
-    // the difference, so Uncommon is deliberately yearly-only (§3.1).
+    // the difference, so Uncommon is deliberately yearly-only.
     for (const tier of TIERS) {
       const monthlyOffered = tier.pricePerMonth !== null;
       const clearsTheLine = (tier.pricePerYear ?? 0) > 28.95;
@@ -120,7 +120,7 @@ describe('tier helpers', () => {
   });
 });
 
-describe('trialPolicyFor (monetization.md §3)', () => {
+describe('trialPolicyFor', () => {
   it('maps size bands at their boundaries', () => {
     expect(trialPolicyFor(0)).toBe('dormant');
     expect(trialPolicyFor(99)).toBe('dormant');
@@ -141,7 +141,7 @@ describe('trialPolicyFor (monetization.md §3)', () => {
 });
 
 /**
- * The accept set against the price table (`plans/pricing-ladder.md` §8.2).
+ * The accept set against the price table.
  *
  * `TIER_IDS` and `TIERS` are two hand-maintained literals, and during a
  * repricing they deliberately disagree: the accept set is a superset. These

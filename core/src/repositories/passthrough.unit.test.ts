@@ -27,7 +27,7 @@ describe('template and state schemas preserve unknown fields', () => {
    * a bare `z.object` for exactly as long. Every command that touches a room
    * does a read-modify-write on it (`/name`, `/private`, `/public`, the roster
    * update on every join and leave), so an old instance in a rolling deploy was
-   * the widest stripper of the four (`plans/name-tokens.md` §6.5).
+   * the widest stripper of the four.
    */
   it('keeps an unknown field on a room state', () => {
     expect(secondaryStateSchema.parse({ seed: 7, index: 0, futureThing: 'x' })).toMatchObject({

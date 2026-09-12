@@ -14,7 +14,7 @@ export interface ExpiredJoinNotifierOptions {
 }
 
 /**
- * The one carve-out from the hard-gate short-circuit (§4): when someone joins
+ * The one carve-out from the hard-gate short-circuit: when someone joins
  * a *creator channel* in a non-entitled guild, post a friendly "AVC is paused
  * here — reactivate at auto-voice.io" notice into that channel's text chat.
  * Heavily throttled per guild so a gated guild costs ~nothing and nobody gets

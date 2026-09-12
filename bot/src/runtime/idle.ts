@@ -4,12 +4,10 @@ import { COMMIT, VERSION } from '../version.js';
 import type { ShardLeaseManager } from './shardLeaseManager.js';
 
 /**
- * Idle bring-up for an instance holding zero shards (`plans/scaling.md`
- * §9.1). An over-provisioned fleet (`EXPECTED_INSTANCES` ahead of the real
- * machine count), or Step B's own deliberate window - a spare machine
- * created ahead of a config flip - ends boot-time claiming with zero owned
- * shards. discord.js cannot represent that: `buildGatewayClient` would pass
- * `shards: []`, which `Client._validateOptions` rejects outright
+ * Idle bring-up for an instance holding zero shards. A surplus machine,
+ * including one created ahead of a scaling config change, can finish
+ * boot-time claiming without owning a shard. discord.js cannot represent that:
+ * `buildGatewayClient` would pass `shards: []`, which `Client._validateOptions` rejects outright
  * (`ClientInvalidProvidedShards`), crash-looping the process forever.
  *
  * Deliberately thin: no gateway client, so none of voice/billing/
@@ -133,8 +131,8 @@ export async function runIdle(deps: {
  * directly testable without touching `process` signals or `process.exit` —
  * the same split `gracefulDrain`/`installShutdown` use in `runtime/shutdown.ts`.
  * Nothing here is time-ordered by anything other than "release before close":
- * there's no gateway to destroy first (§6.2 doesn't apply — this instance
- * never had one) and no in-flight per-guild work to drain (there's no
+ * there's no gateway to destroy first because this instance never had one,
+ * and no in-flight per-guild work to drain (there's no
  * dispatcher either, for the same reason).
  */
 export async function idleDrain(deps: {
