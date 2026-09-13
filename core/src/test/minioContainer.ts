@@ -21,7 +21,26 @@ export async function startMinio(bucket = 'avc-test'): Promise<MinioTestEnv> {
   const accessKeyId = 'minioadmin';
   const secretAccessKey = 'minioadmin';
 
-  const container = await new GenericContainer('minio/minio:RELEASE.2024-09-13T20-26-02Z')
+  /**
+   * **`quay.io`, not Docker Hub, and that is not interchangeable.** `minio/minio`
+   * on Docker Hub stopped serving anonymous pulls: the registry answers 404
+   * "pull access denied ... repository does not exist or may require 'docker
+   * login'" for every tag, including ones it served before. That is a removal,
+   * not a rate limit, which answers 429 and would come back on its own.
+   *
+   * It broke CI silently on 2026-09-12 and took a day to notice, because these
+   * four suites `describe.skipIf` themselves away without `pg_dump` on PATH, so
+   * they are green on a developer machine and only ever run in CI. A machine
+   * that pulled the image before the removal keeps working from its local
+   * cache, which is its own trap: the check is `docker rmi` the tag and pull
+   * again, never "it works here".
+   *
+   * MinIO publishes the same release to quay.io (identical digest, verified),
+   * so the tag is unchanged. If quay ever does the same thing, the options are
+   * an authenticated Docker Hub pull in CI, which does not help anyone locally,
+   * or a different S3 implementation entirely.
+   */
+  const container = await new GenericContainer('quay.io/minio/minio:RELEASE.2024-09-13T20-26-02Z')
     .withEnvironment({ MINIO_ROOT_USER: accessKeyId, MINIO_ROOT_PASSWORD: secretAccessKey })
     .withCommand(['server', '/data'])
     .withExposedPorts(9000)
