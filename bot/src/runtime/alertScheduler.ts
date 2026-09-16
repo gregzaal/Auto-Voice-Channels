@@ -95,6 +95,16 @@ export interface AlertSchedulerDeps {
   intervalMs?: number;
   /** How long an unseen alert stays open before it is aged out. */
   staleAfterMs?: number;
+  /** How often a still-open critical is restated. See {@link REMIND_EVERY_MS}. */
+  remindEveryMs?: number;
+  /**
+   * Mention string prepended to a REMINDER only, never to a first report.
+   *
+   * A message in a channel nobody is reading is not a notification, and a
+   * condition still open half an hour later has already demonstrated that
+   * nobody read it. Absent unless configured, which is the self-host default.
+   */
+  mention?: string | undefined;
   fetchFn?: typeof fetch;
   setIntervalFn?: typeof setInterval;
   clearIntervalFn?: typeof clearInterval;
@@ -168,6 +178,66 @@ const CHUNK_CHARS = 1700;
 const PRUNE_RESOLVED_AFTER_MS = 30 * 24 * 3_600_000;
 
 /**
+ * How often a critical that is STILL true is restated in the admin channel.
+ *
+ * **One message per condition was the gap the 2026-09-15 outage fell through.**
+ * A prod machine exhausted its restart budget during a Discord outage and
+ * stayed stopped; the condition was detected and posted once, and then nothing
+ * mentioned it again for seventeen hours while a quarter of the fleet served
+ * nobody. The first message is a notification. Something has to keep saying it
+ * until a human acts, or the only escalation left is someone happening to look
+ * at a status page.
+ *
+ * Half an hour: long enough that a real incident produces a handful of lines
+ * rather than a wall, short enough that it is still nagging when the next
+ * person looks. Criticals only, so a fleet that is merely warning stays quiet.
+ */
+const REMIND_EVERY_MS = 30 * 60_000;
+
+/**
+ * Conditions restated per tick.
+ *
+ * Small on purpose and for a different reason than the delivery cap: every row
+ * here is by definition something already posted once, so a backlog is not
+ * urgent, and a fleet with twenty open criticals wants a digest rather than
+ * twenty lines a minute.
+ */
+const MAX_REMINDERS_PER_TICK = 5;
+
+/** `2h14m`, for "this has been broken for". Minutes below an hour. */
+function formatOpenFor(ms: number): string {
+  const minutes = Math.max(1, Math.round(ms / 60_000));
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h${String(minutes % 60).padStart(2, '0')}m`;
+}
+
+/**
+ * Splits rendered lines into groups that fit one message.
+ *
+ * The sibling of {@link chunkByLength}, over finished strings rather than rows:
+ * a reminder line carries an "open for" suffix the row-shaped estimate does not
+ * know about, and a length budget that is wrong in the unsafe direction is how
+ * a message gets truncated by Discord.
+ */
+function chunkLines(lines: readonly string[], budget: number): string[][] {
+  const chunks: string[][] = [];
+  let current: string[] = [];
+  let length = 0;
+  for (const line of lines) {
+    if (current.length > 0 && length + line.length + 1 > budget) {
+      chunks.push(current);
+      current = [];
+      length = 0;
+    }
+    current.push(line);
+    length += line.length + 1;
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
+/**
  * Separator for the `key`+`target` gate ids, written as an escape.
  *
  * NUL because it cannot occur in an alert key or a snowflake, and as `\u0000`
@@ -237,6 +307,7 @@ export class AlertScheduler {
 
   private readonly intervalMs: number;
   private readonly staleAfterMs: number;
+  private readonly remindEveryMs: number;
   private readonly fetchFn: typeof fetch;
   private readonly setIntervalFn: typeof setInterval;
   private readonly clearIntervalFn: typeof clearInterval;
@@ -244,6 +315,7 @@ export class AlertScheduler {
   constructor(private readonly deps: AlertSchedulerDeps) {
     this.intervalMs = deps.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.staleAfterMs = deps.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
+    this.remindEveryMs = deps.remindEveryMs ?? REMIND_EVERY_MS;
     this.fetchFn = deps.fetchFn ?? fetch;
     this.setIntervalFn = deps.setIntervalFn ?? setInterval;
     this.clearIntervalFn = deps.clearIntervalFn ?? clearInterval;
@@ -350,6 +422,7 @@ export class AlertScheduler {
       });
 
     await this.deliverPending();
+    await this.remindStillOpen();
     await this.prune();
 
     /**
@@ -426,6 +499,60 @@ export class AlertScheduler {
     } catch (err) {
       this.lastError = (err as Error).message;
       this.deps.logger.warn({ err }, 'alert delivery retry failed');
+    }
+  }
+
+  /**
+   * Restates criticals that are still true, on {@link REMIND_EVERY_MS}.
+   *
+   * The escalation half of the alerting path. `deliverPending` gets the FIRST
+   * message out; this is what keeps an unfixed outage from going quiet, and it
+   * is the only in-band signal that repeats -- the heartbeat monitor repeats
+   * too, but only for a fleet that has stopped pinging entirely.
+   *
+   * Fleet-scoped and not instance-scoped, deliberately, exactly as delivery is:
+   * the condition worth restating most is one whose own instance is gone, and
+   * a healthy peer is the only thing left that can say so. The claim is the
+   * stamp `claimReminders` writes, so peers do not double-post.
+   */
+  private async remindStillOpen(): Promise<void> {
+    const deliver = this.deps.deliver;
+    const alerts = this.deps.alerts;
+    if (!deliver || !alerts) return;
+
+    try {
+      const due = await alerts.claimReminders(
+        this.remindEveryMs,
+        // Same anti-latch window as the watchdog: a row nobody is re-confirming
+        // is not a condition anyone can still act on.
+        new Date(Date.now() - FLEET_CRITICAL_WINDOW_MS),
+        MAX_REMINDERS_PER_TICK,
+      );
+      if (due.length === 0) return;
+
+      const at = Date.now();
+      const lines = due.map((a) => {
+        const where = a.target ? ` (${a.target})` : '';
+        const openFor = formatOpenFor(at - a.openedAt.getTime());
+        return `- **${a.key}**${where}: ${a.message} (unresolved for ${openFor})`;
+      });
+      this.deps.logger.warn({ count: due.length }, 'restating unresolved critical alerts');
+      const header = this.deps.mention
+        ? `${this.deps.mention} **Still unresolved:**`
+        : '**Still unresolved:**';
+      for (const chunk of chunkLines(lines, CHUNK_CHARS)) {
+        /**
+         * Nothing is stamped on the outcome, unlike delivery. The stamp is
+         * already committed by the claim, so a post that fails costs one
+         * interval of silence and the next tick past it tries again. Retrying
+         * inside the tick would turn a broken admin channel into a message
+         * storm during the incident it is reporting.
+         */
+        await deliver([header, ...chunk].join('\n')).catch(() => false);
+      }
+    } catch (err) {
+      this.lastError = (err as Error).message;
+      this.deps.logger.warn({ err }, 'alert reminder pass failed');
     }
   }
 

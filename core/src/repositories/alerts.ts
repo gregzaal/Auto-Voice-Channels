@@ -14,6 +14,16 @@ export interface RaiseAlertInput {
   details?: Record<string, unknown>;
 }
 
+/** A still-open critical the reminder loop has claimed and must now restate. */
+export interface AlertReminder {
+  id: number;
+  key: string;
+  target: string;
+  message: string;
+  occurrences: number;
+  openedAt: Date;
+}
+
 /** A row the retry loop has claimed and now owns for the length of its lease. */
 export interface ClaimedAlert {
   id: number;
@@ -342,6 +352,93 @@ export class AlertRepository {
         message: r.message,
         occurrences: Number(r.occurrences),
         attempts: Number(r.attempts),
+        openedAt: new Date(r.opened_at),
+      }));
+    });
+  }
+
+  /**
+   * Claims still-open criticals that are due to be restated, and stamps them.
+   *
+   * **Delivery answers "was anyone told"; this answers "does anyone still
+   * know".** On 2026-09-15 a prod machine burned its restart budget during a
+   * Discord outage and stayed stopped: the condition was detected, the row was
+   * open, one message was posted, and then nothing said anything for the next
+   * seventeen hours while a quarter of the fleet served nobody. An alert that
+   * fires once about a condition that lasts all day is a notification, not an
+   * escalation.
+   *
+   * Four narrowings, each load-bearing:
+   *
+   * - **`severity = 'critical'`.** Restating a warn every half hour is how a
+   *   channel stops being read, which costs more than the warn is worth.
+   * - **`delivered_at IS NOT NULL`.** An undelivered row is already being
+   *   retried by {@link claimUndelivered} on every tick; reminding on top of
+   *   that would post the same condition twice per tick.
+   * - **`last_seen_at > freshSince`.** The same anti-latch as
+   *   `criticalOpenSince` and `/api/watch`, for the same reason: a row nobody
+   *   has re-confirmed belongs to an instance that went away without cleaning
+   *   up, and reminding about it forever is the failure this whole file argues
+   *   against. The fleet being wholly gone is the heartbeat monitor's job, not
+   *   this one's.
+   * - **`coalesce(last_reminded_at, opened_at)`.** A row that has never been
+   *   reminded is due one interval after it OPENED, not immediately, so the
+   *   first reminder lands an interval after the first message rather than on
+   *   its heels.
+   *
+   * **The stamp is the claim.** It is written and committed before the caller
+   * posts anything, so two instances a second apart cannot both restate the
+   * same row (`FOR UPDATE ... SKIP LOCKED` alone would not: the row lock dies
+   * with this transaction and the Discord post deliberately happens after it).
+   * A post that then fails costs one interval of silence rather than a retry
+   * storm, which is the right direction for a message whose whole purpose is to
+   * repeat.
+   *
+   * No index of its own: `alerts_open_key` is already partial on
+   * `resolved_at IS NULL` and leads with `fleet`, and the set of open rows for
+   * one fleet is measured in dozens.
+   */
+  async claimReminders(
+    everyMs: number,
+    freshSince: Date,
+    limit = 5,
+    at = new Date(),
+  ): Promise<AlertReminder[]> {
+    return this.db.transaction(async (tx) => {
+      const claimed = await tx.execute<{
+        id: number;
+        key: string;
+        target: string;
+        message: string;
+        occurrences: number;
+        opened_at: string | Date;
+      }>(sql`
+        WITH due AS (
+          SELECT a.id
+            FROM ${alerts} a
+           WHERE a.fleet = ${this.fleet}
+             AND a.resolved_at IS NULL
+             AND a.severity = 'critical'
+             AND a.delivered_at IS NOT NULL
+             AND a.last_seen_at > ${freshSince}
+             AND coalesce(a.last_reminded_at, a.opened_at) <= ${new Date(at.getTime() - everyMs)}
+           ORDER BY a.opened_at ASC
+           LIMIT ${limit}
+             FOR UPDATE OF a SKIP LOCKED
+        )
+        UPDATE ${alerts} a
+           SET last_reminded_at = ${at}
+          FROM due
+         WHERE a.id = due.id
+        RETURNING a.id, a.key, a.target, a.message, a.occurrences, a.opened_at
+      `);
+
+      return claimed.rows.map((r) => ({
+        id: Number(r.id),
+        key: r.key,
+        target: r.target,
+        message: r.message,
+        occurrences: Number(r.occurrences),
         openedAt: new Date(r.opened_at),
       }));
     });

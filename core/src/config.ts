@@ -103,6 +103,23 @@ export const configSchema = z
     adminChannelId: z.string().optional(),
 
     /**
+     * Who to mention when a critical condition is STILL open half an hour later.
+     *
+     * A message in a channel nobody is looking at is not a notification, and an
+     * unfixed outage has already proven nobody was looking. Used only by the
+     * reminder pass, never by first reports: a mention on every alert is how
+     * mentions get muted, and then the one that matters is muted too.
+     *
+     * A whole mention string rather than a bare id, so a role works as well as
+     * a person (`<@&...>`), and the shape is checked here so a typo fails at
+     * boot rather than posting `@nobody` during an incident.
+     */
+    adminMention: z
+      .string()
+      .regex(/^<@&?\d{17,20}>$/, 'ADMIN_MENTION must look like <@123...> or <@&123...>')
+      .optional(),
+
+    /**
      * Dead-man's switch. The in-process watcher GETs here on every healthy
      * tick, and something outside notices when the pings stop.
      *
@@ -439,6 +456,7 @@ function envToInput(env: NodeJS.ProcessEnv): Record<string, unknown> {
     instanceId: e.INSTANCE_ID ?? e.FLY_MACHINE_ID,
     httpPort: e.HTTP_PORT,
     adminChannelId: e.ADMIN_CHANNEL_ID,
+    adminMention: e.ADMIN_MENTION,
     watchdogPingUrl: e.WATCHDOG_PING_URL,
     diagnosticsToken: e.DIAGNOSTICS_TOKEN,
     topggToken: e.TOPGG_TOKEN,

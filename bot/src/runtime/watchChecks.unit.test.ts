@@ -15,6 +15,7 @@ function deps(over: Partial<WatchCheckDeps> = {}): WatchCheckDeps {
     } as never,
     snapshot: () => [],
     dbStatus: () => 'up' as SubsystemStatus,
+    gatewayStatus: () => 'up' as SubsystemStatus,
     heartbeat: () => ({ lastOkAt: clock.now, consecutiveFailures: 0 }),
     selfHosted: false,
     now: () => clock.now,
@@ -109,6 +110,45 @@ describe('buildWatchChecks', () => {
       expect(problems).toHaveLength(1);
       expect(problems[0]?.target).toBe('1');
       expect(problems[0]?.details).toEqual({ status: 'Resuming' });
+    });
+
+    /**
+     * A booting machine is not a broken one, and `gatewayStatus` owns the
+     * deadline that separates them. Until it says down, a process that has
+     * never reached ready says nothing.
+     */
+    it('is quiet while a fresh process is still connecting', async () => {
+      const d = deps({
+        client: {
+          isReady: () => false,
+          readyAt: null,
+          ws: { status: Status.Connecting, shards: new Map() },
+        } as never,
+        gatewayStatus: () => 'unknown' as SubsystemStatus,
+      });
+      expect(await find(d, 'gateway.down').run()).toEqual([]);
+    });
+
+    /**
+     * The gap boot-without-blocking opened, and the reason this check needs
+     * `gatewayStatus` at all. Boot no longer waits for `client.login()`, so a
+     * process whose first connect never succeeds stays alive holding claimed,
+     * heartbeated leases: `/api/watch` sees healthy leases, and before this the
+     * shard loop saw no ready and stayed silent, so shards served nobody in
+     * complete quiet.
+     */
+    it('fires when a process has never connected and the boot deadline has passed', async () => {
+      const d = deps({
+        client: {
+          isReady: () => false,
+          readyAt: null,
+          ws: { status: Status.Connecting, shards: new Map() },
+        } as never,
+        gatewayStatus: () => 'down' as SubsystemStatus,
+      });
+      const problems = await find(d, 'gateway.down').run();
+      expect(problems).toHaveLength(1);
+      expect(problems[0]?.message).toMatch(/never connected/i);
     });
 
     /** Two ticks of grace, so a routine RESUME is not an incident. */

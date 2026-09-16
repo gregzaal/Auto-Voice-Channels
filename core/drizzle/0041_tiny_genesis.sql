@@ -1,0 +1,1 @@
+ALTER TABLE "alerts" ADD COLUMN "last_reminded_at" timestamp with time zone;

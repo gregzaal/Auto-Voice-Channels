@@ -26,6 +26,18 @@ export interface WatchCheckDeps {
   snapshot: () => { guildId: string; depth: number; circuitState: string }[];
   /** The `/health` view of the database, refreshed by the 15s ping. */
   dbStatus: () => SubsystemStatus;
+  /**
+   * The `/health` view of the gateway -- the same `createGatewayHealth` closure
+   * `/health` and `GatewaySupervisor` read, never a second derivation.
+   *
+   * Needed for one case the shard loop below cannot answer: a process that has
+   * NEVER reached ready. `readyAt` is null, so "not connected yet" is
+   * indistinguishable from "connected and fine" to a check that only knows
+   * about shards it has seen ready once. That closure owns the deadline which
+   * turns a boot into a failure, and sharing it is what keeps the alert, the
+   * health endpoint and the self-restart from disagreeing about one fact.
+   */
+  gatewayStatus: () => SubsystemStatus;
   /** Lease heartbeat health, from `ShardLeaseManager`. */
   heartbeat: () => { lastOkAt: number | null; consecutiveFailures: number };
   selfHosted: boolean;
@@ -187,9 +199,28 @@ export function buildWatchChecks(deps: WatchCheckDeps): WatchCheck[] {
       confirmations: 2,
       run: () => {
         if (deps.client.readyAt !== null) hasBeenReady = true;
-        // Not connected YET is not the same as disconnected, and only one of
-        // the two is worth waking someone for.
-        if (!hasBeenReady) return [];
+        /**
+         * Not connected YET is not the same as disconnected, and only one of
+         * the two is worth waking someone for -- until "yet" has lasted longer
+         * than any boot takes, which `gatewayStatus` decides and nothing here
+         * second-guesses.
+         *
+         * **Without this branch a machine that never connects raises nothing.**
+         * Boot no longer blocks on the gateway (`gatewayLogin.ts`), so a
+         * process whose first connect fails now stays alive with its leases
+         * claimed and heartbeated: `/api/watch` sees healthy leases, this check
+         * saw no ready and stayed silent, and the shards it holds serve nobody
+         * in perfect quiet. That was the pre-boot gap the same outage exposed.
+         */
+        if (!hasBeenReady) {
+          if (deps.gatewayStatus() !== 'down') return [];
+          return [
+            {
+              message: 'Gateway has never connected since this instance started',
+              details: { shards: deps.client.ws.shards.size },
+            },
+          ];
+        }
         if (!deps.client.isReady()) {
           return [
             {

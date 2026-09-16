@@ -307,3 +307,137 @@ describe('AlertRepository delivery (integration)', () => {
     expect((await solo.open()).map((a) => a.key)).toEqual(['current']);
   });
 });
+
+/**
+ * The escalation path. Delivery answers "was anyone told"; these answer "does
+ * anyone still know", which is the question a seventeen-hour outage asks.
+ */
+describe('AlertRepository reminders (integration)', () => {
+  let env: PgTestEnv;
+  let repo: AlertRepository;
+
+  beforeAll(async () => {
+    env = await startPostgres();
+    repo = new AlertRepository(env.handle.db, 'reminders');
+  }, 600_000);
+
+  afterAll(async () => {
+    await env?.stop();
+  });
+
+  const old = (mins: number) => new Date(Date.now() - mins * 60_000);
+  const every = 30 * 60_000;
+  const fresh = () => old(15);
+
+  /**
+   * A critical opened `mins` ago, delivered once, and STILL being confirmed.
+   *
+   * The second `raise` is what a watcher does on every tick, and it is the
+   * difference the freshness window turns on: `opened_at` says how long this
+   * has been broken, `last_seen_at` says somebody still believes it.
+   */
+  async function standingCritical(key: string, mins: number): Promise<number> {
+    const { id } = await repo.raise(
+      { key, message: 'shard 1 dark', severity: 'critical' },
+      old(mins),
+    );
+    await repo.raise({ key, message: 'shard 1 dark', severity: 'critical' });
+    await repo.markDelivered(id, old(mins));
+    return id;
+  }
+
+  it('restates a critical that is still true an interval later', async () => {
+    await standingCritical('remind.me', 90);
+    const due = await repo.claimReminders(every, fresh());
+    expect(due.map((d) => d.key)).toContain('remind.me');
+  });
+
+  /**
+   * The stamp IS the claim, and it is committed before anything is posted: two
+   * instances a minute apart must not both restate the same condition.
+   */
+  it('does not hand the same reminder to a second instance', async () => {
+    await standingCritical('remind.once', 90);
+    const first = await repo.claimReminders(every, fresh());
+    const second = await repo.claimReminders(every, fresh());
+    expect(first.filter((d) => d.key === 'remind.once')).toHaveLength(1);
+    expect(second.filter((d) => d.key === 'remind.once')).toHaveLength(0);
+  });
+
+  /** ...and comes back round once the interval has passed again. */
+  it('restates again after another interval', async () => {
+    await standingCritical('remind.again', 90);
+    await repo.claimReminders(every, fresh());
+    const later = await repo.claimReminders(
+      every,
+      fresh(),
+      5,
+      new Date(Date.now() + every + 1_000),
+    );
+    expect(later.map((d) => d.key)).toContain('remind.again');
+  });
+
+  /**
+   * A row that has never been reminded is due one interval after it OPENED,
+   * not immediately: the first message went out seconds ago.
+   */
+  it('leaves a freshly opened critical alone', async () => {
+    await standingCritical('remind.notyet', 2);
+    const due = await repo.claimReminders(every, fresh());
+    expect(due.map((d) => d.key)).not.toContain('remind.notyet');
+  });
+
+  it('says nothing about a condition that resolved', async () => {
+    await standingCritical('remind.fixed', 90);
+    await repo.resolve('remind.fixed');
+    const due = await repo.claimReminders(every, fresh());
+    expect(due.map((d) => d.key)).not.toContain('remind.fixed');
+  });
+
+  /** Warnings do not nag. A channel that repeats everything is muted. */
+  it('ignores warnings', async () => {
+    const { id } = await repo.raise(
+      { key: 'remind.warn', message: 'x', severity: 'warn' },
+      old(90),
+    );
+    await repo.markDelivered(id, old(90));
+    const due = await repo.claimReminders(every, fresh());
+    expect(due.map((d) => d.key)).not.toContain('remind.warn');
+  });
+
+  /**
+   * An undelivered row is already being retried by the delivery loop every
+   * tick. Reminding on top of that posts the same condition twice a minute.
+   */
+  it('ignores a critical nobody has managed to deliver yet', async () => {
+    await repo.raise({ key: 'remind.undelivered', message: 'x', severity: 'critical' }, old(90));
+    const due = await repo.claimReminders(every, fresh());
+    expect(due.map((d) => d.key)).not.toContain('remind.undelivered');
+  });
+
+  /**
+   * The anti-latch, and the same window `criticalOpenSince` and `/api/watch`
+   * use. A row nobody is re-confirming belongs to an instance that went away,
+   * and nagging about it forever is how a channel stops being read.
+   */
+  it('stops reminding about a condition nobody is re-confirming', async () => {
+    const { id } = await repo.raise(
+      { key: 'remind.stale', message: 'x', severity: 'critical' },
+      old(600),
+    );
+    await repo.markDelivered(id, old(600));
+    const due = await repo.claimReminders(every, fresh());
+    expect(due.map((d) => d.key)).not.toContain('remind.stale');
+  });
+
+  it('does not reach into another fleet', async () => {
+    const other = new AlertRepository(env.handle.db, 'reminders-other');
+    const { id } = await other.raise(
+      { key: 'remind.elsewhere', message: 'x', severity: 'critical' },
+      old(90),
+    );
+    await other.markDelivered(id, old(90));
+    const due = await repo.claimReminders(every, fresh());
+    expect(due.map((d) => d.key)).not.toContain('remind.elsewhere');
+  });
+});

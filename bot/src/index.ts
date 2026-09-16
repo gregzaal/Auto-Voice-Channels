@@ -42,6 +42,7 @@ import { PgIdentifyThrottler } from './runtime/identifyThrottler.js';
 import { installShutdown } from './runtime/shutdown.js';
 import { AlertScheduler } from './runtime/alertScheduler.js';
 import { GatewaySupervisor } from './runtime/gatewaySupervisor.js';
+import { connectGateway } from './runtime/gatewayLogin.js';
 import { BackupScheduler } from './runtime/backupScheduler.js';
 import { TopggScheduler } from './runtime/topggScheduler.js';
 import { SupporterRoles } from './features/support/supporterRoles.js';
@@ -146,14 +147,40 @@ async function main(): Promise<void> {
    * the window an operator watching a slow boot would ask it anything.
    */
   const gatewaySupervisorHolder: { current?: GatewaySupervisor } = {};
-  try {
-    await runMigrations(db);
-    dbStatus = 'up';
-    logger.info('migrations applied');
-  } catch (err) {
-    dbStatus = 'down';
-    logger.error({ err }, 'migrations failed');
-    throw err;
+  /**
+   * Retried for a couple of minutes before boot gives up.
+   *
+   * **A transient dependency must not be able to spend a finite restart
+   * budget.** Fly's `on-failure` policy stops restarting after `max_retries`,
+   * and a boot that dies in seconds burns all of them inside two minutes -- on
+   * 2026-09-15 a prod machine did exactly that against Discord and then sat
+   * stopped for seventeen hours, long after the outage ended, because nothing
+   * retries once the budget is gone. The database can be unavailable for the
+   * same kind of reason (a failover, a pooler restart), and this is the first
+   * thing boot does with it.
+   *
+   * Bounded rather than endless, because the other reason this throws is a
+   * migration that is genuinely broken, and that has to fail the deploy rather
+   * than hang it. Two minutes rides out a failover and costs a bad migration
+   * two minutes it was going to lose to a rollback anyway.
+   */
+  const migrationsBy = Date.now() + 2 * 60_000;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await runMigrations(db);
+      dbStatus = 'up';
+      logger.info({ attempt }, 'migrations applied');
+      break;
+    } catch (err) {
+      dbStatus = 'down';
+      if (Date.now() >= migrationsBy) {
+        logger.error({ err, attempt }, 'migrations failed');
+        throw err;
+      }
+      const waitMs = Math.min(15_000, 2_000 * attempt);
+      logger.warn({ err, attempt, waitMs }, 'migrations failed, retrying before giving up on boot');
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
   }
 
   const leaseRepo = new ShardLeaseRepository(db, config.fleet);
@@ -825,10 +852,16 @@ async function main(): Promise<void> {
      */
     ...(adminChannel ? { deliver: (content: string) => adminChannel.sendDirect(content) } : {}),
     instanceId: config.instanceId,
+    // Optional, and only ever attached to a reminder: see the config field.
+    ...(config.adminMention ? { mention: config.adminMention } : {}),
     checks: buildWatchChecks({
       client,
       snapshot: () => dispatcher.snapshot(),
       dbStatus: () => dbStatus,
+      // Declared below this line and only ever called from a tick, which starts
+      // at the end of boot. The same closure `/health` and the supervisor read,
+      // deliberately: three signals, one derivation.
+      gatewayStatus: () => currentGatewayStatus(),
       heartbeat: () => leaseManager.heartbeatHealth,
       shardHeadroom: () =>
         lastGatewayLimits
@@ -1276,9 +1309,20 @@ async function main(): Promise<void> {
     logger.info('skipping slash-command registration: this instance does not hold shard 0');
   }
 
-  await client.login(config.discordToken);
+  /**
+   * Supervised, and the rest of boot no longer depends on it. See
+   * `gatewayLogin.ts` for the two ways a bare `await client.login()` cost a
+   * fleet seventeen hours on 2026-09-15: one by never settling, one by
+   * rejecting into `process.exit(1)` and Fly's finite restart budget.
+   */
+  const gatewayOutcome = await connectGateway({
+    login: () => client.login(config.discordToken),
+    hasConnected: () => client.readyAt !== null,
+    logger,
+    report: (kind, message, context) => errorReporter.report(kind, message, context),
+  });
 
-  logger.info({ claimedShards: claimed }, 'bot ready');
+  logger.info({ claimedShards: claimed, gateway: gatewayOutcome }, 'bot ready');
 
   shutdown.request = installShutdown({
     logger,

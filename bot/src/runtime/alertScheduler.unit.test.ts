@@ -30,6 +30,16 @@ function fakeAlerts() {
   }[] = [];
   const delivered: number[] = [];
   const failed: { id: number; err: string }[] = [];
+  /** Rows the reminder loop will be handed, and what it asked for. */
+  const reminders: {
+    id: number;
+    key: string;
+    target: string;
+    message: string;
+    occurrences: number;
+    openedAt: Date;
+  }[] = [];
+  const remindClaims: { everyMs: number; freshSince: Date; limit: number }[] = [];
   let expiredBefore: Date | null = null;
   let prunedBefore: Date | null = null;
   return {
@@ -38,6 +48,8 @@ function fakeAlerts() {
     claimable,
     delivered,
     failed,
+    reminders,
+    remindClaims,
     get expiredBefore() {
       return expiredBefore;
     },
@@ -106,6 +118,14 @@ function fakeAlerts() {
       markDelivered: async (id: number) => void delivered.push(id),
       markDeliveryFailed: async (id: number, err: string) => void failed.push({ id, err }),
       undeliveredDepth: async () => claimable.length,
+      /**
+       * Models the claim's one load-bearing property: a row handed out once is
+       * stamped, so a peer a moment later is handed nothing.
+       */
+      claimReminders: async (everyMs: number, freshSince: Date, limit = 5) => {
+        remindClaims.push({ everyMs, freshSince, limit });
+        return reminders.splice(0, limit);
+      },
       pruneResolved: async (before: Date) => {
         prunedBefore = before;
         return 0;
@@ -122,6 +142,7 @@ function build(
     url?: string;
     fetchFn?: typeof fetch;
     deliver?: (content: string) => Promise<boolean>;
+    mention?: string;
   } = {},
 ) {
   const notified: { kind: string; message: string }[] = [];
@@ -140,6 +161,7 @@ function build(
     checks,
     instanceId: 'inst-a',
     ...(opts.deliver ? { deliver: opts.deliver } : {}),
+    ...(opts.mention ? { mention: opts.mention } : {}),
     ...(opts.url !== undefined ? { watchdogPingUrl: opts.url } : {}),
     ...(opts.fetchFn ? { fetchFn: opts.fetchFn } : {}),
     // Never fires: every test drives `tick()` directly.
@@ -613,6 +635,105 @@ describe('AlertScheduler', () => {
       expect(Date.now() - (alerts.prunedBefore as Date).getTime()).toBeGreaterThan(
         29 * 24 * 3_600_000,
       );
+    });
+  });
+
+  /**
+   * The escalation half. Delivery gets the FIRST message out; this is what
+   * stops an unfixed outage going quiet, which on 2026-09-15 it did for
+   * seventeen hours while a quarter of a fleet served nobody.
+   */
+  describe('reminders for conditions nobody has fixed', () => {
+    const due = (key: string, target = '', openedMinutesAgo = 90) => ({
+      id: 1,
+      key,
+      target,
+      message: `${key} is still broken`,
+      occurrences: 12,
+      openedAt: new Date(Date.now() - openedMinutesAgo * 60_000),
+    });
+
+    it('restates a critical that is still open, with how long it has been', async () => {
+      const posts: string[] = [];
+      const { scheduler, alerts } = build([], {
+        deliver: async (c) => {
+          posts.push(c);
+          return true;
+        },
+      });
+      alerts.reminders.push(due('shard.coverage', '1', 125));
+
+      await scheduler.tick();
+
+      expect(posts).toHaveLength(1);
+      expect(posts[0]).toContain('shard.coverage');
+      expect(posts[0]).toContain('(1)');
+      // 125 minutes, said the way a human reads it rather than in milliseconds.
+      expect(posts[0]).toContain('2h05m');
+    });
+
+    /**
+     * Mentions go on reminders only. On every alert they would be muted inside
+     * a week, and then the one that matters is muted too.
+     */
+    it('pings the configured mention on a reminder', async () => {
+      const posts: string[] = [];
+      const { scheduler, alerts } = build([], {
+        deliver: async (c) => {
+          posts.push(c);
+          return true;
+        },
+        mention: '<@&42>',
+      });
+      alerts.reminders.push(due('shard.coverage', '1'));
+      await scheduler.tick();
+      expect(posts[0]?.startsWith('<@&42> ')).toBe(true);
+    });
+
+    it('says nothing when nothing is due', async () => {
+      const posts: string[] = [];
+      const { scheduler } = build([], {
+        deliver: async (c) => {
+          posts.push(c);
+          return true;
+        },
+      });
+      await scheduler.tick();
+      expect(posts).toHaveLength(0);
+    });
+
+    /**
+     * The window is the anti-latch, and it has to match the one the watchdog
+     * suppression uses: a row nobody is re-confirming is not something anyone
+     * can still act on, and nagging about it forever is how a channel dies.
+     */
+    it('asks only for conditions still being confirmed, on a half-hourly cadence', async () => {
+      const { scheduler, alerts } = build([], { deliver: async () => true });
+      await scheduler.tick();
+      const asked = alerts.remindClaims.at(-1);
+      expect(asked?.everyMs).toBe(30 * 60_000);
+      expect(Date.now() - (asked?.freshSince as Date).getTime()).toBe(15 * 60_000);
+    });
+
+    it('does not run at all without a deliver transport, which is self-host', async () => {
+      const { scheduler, alerts } = build([]);
+      await scheduler.tick();
+      expect(alerts.remindClaims).toHaveLength(0);
+    });
+
+    /**
+     * A reminder that cannot be posted costs one interval of silence, not a
+     * retry storm during the incident it is reporting: the stamp is already
+     * committed, so the next tick past the interval tries again.
+     */
+    it('survives a deliver that throws', async () => {
+      const { scheduler, alerts } = build([], {
+        deliver: async () => {
+          throw new Error('channel gone');
+        },
+      });
+      alerts.reminders.push(due('gateway.down'));
+      await expect(scheduler.tick()).resolves.toBeUndefined();
     });
   });
 

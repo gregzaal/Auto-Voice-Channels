@@ -783,6 +783,19 @@ export const alerts = pgTable(
     lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true }),
     attempts: integer('attempts').notNull().default(0),
     lastError: text('last_error'),
+    /**
+     * When someone was last told this condition is STILL true.
+     *
+     * `delivered_at` answers "was this ever sent", which is the wrong question
+     * for an outage nobody has fixed: the first message goes out, the row keeps
+     * being re-stamped by the watcher, and the channel says nothing for the
+     * next seventeen hours. This column is what the reminder loop claims over,
+     * so a critical that stays open keeps saying so on a timer.
+     *
+     * Null means never reminded, which reads as "due one interval after it
+     * opened" rather than "due now" -- see `claimReminders`.
+     */
+    lastRemindedAt: timestamp('last_reminded_at', { withTimezone: true }),
   },
   (t) => [
     /**

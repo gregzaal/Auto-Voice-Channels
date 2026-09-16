@@ -288,6 +288,13 @@
       "when": 1788853854261,
       "tag": "0040_same_mimic",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1789546624330,
+      "tag": "0041_tiny_genesis",
+      "breakpoints": true
     }
   ]
 }
