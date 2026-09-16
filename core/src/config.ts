@@ -113,6 +113,11 @@ export const configSchema = z
      * A whole mention string rather than a bare id, so a role works as well as
      * a person (`<@&...>`), and the shape is checked here so a typo fails at
      * boot rather than posting `@nobody` during an incident.
+     *
+     * **Hosted only in effect, which is why it is not in `.env.example`.**
+     * Reminders are driven by the `alerts` table, and a self-host has no alert
+     * repository at all (`index.ts` passes `undefined` when `SELF_HOSTED`), so
+     * documenting it to self-hosters would promise a ping that never arrives.
      */
     adminMention: z
       .string()

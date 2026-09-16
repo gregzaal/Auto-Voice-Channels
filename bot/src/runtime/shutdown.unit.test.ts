@@ -37,6 +37,7 @@ function depsRecording(order: string[]): ShutdownDeps {
       stop: step('alertScheduler.stop'),
     } as unknown as ShutdownDeps['alertScheduler'],
     gatewaySupervisor: { stop: () => order.push('gatewaySupervisor.stop') },
+    stopGatewayLogin: () => order.push('stopGatewayLogin'),
     leaseManager: { releaseAll: step('releaseAll') } as unknown as ShutdownDeps['leaseManager'],
     settingsCache: { stop: step('settingsCache.stop') } as unknown as ShutdownDeps['settingsCache'],
     notifier: { close: step('notifier.close') } as unknown as ShutdownDeps['notifier'],
@@ -53,6 +54,7 @@ describe('gracefulDrain', () => {
     expect(order).toEqual([
       'alertScheduler.stop',
       'gatewaySupervisor.stop',
+      'stopGatewayLogin',
       'stopSweep',
       'billingReconciler.stop',
       'disposeInteractions',
@@ -135,6 +137,18 @@ describe('gracefulDrain', () => {
     await gracefulDrain(depsRecording(order));
     expect(order.indexOf('gatewaySupervisor.stop')).toBeLessThan(order.indexOf('client.destroy'));
     expect(order.indexOf('gatewaySupervisor.stop')).toBeLessThan(order.indexOf('drainAll'));
+  });
+
+  /**
+   * A login retry landing after `client.destroy()` would spawn and identify
+   * every shard again on a client with no listeners, while `releaseAll` is
+   * handing those shards to a replacement.
+   */
+  it('stops gateway login retries before destroying the gateway', async () => {
+    const order: string[] = [];
+    await gracefulDrain(depsRecording(order));
+    expect(order.indexOf('stopGatewayLogin')).toBeLessThan(order.indexOf('client.destroy'));
+    expect(order.indexOf('stopGatewayLogin')).toBeLessThan(order.indexOf('releaseAll'));
   });
 
   /** Absent on a self-host build that never constructed one. */

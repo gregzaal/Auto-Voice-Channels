@@ -1315,9 +1315,21 @@ async function main(): Promise<void> {
    * fleet seventeen hours on 2026-09-15: one by never settling, one by
    * rejecting into `process.exit(1)` and Fly's finite restart budget.
    */
+  const gatewayRetries = new AbortController();
   const gatewayOutcome = await connectGateway({
     login: () => client.login(config.discordToken),
-    hasConnected: () => client.readyAt !== null,
+    hasConnected: () => client.isReady(),
+    /**
+     * `client.login()` destroys the client when it rejects, and discord.js
+     * never un-sets that flag, so without this one failed login leaves
+     * `isReady()` false forever -- and `guildCreate` below, the drain's
+     * `client.destroy()` and the `gateway.down` condition all read it. See the
+     * dep's own doc for the full consequence list.
+     */
+    beforeAttempt: () => {
+      (client.ws as unknown as { destroyed: boolean }).destroyed = false;
+    },
+    signal: gatewayRetries.signal,
     logger,
     report: (kind, message, context) => errorReporter.report(kind, message, context),
   });
@@ -1349,6 +1361,9 @@ async function main(): Promise<void> {
     topggScheduler,
     entitlementGate,
     gatewaySupervisor,
+    // Ends any in-flight gateway retry, so one cannot re-identify every shard
+    // in the middle of the drain that is tearing the client down.
+    stopGatewayLogin: () => gatewayRetries.abort(),
     closeDb,
   });
 

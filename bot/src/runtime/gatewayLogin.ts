@@ -33,6 +33,14 @@ import type { Logger } from '@avc/core';
  * `gateway.down` watch condition withholds the watchdog ping, and
  * `GatewaySupervisor` restarts the machine once it is confirmed dead -- all of
  * which need the boot this used to block to have finished.
+ *
+ * **"Retries forever" is bounded by that supervisor, deliberately.** A process
+ * that never reaches ready is restarted about fifteen minutes in (a ten-minute
+ * boot deadline plus a five-minute confirmation), and at most once an hour
+ * after that, which still spends Fly's restart budget -- an hour per attempt
+ * instead of ten attempts in two minutes. The point of retrying here is that
+ * the common case never gets that far: Discord comes back, an attempt lands,
+ * and no restart is spent at all.
  */
 
 export interface GatewayLoginDeps {
@@ -42,23 +50,59 @@ export interface GatewayLoginDeps {
   /** Admin-channel reporter. Called once per episode, not once per attempt. */
   report: (kind: string, message: string, context: Record<string, unknown>) => void;
   /**
-   * Whether the gateway has ever reached ready, checked before each retry.
+   * Whether the client is connected and not torn down (`client.isReady()`).
    *
-   * The websocket layer runs its own reconnect underneath `login()`, so a shard
-   * that failed its first connect can come back on its own while this loop is
-   * still waiting to retry -- that is exactly what `beta` did. Re-entering
-   * `login()` then is not merely redundant: `@discordjs/ws` refuses to connect a
-   * shard that is not idle, which surfaces as an unhandled rejection and an
-   * attempt that never settles. Ever-ready is the right test rather than
-   * currently-ready: a later disconnect is a reconnect for the websocket layer
-   * and a condition for `gateway.down`, never a reason to log in again.
+   * The precondition for "do not log in again": once the websocket layer owns a
+   * live connection, re-entering `login()` tears every shard down and
+   * re-identifies them. Checked before each attempt rather than trusted once,
+   * so any path that reconnects underneath this loop ends it.
+   *
+   * Latched-ready is the right reading rather than currently-ready: a later
+   * disconnect is the websocket layer's own reconnect and a condition for
+   * `gateway.down`, never a reason to log in again.
    */
   hasConnected?: () => boolean;
+  /**
+   * Run immediately before each attempt, to undo discord.js's teardown.
+   *
+   * **`Client.login()` destroys the client when it rejects** (`await
+   * this.destroy(); throw error;`), and `WebSocketManager.destroyed` is set
+   * there and reset only in the constructor. `Client.isReady()` is
+   * `!ws.destroyed && ws.status === Status.Ready`, so without this a single
+   * rejected login leaves `isReady()` false for the life of the process even
+   * after a retry reconnects and the bot is genuinely serving.
+   *
+   * That was unreachable while a rejected login exited the process. Making boot
+   * survive one is what exposes it, and every consequence lands on the paths
+   * this change exists to protect: `gateway.down` would raise a critical that
+   * can never resolve (so the watchdog ping is withheld and the admin channel
+   * nagged forever, while `/health` stays green), `guildCreate` would no-op so
+   * new guilds are never reconciled, and the drain's `client.destroy()` would
+   * early-return at the websocket layer and release shard leases while this
+   * process still holds live sessions.
+   *
+   * Clearing the flag is narrow and exact: those three readers are its only
+   * uses in discord.js, and "this manager was destroyed, do not reconnect" is
+   * precisely the statement being retracted. What it cannot undo is
+   * `Sweepers.destroy()` and the REST hash/handler sweepers, which stay
+   * stopped; with `MessageManager`/`ReactionManager`/`UserManager`/
+   * `ThreadManager` caches capped at 0 that costs a slowly growing REST bucket
+   * cache, which is a far better outcome than a dead machine.
+   */
+  beforeAttempt?: () => void;
   /** How long boot waits for the first connect before continuing without it. */
   bootWaitMs?: number;
   /** First retry delay. Doubles up to {@link MAX_RETRY_DELAY_MS}. */
   retryDelayMs?: number;
   maxRetryDelayMs?: number;
+  /**
+   * Ends the retry loop, for the drain.
+   *
+   * Without it a retry can fire in the middle of a shutdown: `client.destroy()`
+   * has run and the leases are being released, and `login()` would spawn and
+   * identify every shard again on a client with no listeners left attached.
+   */
+  signal?: AbortSignal;
   sleep?: (ms: number) => Promise<void>;
   setTimeoutFn?: typeof setTimeout;
   clearTimeoutFn?: typeof clearTimeout;
@@ -88,14 +132,22 @@ export const BOOT_WAIT_MS = 3 * 60_000;
 
 const RETRY_DELAY_MS = 5_000;
 /**
- * Retry ceiling.
+ * Retry ceiling, and it is sized by the IDENTIFY budget rather than by latency.
  *
- * A minute is short enough to come back promptly when Discord does, and long
- * enough that a multi-hour outage costs a few hundred REST calls rather than
- * tens of thousands. Each attempt spends an identify only if it gets far enough
- * to open a session, so a refused connect is cheap in the budget that matters.
+ * An attempt is not free. `client.login()` reaches `@discordjs/ws`'s
+ * `connect()`, which calls `updateShardCount()` -- destroy, respawn, and
+ * identify EVERY shard this instance holds. So a four-shard instance retrying
+ * every minute would spend 240 identifies an hour against a daily budget of
+ * 1000, and `GatewaySupervisor` refuses to self-heal below 20% headroom: the
+ * loop would exhaust the budget that the recovery needs.
+ *
+ * Five minutes keeps a multi-hour outage inside a few dozen identifies and
+ * still reconnects well inside the supervisor's own confirmation window, so
+ * nothing waits on it that was not already waiting. `@discordjs/ws` refuses
+ * outright when `session_start_limit.remaining` is below the shard count, which
+ * is a floor under this rather than a substitute for it.
  */
-const MAX_RETRY_DELAY_MS = 60_000;
+const MAX_RETRY_DELAY_MS = 5 * 60_000;
 
 /**
  * Login failures that retrying cannot fix.
@@ -128,6 +180,7 @@ export function connectGateway(deps: GatewayLoginDeps): Promise<GatewayLoginOutc
   const maxRetryDelayMs = deps.maxRetryDelayMs ?? MAX_RETRY_DELAY_MS;
   const sleep = deps.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
   const setTimeoutFn = deps.setTimeoutFn ?? setTimeout;
+  const signal = deps.signal;
   const clearTimeoutFn = deps.clearTimeoutFn ?? clearTimeout;
   let delay = deps.retryDelayMs ?? RETRY_DELAY_MS;
 
@@ -165,7 +218,10 @@ export function connectGateway(deps: GatewayLoginDeps): Promise<GatewayLoginOutc
         settle('connected');
         return;
       }
+      if (signal?.aborted) return;
       try {
+        // Before the readiness check would see it, never after: see the dep.
+        deps.beforeAttempt?.();
         await deps.login();
         clearTimeoutFn(timer);
         if (attempt > 1) {
@@ -177,6 +233,20 @@ export function connectGateway(deps: GatewayLoginDeps): Promise<GatewayLoginOutc
       } catch (err) {
         if (isFatal(err)) {
           clearTimeoutFn(timer);
+          /**
+           * Said out loud before it stops, because `fail` is usually a no-op:
+           * the boot gate has already settled by the time a later attempt turns
+           * fatal (a rotated token, an intent switched off mid-outage), so
+           * rejecting reaches nobody. Without this the retry loop would go
+           * silent and the only remaining signal would be `gateway.down` ten
+           * minutes later, saying nothing about the cause.
+           */
+          deps.logger.error({ err, attempt }, 'gateway login failed fatally; not retrying');
+          deps.report(
+            'gateway.login_fatal',
+            'Gateway login was refused for a reason retrying cannot fix; the gateway will stay down',
+            { error: err instanceof Error ? err.message : String(err), attempt },
+          );
           fail(err);
           return;
         }
@@ -207,6 +277,7 @@ export function connectGateway(deps: GatewayLoginDeps): Promise<GatewayLoginOutc
         settle('retrying');
         await sleep(delay);
         delay = Math.min(delay * 2, maxRetryDelayMs);
+        if (signal?.aborted) return;
       }
     }
   })();

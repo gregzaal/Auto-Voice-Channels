@@ -44,6 +44,11 @@ export interface ShutdownDeps {
    * supervisor's whole action is to call this handler).
    */
   gatewaySupervisor?: { stop: () => void } | undefined;
+  /**
+   * Ends any in-flight gateway login retry. Optional so a test harness and the
+   * self-host path need not supply one.
+   */
+  stopGatewayLogin?: (() => void) | undefined;
   /** Always present: the collector runs on self-host too. */
   metricsCollector: MetricsCollector;
   entitlementGate: EntitlementGate;
@@ -82,6 +87,13 @@ export async function gracefulDrain(deps: ShutdownDeps): Promise<void> {
    * hourly allowance the next boot has to respect.
    */
   deps.gatewaySupervisor?.stop();
+  /**
+   * Stopped here for a third version of the same reason: `client.destroy()`
+   * below tears the gateway down on purpose, and a login retry landing after it
+   * would spawn and identify every shard again on a client with no listeners,
+   * while `releaseAll()` is handing those shards to a replacement.
+   */
+  deps.stopGatewayLogin?.();
   // Stopped alongside the watcher, and for the same reason: it talks to a third
   // party, and a machine on its way out should stop doing that first.
   await deps.topggScheduler?.stop();

@@ -103,12 +103,11 @@ describe('connectGateway', () => {
   });
 
   /**
-   * `beta`'s shape: the first connect fails, the websocket layer's own
-   * reconnect brings the shard back underneath, and logging in again would be
-   * refused by `@discordjs/ws` as an attempt to connect a shard that is not
-   * idle -- an unhandled rejection, and an attempt that never settles.
+   * Re-entering `login()` on a live connection tears every shard down and
+   * re-identifies them, so a connection that arrives by any other path has to
+   * end this loop.
    */
-  it('stops retrying once the websocket layer has connected on its own', async () => {
+  it('stops retrying once the client reports itself connected', async () => {
     const timer = manualTimer();
     let connected = false;
     let attempts = 0;
@@ -126,6 +125,91 @@ describe('connectGateway', () => {
     });
     await vi.waitFor(() => expect(timer.armed()).toBe(false));
     expect(attempts).toBe(1);
+  });
+
+  /**
+   * The defect that made this whole file dangerous. `client.login()` destroys
+   * the client when it rejects, and discord.js never un-sets
+   * `WebSocketManager.destroyed`, so `isReady()` stays false for the life of
+   * the process -- which `guildCreate`, the drain's `client.destroy()` and the
+   * `gateway.down` condition all read. The hook runs before every attempt.
+   */
+  it('lets the caller undo the teardown before each attempt', async () => {
+    const timer = manualTimer();
+    const order: string[] = [];
+    let attempt = 0;
+    await connectGateway({
+      login: () => {
+        attempt += 1;
+        order.push(`login${attempt}`);
+        return attempt < 2 ? Promise.reject(new Error('gateway 503')) : Promise.resolve();
+      },
+      beforeAttempt: () => order.push('reset'),
+      logger,
+      report: () => {},
+      retryDelayMs: 0,
+      sleep: () => Promise.resolve(),
+      ...timer,
+    });
+    await vi.waitFor(() => expect(attempt).toBe(2));
+    expect(order).toEqual(['reset', 'login1', 'reset', 'login2']);
+  });
+
+  /**
+   * A fatal error after the boot gate has settled rejects a promise nobody is
+   * holding, so without saying it out loud the loop would stop in silence.
+   */
+  it('reports a fatal failure that arrives after boot has moved on', async () => {
+    const timer = manualTimer();
+    const report = vi.fn();
+    let attempt = 0;
+    const gate = connectGateway({
+      login: () => {
+        attempt += 1;
+        return Promise.reject(
+          attempt === 1 ? new Error('gateway 503') : new Error('An invalid token was provided.'),
+        );
+      },
+      logger,
+      report,
+      retryDelayMs: 0,
+      sleep: () => Promise.resolve(),
+      ...timer,
+    });
+    expect(await gate).toBe('retrying');
+    await vi.waitFor(() =>
+      expect(report.mock.calls.some((c) => c[0] === 'gateway.login_fatal')).toBe(true),
+    );
+  });
+
+  /**
+   * A retry landing mid-drain would spawn and identify every shard again on a
+   * client that is being destroyed, while its leases are handed to a peer.
+   */
+  it('stops retrying when the drain aborts it', async () => {
+    const timer = manualTimer();
+    const controller = new AbortController();
+    let attempt = 0;
+    const gate = connectGateway({
+      login: () => {
+        attempt += 1;
+        return Promise.reject(new Error('gateway 503'));
+      },
+      signal: controller.signal,
+      logger,
+      report: () => {},
+      retryDelayMs: 0,
+      sleep: () => {
+        controller.abort();
+        return Promise.resolve();
+      },
+      ...timer,
+    });
+    expect(await gate).toBe('retrying');
+    await vi.waitFor(() => expect(controller.signal.aborted).toBe(true));
+    const settled = attempt;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(attempt).toBe(settled);
   });
 
   it('backs off between attempts, up to a ceiling', async () => {
