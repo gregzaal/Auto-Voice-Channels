@@ -157,6 +157,42 @@ describe('buildWatchChecks', () => {
     });
   });
 
+  describe('queue.backlog', () => {
+    /**
+     * The alert an operator actually reads. "1,081 tasks queued" took a live
+     * investigation to turn into a cause on 2026-09-16; the name of the task
+     * holding the queue was in memory the whole time.
+     */
+    it('names the task holding the queue and how long it has held it', async () => {
+      const d = deps({
+        snapshot: () => [
+          {
+            guildId: 'g9',
+            depth: 1081,
+            circuitState: 'closed',
+            task: 'rerenderChannel',
+            taskRanForMs: 7 * 3_600_000,
+          },
+        ],
+      });
+      const problems = await find(d, 'queue.backlog').run();
+      expect(problems).toHaveLength(1);
+      expect(problems[0]?.message).toContain('rerenderChannel');
+      expect(problems[0]?.message).toContain('420m');
+      expect(problems[0]?.details).toMatchObject({ task: 'rerenderChannel' });
+    });
+
+    /** An idle-but-deep queue has no in-flight task, and must still report. */
+    it('still reports a backlog with nothing running', async () => {
+      const d = deps({
+        snapshot: () => [{ guildId: 'g9', depth: 200, circuitState: 'closed' }],
+      });
+      const problems = await find(d, 'queue.backlog').run();
+      expect(problems).toHaveLength(1);
+      expect(problems[0]?.message).not.toContain('held by');
+    });
+  });
+
   describe('circuit.tripped', () => {
     it('names the guild whose breaker is open', async () => {
       const d = deps({

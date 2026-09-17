@@ -23,7 +23,14 @@ import type { WatchCheck, WatchProblem } from './alertScheduler.js';
 export interface WatchCheckDeps {
   client: Client;
   /** Live queue and breaker state, per guild. */
-  snapshot: () => { guildId: string; depth: number; circuitState: string }[];
+  snapshot: () => {
+    guildId: string;
+    depth: number;
+    circuitState: string;
+    /** The task holding the queue and its age, when one is running. */
+    task?: string;
+    taskRanForMs?: number;
+  }[];
   /** The `/health` view of the database, refreshed by the 15s ping. */
   dbStatus: () => SubsystemStatus;
   /**
@@ -280,15 +287,33 @@ export function buildWatchChecks(deps: WatchCheckDeps): WatchCheck[] {
       severity: 'warn',
       audience: 'both',
       confirmations: 3,
+      /**
+       * Names the task holding the queue, not just the depth.
+       *
+       * "1,081 tasks queued and not draining" is a symptom that took a live
+       * investigation to turn into a cause on 2026-09-16, and the answer was in
+       * memory the whole time. A backlog is almost always one task that stopped
+       * settling, so the alert is worth nothing without its name and its age.
+       */
       run: () =>
         deps
           .snapshot()
           .filter((q) => q.depth >= QUEUE_DEPTH_THRESHOLD)
-          .map((q) => ({
-            target: q.guildId,
-            message: `Guild ${q.guildId} has ${q.depth} tasks queued and not draining`,
-            details: { depth: q.depth, circuitState: q.circuitState },
-          })),
+          .map((q) => {
+            const held =
+              q.task !== undefined
+                ? `, held by \`${q.task}\` for ${Math.round((q.taskRanForMs ?? 0) / 60_000)}m`
+                : '';
+            return {
+              target: q.guildId,
+              message: `Guild ${q.guildId} has ${q.depth} tasks queued and not draining${held}`,
+              details: {
+                depth: q.depth,
+                circuitState: q.circuitState,
+                ...(q.task !== undefined ? { task: q.task, taskRanForMs: q.taskRanForMs } : {}),
+              },
+            };
+          }),
     },
   ];
 

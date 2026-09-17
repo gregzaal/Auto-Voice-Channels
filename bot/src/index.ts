@@ -229,6 +229,21 @@ async function main(): Promise<void> {
     logger,
     // The per-guild boundary is the only place that sees every isolated failure.
     onTaskFailure: (err) => countError.record?.(err),
+    /**
+     * A task abandoned for running too long is reported by name.
+     *
+     * Through the holder, because the reporter needs a Discord client and this
+     * is built long before one exists; a timeout in that window is logged by
+     * the queue and nothing else, which is the same trade every other early
+     * boot condition makes.
+     */
+    onTaskTimeout: (guildId, task, ranForMs) => {
+      opsReport.report?.(
+        'queue.task_timeout',
+        'A guild task ran too long and was abandoned so its queue could continue',
+        { guildId, task, ranForMinutes: Math.round(ranForMs / 60_000) },
+      );
+    },
   });
 
   // Boot-time claim retries across the lease-expiry window so a replacement

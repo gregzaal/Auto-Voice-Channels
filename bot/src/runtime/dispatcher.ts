@@ -13,6 +13,16 @@ export interface DispatcherOptions {
    * already been handled, and several callers do not look at it at all.
    */
   onTaskFailure?: (err: unknown) => void;
+  /** How long one task may hold a guild's queue. See `DEFAULT_TASK_TIMEOUT_MS`. */
+  taskTimeoutMs?: number;
+  /**
+   * Called when a guild's task is abandoned for running too long.
+   *
+   * Reported from here rather than logged and forgotten inside the queue: an
+   * abandoned task is the only evidence of the failure that used to be silent,
+   * and it names the guild and the task an operator has to look at.
+   */
+  onTaskTimeout?: (guildId: string, task: string, ranForMs: number) => void;
 }
 
 /**
@@ -25,11 +35,17 @@ export class GuildDispatcher {
   private readonly logger: Logger;
   private readonly circuit: CircuitBreakerOptions | undefined;
   private readonly onTaskFailure: ((err: unknown) => void) | undefined;
+  private readonly taskTimeoutMs: number | undefined;
+  private readonly onTaskTimeout:
+    | ((guildId: string, task: string, ranForMs: number) => void)
+    | undefined;
 
   constructor(options: DispatcherOptions) {
     this.logger = options.logger;
     this.circuit = options.circuit;
     this.onTaskFailure = options.onTaskFailure;
+    this.taskTimeoutMs = options.taskTimeoutMs;
+    this.onTaskTimeout = options.onTaskTimeout;
   }
 
   private queueFor(guildId: string): GuildQueue {
@@ -41,6 +57,13 @@ export class GuildDispatcher {
         onIdle: () => this.maybeEvict(guildId),
         ...(this.onTaskFailure ? { onTaskFailure: this.onTaskFailure } : {}),
         ...(this.circuit ? { circuit: this.circuit } : {}),
+        ...(this.taskTimeoutMs !== undefined ? { taskTimeoutMs: this.taskTimeoutMs } : {}),
+        ...(this.onTaskTimeout
+          ? {
+              onTaskTimeout: (task: string, ranForMs: number) =>
+                this.onTaskTimeout?.(guildId, task, ranForMs),
+            }
+          : {}),
       });
       this.queues.set(guildId, queue);
     }
@@ -64,13 +87,30 @@ export class GuildDispatcher {
     return this.queueFor(guildId).enqueue(name, task);
   }
 
-  /** Snapshot of every active queue, for the diagnostics endpoint. */
-  snapshot(): { guildId: string; depth: number; circuitState: string }[] {
-    return [...this.queues.values()].map((q) => ({
-      guildId: q.guildId,
-      depth: q.depth,
-      circuitState: q.circuitState,
-    }));
+  /**
+   * Snapshot of every active queue, for the diagnostics endpoint.
+   *
+   * Carries the in-flight task and its age, not just the depth. Depth alone
+   * cannot separate a busy guild from a stuck one, which is what made the
+   * 2026-09-16 stall un-diagnosable from outside the process: three queues
+   * thousands deep, and no way to ask what any of them was waiting on.
+   */
+  snapshot(): {
+    guildId: string;
+    depth: number;
+    circuitState: string;
+    task?: string;
+    taskRanForMs?: number;
+  }[] {
+    return [...this.queues.values()].map((q) => {
+      const inFlight = q.inFlightTask;
+      return {
+        guildId: q.guildId,
+        depth: q.depth,
+        circuitState: q.circuitState,
+        ...(inFlight ? { task: inFlight.name, taskRanForMs: inFlight.ranForMs } : {}),
+      };
+    });
   }
 
   /** Number of guilds whose breaker is currently tripped. */

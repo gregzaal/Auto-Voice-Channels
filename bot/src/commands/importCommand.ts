@@ -70,10 +70,12 @@ import {
  *   written rather than leaving the guild silently switched off.
  * - **The reconcile is fired AFTER the queued task returns, never awaited
  *   inside it.** `run()` is `dispatcher.dispatch`, whose queue runs tasks
- *   strictly sequentially with no timeout, so awaiting `reconcileGuild` from
- *   inside a queued task waits for a task that cannot start until the awaiting
- *   one finishes. The guild's queue would hang forever and every voice event for
- *   it would stop until the process restarted.
+ *   strictly sequentially, so awaiting `reconcileGuild` from inside a queued
+ *   task waits for a task that cannot start until the awaiting one finishes.
+ *   The guild's queue stalls and every voice event for it stops. A task
+ *   timeout now ends that after five minutes with an abandoned task and an
+ *   alert, rather than a guild that is dead until the process restarts: a
+ *   better failure, and still a failure. Do not rely on it.
  * - **The three outbound Discord calls are outside the queue.** Nothing bounds a
  *   REST call subject to discord.js's automatic 429 retry, `GuildQueue.drain()`
  *   polls until idle with no timeout, and `gracefulDrain` blocks on it inside a

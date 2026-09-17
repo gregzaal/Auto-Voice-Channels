@@ -73,3 +73,88 @@ describe('GuildQueue', () => {
     expect(q.isIdle).toBe(true);
   });
 });
+
+/**
+ * The 2026-09-16 failure, as a test. Three guilds had a head task stop settling
+ * and every later task for that guild piled up behind it for hours, with no
+ * error, no log line and no recovery short of restarting the machine.
+ */
+describe('GuildQueue task timeout', () => {
+  const stuckQueue = (opts: {
+    onTaskTimeout?: (task: string, ranForMs: number) => void;
+    now?: () => number;
+  }) =>
+    new GuildQueue({
+      guildId: 'g1',
+      logger: fakeLogger(),
+      taskTimeoutMs: 20,
+      ...opts,
+    });
+
+  it('abandons a task that never settles, and keeps the queue moving', async () => {
+    const q = stuckQueue({});
+    const hung = q.enqueue('rerenderChannel', () => new Promise<void>(() => {}));
+    const after = q.enqueue('reconcile', async () => 'ran');
+
+    await expect(hung).rejects.toThrow(/exceeded 20ms and was abandoned/);
+    // The whole point: the task behind the hung one still runs.
+    await expect(after).resolves.toBe('ran');
+    expect(q.isIdle).toBe(true);
+  });
+
+  /** Nothing else knows a task was abandoned, so this hook is the only evidence. */
+  it('reports the abandoned task by name and age', async () => {
+    const seen: { task: string; ranForMs: number }[] = [];
+    const q = stuckQueue({ onTaskTimeout: (task, ranForMs) => seen.push({ task, ranForMs }) });
+    await expect(
+      q.enqueue('voiceStateUpdate', () => new Promise<void>(() => {})),
+    ).rejects.toThrow();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.task).toBe('voiceStateUpdate');
+    expect(seen[0]?.ranForMs).toBeGreaterThanOrEqual(0);
+  });
+
+  /**
+   * Counted as a failure, so a guild whose every task hangs trips its own
+   * breaker instead of burning a timeout per task forever.
+   */
+  it('counts a timeout against the circuit breaker', async () => {
+    const q = new GuildQueue({
+      guildId: 'g1',
+      logger: fakeLogger(),
+      taskTimeoutMs: 10,
+      circuit: { failureThreshold: 2, cooldownMs: 10_000 },
+    });
+    await expect(q.enqueue('a', () => new Promise<void>(() => {}))).rejects.toThrow();
+    await expect(q.enqueue('b', () => new Promise<void>(() => {}))).rejects.toThrow();
+    expect(q.circuitState).not.toBe('closed');
+  });
+
+  it('leaves a task that finishes in time completely alone', async () => {
+    const q = stuckQueue({});
+    await expect(q.enqueue('quick', async () => 'done')).resolves.toBe('done');
+  });
+
+  /**
+   * Depth alone cannot separate a busy guild from a stuck one; this is what
+   * turns the alert from a symptom into a cause.
+   */
+  it('exposes what is running and for how long', async () => {
+    let clock = 1_000;
+    const q = new GuildQueue({
+      guildId: 'g1',
+      logger: fakeLogger(),
+      taskTimeoutMs: 10_000,
+      now: () => clock,
+    });
+    expect(q.inFlightTask).toBeNull();
+    let release: (() => void) | undefined;
+    const running = q.enqueue('reconcile', () => new Promise<void>((r) => (release = r)));
+    await Promise.resolve();
+    clock = 4_000;
+    expect(q.inFlightTask).toEqual({ name: 'reconcile', ranForMs: 3_000 });
+    release?.();
+    await running;
+    expect(q.inFlightTask).toBeNull();
+  });
+});
