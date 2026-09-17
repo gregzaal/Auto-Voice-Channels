@@ -475,6 +475,66 @@ describe('DiscordVoiceActions.renameChannel (rate-limit probe)', () => {
   });
 });
 
+describe('DiscordVoiceActions.setVoiceStatus (rate-limit probe)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const clientWithRest = (put: unknown): Client => ({ rest: { put } }) as unknown as Client;
+
+  /**
+   * The same guard the rename has, applied before Discord needs it to. This
+   * runs inside the guild's serial queue, so an unbounded await here is the
+   * defect that stalled three guilds on 2026-09-16 (`guildQueue.ts`).
+   */
+  it('returns rather than waiting when the write outlives the probe window', async () => {
+    vi.useFakeTimers();
+    const actions = new DiscordVoiceActions(clientWithRest(vi.fn(() => new Promise(() => {}))));
+    const pending = actions.setVoiceStatus('g1', 'c1', 'Playing something');
+    await vi.advanceTimersByTimeAsync(2600); // past STATUS_PROBE_MS (2500)
+    await expect(pending).resolves.toBeUndefined();
+  });
+
+  it('waits for a write that lands promptly', async () => {
+    const put = vi.fn().mockResolvedValue(undefined);
+    const actions = new DiscordVoiceActions(clientWithRest(put));
+    await expect(actions.setVoiceStatus('g1', 'c1', 'x')).resolves.toBeUndefined();
+    expect(put).toHaveBeenCalledWith('/channels/c1/voice-status', { body: { status: 'x' } });
+  });
+
+  /**
+   * A deferred write that fails later must not become an unhandled rejection,
+   * which is why the catch is attached before the race rather than after it.
+   */
+  it('contains a failure that arrives after it has returned', async () => {
+    vi.useFakeTimers();
+    let fail: ((err: unknown) => void) | undefined;
+    const actions = new DiscordVoiceActions(
+      clientWithRest(vi.fn(() => new Promise((_resolve, reject) => (fail = reject)))),
+    );
+    const pending = actions.setVoiceStatus('g1', 'c1', 'x');
+    await vi.advanceTimersByTimeAsync(2600);
+    await expect(pending).resolves.toBeUndefined();
+    fail?.(new Error('429 later'));
+    await vi.advanceTimersByTimeAsync(10);
+    // Reaching here without an unhandled rejection is the assertion.
+    expect(fail).toBeDefined();
+  });
+
+  it('swallows an unknown channel rather than warning about it', async () => {
+    const err = new DiscordAPIError(
+      { code: UNKNOWN_CHANNEL, message: 'Unknown Channel' },
+      UNKNOWN_CHANNEL,
+      404,
+      'PUT',
+      '',
+      {},
+    );
+    const actions = new DiscordVoiceActions(clientWithRest(vi.fn().mockRejectedValue(err)));
+    await expect(actions.setVoiceStatus('g1', 'c1', 'x')).resolves.toBeUndefined();
+  });
+});
+
 describe('DiscordVoiceActions.renameChannel (deleted vs merely hidden)', () => {
   /**
    * A client that serves the cached fetch from `channel` (as discord.js does) but

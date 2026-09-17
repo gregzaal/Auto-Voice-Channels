@@ -221,6 +221,23 @@ const POSITION_STEP = 16;
  */
 const RENAME_PROBE_MS = 2500;
 
+/**
+ * The same window for a voice-channel status write, and deliberately the same
+ * number as {@link RENAME_PROBE_MS}.
+ *
+ * Discord does not publish a tight rate limit on `/voice-status` today, which is
+ * exactly why this is here rather than added after the fact: the endpoint is
+ * written on the same hot path as a rename, from inside the guild's serial work
+ * queue, and an unbounded await there is what stalled three guilds on
+ * 2026-09-16 (`guildQueue.ts`). If Discord tightens this endpoint — and a status
+ * that changes whenever someone's game does is an obvious candidate —
+ * discord.js will queue the request rather than reject it, and without this the
+ * queue would wait on it for as long as Discord says.
+ *
+ * Separate constant from the rename's so the two can diverge if their limits do.
+ */
+const STATUS_PROBE_MS = 2500;
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -899,19 +916,47 @@ export class DiscordVoiceActions implements VoiceActions {
     }
   }
 
+  /**
+   * Sets (or with `''` clears) a voice channel's status.
+   *
+   * discord.js has no helper for this endpoint yet, so it calls the raw route —
+   * and, like {@link renameChannel}, it refuses to wait indefinitely for it. The
+   * caller is a queued per-guild task, so time spent here is time no other event
+   * for that guild is handled; a write that has not landed inside
+   * {@link STATUS_PROBE_MS} is left to finish in the background, where its
+   * failure is still logged. The status converges either way: every re-render
+   * writes the current value, not a delta.
+   */
   async setVoiceStatus(guildId: string, channelId: string, status: string): Promise<void> {
-    // discord.js has no helper for voice channel status yet, so call the raw
-    // endpoint. Its rate limit is far laxer than channel renames. `''` clears it.
-    try {
-      await this.client.rest.put(`/channels/${channelId}/voice-status`, {
-        body: { status },
-      });
-    } catch (err) {
-      if (isApiError(err, UNKNOWN_CHANNEL)) return;
-      // The guild id was already a parameter and simply went unlogged, which
-      // left the most common cause of this warning (a guild that has not
-      // granted the permission) with nothing to identify the guild by.
-      this.logger?.warn({ err, guildId, channelId }, 'failed to set voice channel status');
+    const apply = this.client.rest.put(`/channels/${channelId}/voice-status`, {
+      body: { status },
+    });
+    /**
+     * The catch is attached HERE, before the race, not on the losing branch.
+     *
+     * It is what keeps a deferred write from becoming an unhandled rejection
+     * when it fails minutes later, and it is the only thing that will report
+     * that failure at all once this method has already returned.
+     */
+    const settled = apply.then(
+      () => 'done' as const,
+      (err: unknown) => {
+        if (isApiError(err, UNKNOWN_CHANNEL)) return 'gone' as const;
+        // The guild id was already a parameter and simply went unlogged, which
+        // left the most common cause of this warning (a guild that has not
+        // granted the permission) with nothing to identify the guild by.
+        this.logger?.warn({ err, guildId, channelId }, 'failed to set voice channel status');
+        return 'failed' as const;
+      },
+    );
+    const outcome = await Promise.race([
+      settled,
+      delay(STATUS_PROBE_MS).then(() => 'pending' as const),
+    ]);
+    if (outcome === 'pending') {
+      // Debug, not warn: a deferred status write is the guard working, and on a
+      // throttled endpoint it would otherwise be a warning per re-render.
+      this.logger?.debug({ guildId, channelId }, 'voice status write deferred, queue continuing');
     }
   }
 
