@@ -924,19 +924,25 @@ export class DiscordVoiceActions implements VoiceActions {
    * caller is a queued per-guild task, so time spent here is time no other event
    * for that guild is handled; a write that has not landed inside
    * {@link STATUS_PROBE_MS} is left to finish in the background, where its
-   * failure is still logged. The status converges either way: every re-render
-   * writes the current value, not a delta.
+   * failure is still logged.
+   *
+   * A deferred write that Discord eventually accepts converges, because every
+   * re-render writes the current value rather than a delta. One that ultimately
+   * FAILS does not: `rerenderSecondary` persists the new status regardless of
+   * the outcome, so the next render sees no change and never retries. That is
+   * pre-existing and is the reason this logs rather than passing quietly.
    */
   async setVoiceStatus(guildId: string, channelId: string, status: string): Promise<void> {
     const apply = this.client.rest.put(`/channels/${channelId}/voice-status`, {
       body: { status },
     });
     /**
-     * The catch is attached HERE, before the race, not on the losing branch.
+     * Handled here rather than on the losing branch, because after the race
+     * this method has returned and nothing else is listening.
      *
-     * It is what keeps a deferred write from becoming an unhandled rejection
-     * when it fails minutes later, and it is the only thing that will report
-     * that failure at all once this method has already returned.
+     * Not for unhandled-rejection safety: `Promise.race` subscribes to every
+     * element, so a late rejection is marked handled either way. This is the
+     * only thing that will REPORT the failure once the write has been deferred.
      */
     const settled = apply.then(
       () => 'done' as const,
@@ -949,10 +955,21 @@ export class DiscordVoiceActions implements VoiceActions {
         return 'failed' as const;
       },
     );
-    const outcome = await Promise.race([
-      settled,
-      delay(STATUS_PROBE_MS).then(() => 'pending' as const),
-    ]);
+    /**
+     * Unref'd and cleared, unlike `renameChannel`'s probe.
+     *
+     * This runs on every presence change that moves a managed name, so a ref'd
+     * 2.5s timer left behind by every write that lands in 40ms is the same
+     * carelessness the queue's own timer takes care to avoid.
+     */
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const probe = new Promise<'pending'>((resolve) => {
+      timer = setTimeout(() => resolve('pending'), STATUS_PROBE_MS);
+      (timer as { unref?: () => void }).unref?.();
+    });
+    const outcome = await Promise.race([settled, probe]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
     if (outcome === 'pending') {
       // Debug, not warn: a deferred status write is the guard working, and on a
       // throttled endpoint it would otherwise be a warning per re-render.

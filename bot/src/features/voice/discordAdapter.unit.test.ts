@@ -503,22 +503,32 @@ describe('DiscordVoiceActions.setVoiceStatus (rate-limit probe)', () => {
   });
 
   /**
-   * A deferred write that fails later must not become an unhandled rejection,
-   * which is why the catch is attached before the race rather than after it.
+   * The point of handling the rejection before the race: once the write is
+   * deferred this method has returned, so nothing else is left to report a
+   * failure that lands minutes later. Asserts the WARNING, which is the part
+   * that carries information - `Promise.race` would contain the rejection
+   * either way.
    */
-  it('contains a failure that arrives after it has returned', async () => {
+  it('still reports a failure that lands after it has returned', async () => {
     vi.useFakeTimers();
     let fail: ((err: unknown) => void) | undefined;
+    const warn = vi.fn();
+    const logger = { warn, debug: vi.fn(), info: vi.fn(), error: vi.fn() };
     const actions = new DiscordVoiceActions(
       clientWithRest(vi.fn(() => new Promise((_resolve, reject) => (fail = reject)))),
+      logger as never,
     );
     const pending = actions.setVoiceStatus('g1', 'c1', 'x');
     await vi.advanceTimersByTimeAsync(2600);
     await expect(pending).resolves.toBeUndefined();
+    expect(warn).not.toHaveBeenCalled();
+
     fail?.(new Error('429 later'));
     await vi.advanceTimersByTimeAsync(10);
-    // Reaching here without an unhandled rejection is the assertion.
-    expect(fail).toBeDefined();
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ guildId: 'g1', channelId: 'c1' }),
+      'failed to set voice channel status',
+    );
   });
 
   it('swallows an unknown channel rather than warning about it', async () => {
