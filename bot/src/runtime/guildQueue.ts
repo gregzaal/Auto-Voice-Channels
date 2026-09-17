@@ -28,9 +28,13 @@ export interface GuildQueueOptions {
   /**
    * How long one task may run before the queue gives up waiting for it.
    *
-   * See {@link DEFAULT_TASK_TIMEOUT_MS}. Injectable so tests need not wait.
+   * A function rather than a number when the caller wants the runtime flag
+   * (`queue.task_timeout_ms`) to take effect without a restart; it is read once
+   * per task, so a change applies to the next task rather than a running one.
+   * **Zero or less disables the timeout**, restoring the unbounded wait this
+   * exists to prevent. See {@link DEFAULT_TASK_TIMEOUT_MS}.
    */
-  taskTimeoutMs?: number;
+  taskTimeoutMs?: number | (() => number);
   /**
    * Called when a task is abandoned for running too long, with enough to act on:
    * the guild is in {@link GuildQueue.guildId}, the task name and its age are
@@ -51,19 +55,24 @@ export interface GuildQueueOptions {
  * Per-guild isolation is the point of this class, and an unbounded await is a
  * hole straight through it.
  *
- * Five minutes is far past any real task. The work this queue runs is a
- * reconcile, a voice-state handler or a rename, all of which are seconds; the
- * one operation that can legitimately take minutes (a rate-limited channel
- * rename) already refuses to block, returning `rateLimited` and converging in
- * the background rather than holding the queue.
- *
  * **Abandoning is not cancelling.** The underlying work keeps running and may
- * still complete, so a timeout trades the ordering guarantee for liveness on
- * exactly the tasks that have already broken it. That is the right trade at
- * five minutes and the wrong one at five seconds, which is why this is generous
- * and why it reports rather than passing quietly.
+ * still complete while the next task for the same guild starts, so a false
+ * abandonment can produce exactly the double-acting this queue exists to
+ * prevent: a room created twice when an abandoned create is followed by a
+ * reconcile that still sees the member sitting in the creator channel. That
+ * self-heals on the next sweep, and it is still the reason this bound is set
+ * well clear of legitimate work rather than tight enough to feel responsive.
+ *
+ * Ten minutes, for two reasons a shorter value gets wrong. A reconcile is a
+ * loop over the guild's rooms, each re-render bounded by a 2.5s rename probe
+ * and a 2.5s status probe, so a large guild's renumber can legitimately run for
+ * minutes; five minutes put that inside the abandonment window. And the safety
+ * net sweep runs every five minutes, so a timeout of exactly five made the
+ * abandonment coincide with a reconcile queued and ready to double-act.
+ *
+ * `queue.task_timeout_ms` overrides this live, and 0 disables it.
  */
-export const DEFAULT_TASK_TIMEOUT_MS = 5 * 60_000;
+export const DEFAULT_TASK_TIMEOUT_MS = 10 * 60_000;
 
 /**
  * A serial, ordered, fault-isolated work queue for a single guild (actor-style).
@@ -88,7 +97,7 @@ export class GuildQueue {
   private draining = false;
   /** What is running right now, and since when. Null while idle. */
   private current: { name: string; startedAt: number } | null = null;
-  private readonly taskTimeoutMs: number;
+  private readonly taskTimeoutMs: () => number;
   private readonly onTaskTimeout: ((task: string, ranForMs: number) => void) | undefined;
   private readonly now: () => number;
 
@@ -98,7 +107,8 @@ export class GuildQueue {
     this.breaker = new CircuitBreaker(options.circuit);
     this.onIdle = options.onIdle;
     this.onTaskFailure = options.onTaskFailure;
-    this.taskTimeoutMs = options.taskTimeoutMs ?? DEFAULT_TASK_TIMEOUT_MS;
+    const configured = options.taskTimeoutMs ?? DEFAULT_TASK_TIMEOUT_MS;
+    this.taskTimeoutMs = typeof configured === 'function' ? configured : (): number => configured;
     this.onTaskTimeout = options.onTaskTimeout;
     this.now = options.now ?? Date.now;
   }
@@ -185,6 +195,7 @@ export class GuildQueue {
 
     const startedAt = this.now();
     this.current = { name: task.name, startedAt };
+    const timeoutMs = this.taskTimeoutMs();
     /**
      * Raced, never awaited bare.
      *
@@ -192,11 +203,17 @@ export class GuildQueue {
      * never settles parks this loop, and every later task for the guild waits
      * behind it until the process restarts. The timer is unref'd so a pending
      * race can never be the reason the process stays alive.
+     *
+     * Zero or less is the kill switch (`queue.task_timeout_ms`), and it restores
+     * the original unbounded wait deliberately: an operator turning this off is
+     * choosing the stall over the double-acting, which is a choice worth having
+     * when a guard misfires, but it is the outage this class was fixed to stop.
      */
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timedOut = Symbol('task-timeout');
     const expiry = new Promise<typeof timedOut>((resolve) => {
-      timer = setTimeout(() => resolve(timedOut), this.taskTimeoutMs);
+      if (timeoutMs <= 0) return;
+      timer = setTimeout(() => resolve(timedOut), timeoutMs);
       (timer as { unref?: () => void }).unref?.();
     });
 
@@ -213,9 +230,15 @@ export class GuildQueue {
         this.breaker.onFailure();
         this.inFlight = 0;
         this.current = null;
-        const err = new Error(
-          `Task ${task.name} exceeded ${this.taskTimeoutMs}ms and was abandoned`,
-        );
+        /**
+         * Deliberately says nothing about tasks or milliseconds: this message
+         * is rendered verbatim to whoever ran the command (`describeError`), so
+         * an admin running `/import` on a stalled guild would otherwise be shown
+         * an internal task slug. The task name and duration are in the log line
+         * below and in the `queue.task_timeout` report, which are where an
+         * operator looks.
+         */
+        const err = new Error('That took too long to finish and was stopped, please try again');
         this.logger.error(
           { task: task.name, ranForMs, circuit: this.breaker.getState() },
           'task abandoned after timeout, queue continuing',

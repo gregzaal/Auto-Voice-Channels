@@ -35,6 +35,7 @@ import {
 import v8 from 'node:v8';
 import { REST, Routes, type Client } from 'discord.js';
 import { GuildDispatcher } from './runtime/dispatcher.js';
+import { DEFAULT_TASK_TIMEOUT_MS } from './runtime/guildQueue.js';
 import { RuntimeCreationGate } from './runtime/creationGate.js';
 import { ShardLeaseManager } from './runtime/shardLeaseManager.js';
 import { runIdle } from './runtime/idle.js';
@@ -197,6 +198,15 @@ async function main(): Promise<void> {
   const opsReport: {
     report?: (kind: string, message: string, context: Record<string, unknown>) => void;
   } = {};
+  /**
+   * The flags repository, for readers built before it exists.
+   *
+   * Same holder idiom and the same reason as `opsReport` above: the dispatcher
+   * is constructed before the database repositories, and its task timeout wants
+   * to follow a runtime flag. Absent means the compiled default, which is the
+   * safe direction for a guard.
+   */
+  const flagsHolder: { current?: RuntimeFlagsRepository } = {};
   // Distribute shards across the fleet: each instance claims up to its cap. At one
   // instance (self-host) the cap is the full shard count, so it claims everything.
   const maxShards = shardCapFor(config.totalShards, config.expectedInstances);
@@ -225,8 +235,37 @@ async function main(): Promise<void> {
    * is simply not counted, not a crash.
    */
   const countError: { record?: (err: unknown) => void } = {};
+  /**
+   * The task timeout, live-overridable by `queue.task_timeout_ms`.
+   *
+   * Read through a holder because the flags repository is built well below
+   * this, and refreshed in the BACKGROUND rather than awaited: this is called
+   * once per task on the hot path, and a queue that has to wait on a database
+   * read before it can start work would be a worse version of the problem the
+   * timeout exists to solve. The stamp is taken before the read so a slow
+   * database cannot stampede it, and a failed read keeps the last good value.
+   */
+  const taskTimeout = { ms: DEFAULT_TASK_TIMEOUT_MS, readAt: 0 };
+  const taskTimeoutMs = (): number => {
+    const now = Date.now();
+    if (now - taskTimeout.readAt >= 60_000 && flagsHolder.current) {
+      taskTimeout.readAt = now;
+      void flagsHolder.current
+        .getAll()
+        .then((all) => {
+          const raw = all[RUNTIME_FLAGS.QUEUE_TASK_TIMEOUT_MS];
+          taskTimeout.ms = typeof raw === 'number' && raw >= 0 ? raw : DEFAULT_TASK_TIMEOUT_MS;
+        })
+        .catch(() => {
+          /* keep the last good value: a flag read failing must not un-guard the queue */
+        });
+    }
+    return taskTimeout.ms;
+  };
+
   const dispatcher = new GuildDispatcher({
     logger,
+    taskTimeoutMs,
     // The per-guild boundary is the only place that sees every isolated failure.
     onTaskFailure: (err) => countError.record?.(err),
     /**
@@ -241,7 +280,9 @@ async function main(): Promise<void> {
       opsReport.report?.(
         'queue.task_timeout',
         'A guild task ran too long and was abandoned so its queue could continue',
-        { guildId, task, ranForMinutes: Math.round(ranForMs / 60_000) },
+        // Seconds, not minutes: the bound is the only value this can take in
+        // whole minutes, so minutes carry no information at all.
+        { guildId, task, ranForSeconds: Math.round(ranForMs / 1_000) },
       );
     },
   });
@@ -317,6 +358,7 @@ async function main(): Promise<void> {
   const memberPoolGuildsRepo = new MemberPoolGuildRepository(db);
   const memberPoolsRepo = new MemberPoolRepository(db);
   const flags = new RuntimeFlagsRepository(db, config.fleet);
+  flagsHolder.current = flags;
   const actions = new DiscordVoiceActions(client, logger);
   const voice = new DiscordVoiceView(client);
   // Significant errors are reported to the admin channel when configured; a seam

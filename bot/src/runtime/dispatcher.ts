@@ -13,8 +13,13 @@ export interface DispatcherOptions {
    * already been handled, and several callers do not look at it at all.
    */
   onTaskFailure?: (err: unknown) => void;
-  /** How long one task may hold a guild's queue. See `DEFAULT_TASK_TIMEOUT_MS`. */
-  taskTimeoutMs?: number;
+  /**
+   * How long one task may hold a guild's queue. See `DEFAULT_TASK_TIMEOUT_MS`.
+   *
+   * A function when it should follow the `queue.task_timeout_ms` runtime flag
+   * without a restart; 0 disables the timeout.
+   */
+  taskTimeoutMs?: number | (() => number);
   /**
    * Called when a guild's task is abandoned for running too long.
    *
@@ -35,7 +40,7 @@ export class GuildDispatcher {
   private readonly logger: Logger;
   private readonly circuit: CircuitBreakerOptions | undefined;
   private readonly onTaskFailure: ((err: unknown) => void) | undefined;
-  private readonly taskTimeoutMs: number | undefined;
+  private readonly taskTimeoutMs: number | (() => number) | undefined;
   private readonly onTaskTimeout:
     | ((guildId: string, task: string, ranForMs: number) => void)
     | undefined;

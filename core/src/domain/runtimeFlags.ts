@@ -14,6 +14,16 @@ export const RUNTIME_FLAGS = {
   VOICE_ORDER_REPAIR_DISABLED: 'voice.order_repair_disabled',
   /** Throttle: max secondary creations per guild per minute (number; 0 = unlimited). */
   CREATE_RATE_LIMIT: 'create.rate_limit_per_min',
+  /**
+   * How long one guild task may hold its queue before it is abandoned
+   * (number of ms; **0 disables the timeout**, restoring the unbounded wait).
+   *
+   * The no-deploy lever for a guard that trades an ordering guarantee for
+   * liveness: abandoning a task does not cancel it, so if abandonment ever
+   * causes more trouble than the stall it prevents, this widens or removes it
+   * without shipping a build. Unset means the compiled default.
+   */
+  QUEUE_TASK_TIMEOUT_MS: 'queue.task_timeout_ms',
   /** Disable the billing/trial reconcile job entirely (sampling + ladder + notifications). */
   BILLING_RECONCILE_DISABLED: 'billing.reconcile_disabled',
   /**

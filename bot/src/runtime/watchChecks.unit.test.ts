@@ -171,14 +171,16 @@ describe('buildWatchChecks', () => {
             depth: 1081,
             circuitState: 'closed',
             task: 'rerenderChannel',
-            taskRanForMs: 7 * 3_600_000,
+            // Inside the queue's own timeout, which is the only age this check
+            // can actually observe: a longer one is a state the code prevents.
+            taskRanForMs: 9 * 60_000,
           },
         ],
       });
       const problems = await find(d, 'queue.backlog').run();
       expect(problems).toHaveLength(1);
       expect(problems[0]?.message).toContain('rerenderChannel');
-      expect(problems[0]?.message).toContain('420m');
+      expect(problems[0]?.message).toContain('540s');
       expect(problems[0]?.details).toMatchObject({ task: 'rerenderChannel' });
     });
 

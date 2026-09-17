@@ -300,9 +300,15 @@ export function buildWatchChecks(deps: WatchCheckDeps): WatchCheck[] {
           .snapshot()
           .filter((q) => q.depth >= QUEUE_DEPTH_THRESHOLD)
           .map((q) => {
+            /**
+             * Seconds, not minutes. A task cannot outlive the queue's own
+             * timeout, so in whole minutes every backlog this check can see
+             * renders as the same small number, and anything under thirty
+             * seconds renders as `0m`.
+             */
             const held =
               q.task !== undefined
-                ? `, held by \`${q.task}\` for ${Math.round((q.taskRanForMs ?? 0) / 60_000)}m`
+                ? `, held by \`${q.task}\` for ${Math.round((q.taskRanForMs ?? 0) / 1_000)}s`
                 : '';
             return {
               target: q.guildId,

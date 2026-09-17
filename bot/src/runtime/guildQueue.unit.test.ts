@@ -96,7 +96,7 @@ describe('GuildQueue task timeout', () => {
     const hung = q.enqueue('rerenderChannel', () => new Promise<void>(() => {}));
     const after = q.enqueue('reconcile', async () => 'ran');
 
-    await expect(hung).rejects.toThrow(/exceeded 20ms and was abandoned/);
+    await expect(hung).rejects.toThrow(/took too long/);
     // The whole point: the task behind the hung one still runs.
     await expect(after).resolves.toBe('ran');
     expect(q.isIdle).toBe(true);
@@ -128,6 +128,39 @@ describe('GuildQueue task timeout', () => {
     await expect(q.enqueue('a', () => new Promise<void>(() => {}))).rejects.toThrow();
     await expect(q.enqueue('b', () => new Promise<void>(() => {}))).rejects.toThrow();
     expect(q.circuitState).not.toBe('closed');
+  });
+
+  /**
+   * The kill switch (`queue.task_timeout_ms` = 0). It restores the unbounded
+   * wait on purpose: an operator turning the guard off is choosing the stall
+   * over the double-acting, and that choice has to actually work.
+   */
+  it('waits indefinitely when the timeout is disabled', async () => {
+    const q = new GuildQueue({ guildId: 'g1', logger: fakeLogger(), taskTimeoutMs: 0 });
+    let release: (() => void) | undefined;
+    const held = q.enqueue('reconcile', () => new Promise<void>((r) => (release = r)));
+    const behind = q.enqueue('after', async () => 'ran');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(q.depth).toBe(2); // nothing abandoned, nothing behind it started
+    release?.();
+    await expect(held).resolves.toBeUndefined();
+    await expect(behind).resolves.toBe('ran');
+  });
+
+  /** Read per task, so a flag change applies to the next one without a restart. */
+  it('reads the timeout afresh for every task', async () => {
+    let ms = 0;
+    const q = new GuildQueue({ guildId: 'g1', logger: fakeLogger(), taskTimeoutMs: () => ms });
+    let release: (() => void) | undefined;
+    const unbounded = q.enqueue('first', () => new Promise<void>((r) => (release = r)));
+    await new Promise((r) => setTimeout(r, 25));
+    release?.();
+    await unbounded;
+
+    ms = 20;
+    await expect(q.enqueue('second', () => new Promise<void>(() => {}))).rejects.toThrow(
+      /took too long/,
+    );
   });
 
   it('leaves a task that finishes in time completely alone', async () => {
