@@ -46,6 +46,31 @@ export interface CompanionSyncResult {
    * not be granted is never remembered as granted.
    */
   grantedRoleId?: string | null;
+  /**
+   * True when a moderator role IS configured but no longer exists in the guild.
+   *
+   * Distinct from `grantedRoleId: null`, which also covers "none configured"
+   * and "the grant failed once". Only this one means the setting points at a
+   * deleted role, which no amount of retrying fixes and which the admin is the
+   * only one who can correct.
+   */
+  roleMissing?: boolean;
+}
+
+/** What {@link VoiceActions.createCompanionChannel} actually managed to do. */
+export interface CreateCompanionChannelResult {
+  channelId: string;
+  /**
+   * The moderator role actually written into the create payload.
+   *
+   * Null when none is configured or the configured one no longer exists.
+   * Returned rather than assumed, because Discord accepts a create whose
+   * `permission_overwrites` names an unknown role and silently drops that
+   * entry: the caller cannot infer a grant from the create having succeeded.
+   */
+  grantedRoleId: string | null;
+  /** As {@link CompanionSyncResult.roleMissing}. */
+  roleMissing: boolean;
 }
 
 export interface CreateVoiceChannelInput {
@@ -182,7 +207,7 @@ export interface VoiceActions {
    * text channel routed through them would be orphaned on teardown while the
    * row was dropped cleanly.
    */
-  createCompanionChannel(input: CreateCompanionChannelInput): Promise<string>;
+  createCompanionChannel(input: CreateCompanionChannelInput): Promise<CreateCompanionChannelResult>;
   /**
    * Converges a companion text channel's viewers onto exactly `memberIds`
    * (plus `roleId` when set), and reports what it changed.
@@ -311,6 +336,12 @@ export class RecordingVoiceActions implements VoiceActions {
   failMove = false;
   /** When true, `setPrivacy` throws Missing Permissions (tests the created-but-unlockable path). */
   failPrivacy = false;
+  /**
+   * When true, a configured moderator role is treated as no longer existing in
+   * the guild, exactly as {@link DiscordVoiceActions.resolveViewerRole} decides
+   * it for real: no grant is attempted and the caller is told to report it.
+   */
+  missingCompanionRole = false;
   /** When true, `createCompanionChannel` throws Missing Permissions. */
   failCompanionCreate = false;
   /** When set, `syncCompanionMembers` reports this channel as gone from Discord. */
@@ -461,7 +492,9 @@ export class RecordingVoiceActions implements VoiceActions {
     return Promise.resolve(channelId);
   }
 
-  createCompanionChannel(input: CreateCompanionChannelInput): Promise<string> {
+  createCompanionChannel(
+    input: CreateCompanionChannelInput,
+  ): Promise<CreateCompanionChannelResult> {
     if (this.failCompanionCreate) {
       return Promise.reject(
         new DiscordAPIError(
@@ -484,7 +517,20 @@ export class RecordingVoiceActions implements VoiceActions {
       name: input.name,
       secondaryChannelId: input.secondaryChannelId,
     });
-    return Promise.resolve(channelId);
+    /**
+     * The fake grants whatever it is given, because it has no guild to resolve
+     * a role against. Tests that need the "role no longer exists" path drive it
+     * through `missingCompanionRole` instead of inventing a second fake.
+     */
+    // `@everyone`'s id IS the guild id, and the real adapter refuses it rather
+    // than publishing the chat to the server. Modelled here so a service-level
+    // test cannot pass against code that records it as granted.
+    const wanted = input.roleId && input.roleId !== input.guildId ? input.roleId : null;
+    return Promise.resolve({
+      channelId,
+      grantedRoleId: this.missingCompanionRole ? null : wanted,
+      roleMissing: this.missingCompanionRole && !!wanted,
+    });
   }
 
   syncCompanionMembers(input: SyncCompanionMembersInput): Promise<CompanionSyncResult> {
@@ -503,6 +549,15 @@ export class RecordingVoiceActions implements VoiceActions {
       memberIds: [...input.memberIds],
       roleId: input.roleId,
     });
+    if (this.missingCompanionRole && input.roleId && input.roleId !== input.guildId) {
+      return Promise.resolve({
+        added,
+        removed,
+        channelGone: false,
+        grantedRoleId: null,
+        roleMissing: true,
+      });
+    }
     return Promise.resolve({ added, removed, channelGone: false, grantedRoleId: input.roleId });
   }
 

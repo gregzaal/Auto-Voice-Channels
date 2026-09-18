@@ -6,6 +6,7 @@ import {
   PermissionFlagsBits,
   type Activity,
   type Client,
+  type Guild,
   type GuildMember,
   type VoiceBasedChannel,
   type VoiceState,
@@ -14,6 +15,7 @@ import type { Logger } from '@avc/core';
 import type {
   CompanionSyncResult,
   CreateCompanionChannelInput,
+  CreateCompanionChannelResult,
   CreateVoiceChannelInput,
   RenameResult,
   SyncCompanionMembersInput,
@@ -1031,6 +1033,47 @@ export class DiscordVoiceActions implements VoiceActions {
   }
 
   /**
+   * The configured moderator role, but only when it still exists here.
+   *
+   * Discord accepts a channel create whose `permission_overwrites` names a role
+   * the guild does not have and silently drops that entry, while the equivalent
+   * `PUT .../permissions/{id}` answers `10009 Unknown Overwrite`. A role deleted
+   * since it was configured therefore produced a create that looked fine and a
+   * sync that failed every five minutes forever. Found in production on
+   * 2026-09-18: an `stct` value restored from the legacy archive naming a role
+   * the guild had deleted years earlier.
+   *
+   * Resolved from the local role cache, which GUILD_CREATE populates, so it
+   * costs no request. The `size > 0` guard is the cold-cache case: an empty
+   * cache means "we do not know yet", not "the role is gone", and must never be
+   * read as grounds to stop granting a perfectly good role.
+   */
+  private resolveViewerRole(
+    guild: Guild,
+    roleId: string | null | undefined,
+  ): { roleId: string | null; missing: boolean } {
+    /**
+     * Compared against the guild id, not `roles.everyone.id`: `@everyone`'s id IS the
+     * guild id, and `RoleManager#everyone` is itself `cache.get(guild.id)`, so reading it
+     * here would throw on exactly the unhydrated guild the size guard below
+     * exists to tolerate -- making that guard unreachable and turning "we do not
+     * know yet" into a create that fails outright.
+     */
+    if (!roleId || roleId === guild.id) return { roleId: null, missing: false };
+    /**
+     * Absent evidence is not evidence of absence, and this is the direction
+     * that matters: judging a live role missing silently withholds a permission
+     * the admin asked for, with no error anywhere. An empty cache means "not
+     * loaded", so only a populated cache that does not list the role counts.
+     */
+    const cache = guild.roles?.cache;
+    if (!cache || typeof cache.has !== 'function' || !(cache.size > 0)) {
+      return { roleId, missing: false };
+    }
+    return cache.has(roleId) ? { roleId, missing: false } : { roleId: null, missing: true };
+  }
+
+  /**
    * Creates a room's private companion text channel.
    *
    * `@everyone` is denied View Channel in the create payload itself, so there is
@@ -1043,8 +1086,11 @@ export class DiscordVoiceActions implements VoiceActions {
    * deletes a channel on a topic match, which is the legacy defect that forced
    * its help text to tell admins not to edit the topic.
    */
-  async createCompanionChannel(input: CreateCompanionChannelInput): Promise<string> {
+  async createCompanionChannel(
+    input: CreateCompanionChannelInput,
+  ): Promise<CreateCompanionChannelResult> {
     const guild = await this.client.guilds.fetch(input.guildId);
+    const viewerRole = this.resolveViewerRole(guild, input.roleId);
     const room = await this.client.channels.fetch(input.secondaryChannelId).catch(() => null);
     const parentId = room?.isVoiceBased() ? room.parent?.id : undefined;
     const botId = this.client.user?.id;
@@ -1066,10 +1112,10 @@ export class DiscordVoiceActions implements VoiceActions {
       // Never `@everyone`, whose id is the guild id: granting it View here would
       // undo the deny above and publish the chat to the whole server. Refused at
       // three levels, this being the one that writes.
-      ...(input.roleId && input.roleId !== guild.roles.everyone.id
+      ...(viewerRole.roleId
         ? [
             {
-              id: input.roleId,
+              id: viewerRole.roleId,
               type: OverwriteType.Role,
               allow: PermissionFlagsBits.ViewChannel,
             },
@@ -1089,7 +1135,11 @@ export class DiscordVoiceActions implements VoiceActions {
       topic: `Chat for <#${input.secondaryChannelId}>. Visible to whoever is in that room right now.`,
       permissionOverwrites: overwrites,
     });
-    return channel.id;
+    return {
+      channelId: channel.id,
+      grantedRoleId: viewerRole.roleId,
+      roleMissing: viewerRole.missing,
+    };
   }
 
   /**
@@ -1131,7 +1181,8 @@ export class DiscordVoiceActions implements VoiceActions {
      * last of the three guards, at the only place that actually writes.
      */
     const everyoneId = channel.guild.roles.everyone.id;
-    const roleId = input.roleId && input.roleId !== everyoneId ? input.roleId : null;
+    const viewerRole = this.resolveViewerRole(channel.guild, input.roleId);
+    const roleId = viewerRole.roleId;
 
     /**
      * What this bot granted a MEMBER, so occupants converge.
@@ -1214,6 +1265,15 @@ export class DiscordVoiceActions implements VoiceActions {
       if (stale && stale !== roleId && stale !== everyoneId) {
         await channel.permissionOverwrites.delete(stale).catch(() => undefined);
         removed += 1;
+      }
+      if (viewerRole.missing) {
+        /**
+         * Nothing to attempt: the role is gone, so the PUT could only ever
+         * answer 10009, and a warning every five minutes is what that used to
+         * look like. The caller reports it once instead, through the same
+         * backed-off channel as any other permission problem.
+         */
+        return { added, removed, channelGone: false, grantedRoleId: null, roleMissing: true };
       }
       if (roleId) {
         const existing = channel.permissionOverwrites.cache.get(roleId);

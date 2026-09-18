@@ -351,6 +351,55 @@ describe('CompanionTextService (integration)', () => {
     expect(await companions.get(channelId!)).toMatchObject({ viewerRoleId: null });
   });
 
+  it('does not record a moderator role the guild no longer has', async () => {
+    // Production, 2026-09-18: a legacy `stct` value restored onto a guild that
+    // had deleted the role years earlier. Discord accepts the create and drops
+    // the unknown overwrite silently, so recording the configured id claimed a
+    // grant that never happened.
+    await setupRoom(true);
+    await guilds.updateSettings(GUILD, { text_channel_role: '555000111222333444' });
+    actions.missingCompanionRole = true;
+
+    const channelId = await service.createForRoom(GUILD, ROOM, PRIMARY, ['u1']);
+    expect(channelId).toBeTruthy();
+    expect(await companions.get(channelId!)).toMatchObject({ viewerRoleId: null });
+  });
+
+  it('reports a deleted moderator role instead of retrying it forever', async () => {
+    // The old behaviour was a PUT answering 10009 Unknown Overwrite on every
+    // five-minute sweep, for as long as the setting stayed wrong, visible only
+    // in the logs. It has to reach the admin, because only they can fix it.
+    await setupRoom(true);
+    await guilds.updateSettings(GUILD, { text_channel_role: '555000111222333444' });
+    actions.missingCompanionRole = true;
+    const channelId = await service.createForRoom(GUILD, ROOM, PRIMARY, ['u1']);
+
+    expect(problems.recent(GUILD)).toContainEqual(
+      expect.objectContaining({ channelId: PRIMARY, operation: 'companion_role' }),
+    );
+
+    // And the sync keeps reporting it rather than quietly giving up, without
+    // ever writing the role it could not grant.
+    problems.clear(GUILD, PRIMARY, ['companion_role']);
+    await service.syncRoom(GUILD, ROOM);
+    expect(problems.recent(GUILD)).toContainEqual(
+      expect.objectContaining({ channelId: PRIMARY, operation: 'companion_role' }),
+    );
+    expect(await companions.get(channelId!)).toMatchObject({ viewerRoleId: null });
+  });
+
+  it('still grants a moderator role the guild does have', async () => {
+    // The guard above must not cost the feature its normal case.
+    await setupRoom(true);
+    await guilds.updateSettings(GUILD, { text_channel_role: '555000111222333444' });
+    const channelId = await service.createForRoom(GUILD, ROOM, PRIMARY, ['u1']);
+
+    expect(await companions.get(channelId!)).toMatchObject({
+      viewerRoleId: '555000111222333444',
+    });
+    expect(problems.recent(GUILD)).toEqual([]);
+  });
+
   it('recognises its own channel being deleted by hand, and only its own', async () => {
     await setupRoom(true);
     const channelId = await service.createForRoom(GUILD, ROOM, PRIMARY, ['u1']);
@@ -380,6 +429,8 @@ describe('CompanionTextService (integration)', () => {
 
     expect(await service.createForRoom(GUILD, ROOM, PRIMARY, ['u1'])).toBeNull();
 
+    // `companion`, not `companion_role`: this one really could not create the
+    // channel, which is what that copy describes.
     expect(problems.recent(GUILD)).toContainEqual(
       expect.objectContaining({ channelId: PRIMARY, operation: 'companion' }),
     );

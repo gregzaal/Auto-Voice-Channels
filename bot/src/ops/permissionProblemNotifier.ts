@@ -403,7 +403,9 @@ export class PermissionProblemNotifier {
      * they asked for this, recently, by name.
      */
     const mentionId = mode === 'contact' ? contactId.mentionable : null;
-    const blocking = problems.some((p) => p.operation !== 'companion');
+    const blocking = problems.some(
+      (p) => p.operation !== 'companion' && p.operation !== 'companion_role',
+    );
     const body = problemNoticeBody(permissionProblemSummary(problems), sends, mode, blocking);
 
     await this.takeSlot();

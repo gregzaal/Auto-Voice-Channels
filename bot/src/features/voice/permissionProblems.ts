@@ -14,7 +14,8 @@ export type PermissionOperation =
   | 'rename'
   | 'privacy'
   /** A room was made but its companion text channel could not be. */
-  | 'companion';
+  | 'companion'
+  | 'companion_role';
 
 export interface PermissionProblem {
   channelId: string;
@@ -192,6 +193,22 @@ export function permissionProblemMessage(
       'category the rooms are made in or on my role.'
     );
   }
+  if (operation === 'companion_role') {
+    /**
+     * Deliberately NOT the 'companion' copy below, every clause of which is
+     * false here: the text channels were created, both permissions are held,
+     * and the category is not full. The only fault is a setting pointing at a
+     * role that no longer exists, and naming the wrong fix is worse than saying
+     * nothing, so this names the setting and the command that changes it.
+     */
+    return (
+      `⚠️ The moderator role set for the text channels on <#${channelId}> no longer exists, so ` +
+      'I am not adding it to them. Everything else is working: the rooms and their text ' +
+      'channels are being made as usual, and whoever is in a room can read its chat. Pick a ' +
+      'role again under `/setup`, More settings, Room text channels, or clear it there to stop ' +
+      'this notice.'
+    );
+  }
   if (operation === 'companion') {
     return (
       `⚠️ I made a room from <#${channelId}> but could not create its text channel. Two things ` +
@@ -252,12 +269,14 @@ export function permissionProblemSummary(problems: readonly ProblemLike[]): stri
   const moves = problems.filter((p) => p.operation === 'move');
   const privacyFails = problems.filter((p) => p.operation === 'privacy');
   const companions = problems.filter((p) => p.operation === 'companion');
+  const companionRoles = problems.filter((p) => p.operation === 'companion_role');
   const access = problems.filter(
     (p) =>
       p.operation !== 'create' &&
       p.operation !== 'move' &&
       p.operation !== 'privacy' &&
-      p.operation !== 'companion',
+      p.operation !== 'companion' &&
+      p.operation !== 'companion_role',
   );
   const lines: string[] = [];
   if (creates.length > 0) {
@@ -309,6 +328,13 @@ export function permissionProblemSummary(problems: readonly ProblemLike[]): stri
         'need **Manage Channels** and **Manage Roles** on the category the rooms are made in, or ' +
         'the category is full: Discord allows 50 channels in one, and a room plus its text ' +
         'channel takes two slots. The rooms themselves are working.',
+    );
+  }
+  if (companionRoles.length > 0) {
+    lines.push(
+      `The moderator role set for the text channels on ${list(companionRoles)} no longer exists, ` +
+        'so I am leaving it off them. The rooms and their text channels are fine. Pick a role ' +
+        'again under `/setup`, More settings, Room text channels, or clear it there.',
     );
   }
   if (access.length > 0) {

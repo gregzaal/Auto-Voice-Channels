@@ -50,6 +50,37 @@ export interface CompanionTextDeps {
 export class CompanionTextService {
   constructor(private readonly deps: CompanionTextDeps) {}
 
+  /**
+   * Tells the guild its configured moderator role no longer exists.
+   *
+   * Goes through the ordinary permission-problem channel rather than a log
+   * line, because this is a setting only an admin can fix and nothing else will
+   * ever surface it: the companions themselves keep working, so there is no
+   * other symptom to notice. The tracker's own backoff keeps a permanently
+   * broken setting from nagging, and the sweep re-records it while it lasts.
+   *
+   * Against the CREATOR channel, matching the create-failure report above, so
+   * `/setup` lists one channel rather than one per room.
+   */
+  private reportMissingRole(
+    guildId: string,
+    primaryChannelId: string,
+    roleId: string | null | undefined,
+  ): void {
+    this.deps.permissionProblems?.record(guildId, {
+      channelId: primaryChannelId,
+      operation: 'companion_role',
+      at: Date.now(),
+    });
+    // The create-failure path does this too: a guild that configured
+    // `/logging` asked to be told there rather than only in the system channel.
+    this.deps.serverLog?.(guildId, 1, permissionProblemMessage(primaryChannelId, 'companion_role'));
+    this.deps.logger.warn(
+      { guildId, primaryChannelId, roleId },
+      'the configured companion moderator role no longer exists; skipping the grant',
+    );
+  }
+
   /** Whether this room's creator channel asked for a companion. */
   private async optedIn(guildId: string, primaryChannelId: string): Promise<boolean> {
     const primary = await this.deps.autoChannels.get(primaryChannelId);
@@ -124,7 +155,7 @@ export class CompanionTextService {
 
       const guild = await this.deps.guilds.ensure(guildId);
       const roleId = readTextChannelRole(guild.settings);
-      const channelId = await this.deps.actions.createCompanionChannel({
+      const created = await this.deps.actions.createCompanionChannel({
         guildId,
         name: readTextChannelName(guild.settings) ?? DEFAULT_TEXT_CHANNEL_NAME,
         secondaryChannelId: roomId,
@@ -141,14 +172,22 @@ export class CompanionTextService {
        * alike, which is why the catch is here rather than only around the
        * conflict.
        */
+      const channelId = created.channelId;
       let row;
       try {
         row = await this.deps.companions.create({
           channelId,
           guildId,
           secondaryChannelId: roomId,
-          // Written inline in the create payload above, so it is granted already.
-          viewerRoleId: roleId,
+          /**
+           * What the create actually applied, not what the setting asked for.
+           *
+           * Discord drops an unknown role from a create's overwrites without
+           * complaining, so recording the configured id here claimed a grant
+           * that never happened, and every later sync then tried to "restore"
+           * it against a role that does not exist.
+           */
+          viewerRoleId: created.grantedRoleId,
         });
       } catch (err) {
         await this.deps.actions.deleteCompanionChannel(guildId, channelId).catch(() => undefined);
@@ -166,6 +205,14 @@ export class CompanionTextService {
         return existing?.channelId ?? null;
       }
       this.deps.count?.('created', guildId);
+      /**
+       * After the row, never before it. Everything between the Discord create
+       * and the insert has to either persist the id or delete the channel, and
+       * a throw from the tracker in that window would leak a companion nothing
+       * can ever find again. It also keeps the duplicate-discard path above
+       * from reporting a problem against a channel it then throws away.
+       */
+      if (created.roleMissing) this.reportMissingRole(guildId, primaryChannelId, roleId);
       this.deps.logger.debug({ guildId, roomId, channelId }, 'created companion text channel');
       return channelId;
     } catch (err) {
@@ -211,7 +258,12 @@ export class CompanionTextService {
    * Never throws, for the same reason as the create: this hangs off a voice
    * event that has already done its real work.
    */
-  async syncRoom(guildId: string, roomId: string, known?: CompanionChannelRow): Promise<void> {
+  async syncRoom(
+    guildId: string,
+    roomId: string,
+    known?: CompanionChannelRow,
+    knownPrimaryChannelId?: string,
+  ): Promise<void> {
     try {
       // The reconciler already holds the row; the voice paths do not.
       const row = known ?? (await this.deps.companions.getBySecondary(roomId));
@@ -231,6 +283,31 @@ export class CompanionTextService {
        * Only when it changed, because this runs on every voice event in an
        * opted-in room and a blind write would be one update per join and leave.
        */
+      /**
+       * Report at most once per creator channel, and clear it again when the
+       * role starts working.
+       *
+       * `syncRoom` runs on every join and every leave, not only on the sweep, and
+       * a deleted role never resolves itself, so an unconditional report would
+       * re-stamp the incident on every voice event: permanently "fresh" in
+       * `/setup`, and ten of them would evict every genuine incident from the
+       * tracker's per-guild cap. The primary id is passed in by the reconciler,
+       * which already holds it; only the voice paths pay for the lookup, and
+       * only while the guild is misconfigured.
+       */
+      const primaryChannelId =
+        knownPrimaryChannelId ??
+        (result.roleMissing ? (await this.deps.secondaries.get(roomId))?.primaryChannelId : null);
+      if (primaryChannelId) {
+        if (result.roleMissing) {
+          const already = this.deps.permissionProblems
+            ?.recent(guildId)
+            .some((p) => p.channelId === primaryChannelId && p.operation === 'companion_role');
+          if (!already) this.reportMissingRole(guildId, primaryChannelId, configuredRole);
+        } else if (configuredRole) {
+          this.deps.permissionProblems?.clear(guildId, primaryChannelId, ['companion_role']);
+        }
+      }
       const granted = result.grantedRoleId ?? null;
       if (!result.channelGone && granted !== row.viewerRoleId) {
         await this.deps.companions.setViewerRole(row.channelId, granted);
@@ -379,7 +456,9 @@ export class CompanionTextService {
     for (const room of rooms) {
       const row = byRoom.get(room.channelId);
       if (row) {
-        if (!opts.dryRun) await this.syncRoom(guildId, room.channelId, row);
+        // The primary id is already in hand here, so the sweep never pays for
+        // the lookup `syncRoom` would otherwise do to report a dead role.
+        if (!opts.dryRun) await this.syncRoom(guildId, room.channelId, row, room.primaryChannelId);
         synced += 1;
         continue;
       }

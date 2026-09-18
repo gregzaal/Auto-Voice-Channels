@@ -53,9 +53,19 @@ describe('DiscordVoiceActions companion channels', () => {
       overwrites.delete(id);
       return Promise.resolve();
     });
+    // A real `Guild#roles.cache` is a Collection keyed by role id. The fake had
+    // only `everyone`, which meant these tests could not distinguish "the role
+    // exists" from "we never looked" -- the exact gap that let a deleted role
+    // reach production and retry its grant every five minutes.
+    const roleCache = new Map<string, { id: string }>([
+      [EVERYONE, { id: EVERYONE }],
+      ['mods-new', { id: 'mods-new' }],
+      ['mods-old', { id: 'mods-old' }],
+      // 'mods-gone' is deliberately absent: it is the deleted role.
+    ]);
     const guild = {
       id: GUILD,
-      roles: { everyone: { id: EVERYONE } },
+      roles: { everyone: { id: EVERYONE }, cache: roleCache },
       channels: { create: vi.fn().mockResolvedValue({ id: 'text-1' }) },
     };
     const text = {
@@ -295,9 +305,58 @@ describe('DiscordVoiceActions companion channels', () => {
       { id: EVERYONE, type: 0, allow: 0n, deny: VIEW },
       { id: 'mods-old', type: OverwriteType.Role, allow: VIEW, deny: 0n },
     ]);
+    // 'mods-new' EXISTS in the guild, so the grant is attempted and fails for
+    // a different reason (hierarchy, or Manage Roles lost on the category).
+    // Using 'mods-gone' here would short-circuit at the resolver and never
+    // reach the catch this test is about.
     edit.mockImplementation((id: string) =>
-      id === 'mods-gone' ? Promise.reject(apiError(10011)) : Promise.resolve(),
+      id === 'mods-new' ? Promise.reject(apiError(50013)) : Promise.resolve(),
     );
+
+    const result = await new DiscordVoiceActions(client).syncCompanionMembers({
+      guildId: GUILD,
+      channelId: 'text-1',
+      memberIds: [],
+      roleId: 'mods-new',
+      previousRoleId: 'mods-old',
+    });
+
+    expect(del).toHaveBeenCalledWith('mods-old');
+    // Never recorded as granted, or the next pass would try to revoke it.
+    expect(result.grantedRoleId).toBeNull();
+    // A role that exists but cannot be granted is NOT the deleted-role case.
+    expect(result.roleMissing).toBeFalsy();
+  });
+
+  /**
+   * The deleted-role case, at the adapter rather than through the fake.
+   *
+   * Production, 2026-09-18: a legacy `stct` value naming a role the guild had
+   * deleted years earlier. Discord took it in the create payload and dropped it
+   * silently, then answered `10009 Unknown Overwrite` to the equivalent PUT on
+   * every sweep, forever.
+   */
+  it('never asks Discord for a role the guild no longer has', async () => {
+    const { client, guild } = makeClient();
+    const created = await new DiscordVoiceActions(client).createCompanionChannel({
+      guildId: GUILD,
+      name: 'voice context',
+      secondaryChannelId: ROOM,
+      memberIds: ['u1'],
+      roleId: 'mods-gone',
+    });
+
+    // Not in the payload, so the row cannot claim a grant that never happened.
+    const payload = createArg(guild);
+    expect(payload.permissionOverwrites.find((o) => o.id === 'mods-gone')).toBeUndefined();
+    expect(created).toMatchObject({ grantedRoleId: null, roleMissing: true });
+  });
+
+  it('issues no permission write for a deleted role, but still revokes the old one', async () => {
+    const { client, edit, del } = makeClient([
+      { id: EVERYONE, type: 0, allow: 0n, deny: VIEW },
+      { id: 'mods-old', type: OverwriteType.Role, allow: VIEW, deny: 0n },
+    ]);
 
     const result = await new DiscordVoiceActions(client).syncCompanionMembers({
       guildId: GUILD,
@@ -307,9 +366,11 @@ describe('DiscordVoiceActions companion channels', () => {
       previousRoleId: 'mods-old',
     });
 
+    // The 10009 loop was exactly this call being made every five minutes.
+    expect(edit).not.toHaveBeenCalledWith('mods-gone', expect.anything(), expect.anything());
+    // Changing to a dead role must not strand the role that WAS granted.
     expect(del).toHaveBeenCalledWith('mods-old');
-    // Never recorded as granted, or the next pass would try to revoke it.
-    expect(result.grantedRoleId).toBeNull();
+    expect(result).toMatchObject({ grantedRoleId: null, roleMissing: true });
   });
 
   it('reports a deleted channel rather than throwing', async () => {
