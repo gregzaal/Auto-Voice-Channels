@@ -369,6 +369,40 @@ export class GuildRepository {
   }
 
   /**
+   * Writes only the keys the guild does not already have, in one statement.
+   *
+   * The operand order IS the policy: `patch || settings` lets the stored value
+   * win every collision, which is {@link updateSettings}'s rule reversed and the
+   * same first-writer-wins rule `migrate/merge.ts` applies to an import. Doing
+   * it DB-side rather than read-then-write is what makes it safe to run against
+   * guilds a live fleet is serving: there is no window in which an admin's
+   * `/setup` change can land between the read and the write and be lost.
+   *
+   * Added for the companion backfill (`migrate/backfillCompanion.ts`), which
+   * restores two settings for guilds imported before those keys were mapped and
+   * must not overwrite anything an admin has set since.
+   *
+   * **This does not invalidate the settings cache, and neither does any other
+   * write on this class.** A caller inside the bot runtime must go through
+   * `SettingsCache.fillSettingsGaps`, which wraps this one exactly as it wraps
+   * `updateSettings`; a caller outside it (the backfill CLI has no notifier)
+   * must broadcast `avc_settings_invalidate` itself, or every instance serves
+   * the old values for up to the cache TTL.
+   */
+  async fillSettingsGaps(guildId: string, patch: Record<string, unknown>): Promise<GuildRow> {
+    await this.ensure(guildId);
+    const [updated] = await this.db
+      .update(guilds)
+      .set({
+        settings: sql`${JSON.stringify(patch)}::jsonb || ${guilds.settings}`,
+        updatedAt: new Date(),
+      })
+      .where(eq(guilds.guildId, guildId))
+      .returning();
+    return guildRowSchema.parse(updated);
+  }
+
+  /**
    * Read-modify-write on `settings`, under the row lock, with the decision
    * supplied by the caller.
    *

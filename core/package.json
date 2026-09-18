@@ -30,7 +30,8 @@
     "backup:drill": "tsx ./src/backup/cli.ts drill",
     "backup:restore": "tsx ./src/backup/cli.ts restore",
     "migrate:import": "tsx ./src/migrate/import-cli.ts",
-    "migrate:preseed": "tsx ./src/migrate/preseed-cli.ts"
+    "migrate:preseed": "tsx ./src/migrate/preseed-cli.ts",
+    "migrate:backfill-companion": "tsx ./src/migrate/backfill-companion-cli.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1113.0",

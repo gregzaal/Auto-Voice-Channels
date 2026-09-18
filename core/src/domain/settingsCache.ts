@@ -113,6 +113,21 @@ export class SettingsCache implements GuildSettingsStore {
     return row;
   }
 
+  /**
+   * Writes only the keys the guild lacks, then invalidates the cache.
+   *
+   * Deliberately NOT on `GuildSettingsStore`: nothing in the bot runtime calls
+   * it yet, and adding it to the interface would make every test fake implement
+   * a method none of them exercise. It lives here so that the first runtime
+   * caller finds an invalidating path already waiting, rather than reaching for
+   * the repository and silently serving stale settings for a TTL.
+   */
+  async fillSettingsGaps(guildId: string, patch: Record<string, unknown>): Promise<GuildRow> {
+    const row = await this.repo.fillSettingsGaps(guildId, patch);
+    await this.invalidate(guildId);
+    return row;
+  }
+
   /** Read-modify-write under the row lock, then invalidates the cache. */
   async mergeSettings<T>(
     guildId: string,

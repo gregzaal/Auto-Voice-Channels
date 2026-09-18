@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { SQL } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
@@ -186,6 +186,50 @@ export class AutoChannelRepository {
       .from(autoChannels)
       .where(this.scoped());
     return rows.map((r) => r.guildId);
+  }
+
+  /**
+   * Merges `textChannel: true` into the stored template, leaving every other
+   * field alone.
+   *
+   * The one-off companion backfill (`migrate/backfillCompanion.ts`) is the only
+   * caller, and it needs this because {@link upsert} replaces `template`
+   * wholesale: re-running the legacy importer to restore this one field would
+   * discard every template edit an admin has made since their guild was
+   * imported. The merge is DB-side for the same reason `updateSettings` is --
+   * a read-modify-write here would clobber a concurrent `/template` edit.
+   *
+   * Returns the channel ids actually changed. The predicate is `is null`, not
+   * "not already true", and the difference is the whole point: a stored
+   * `textChannel: false` is an admin's recorded decision, reachable through
+   * `/import` (`guildConfig/import.ts` accepts the boolean verbatim, unlike
+   * `/textchannels`, which deletes the key). Only an ABSENT field means "never
+   * asked". Rows already carrying `true` are excluded too, so a second run
+   * reports nothing and does not bump `updatedAt` on rows it did not change.
+   *
+   * `channelIds`, when given, restricts the update to those channels: the
+   * backfill's default is to restore the flag only on creator channels the
+   * legacy config itself carried, not on ones an admin has created since under
+   * a model where this feature is off by default. An empty array therefore
+   * means "no channels", never "all of them".
+   */
+  async enableTextChannel(guildId: string, channelIds?: readonly string[]): Promise<string[]> {
+    if (channelIds && channelIds.length === 0) return [];
+    const rows = await this.db
+      .update(autoChannels)
+      .set({
+        template: sql`${autoChannels.template} || '{"textChannel":true}'::jsonb`,
+        updatedAt: new Date(),
+      })
+      .where(
+        this.scoped(
+          eq(autoChannels.guildId, guildId),
+          sql`${autoChannels.template}->>'textChannel' is null`,
+          channelIds ? inArray(autoChannels.channelId, [...channelIds]) : undefined,
+        ),
+      )
+      .returning({ channelId: autoChannels.channelId });
+    return rows.map((r) => r.channelId);
   }
 
   /** Count of primaries in a guild (cheap existence/aggregate check). */
