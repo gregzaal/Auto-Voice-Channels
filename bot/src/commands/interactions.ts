@@ -141,6 +141,11 @@ import {
   parseListsId,
 } from './listsPanel.js';
 import { buildTimeZoneModal, parseTimeZoneModal, TIMEZONE_MODAL_ID } from './timezoneModal.js';
+import {
+  buildTextChannelsModal,
+  parseTextChannelsModal,
+  TEXT_CHANNELS_MODAL_ID,
+} from './textChannelsModal.js';
 import { adviseTemplate, lintTemplate } from '../features/templateAssistant/validate.js';
 import {
   ASSISTANT_PREFIX,
@@ -423,6 +428,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         interaction.customId === GENERAL_MODAL_ID ||
         interaction.customId === LOGGING_MODAL_ID ||
         interaction.customId === TIMEZONE_MODAL_ID ||
+        interaction.customId === TEXT_CHANNELS_MODAL_ID ||
         interaction.customId.startsWith(LISTS_PREFIX)
       );
     }
@@ -543,6 +549,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return openPositionModal(interaction);
       case 'alwaysprivate':
         return handleAlwaysPrivate(interaction);
+      case 'textchannels':
+        return handleTextChannels(interaction);
       case 'defaultlimit':
         return handleDefaultLimit(interaction);
       case 'group':
@@ -1023,6 +1031,35 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     const guildId = interaction.guildId!;
     const res = await run(guildId, 'cmd:alwaysprivate', () =>
       deps.settings.toggleDefaultPrivate(guildId, channelId),
+    );
+    await respond(interaction, { content: formatResult(res), ephemeral: true });
+  }
+
+  /**
+   * `/textchannels` → toggle per-room companion text channels for a creator
+   * channel (yours, or picked).
+   *
+   * The legacy command of the same name, narrowed from per guild to per creator
+   * channel: a companion costs a slot in a category Discord caps at 50, so the
+   * guilds that want it pay only where they asked for it.
+   */
+  async function handleTextChannels(interaction: ChatInputCommandInteraction): Promise<void> {
+    const channelId = await resolveOrPick(
+      interaction,
+      'textchannels',
+      '💬 Pick a creator channel to toggle text channels for:',
+    );
+    if (!channelId) return;
+    await textChannelsCore(interaction, channelId);
+  }
+
+  async function textChannelsCore(
+    interaction: ManageableInteraction,
+    channelId: string,
+  ): Promise<void> {
+    const guildId = interaction.guildId!;
+    const res = await run(guildId, 'cmd:textchannels', () =>
+      deps.settings.toggleTextChannel(guildId, channelId),
     );
     await respond(interaction, { content: formatResult(res), ephemeral: true });
   }
@@ -2388,6 +2425,20 @@ Already subscribed? Add the new server ` +
       assistant: Boolean(deps.assistant),
       listCount: Object.keys(config.lists).length,
       gameNameMode: config.gameNameMode,
+      // Resolved from the guild's own cache so the panel can name the role
+      // rather than printing a snowflake. A role that no longer exists simply
+      // has no name, and the option still reports that one is configured.
+      ...(config.textChannelRoleId
+        ? {
+            textChannelRoleId: config.textChannelRoleId,
+            ...(interaction.guild?.roles.cache.get(config.textChannelRoleId)?.name
+              ? {
+                  textChannelRoleName: interaction.guild.roles.cache.get(config.textChannelRoleId)!
+                    .name,
+                }
+              : {}),
+          }
+        : {}),
       ...(config.timezone !== undefined ? { timezone: config.timezone } : {}),
       entitlement,
       // Guild-scoped, so an admin clicking it cannot authorize into the wrong
@@ -2509,6 +2560,19 @@ Already subscribed? Add the new server ` +
       await interaction.showModal(buildTimeZoneModal(config.timezone));
       return;
     }
+    if (action === 'textchannels') {
+      // Undispatched for the same reason as `timezone` above: `showModal`
+      // cannot be deferred, so a queued read would sit behind every rename in
+      // flight.
+      const config = await deps.settings.getConfig(guildId);
+      await interaction.showModal(
+        buildTextChannelsModal({
+          name: config.textChannelName,
+          roleId: config.textChannelRoleId ?? null,
+        }),
+      );
+      return;
+    }
     if (action === 'lists') {
       // Always reached from the panel, so the panel is what it replaces.
       // `refreshListsPanel` defers for us if this branch ever gains a caller
@@ -2559,6 +2623,7 @@ Already subscribed? Add the new server ` +
     'manage',
     'position',
     'alwaysprivate',
+    'textchannels',
     'defaultlimit',
     'inheritpermissions',
     'group',
@@ -2579,6 +2644,8 @@ Already subscribed? Add the new server ` +
         return positionCore(interaction, channelId);
       case 'alwaysprivate':
         return alwaysPrivateCore(interaction, channelId);
+      case 'textchannels':
+        return textChannelsCore(interaction, channelId);
       case 'defaultlimit': {
         const raw = parseSetupPickArg(interaction.customId);
         const limit = raw === null ? Number.NaN : Number(raw);
@@ -2764,6 +2831,8 @@ Already subscribed? Add the new server ` +
     if (interaction.customId.startsWith(ASSISTANT_PREFIX)) return handleAssistantModal(interaction);
     if (interaction.customId === GENERAL_MODAL_ID) return handleGeneralSubmit(interaction);
     if (interaction.customId === TIMEZONE_MODAL_ID) return handleTimeZoneSubmit(interaction);
+    if (interaction.customId === TEXT_CHANNELS_MODAL_ID)
+      return handleTextChannelsSubmit(interaction);
     if (interaction.customId.startsWith(LISTS_PREFIX)) return handleListSaveSubmit(interaction);
     // `avc:alias` is the pre-panel id of the Add modal, still accepted so a
     // modal opened on an old instance mid-deploy can submit against a new one.
@@ -2815,6 +2884,28 @@ Already subscribed? Add the new server ` +
     const res = await run(guildId, 'setup:timezone', () =>
       deps.settings.setTimeZone(guildId, zone),
     );
+    await interaction.reply({ content: formatResult(res), ephemeral: true });
+  }
+
+  /** The `/setup` room text channel settings modal submit (name + moderator role). */
+  async function handleTextChannelsSubmit(interaction: ModalSubmitInteraction): Promise<void> {
+    if (!(await requireManageChannels(interaction))) return;
+    const guildId = interaction.guildId!;
+    const { name, roleId } = parseTextChannelsModal(interaction.fields);
+    // Both writes, then one note. Two separate notes would be two panel
+    // refreshes for one submit.
+    const res = await run(guildId, 'setup:textchannels', async () => {
+      const nameResult = await deps.settings.setTextChannelName(guildId, name);
+      if (!nameResult.ok) return nameResult;
+      return deps.settings.setTextChannelRole(guildId, roleId);
+    });
+    // Same shape as `handleTimeZoneSubmit`: opened from the panel today, with
+    // the plain-reply branch as the defence for a modal with no message behind it.
+    if (interaction.isFromMessage()) {
+      await interaction.deferUpdate();
+      await refreshSetupPanel(interaction, { note: formatResult(res) });
+      return;
+    }
     await interaction.reply({ content: formatResult(res), ephemeral: true });
   }
 

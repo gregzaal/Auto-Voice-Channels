@@ -11,7 +11,14 @@ import {
   type VoiceState,
 } from 'discord.js';
 import type { Logger } from '@avc/core';
-import type { CreateVoiceChannelInput, RenameResult, VoiceActions } from './actions.js';
+import type {
+  CompanionSyncResult,
+  CreateCompanionChannelInput,
+  CreateVoiceChannelInput,
+  RenameResult,
+  SyncCompanionMembersInput,
+  VoiceActions,
+} from './actions.js';
 import type {
   GuildVoiceView,
   MemberActivity,
@@ -35,6 +42,29 @@ function isApiError(err: unknown, code: number): boolean {
 /** Whether `err` is a Discord permission/visibility failure (the bot lacks access). */
 export function isPermissionError(err: unknown): boolean {
   return isApiError(err, MISSING_ACCESS) || isApiError(err, MISSING_PERMISSIONS);
+}
+
+/**
+ * Whether Discord says the thing is already gone.
+ *
+ * Distinct from a permission error, and the pair together are the only
+ * PERMANENT failures: everything else (a 500, an exhausted rate limit, a
+ * dropped socket) is worth retrying, and a caller that drops its only record of
+ * a channel on a transient failure orphans it for good.
+ */
+export function isGoneError(err: unknown): boolean {
+  return isApiError(err, UNKNOWN_CHANNEL);
+}
+
+/**
+ * Channel types a companion may legitimately be.
+ *
+ * It is created as a text channel, and a human can convert it to an
+ * announcement channel without telling anyone. Both still carry permission
+ * overwrites and both are ours to converge and to delete.
+ */
+function isCompanionType(type: number): boolean {
+  return type === ChannelType.GuildText || type === ChannelType.GuildAnnouncement;
 }
 
 export interface ResolvedOverwrite {
@@ -998,6 +1028,233 @@ export class DiscordVoiceActions implements VoiceActions {
       ...(createPosition !== undefined ? { position: createPosition } : {}),
     });
     return channel.id;
+  }
+
+  /**
+   * Creates a room's private companion text channel.
+   *
+   * `@everyone` is denied View Channel in the create payload itself, so there is
+   * no window in which the channel exists and is readable by the server. The
+   * bot's own allow goes in the same payload for the reason `setPrivacy`
+   * documents: denying `@everyone` also denies the bot, which is a member of it.
+   *
+   * The topic names the room, which is what makes an orphan identifiable by a
+   * human later. It is NOT a recovery index: the row is, and nothing here
+   * deletes a channel on a topic match, which is the legacy defect that forced
+   * its help text to tell admins not to edit the topic.
+   */
+  async createCompanionChannel(input: CreateCompanionChannelInput): Promise<string> {
+    const guild = await this.client.guilds.fetch(input.guildId);
+    const room = await this.client.channels.fetch(input.secondaryChannelId).catch(() => null);
+    const parentId = room?.isVoiceBased() ? room.parent?.id : undefined;
+    const botId = this.client.user?.id;
+
+    const overwrites = [
+      { id: guild.roles.everyone.id, deny: PermissionFlagsBits.ViewChannel },
+      ...(botId
+        ? [
+            {
+              id: botId,
+              type: OverwriteType.Member,
+              allow:
+                PermissionFlagsBits.ViewChannel |
+                PermissionFlagsBits.ManageChannels |
+                PermissionFlagsBits.SendMessages,
+            },
+          ]
+        : []),
+      // Never `@everyone`, whose id is the guild id: granting it View here would
+      // undo the deny above and publish the chat to the whole server. Refused at
+      // three levels, this being the one that writes.
+      ...(input.roleId && input.roleId !== guild.roles.everyone.id
+        ? [
+            {
+              id: input.roleId,
+              type: OverwriteType.Role,
+              allow: PermissionFlagsBits.ViewChannel,
+            },
+          ]
+        : []),
+      ...input.memberIds.map((id) => ({
+        id,
+        type: OverwriteType.Member,
+        allow: PermissionFlagsBits.ViewChannel,
+      })),
+    ];
+
+    const channel = await guild.channels.create({
+      name: input.name,
+      type: ChannelType.GuildText,
+      ...(parentId ? { parent: parentId } : {}),
+      topic: `Chat for <#${input.secondaryChannelId}>. Visible to whoever is in that room right now.`,
+      permissionOverwrites: overwrites,
+    });
+    return channel.id;
+  }
+
+  /**
+   * Converges a companion's viewers on `memberIds` (plus the moderator role).
+   *
+   * Reads the CURRENT set from the channel's own overwrite cache, which discord.js
+   * already holds, so a steady-state call with nothing to do costs zero requests
+   * and a join costs exactly one. Never touches the `@everyone` deny, the bot's
+   * own allow, or any overwrite a human added: only member overwrites this bot
+   * granted View Channel to are candidates for removal.
+   */
+  async syncCompanionMembers(input: SyncCompanionMembersInput): Promise<CompanionSyncResult> {
+    const channel = await this.client.channels.fetch(input.channelId).catch((err: unknown) => {
+      if (isApiError(err, UNKNOWN_CHANNEL)) return null;
+      throw err;
+    });
+    if (!channel) return { added: 0, removed: 0, channelGone: true };
+    /**
+     * Announcement channels count.
+     *
+     * One right-click converts a text channel to one, and treating that as
+     * "not ours" froze the ACL silently: departed members kept read access for
+     * the life of the channel, and the teardown reported success while
+     * leaking it. Anything else really is not ours and is left alone.
+     */
+    if (!('permissionOverwrites' in channel) || !isCompanionType(channel.type)) {
+      return { added: 0, removed: 0, channelGone: false };
+    }
+
+    const botId = this.client.user?.id;
+    const guildId = channel.guildId;
+    const desired = new Set(input.memberIds);
+    /**
+     * `@everyone` is never a viewer, whatever the setting says.
+     *
+     * The role id equals the guild id, and granting it View would undo the deny
+     * in the same channel and publish every room's chat to the server. The
+     * settings validator and the settings service both refuse it; this is the
+     * last of the three guards, at the only place that actually writes.
+     */
+    const everyoneId = channel.guild.roles.everyone.id;
+    const roleId = input.roleId && input.roleId !== everyoneId ? input.roleId : null;
+
+    /**
+     * What this bot granted a MEMBER, so occupants converge.
+     *
+     * The test is the exact overwrite this code writes: `ViewChannel` allowed
+     * and nothing else, denying nothing. A human who granted somebody a
+     * different set (View plus Manage Messages, say) is left alone, which is
+     * the closest thing to "did we write this" available for a member, and it
+     * is a safe heuristic here only because the bot writes one per occupant.
+     *
+     * **Roles are NOT inferred this way.** The bot writes at most one role
+     * overwrite, so every other one is somebody's deliberate grant and the same
+     * heuristic would revoke a moderator's decision every five minutes. The
+     * caller passes `previousRoleId`, read from the row this bot wrote, so the
+     * revoke names exactly what the grant named.
+     */
+    const ours = (allow: bigint, deny: bigint): boolean =>
+      allow === PermissionFlagsBits.ViewChannel && deny === 0n;
+    const currentMembers = new Set<string>();
+    for (const overwrite of channel.permissionOverwrites.cache.values()) {
+      if (overwrite.id === botId || overwrite.id === everyoneId) continue;
+      if (overwrite.type !== OverwriteType.Member) continue;
+      if (!ours(overwrite.allow.bitfield, overwrite.deny.bitfield)) continue;
+      currentMembers.add(overwrite.id);
+    }
+
+    let added = 0;
+    let removed = 0;
+    try {
+      /**
+       * The `@everyone` deny is re-asserted, not assumed.
+       *
+       * It is written once in the create payload, and one click of "Sync
+       * permissions with category" on the companion, or any admin clearing the
+       * overwrite, would publish every message in that room's chat to the whole
+       * server while `/channelinfo` kept telling members only the room can read
+       * it. Costs nothing in the steady state: the overwrite is already there
+       * and this writes only when it is not.
+       */
+      const everyone = channel.permissionOverwrites.cache.get(everyoneId);
+      if (!everyone || (everyone.deny.bitfield & PermissionFlagsBits.ViewChannel) === 0n) {
+        await channel.permissionOverwrites.edit(
+          everyoneId,
+          { ViewChannel: false },
+          { type: OverwriteType.Role },
+        );
+      }
+      for (const memberId of desired) {
+        if (currentMembers.has(memberId)) continue;
+        await channel.permissionOverwrites.edit(
+          memberId,
+          { ViewChannel: true },
+          { type: OverwriteType.Member },
+        );
+        added += 1;
+      }
+      for (const memberId of currentMembers) {
+        if (desired.has(memberId)) continue;
+        await channel.permissionOverwrites.delete(memberId).catch((err: unknown) => {
+          if (isApiError(err, UNKNOWN_MEMBER)) return;
+          throw err;
+        });
+        removed += 1;
+      }
+      /**
+       * The moderator role converges in BOTH directions, and is reported back
+       * so the caller can record what is now granted.
+       *
+       * Adding only was the first version and it was a privacy defect with a
+       * false confirmation on top: clearing the setting told the admin nobody
+       * outside the room could read it while every live companion still had the
+       * old role on it, and changing the role added the new one and kept the old.
+       *
+       * Its own try/catch, separate from the member loops above, because a role
+       * that has since been DELETED from the guild makes the grant throw, and a
+       * throw here would skip the revoke directly below it and strand the old
+       * role's overwrite with nothing able to remove it.
+       */
+      const stale = input.previousRoleId;
+      if (stale && stale !== roleId && stale !== everyoneId) {
+        await channel.permissionOverwrites.delete(stale).catch(() => undefined);
+        removed += 1;
+      }
+      if (roleId) {
+        const existing = channel.permissionOverwrites.cache.get(roleId);
+        if (!existing || (existing.allow.bitfield & PermissionFlagsBits.ViewChannel) === 0n) {
+          try {
+            await channel.permissionOverwrites.edit(
+              roleId,
+              { ViewChannel: true },
+              { type: OverwriteType.Role },
+            );
+            added += 1;
+          } catch (err) {
+            this.logger?.warn(
+              { err, guildId, channelId: input.channelId, roleId },
+              'could not grant the companion moderator role',
+            );
+            return { added, removed, channelGone: false, grantedRoleId: null };
+          }
+        }
+      }
+      return { added, removed, channelGone: false, grantedRoleId: roleId };
+    } catch (err) {
+      if (isApiError(err, UNKNOWN_CHANNEL))
+        return { added, removed, channelGone: true, grantedRoleId: input.previousRoleId ?? null };
+      this.logger?.warn(
+        { err, guildId, channelId: input.channelId, added, removed },
+        'companion member sync incomplete',
+      );
+      throw err;
+    }
+  }
+
+  /** Deletes a companion text channel, tolerating it already being gone. */
+  async deleteCompanionChannel(_guildId: string, channelId: string): Promise<void> {
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (channel && isCompanionType(channel.type)) await channel.delete();
+    } catch (err) {
+      if (isApiError(err, UNKNOWN_CHANNEL)) return;
+      throw err;
+    }
   }
 }
 

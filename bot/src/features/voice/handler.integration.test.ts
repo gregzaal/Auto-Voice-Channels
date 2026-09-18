@@ -1,5 +1,6 @@
 import {
   AutoChannelRepository,
+  CompanionChannelRepository,
   GuildRepository,
   JoinChannelRepository,
   ManagedChannelRepository,
@@ -11,6 +12,7 @@ import type { PgTestEnv } from '../../test/pgContainer.js';
 import { startPostgres } from '../../test/pgContainer.js';
 import { fakeLogger } from '../../runtime/testUtils.js';
 import { RecordingVoiceActions } from './actions.js';
+import { CompanionTextService } from './companionText.js';
 import { VoiceFeature } from './handler.js';
 import { renderChannelName } from './nameTemplate.js';
 import { PermissionProblemTracker } from './permissionProblems.js';
@@ -1910,6 +1912,100 @@ describe('VoiceFeature (integration)', () => {
       const rg = actions.ofType('repositionGroup').at(-1)!;
       expect(rg.channelIds).toEqual(['r1', 'r2']);
       expect(rg.above).toBe(true);
+    });
+  });
+  /**
+   * The wiring, not the service: that the live voice path actually reaches
+   * companion text channels at the three moments it has to. The service itself
+   * is covered in companionText.integration.test.ts.
+   */
+  describe('companion text channels', () => {
+    let companions: CompanionChannelRepository;
+    let companionText: CompanionTextService;
+
+    beforeEach(async () => {
+      companions = new CompanionChannelRepository(env.handle.db);
+      await env.handle.db.delete(db.schema.companionChannels);
+      companionText = new CompanionTextService({
+        companions,
+        secondaries,
+        autoChannels,
+        guilds,
+        actions,
+        voice,
+        logger: fakeLogger(),
+      });
+      feature = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+        companionText,
+        onSecondaryRemoved: (gid, cid) => companionText.removeForRoom(gid, cid),
+      });
+      await autoChannels.upsert(GUILD, PRIMARY, { name: 'Room', textChannel: true });
+    });
+
+    it('makes one with the room, keeps it in step, and deletes it with the room', async () => {
+      const alice = member('alice');
+      voice.put(PRIMARY, alice);
+      await feature.handleVoiceStateUpdate({
+        guildId: GUILD,
+        member: alice,
+        afterChannelId: PRIMARY,
+      });
+
+      const [room] = await secondaries.listByGuild(GUILD);
+      const companion = await companions.getBySecondary(room!.channelId);
+      expect(companion).toBeDefined();
+
+      // A second member joining the room is added to its chat.
+      const bob = member('bob');
+      voice.put(room!.channelId, bob);
+      await feature.handleVoiceStateUpdate({
+        guildId: GUILD,
+        member: bob,
+        afterChannelId: room!.channelId,
+      });
+      const syncs = actions.actions.filter((a) => a.type === 'companionSync');
+      expect(syncs.at(-1)!.memberIds).toContain('bob');
+
+      // Everyone leaves: the room is cleaned up and the chat goes with it.
+      voice.drop(room!.channelId, 'alice');
+      voice.drop(room!.channelId, 'bob');
+      await feature.handleVoiceStateUpdate({
+        guildId: GUILD,
+        member: bob,
+        beforeChannelId: room!.channelId,
+      });
+
+      expect(await companions.getBySecondary(room!.channelId)).toBeUndefined();
+      expect(actions.actions).toContainEqual({
+        type: 'companionDelete',
+        guildId: GUILD,
+        channelId: companion!.channelId,
+      });
+    });
+
+    it('drops the row when a human deletes the text channel', async () => {
+      const alice = member('alice');
+      voice.put(PRIMARY, alice);
+      await feature.handleVoiceStateUpdate({
+        guildId: GUILD,
+        member: alice,
+        afterChannelId: PRIMARY,
+      });
+      const [room] = await secondaries.listByGuild(GUILD);
+      const companion = await companions.getBySecondary(room!.channelId);
+
+      await feature.handleChannelDeleted(GUILD, companion!.channelId);
+
+      expect(await companions.get(companion!.channelId)).toBeUndefined();
+      // The room itself is untouched.
+      expect(await secondaries.get(room!.channelId)).toBeDefined();
     });
   });
 });

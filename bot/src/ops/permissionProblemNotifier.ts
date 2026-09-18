@@ -403,7 +403,8 @@ export class PermissionProblemNotifier {
      * they asked for this, recently, by name.
      */
     const mentionId = mode === 'contact' ? contactId.mentionable : null;
-    const body = problemNoticeBody(permissionProblemSummary(problems), sends, mode);
+    const blocking = problems.some((p) => p.operation !== 'companion');
+    const body = problemNoticeBody(permissionProblemSummary(problems), sends, mode, blocking);
 
     await this.takeSlot();
 
@@ -671,6 +672,15 @@ export function problemNoticeBody(
   lines: readonly string[],
   sends: number,
   mode: 'contact' | 'quiet',
+  /**
+   * Whether anything here actually stopped AVC working.
+   *
+   * False when every incident is a companion text channel, the one operation
+   * whose failure leaves the rooms themselves working. Leading with "has
+   * stopped working here" in that case is a false alarm that contradicts the
+   * line printed directly under it.
+   */
+  blocking = true,
 ): string {
   /**
    * There are `BACKOFF_MS.length + 1` notices in total: the first is
@@ -683,5 +693,8 @@ export function problemNoticeBody(
     : mode === 'contact'
       ? 'Run `/setup` for the full picture, or `/logging` to change who I tell about this.'
       : 'Run `/setup` for the full picture.';
-  return ['⚠️ **Auto Voice Channels has stopped working here.**', ...lines, tail].join('\n\n');
+  const headline = blocking
+    ? '⚠️ **Auto Voice Channels has stopped working here.**'
+    : '⚠️ **Auto Voice Channels cannot finish setting up its rooms here.**';
+  return [headline, ...lines, tail].join('\n\n');
 }

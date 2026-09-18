@@ -66,6 +66,11 @@ export const legacyGuildSchema = z
     log_level: z.unknown(),
     /** Whoever last ran the legacy `create` command. Carried since 2026-08-19. */
     server_contact: z.unknown(),
+    /** The Gold-only companion text channel feature, restored 2026-09-18. */
+    text_channels: z.unknown(),
+    text_channel_name: z.unknown(),
+    /** Its `showtextchannelsto` role: one role that could read every one. */
+    stct: z.unknown(),
     auto_channels: z.unknown(),
     /**
      * Truthy when the bot has left the guild: a `"YYYY-MM-DD HH:MM"` stamp on
@@ -82,13 +87,10 @@ export const DROPPED_FIELDS = [
   'custom_bitrates',
   'requiredrole',
   'restrictions',
-  'text_channels',
-  'text_channel_name',
   'msgs',
   'asip',
   'dcnf',
   'uniquenames',
-  'stct',
   'prefix',
   'last_activity',
   'last_channel',
@@ -156,6 +158,24 @@ function stringMap(value: unknown): Record<string, string> | null {
   for (const [k, v] of Object.entries(value)) if (typeof v === 'string') out[k] = v;
   return Object.keys(out).length > 0 ? out : null;
 }
+
+/**
+ * A legacy boolean, read loosely.
+ *
+ * Eight years of files with no validation on the way in, several bot versions,
+ * and this file already documents `left` appearing in three different shapes.
+ * A strict `=== true` on `text_channels` would silently restore nothing for a
+ * guild that stored `1` or `"true"`, and because the key is no longer in
+ * `DROPPED_FIELDS` there would be no note saying so either: doubly silent, on
+ * the feature several paying customers are asking to have back.
+ *
+ * Only the on-direction is loose. Anything unrecognised reads as off, which is
+ * the direction that cannot create channels a guild did not ask for.
+ */
+const legacyTruthy = (v: unknown): boolean =>
+  v === true ||
+  v === 1 ||
+  (typeof v === 'string' && ['1', 'true', 'yes', 'on'].includes(v.trim().toLowerCase()));
 
 const asId = (v: unknown): string | null => {
   if (typeof v === 'number' && Number.isFinite(v)) return String(BigInt(Math.trunc(v)));
@@ -286,6 +306,31 @@ export function planGuild(guildId: string, raw: unknown, options: PlanOptions = 
   // put it and a reason to want it (who to talk to when automation breaks).
   const contact = mapServerContact(guild.server_contact);
   if (contact) settings.contact_user_id = contact;
+
+  /**
+   * The companion text channel settings, restored 2026-09-18.
+   *
+   * Legacy's `text_channels` was a per-GUILD switch and a Gold-only feature;
+   * the rewrite's is per creator channel and free. A guild that had it on gets
+   * it back on every creator channel this same plan writes (below), which is
+   * the only reading of the legacy setting that preserves what the guild had.
+   *
+   * The name and the moderator role are guild settings either way. A legacy
+   * `stct` names a role in a guild the bot may since have been re-invited to,
+   * so it is carried on shape alone: an id that no longer resolves grants
+   * nobody anything, and the alternative is silently losing a moderation
+   * setting several paying customers configured deliberately.
+   */
+  const textChannelsOn = legacyTruthy(guild.text_channels);
+  if (typeof guild.text_channel_name === 'string' && guild.text_channel_name.length > 0) {
+    settings.text_channel_name = guild.text_channel_name.slice(0, 100);
+  }
+  const stct = asId(guild.stct);
+  // Never the guild id: that is the @everyone role, and granting it View on a
+  // companion publishes every room chat to the server. The interactive import
+  // refuses it in `validateSetting`, but `importDump` writes this plan straight
+  // through with no validation, so the refusal has to exist here too.
+  if (stct && stct !== guildId) settings.text_channel_role = stct;
   if (guild.log_level !== undefined && guild.log_level !== null) {
     const level = Math.trunc(Number(guild.log_level));
     if (Number.isFinite(level)) settings.log_level = Math.min(3, Math.max(1, level));
@@ -329,6 +374,15 @@ export function planGuild(guildId: string, raw: unknown, options: PlanOptions = 
      * written explicitly for every primary rather than ever left to a default.
      */
     template.above = p.above !== false;
+
+    /**
+     * The guild-wide legacy switch, applied to every creator channel.
+     *
+     * Only written when it was ON. Writing `false` for everyone else would put
+     * an explicit opt-out on 5,000 creator channels that never had the feature,
+     * which is noise in every export and a lie about what the guild configured.
+     */
+    if (textChannelsOn) template.textChannel = true;
 
     /**
      * `inheritperms`. Measured against the live fleet after importing it: 37

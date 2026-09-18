@@ -394,6 +394,17 @@ export interface SetupPanelInput {
   timezone?: string;
   /** How many named `[[list:name]]` pools the guild has, for the select's label. */
   listCount?: number;
+  /**
+   * The role that can read every room text channel, when one is set.
+   *
+   * Carried for disclosure rather than for editing: it grants one role read
+   * access to every private room conversation in the server, so the panel says
+   * so without being opened. `/channelinfo` names it too, for the members whose
+   * conversations it covers.
+   */
+  textChannelRoleId?: string | undefined;
+  /** That role's name, when it still resolves. */
+  textChannelRoleName?: string | undefined;
 }
 
 /**
@@ -610,6 +621,24 @@ function settingsRow(
           : `Date and time tokens use ${input.timezone}`.slice(0, 100),
       )
       .setEmoji('🕓'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel('Room text channels')
+      .setValue(setupId('textchannels'))
+      // Reports state, for the same reason the time zone option does: the
+      // moderator role grants one role read access to every room chat in the
+      // server, and a setting that sensitive must be visible without opening
+      // anything. Turning the feature ON is per creator channel (/textchannels),
+      // which is why this says where to do that.
+      // Sliced, like the time zone option above: Discord allows a 100-character
+      // ROLE name and `setDescription` throws at call time past 100, so an
+      // unsliced interpolation takes down the whole panel for that guild.
+      .setDescription(
+        (input.textChannelRoleId
+          ? `Name, and @${input.textChannelRoleName ?? 'a role'} can read them all`
+          : 'Name them, and pick a role that can read them all. /textchannels turns them on'
+        ).slice(0, 100),
+      )
+      .setEmoji('💬'),
     new StringSelectMenuOptionBuilder()
       .setLabel('Named lists')
       .setValue(setupId('lists'))

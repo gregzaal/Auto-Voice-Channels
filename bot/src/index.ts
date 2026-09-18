@@ -9,6 +9,7 @@ import {
   GuildRepository,
   AlertRepository,
   isEntitled,
+  CompanionChannelRepository,
   JoinChannelRepository,
   loadConfig,
   ManagedChannelRepository,
@@ -64,6 +65,7 @@ import { PermissionProblemNotifier } from './ops/permissionProblemNotifier.js';
 import { buildGatewayClient } from './gateway/client.js';
 import { createGatewayHealth } from './gateway/gatewayHealth.js';
 import {
+  CompanionTextService,
   DiscordVoiceActions,
   DiscordVoiceView,
   GuildSettingsService,
@@ -353,6 +355,7 @@ async function main(): Promise<void> {
   const secondaries = new SecondaryChannelRepository(db, config.fleet);
   const managed = new ManagedChannelRepository(db, config.fleet);
   const joinChannelsRepo = new JoinChannelRepository(db, config.fleet);
+  const companionsRepo = new CompanionChannelRepository(db, config.fleet);
   const guildsRepo = new GuildRepository(db);
   const presenceRepo = new GuildFleetPresenceRepository(db, config.fleet ?? DEFAULT_FLEET);
   const memberPoolGuildsRepo = new MemberPoolGuildRepository(db);
@@ -470,6 +473,27 @@ async function main(): Promise<void> {
     rerender: (gid: string, cid: string): Promise<unknown> =>
       voiceFeature.rerenderSecondary(gid, cid),
   });
+  /**
+   * Per-room companion text channels. Constructed before the feature because
+   * the feature holds it, and it reaches nothing that reaches back.
+   */
+  const companionText = new CompanionTextService({
+    companions: companionsRepo,
+    secondaries,
+    autoChannels,
+    guilds: settingsCache,
+    actions,
+    voice,
+    logger,
+    permissionProblems,
+    serverLog: (gid, level, message) => serverLogger.log(gid, level, message),
+    count: (outcome, guildId) => {
+      if (outcome === 'created') metricsCollector.increment(METRICS.COMPANION_TEXT_CREATED);
+      else if (outcome === 'deleted') metricsCollector.increment(METRICS.COMPANION_TEXT_DELETED);
+      else metricsCollector.increment(METRICS.COMPANION_TEXT_FAILED);
+      void guildId;
+    },
+  });
   const voiceFeature = new VoiceFeature({
     autoChannels,
     secondaries,
@@ -479,7 +503,16 @@ async function main(): Promise<void> {
     voice,
     selfHosted: config.selfHosted,
     gate: creationGate,
-    onSecondaryRemoved: (gid, cid) => privacy.cleanupForSecondary(gid, cid),
+    companionText,
+    /**
+     * Both companions hang off the one hook, in this order: the text channel
+     * first, because it is the one whose failure is recoverable, and the "⇩ Join"
+     * channel second, since it is what the hook was built for.
+     */
+    onSecondaryRemoved: async (gid, cid) => {
+      await companionText.removeForRoom(gid, cid);
+      await privacy.cleanupForSecondary(gid, cid);
+    },
     onOwnerChanged: (gid, cid, ownerId, ownerName) =>
       privacy.handleOwnerChanged(gid, cid, ownerId, ownerName),
     joinCompanionFor: async (cid) =>
@@ -667,6 +700,14 @@ async function main(): Promise<void> {
     // Scopes the sweep to this instance's own shards — see the deps doc in
     // reconciler.ts. A no-op at one instance, where every shard is owned.
     ownsGuild: (guildId) => leaseManager.ownsGuild(guildId),
+    /**
+     * Deliberately NOT scoped by `ownsGuild`: the rows this reaches belong to
+     * guilds no instance owns a shard for any more, which is exactly why no
+     * per-guild pass can see them. It is a bounded SQL existence check, so
+     * every instance running it costs one cheap query and the work is
+     * idempotent.
+     */
+    sweepCompanionOrphans: () => companionText.sweepOrphans(),
   });
 
   /**
@@ -1271,6 +1312,23 @@ async function main(): Promise<void> {
           disabled: await flags.getBoolAnyFleet(RUNTIME_FLAGS.IMPORT_DISABLED).catch(() => null),
           announceDisabled: runtimeFlags[RUNTIME_FLAGS.IMPORT_ANNOUNCE_DISABLED] === true,
           ...importSessions.stats(),
+        },
+        /**
+         * Companion text channels.
+         *
+         * `orphaned` is the number that matters and the reason the repository
+         * has a counting method at all: a companion outliving its room is
+         * invisible everywhere else, and the in-house precedent for this shape
+         * (`join_channels`) accumulated exactly that with nothing reporting it.
+         * A non-zero figure that does not fall across a few sweeps means the
+         * sweep cannot delete them, which is a permissions answer, not a bug.
+         *
+         * The lever is reported beside it, per fleet, because the real failure
+         * mode of a freeze switch is being left on for months.
+         */
+        companionText: {
+          disabled: runtimeFlags[RUNTIME_FLAGS.COMPANION_TEXT_DISABLED] === true,
+          ...(await companionsRepo.counts().catch(() => ({ tracked: null, orphaned: null }))),
         },
       };
     },

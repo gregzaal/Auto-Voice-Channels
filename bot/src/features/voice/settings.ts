@@ -19,12 +19,15 @@ import { MAX_USER_LIMIT } from './commands.js';
 import {
   SETTINGS_KEYS,
   isSnowflake,
+  DEFAULT_TEXT_CHANNEL_NAME,
   isStringMap,
   parseVoiceSettings,
   readContact,
   readGroups,
   readLogging,
   readProblemAlerts,
+  readTextChannelName,
+  readTextChannelRole,
   problemAlertConfirmation,
   timeZoneConfirmation,
 } from './guildSettings.js';
@@ -123,6 +126,10 @@ export interface GuildConfig {
   timezone?: string;
   /** How `@@game_name@@` resolves a tie for most-played game. */
   gameNameMode: GameNameMode;
+  /** Companion text channel name, absent when never set (the default is used). */
+  textChannelName?: string;
+  /** Role that may read every companion text channel, absent when none is set. */
+  textChannelRoleId?: string;
   primaries: { channelId: string; template: string; limit: number }[];
 }
 
@@ -197,6 +204,12 @@ export class GuildSettingsService {
       lists: s.lists,
       primaries: primaries.map((p) => toPrimaryView(p)),
       ...(s.timezone !== undefined ? { timezone: s.timezone } : {}),
+      ...(readTextChannelName(guild.settings) !== undefined
+        ? { textChannelName: readTextChannelName(guild.settings)! }
+        : {}),
+      ...(readTextChannelRole(guild.settings) !== null
+        ? { textChannelRoleId: readTextChannelRole(guild.settings)! }
+        : {}),
     };
   }
 
@@ -651,6 +664,96 @@ export class GuildSettingsService {
       enabled
         ? '🔒 New rooms from this creator channel will be created **private** automatically.'
         : '🔓 New rooms from this creator channel will be created **public** (the default).',
+    );
+  }
+
+  /**
+   * Toggles whether rooms from the creator channel you are in get a private
+   * companion text channel (`/textchannels`, restoring the legacy command of
+   * that name).
+   *
+   * Per creator channel where legacy was per guild: the companion costs a slot
+   * in a category Discord caps at 50, so a guild pays only where it asked.
+   * Stores nothing for the default (off).
+   */
+  async toggleTextChannel(guildId: string, secondaryChannelId: string): Promise<CommandResult> {
+    const primary = await this.primaryFor(guildId, secondaryChannelId);
+    if (!primary) return fail('You need to be in a bot-managed voice channel.');
+    const enabled = primary.template.textChannel !== true;
+    const next = { ...primary.template };
+    if (enabled) next.textChannel = true;
+    else delete next.textChannel;
+    await this.deps.autoChannels.upsert(guildId, primary.channelId, next);
+    return ok(
+      enabled
+        ? '💬 New rooms from this creator channel will get their own text channel, visible to ' +
+            'whoever is in the room right now, plus your admins and any role you set under ' +
+            '`/setup`. Anyone who can join the room can still join it and read along.'
+        : '💬 New rooms from this creator channel will no longer get a private text channel. ' +
+            'Existing ones stay until their room is cleaned up.',
+    );
+  }
+
+  /**
+   * Sets the name new companion text channels are created with, or clears it
+   * back to the default.
+   *
+   * Discord lowercases the name and replaces spaces with hyphens, so the reply
+   * says so rather than letting an admin think the write failed.
+   */
+  async setTextChannelName(guildId: string, raw: string): Promise<CommandResult> {
+    const value = raw.trim();
+    if (value === '') {
+      return this.deps.guilds.mergeSettings(guildId, () => ({
+        patch: {},
+        remove: [SETTINGS_KEYS.textChannelName],
+        result: ok(
+          `Name cleared. New text channels will be called **${DEFAULT_TEXT_CHANNEL_NAME}**.`,
+        ),
+      }));
+    }
+    if (value.length > 100) return fail('That name is too long. Discord allows 100 characters.');
+    await this.deps.guilds.updateSettings(guildId, { [SETTINGS_KEYS.textChannelName]: value });
+    return ok(
+      `New text channels will be called **${value}**. Discord lowercases channel names and ` +
+        'replaces spaces with hyphens, so it may not look exactly like that.',
+    );
+  }
+
+  /**
+   * Sets, or clears, the one role that can read every companion text channel
+   * (the legacy `showtextchannelsto`).
+   *
+   * Existing companions are re-synced by the reconciler rather than rewritten
+   * here: a guild with many live rooms would otherwise spend one overwrite
+   * write per room inside a slash-command reply.
+   */
+  async setTextChannelRole(guildId: string, roleId: string | null): Promise<CommandResult> {
+    /**
+     * `@everyone` is refused: its role id is the guild id, so granting it View
+     * would undo the deny that makes a companion private and publish every
+     * room's chat to the server. Discord's role picker offers it, so this is
+     * reachable by one click rather than only by a hand-edited import file.
+     */
+    if (roleId === guildId) {
+      return fail(
+        'That is the everyone role, which would let the whole server read every room chat. ' +
+          'Pick a moderator role, or leave it empty so only the people in a room can read it.',
+      );
+    }
+    if (roleId === null) {
+      return this.deps.guilds.mergeSettings(guildId, () => ({
+        patch: {},
+        remove: [SETTINGS_KEYS.textChannelRole],
+        result: ok(
+          'Cleared. Only the people in a room (and server admins) can read its text channel.',
+        ),
+      }));
+    }
+    await this.deps.guilds.updateSettings(guildId, { [SETTINGS_KEYS.textChannelRole]: roleId });
+    return ok(
+      `<@&${roleId}> can now read every room text channel, including private rooms. ` +
+        'Existing channels are updated within a few minutes.',
     );
   }
 

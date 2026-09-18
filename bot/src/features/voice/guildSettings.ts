@@ -26,6 +26,8 @@ export const SETTINGS_KEYS = {
   timezone: 'timezone',
   lists: 'lists',
   gameNameMode: 'game_name_mode',
+  textChannelName: 'text_channel_name',
+  textChannelRole: 'text_channel_role',
 } as const;
 
 /**
@@ -183,6 +185,40 @@ export function readGameNameMode(settings: Record<string, unknown>): GameNameMod
   return settings[SETTINGS_KEYS.gameNameMode] === 'top' ? 'top' : 'shared';
 }
 
+/**
+ * What a companion text channel is called when a guild has not set a name.
+ *
+ * The legacy bot's default, kept deliberately: it is what people who are asking
+ * for this feature back call these channels.
+ */
+export const DEFAULT_TEXT_CHANNEL_NAME = 'voice context';
+/**
+ * The name to give companion text channels, or `undefined` for the default.
+ *
+ * Stored as the admin typed it. Discord lowercases and hyphenates a text
+ * channel name itself, so this is never exactly what the channel ends up
+ * called, and every surface that shows it says so.
+ */
+export function readTextChannelName(settings: Record<string, unknown>): string | undefined {
+  const raw = settings[SETTINGS_KEYS.textChannelName];
+  // Trimmed-empty is refused as well as empty: Discord rejects a whitespace-only
+  // channel name (50035), which would fail every create with nothing to show for
+  // it, so an unusable stored value reads as absent and the default is used.
+  return typeof raw === 'string' && raw.trim().length > 0 && raw.length <= 100 ? raw : undefined;
+}
+
+/**
+ * The role allowed to read every companion text channel, or null for none.
+ *
+ * The legacy bot's `showtextchannelsto`. Recognition of a moderation need, not
+ * an entitlement: it grants one role read access to every private room
+ * conversation in the server, which is why `/setup` and `/channelinfo` both
+ * disclose it rather than leaving it in a settings blob a new admin inherits.
+ */
+export function readTextChannelRole(settings: Record<string, unknown>): string | null {
+  const raw = settings[SETTINGS_KEYS.textChannelRole];
+  return isSnowflake(raw) ? raw : null;
+}
 /** The stored zone, or `undefined` when absent or unrecognised. */
 export function readTimeZone(settings: Record<string, unknown>): string | undefined {
   const raw = settings[SETTINGS_KEYS.timezone];

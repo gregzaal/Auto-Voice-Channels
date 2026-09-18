@@ -5,6 +5,49 @@ import { DiscordAPIError } from 'discord.js';
  * it can be driven by a real discord.js implementation in production and by a
  * recording fake in tests (the "fake REST/action recorder").
  */
+export interface CreateCompanionChannelInput {
+  guildId: string;
+  /** What the channel is called. Discord lowercases and hyphenates it itself. */
+  name: string;
+  /** The room this belongs to: its category, and what the topic names. */
+  secondaryChannelId: string;
+  /** Members allowed to read it at creation, written inline in the create payload. */
+  memberIds: readonly string[];
+  /** The guild's moderator role, or null. */
+  roleId: string | null;
+}
+
+export interface SyncCompanionMembersInput {
+  guildId: string;
+  /** The companion text channel. */
+  channelId: string;
+  /** Exactly who should be able to read it now. */
+  memberIds: readonly string[];
+  roleId: string | null;
+  /**
+   * The moderator role this bot last granted here, from the stored row.
+   *
+   * Discord attributes an overwrite to nobody, so without this the revoke
+   * would have to guess by permission bits and would take away a grant a
+   * moderator made by hand, every few minutes, with no way to opt out.
+   */
+  previousRoleId?: string | null;
+}
+
+export interface CompanionSyncResult {
+  added: number;
+  removed: number;
+  /** True when Discord says the channel is gone, so the caller can drop the row. */
+  channelGone: boolean;
+  /**
+   * The moderator role now granted here, for the caller to record.
+   *
+   * Null when none is configured or the grant failed, so a role that could
+   * not be granted is never remembered as granted.
+   */
+  grantedRoleId?: string | null;
+}
+
 export interface CreateVoiceChannelInput {
   guildId: string;
   name: string;
@@ -130,6 +173,28 @@ export interface VoiceActions {
    * (same category, adjacent position, @everyone may connect). Returns its id.
    */
   createJoinChannel(guildId: string, name: string, nearChannelId: string): Promise<string>;
+  /**
+   * Creates a private companion TEXT channel for a room, in the same category,
+   * readable by nobody but the bot until members are synced onto it.
+   *
+   * Separate from the voice methods above rather than a widening of them: every
+   * one of those early-returns on a non-voice channel and reports SUCCESS, so a
+   * text channel routed through them would be orphaned on teardown while the
+   * row was dropped cleanly.
+   */
+  createCompanionChannel(input: CreateCompanionChannelInput): Promise<string>;
+  /**
+   * Converges a companion text channel's viewers onto exactly `memberIds`
+   * (plus `roleId` when set), and reports what it changed.
+   *
+   * The desired set is passed in whole rather than as a delta, so a missed join
+   * or leave is repaired by the next call instead of accumulating. The CURRENT
+   * set is read from the channel's own overwrite cache, which costs nothing, so
+   * this writes only the difference.
+   */
+  syncCompanionMembers(input: SyncCompanionMembersInput): Promise<CompanionSyncResult>;
+  /** Deletes a companion text channel. Tolerates it already being gone. */
+  deleteCompanionChannel(guildId: string, channelId: string): Promise<void>;
   /** Sets a voice channel's status (`''` clears it). Separate, laxer rate limit. */
   setVoiceStatus(guildId: string, channelId: string, status: string): Promise<void>;
   /**
@@ -197,6 +262,21 @@ export type RecordedAction =
     }
   | { type: 'status'; guildId: string; channelId: string; status: string }
   | {
+      type: 'companionCreate';
+      guildId: string;
+      channelId: string;
+      name: string;
+      secondaryChannelId: string;
+    }
+  | {
+      type: 'companionSync';
+      guildId: string;
+      channelId: string;
+      memberIds: string[];
+      roleId: string | null;
+    }
+  | { type: 'companionDelete'; guildId: string; channelId: string }
+  | {
       type: 'reposition';
       guildId: string;
       primaryChannelId: string;
@@ -231,8 +311,18 @@ export class RecordingVoiceActions implements VoiceActions {
   failMove = false;
   /** When true, `setPrivacy` throws Missing Permissions (tests the created-but-unlockable path). */
   failPrivacy = false;
+  /** When true, `createCompanionChannel` throws Missing Permissions. */
+  failCompanionCreate = false;
+  /** When set, `syncCompanionMembers` reports this channel as gone from Discord. */
+  companionGoneForChannel?: string;
   private seq = 0;
   private readonly created = new Set<string>();
+  /**
+   * Who can currently read each companion, so the fake can answer the same
+   * "write only the difference" question the real adapter answers from the
+   * channel's overwrite cache.
+   */
+  private readonly companionViewers = new Map<string, Set<string>>();
 
   constructor(private readonly idPrefix = 'sec') {}
 
@@ -369,6 +459,58 @@ export class RecordingVoiceActions implements VoiceActions {
     this.created.add(channelId);
     this.actions.push({ type: 'joinChannel', guildId, channelId, name, nearChannelId });
     return Promise.resolve(channelId);
+  }
+
+  createCompanionChannel(input: CreateCompanionChannelInput): Promise<string> {
+    if (this.failCompanionCreate) {
+      return Promise.reject(
+        new DiscordAPIError(
+          { code: 50013, message: 'Missing Permissions' } as never,
+          50013,
+          403,
+          'POST',
+          'https://discord.test',
+          {} as never,
+        ),
+      );
+    }
+    const channelId = `${this.idPrefix}-text-${++this.seq}`;
+    this.created.add(channelId);
+    this.companionViewers.set(channelId, new Set(input.memberIds));
+    this.actions.push({
+      type: 'companionCreate',
+      guildId: input.guildId,
+      channelId,
+      name: input.name,
+      secondaryChannelId: input.secondaryChannelId,
+    });
+    return Promise.resolve(channelId);
+  }
+
+  syncCompanionMembers(input: SyncCompanionMembersInput): Promise<CompanionSyncResult> {
+    if (this.companionGoneForChannel === input.channelId) {
+      return Promise.resolve({ added: 0, removed: 0, channelGone: true, grantedRoleId: null });
+    }
+    const current = this.companionViewers.get(input.channelId) ?? new Set<string>();
+    const desired = new Set(input.memberIds);
+    const added = [...desired].filter((id) => !current.has(id)).length;
+    const removed = [...current].filter((id) => !desired.has(id)).length;
+    this.companionViewers.set(input.channelId, desired);
+    this.actions.push({
+      type: 'companionSync',
+      guildId: input.guildId,
+      channelId: input.channelId,
+      memberIds: [...input.memberIds],
+      roleId: input.roleId,
+    });
+    return Promise.resolve({ added, removed, channelGone: false, grantedRoleId: input.roleId });
+  }
+
+  deleteCompanionChannel(guildId: string, channelId: string): Promise<void> {
+    this.created.delete(channelId);
+    this.companionViewers.delete(channelId);
+    this.actions.push({ type: 'companionDelete', guildId, channelId });
+    return Promise.resolve();
   }
 
   setVoiceStatus(guildId: string, channelId: string, status: string): Promise<void> {

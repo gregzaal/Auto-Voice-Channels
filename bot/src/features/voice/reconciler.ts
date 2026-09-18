@@ -48,6 +48,17 @@ export interface ReconcilerDeps {
    * guild is in scope (tests, self-host, a single-instance fleet).
    */
   ownsGuild?: (guildId: string) => boolean;
+  /**
+   * The fleet-wide companion-orphan sweep, run once per tick outside the
+   * per-guild loop.
+   *
+   * It has to live here rather than inside `reconcileGuild` because every
+   * per-guild path is unable to reach the case that actually leaks: `scopedGuildIds`
+   * filters by `ownsGuild`, and `reconcileGuild` bails on a guild the gateway has
+   * not hydrated, which a guild the bot has been REMOVED from never is. Its
+   * predicate is a single SQL existence check, so it needs neither.
+   */
+  sweepCompanionOrphans?: () => Promise<{ removed: number }>;
 }
 
 const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
@@ -205,6 +216,22 @@ export class Reconciler {
       this.deps.logger.debug('sweep skipped: disabled by runtime flag');
       return;
     }
+    /**
+     * Before the per-guild pass, and never inside a dispatch.
+     *
+     * Its own try/catch because it is unrelated work sharing a timer: a failure
+     * here must not cost the guild sweep, which is the one with customers
+     * waiting on it. Skipped on a dry run, which reports drift rather than
+     * acting.
+     */
+    if (!opts.dryRun && this.deps.sweepCompanionOrphans) {
+      try {
+        await this.deps.sweepCompanionOrphans();
+      } catch (err) {
+        this.deps.logger.error({ err }, 'companion orphan sweep failed');
+      }
+    }
+
     const guildIds = await this.scopedGuildIds();
     if (guildIds.length === 0) return;
     this.deps.logger.debug({ count: guildIds.length }, 'running safety-net sweep');

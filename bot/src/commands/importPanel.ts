@@ -244,6 +244,11 @@ const SETTING_LABELS: Record<string, string> = {
   groups: 'Channel grouping',
   contact_user_id: 'Server contact',
   problem_alerts: 'Problem alerts',
+  timezone: 'Time zone',
+  lists: 'Named lists',
+  game_name_mode: 'Tied games',
+  text_channel_name: 'Room text channel name',
+  text_channel_role: 'Role that can read room text channels',
 };
 
 const NOTE_LABELS: Record<ImportNoteCode, string> = {
@@ -277,7 +282,8 @@ const NOTE_LABELS: Record<ImportNoteCode, string> = {
   other_bot_may_be_present: 'Another AVC bot may still be managing these channels',
   legacy_field_dropped: 'is an old setting AVC no longer has',
   legacy_marked_left: 'This file was saved after the old bot was removed',
-  orphaned_text_channel: 'was left behind by the old bot and is safe to delete',
+  orphaned_text_channel:
+    'was left behind by the old bot and is not used. If you turn text channels back on with /textchannels, AVC makes its own',
   orphaned_role: 'is a role left behind by the old bot and is safe to delete',
 };
 

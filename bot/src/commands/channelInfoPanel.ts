@@ -274,6 +274,24 @@ export function buildChannelInfoPanel(input: ChannelInfoPanelInput): Interaction
     );
   }
 
+  /**
+   * The room's own text channel, and WHO ELSE can read it.
+   *
+   * Shown to every member, not just admins, which is the point: the moderator
+   * role is a guild setting nobody in the room can see, and a private chat with
+   * a wider audience than the room is precisely what someone should be able to
+   * check before they type in it.
+   */
+  if (info.companion) {
+    embed.fields.push({
+      name: 'Text channel',
+      value:
+        `<#${info.companion.channelId}>, visible to whoever is in this room right now, ` +
+        "plus this server's admins." +
+        (info.companion.roleId ? `\n<@&${info.companion.roleId}> can read it too.` : ''),
+    });
+  }
+
   if (info.render) {
     // Destructured so the render reads `renderChannelName(template, ctx)`, which
     // is the shape this file's own guard test insists on: every render here uses
@@ -513,6 +531,7 @@ function pushAdminFields(embed: APIEmbed, input: ChannelInfoPanelInput): void {
       `New rooms appear ${p.above === true ? 'above' : 'below'} it, numbered from ${p.startAt ?? 1}`,
       `Default limit: ${p.limit && p.limit > 0 ? p.limit : 'none'}`,
       `New rooms start private: ${p.defaultPrivate === true ? 'yes' : 'no'}`,
+      `Each room gets its own text channel: ${p.textChannel === true ? 'yes' : 'no'}`,
       `Permissions copied from: ${p.inheritperms ? `\`${escapeMarkdown(p.inheritperms)}\`` : 'the creator channel'}`,
     ];
     embed.fields!.push({ name: 'Creator channel settings', value: bits.join('\n') });

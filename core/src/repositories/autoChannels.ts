@@ -48,6 +48,14 @@ export const primaryTemplateSchema = z
      * behaviour), NOT Discord's implicit category-sync.
      */
     inheritperms: z.string().optional(),
+    /**
+     * When `true`, each room spawned from this primary gets a private companion
+     * text channel readable only by its current occupants (plus the guild's
+     * optional moderator role). Off when absent. Restores the legacy bot's
+     * per-guild `text_channels` setting, narrowed to one creator channel so a
+     * guild pays the category-slot cost only where it asked for it.
+     */
+    textChannel: z.boolean().optional(),
   })
   .passthrough();
 

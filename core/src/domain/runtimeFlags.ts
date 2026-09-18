@@ -12,6 +12,21 @@ export const RUNTIME_FLAGS = {
   SWEEP_DISABLED: 'sweep.disabled',
   /** Stops repairing a primary's rooms when they render out of creation order. */
   VOICE_ORDER_REPAIR_DISABLED: 'voice.order_repair_disabled',
+  /**
+   * Stops creating companion text channels on **this fleet**.
+   *
+   * A load and blast-radius lever for the one feature that gives a room a second
+   * Discord object. It **freezes rather than strips**: teardown, membership
+   * convergence and the orphan sweep all keep running, because a lever that
+   * stopped those would leave rows outliving their channels and departed members
+   * still reading a room. Existing companions keep working, which is deliberate
+   * - deleting live ones destroys conversations in progress, a much louder event
+   * than whatever prompted the switch.
+   *
+   * A failed flag read is treated as NOT disabled, matching `channelinfo.disabled`:
+   * a database blip must not silently withdraw a feature a guild has enabled.
+   */
+  COMPANION_TEXT_DISABLED: 'companion_text.disabled',
   /** Throttle: max secondary creations per guild per minute (number; 0 = unlimited). */
   CREATE_RATE_LIMIT: 'create.rate_limit_per_min',
   /**

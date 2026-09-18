@@ -310,7 +310,7 @@ export interface ImportPlan {
 
 export type DiffResult = { ok: true; plan: ImportPlan } | { ok: false; refusals: ImportNote[] };
 
-/** The seven fields of `primaryTemplateSchema`. */
+/** Every field of `primaryTemplateSchema`. */
 const PRIMARY_FIELDS = [
   'name',
   'status',
@@ -319,6 +319,7 @@ const PRIMARY_FIELDS = [
   'above',
   'defaultPrivate',
   'inheritperms',
+  'textChannel',
 ] as const;
 
 /** Both fields of `managedTemplateSchema`. */
@@ -335,7 +336,17 @@ const MANAGED_STATE_FIELDS = ['seed', 'name', 'status'] as const;
  * column, so a wholesale write would silently clear the voice-status template
  * and `/alwaysprivate` on every creator channel the file names.
  */
-const LEGACY_TEMPLATE_FIELDS: readonly string[] = ['name', 'limit', 'above', 'inheritperms'];
+const LEGACY_TEMPLATE_FIELDS: readonly string[] = [
+  'name',
+  'limit',
+  'above',
+  'inheritperms',
+  // `planGuild` writes this when the legacy guild had `text_channels` on, so a
+  // guild recovering its own config from a legacy file gets the feature back
+  // here as well as through the bulk importer. Omitted from the list, it would
+  // be silently dropped on exactly the path an individual guild uses.
+  'textChannel',
+];
 
 const PROBLEM_ALERT_VALUES = new Set(['contact', 'quiet', 'off']);
 
@@ -990,7 +1001,42 @@ function validateSetting(
       if (typeof value !== 'string' || !GAME_NAME_MODE_VALUES.has(value))
         return drop('setting_invalid');
       return value;
+
+    case 'text_channel_name':
+      // Discord lowercases and hyphenates a text channel name itself, so the
+      // stored value is what an admin typed, not what the channel is called.
+      // Length is Discord's own channel-name limit.
+      if (typeof value !== 'string' || value.trim().length === 0 || value.length > 100)
+        return drop('setting_invalid');
+      return value;
+
+    case 'text_channel_role':
+      // Shape only: `GuildFacts` carries channels and members, not roles, so a
+      // role that no longer exists cannot be detected here. That is inert
+      // rather than dangerous - a missing role simply grants nobody the
+      // moderator view, and the overwrite write reports its own failure.
+      if (!isSnowflake(value)) return drop('setting_invalid');
+      /**
+       * Except `@everyone`, which is not inert at all.
+       *
+       * Its role id IS the guild id, and granting it View on a companion undoes
+       * the deny that makes the channel private, publishing every room's chat
+       * to the server. A hand-edited file is the cheapest way to reach that, so
+       * it is refused here as well as at the two write sites.
+       */
+      if (value === facts.guildId) return drop('setting_invalid');
+      return value;
   }
+
+  /**
+   * Exhaustiveness guard. `noImplicitReturns` is not set, so without this a key
+   * added to `EXPORT_SETTINGS_KEYS` with no case above compiles cleanly, returns
+   * `undefined`, and is read by the caller as "dropped and already noted" while
+   * pushing no note: silently discarded on every import, on the one command
+   * whose pre-import snapshot is the documented undo.
+   */
+  const unreachable: never = key;
+  return drop('setting_invalid', { subject: unreachable });
 }
 
 interface ChannelDiff {
@@ -1314,6 +1360,7 @@ function validateTemplateField(
       return value < 0 || value > limits.startAt ? drop() : value;
     case 'above':
     case 'defaultPrivate':
+    case 'textChannel':
       return typeof value === 'boolean' ? value : drop();
     case 'inheritperms': {
       if (typeof value !== 'string') return drop();

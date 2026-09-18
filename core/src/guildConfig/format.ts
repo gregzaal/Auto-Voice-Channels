@@ -62,6 +62,8 @@ export const EXPORT_SETTINGS_KEYS = [
   'timezone',
   'lists',
   'game_name_mode',
+  'text_channel_name',
+  'text_channel_role',
 ] as const;
 
 export type ExportSettingsKey = (typeof EXPORT_SETTINGS_KEYS)[number];
@@ -105,6 +107,10 @@ export const exportedSettingsSchema = z.object({
    * and `readGameNameMode` treats anything unrecognised as `shared`.
    */
   game_name_mode: z.string().nullable(),
+  /** Name for companion text channels. Absent means the default. */
+  text_channel_name: z.string().nullable(),
+  /** Role id that may read every companion text channel. Absent means none. */
+  text_channel_role: z.string().nullable(),
 });
 
 export type ExportedSettings = z.infer<typeof exportedSettingsSchema>;
@@ -133,7 +139,7 @@ export type ExportedSettings = z.infer<typeof exportedSettingsSchema>;
 const settingsReadSchema = exportedSettingsSchema.partial();
 
 /**
- * A creator channel's template on the wire: all seven fields of
+ * A creator channel's template on the wire: every field of
  * `primaryTemplateSchema`, each nullable, unknown keys preserved.
  *
  * `passthrough` is load-bearing for expand/contract (golden rule 3): during a
@@ -150,6 +156,7 @@ export const exportedPrimaryTemplateSchema = z
     above: z.boolean().nullable(),
     defaultPrivate: z.boolean().nullable(),
     inheritperms: z.string().nullable(),
+    textChannel: z.boolean().nullable(),
   })
   .passthrough();
 

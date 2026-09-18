@@ -161,6 +161,7 @@ describe('buildExportFile', () => {
       'name',
       'startAt',
       'status',
+      'textChannel',
     ]);
     // Stored row has no `status`, so the wire value is null, not `''`.
     expect(template.status).toBeNull();

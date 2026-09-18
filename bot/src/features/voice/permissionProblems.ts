@@ -7,7 +7,14 @@
  * the same process that records an incident also serves that guild's `/setup` —
  * no cross-instance sharing is needed.
  */
-export type PermissionOperation = 'create' | 'move' | 'delete' | 'rename' | 'privacy';
+export type PermissionOperation =
+  | 'create'
+  | 'move'
+  | 'delete'
+  | 'rename'
+  | 'privacy'
+  /** A room was made but its companion text channel could not be. */
+  | 'companion';
 
 export interface PermissionProblem {
   channelId: string;
@@ -102,9 +109,26 @@ export class PermissionProblemTracker {
   }
 
   /** Clears a channel's incident (e.g. once it's been resolved/cleaned up). */
-  clear(guildId: string, channelId: string): void {
+  /**
+   * Clears this channel's incidents after an operation succeeded.
+   *
+   * `operations` narrows it to the ones the success actually speaks for, and
+   * the create path needs that narrowing rather than wanting it. Creating a
+   * room and creating its companion text channel are different operations on
+   * the same creator channel, and one can work while the other cannot: a guild
+   * with Manage Channels but no Manage Roles on the category makes rooms
+   * happily and fails every companion. With a blanket clear, each successful
+   * room create resets the notifier's escalating backoff to zero and the next
+   * companion failure re-records, so that guild is DM'd or posted at on EVERY
+   * room create, forever, instead of the four times the ladder promises.
+   *
+   * Omitted means every operation, which is what every other caller wants.
+   */
+  clear(guildId: string, channelId: string, operations?: readonly PermissionOperation[]): void {
     if (!this.byGuild.has(guildId)) return;
-    const remaining = (this.byGuild.get(guildId) ?? []).filter((p) => p.channelId !== channelId);
+    const remaining = (this.byGuild.get(guildId) ?? []).filter(
+      (p) => p.channelId !== channelId || (operations && !operations.includes(p.operation)),
+    );
     if (remaining.length) {
       this.byGuild.set(guildId, remaining);
       return;
@@ -168,6 +192,15 @@ export function permissionProblemMessage(
       'category the rooms are made in or on my role.'
     );
   }
+  if (operation === 'companion') {
+    return (
+      `⚠️ I made a room from <#${channelId}> but could not create its text channel. Two things ` +
+      'cause this: I need **Manage Channels** and **Manage Roles** on the category the rooms ' +
+      'are made in, or the category is full, because Discord allows 50 channels in one and a ' +
+      'room plus its text channel takes two slots. The rooms themselves are working. Turn the ' +
+      'text channels off with `/textchannels` if you would rather have the room slots back.'
+    );
+  }
   return (
     `⚠️ I cannot manage <#${channelId}>, I have lost access to it (a permission override is ` +
     'hiding it from me). Grant my role **View Channel**, **Connect**, **Manage Channels** and ' +
@@ -218,8 +251,13 @@ export function permissionProblemSummary(problems: readonly ProblemLike[]): stri
   const creates = problems.filter((p) => p.operation === 'create');
   const moves = problems.filter((p) => p.operation === 'move');
   const privacyFails = problems.filter((p) => p.operation === 'privacy');
+  const companions = problems.filter((p) => p.operation === 'companion');
   const access = problems.filter(
-    (p) => p.operation !== 'create' && p.operation !== 'move' && p.operation !== 'privacy',
+    (p) =>
+      p.operation !== 'create' &&
+      p.operation !== 'move' &&
+      p.operation !== 'privacy' &&
+      p.operation !== 'companion',
   );
   const lines: string[] = [];
   if (creates.length > 0) {
@@ -258,6 +296,19 @@ export function permissionProblemSummary(problems: readonly ProblemLike[]): stri
       `I made rooms from ${list(privacyFails)} but could not make them private, so I deleted ` +
         'them again. I need **Manage Roles** (to set permission overrides) and **Connect**, on ' +
         'the category the rooms are made in or on my role.',
+    );
+  }
+  /**
+   * Its own line too, and the mildest of the four: the room itself is fine and
+   * working. Only its text channel is missing, so the notice must not read like
+   * an outage or name the four permissions the access line names.
+   */
+  if (companions.length > 0) {
+    lines.push(
+      `I made rooms from ${list(companions)} but could not create their text channels. Either I ` +
+        'need **Manage Channels** and **Manage Roles** on the category the rooms are made in, or ' +
+        'the category is full: Discord allows 50 channels in one, and a room plus its text ' +
+        'channel takes two slots. The rooms themselves are working.',
     );
   }
   if (access.length > 0) {

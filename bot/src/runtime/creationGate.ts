@@ -38,7 +38,13 @@ export class RuntimeCreationGate implements CreationGate {
   private readonly flagCacheMs: number;
   private readonly events = new Map<string, number[]>();
   private flagCache:
-    | { at: number; paused: boolean; limit: number; orderRepairDisabled: boolean }
+    | {
+        at: number;
+        paused: boolean;
+        limit: number;
+        orderRepairDisabled: boolean;
+        companionTextDisabled: boolean;
+      }
     | undefined;
 
   constructor(private readonly opts: RuntimeCreationGateOptions) {
@@ -62,11 +68,14 @@ export class RuntimeCreationGate implements CreationGate {
       return { allowed: false, reason: 'shard lease could not be refreshed' };
     }
 
-    const { paused, limit, orderRepairDisabled } = await this.readFlags();
+    const { paused, limit, orderRepairDisabled, companionTextDisabled } = await this.readFlags();
     if (paused) return { allowed: false, reason: 'global pause' };
     // Carried on every allowed decision, so the caller reads one consistent
     // snapshot rather than racing a second flag read against this one.
-    const extra = orderRepairDisabled ? { orderRepairDisabled: true } : {};
+    const extra = {
+      ...(orderRepairDisabled ? { orderRepairDisabled: true } : {}),
+      ...(companionTextDisabled ? { companionTextDisabled: true } : {}),
+    };
     if (limit <= 0) return { allowed: true, ...extra };
 
     const now = Date.now();
@@ -80,22 +89,41 @@ export class RuntimeCreationGate implements CreationGate {
     return { allowed: true, ...extra };
   }
 
+  /**
+   * The companion lever on its own, for the reconciler's repair path.
+   *
+   * Shares the cached snapshot, so it costs no extra query, and **fails open**:
+   * `allowCreate` lets a flag-read failure refuse the whole room create, which is
+   * right for a gate whose job is refusing, and wrong for a feature a guild has
+   * switched on. A database blip must not withdraw it.
+   */
+  async companionTextDisabled(): Promise<boolean> {
+    try {
+      return (await this.readFlags()).companionTextDisabled;
+    } catch (err) {
+      this.opts.logger.warn({ err }, 'companion text flag read failed; treating as enabled');
+      return false;
+    }
+  }
+
   private async readFlags(): Promise<{
     paused: boolean;
     limit: number;
     orderRepairDisabled: boolean;
+    companionTextDisabled: boolean;
   }> {
     const now = Date.now();
     if (this.flagCache && now - this.flagCache.at < this.flagCacheMs) {
-      const { paused, limit, orderRepairDisabled } = this.flagCache;
-      return { paused, limit, orderRepairDisabled };
+      const { paused, limit, orderRepairDisabled, companionTextDisabled } = this.flagCache;
+      return { paused, limit, orderRepairDisabled, companionTextDisabled };
     }
     const all = await this.opts.flags.getAll();
     const paused = all[RUNTIME_FLAGS.GLOBAL_PAUSE] === true;
     const rawLimit = all[RUNTIME_FLAGS.CREATE_RATE_LIMIT];
     const limit = typeof rawLimit === 'number' && rawLimit > 0 ? rawLimit : 0;
     const orderRepairDisabled = all[RUNTIME_FLAGS.VOICE_ORDER_REPAIR_DISABLED] === true;
-    this.flagCache = { at: now, paused, limit, orderRepairDisabled };
-    return { paused, limit, orderRepairDisabled };
+    const companionTextDisabled = all[RUNTIME_FLAGS.COMPANION_TEXT_DISABLED] === true;
+    this.flagCache = { at: now, paused, limit, orderRepairDisabled, companionTextDisabled };
+    return { paused, limit, orderRepairDisabled, companionTextDisabled };
   }
 }

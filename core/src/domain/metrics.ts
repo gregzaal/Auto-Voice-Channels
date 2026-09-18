@@ -133,6 +133,18 @@ export const METRICS = {
   ROOMS_CREATED_BY_GUILD: 'rooms.created.by_guild',
   /** Secondary channels cleaned up. */
   ROOMS_DELETED: 'rooms.deleted',
+  /** Companion text channels created. */
+  COMPANION_TEXT_CREATED: 'companion_text.created',
+  /** Companion text channels deleted, including orphans swept. */
+  COMPANION_TEXT_DELETED: 'companion_text.deleted',
+  /**
+   * Companion text channels that could not be created.
+   *
+   * Separate from `errors` deliberately: a failure here is not a failure of the
+   * room, so folding it into the error categories would make a guild whose
+   * rooms all work look broken.
+   */
+  COMPANION_TEXT_FAILED: 'companion_text.failed',
   /** Slash commands invoked, keyed by command name. */
   COMMANDS_INVOKED: 'commands.invoked',
   /** Handled errors, keyed by coarse category. */
@@ -251,6 +263,24 @@ const DEFINITIONS: Record<MetricName, MetricDefinition> = {
     scope: 'fleet',
     dimension: null,
     describe: 'Secondary channels cleaned up.',
+  },
+  [METRICS.COMPANION_TEXT_CREATED]: {
+    kind: 'counter',
+    scope: 'fleet',
+    dimension: null,
+    describe: 'Companion text channels created for rooms whose creator channel opted in.',
+  },
+  [METRICS.COMPANION_TEXT_DELETED]: {
+    kind: 'counter',
+    scope: 'fleet',
+    dimension: null,
+    describe: 'Companion text channels deleted with their room, or swept as orphans.',
+  },
+  [METRICS.COMPANION_TEXT_FAILED]: {
+    kind: 'counter',
+    scope: 'fleet',
+    dimension: null,
+    describe: 'Companion text channels that could not be created. The room itself still works.',
   },
   [METRICS.COMMANDS_INVOKED]: {
     kind: 'counter',

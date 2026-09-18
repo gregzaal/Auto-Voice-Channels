@@ -32,6 +32,7 @@ describe('buildCommandDefinitions', () => {
         'setup',
         'source',
         'template',
+        'textchannels',
         'transfer',
         'unlimit',
       ].sort(),

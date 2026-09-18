@@ -194,6 +194,11 @@ export function buildCommandDefinitions(
     ),
     adminOnly(
       new SlashCommandBuilder()
+        .setName('textchannels')
+        .setDescription('Toggle a private text channel for each room from this creator channel.'),
+    ),
+    adminOnly(
+      new SlashCommandBuilder()
         .setName('defaultlimit')
         .setDescription('Set the user limit new rooms from this creator channel start with.')
         .addIntegerOption((o) =>

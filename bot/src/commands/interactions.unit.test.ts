@@ -200,6 +200,9 @@ function setup(overrides: Partial<InteractionDeps> = {}) {
     addAlias: vi.fn().mockResolvedValue({ ok: true, message: 'added' }),
     removeAlias: vi.fn().mockResolvedValue({ ok: true, message: 'removed' }),
     replaceAlias: vi.fn().mockResolvedValue({ ok: true, message: 'saved' }),
+    setTextChannelName: vi.fn().mockResolvedValue({ ok: true, message: 'named' }),
+    setTextChannelRole: vi.fn().mockResolvedValue({ ok: true, message: 'role set' }),
+    toggleTextChannel: vi.fn().mockResolvedValue({ ok: true, message: 'toggled' }),
   };
   const guilds = {
     get: vi.fn().mockResolvedValue({ authStatus: 'active' }),

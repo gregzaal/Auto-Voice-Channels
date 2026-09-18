@@ -286,6 +286,53 @@ export const joinChannels = pgTable(
   (t) => [index('join_channels_secondary_idx').on(t.secondaryChannelId)],
 );
 
+/**
+ * Per-room private text channels ("voice context"), for creator channels whose
+ * template opts in. Readable only by the room's current occupants plus the
+ * optional moderator role; created with the room and deleted with it.
+ *
+ * Keyed by the text channel's own id because `channelDelete` arrives with an id
+ * and nothing else, so "is this one of ours" has to be an indexed lookup rather
+ * than a scan of every room's `state`.
+ */
+export const companionChannels = pgTable(
+  'companion_channels',
+  {
+    channelId: text('channel_id').primaryKey(),
+    guildId: text('guild_id').notNull(),
+    fleet: fleet(),
+    /** The room this text channel belongs to. Deleted with it. */
+    secondaryChannelId: text('secondary_channel_id').notNull(),
+    /**
+     * The moderator role this bot granted View on the channel, if any.
+     *
+     * Recorded because Discord stores no author for a permission overwrite, and
+     * without it the sync cannot tell a role IT granted from one a human added.
+     * Guessing by permission bits revokes a moderator's deliberate grant every
+     * five minutes; not revoking at all leaves a cleared or changed setting's
+     * old role reading every live room. Knowing exactly what we granted is what
+     * makes both correct.
+     */
+    viewerRoleId: text('viewer_role_id'),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    /**
+     * UNIQUE, unlike its sibling on `join_channels`.
+     *
+     * The create is check-then-act with a Discord round trip in the middle, so
+     * two callers can both see no row and both create a channel. The primary key
+     * is the channel id, so nothing would stop the second insert, and the
+     * teardown deletes by room: it would drop both rows and leave one channel
+     * with no record, which is the one leak this feature cannot reclaim. Today
+     * the per-guild dispatcher serialises both callers, so this is defence
+     * against a future caller outside the queue rather than a live fix.
+     */
+    uniqueIndex('companion_channels_secondary_idx').on(t.fleet, t.secondaryChannelId),
+    index('companion_channels_guild_idx').on(t.fleet, t.guildId),
+  ],
+);
+
 /** Per-guild game-name aliases. */
 export const aliases = pgTable(
   'aliases',

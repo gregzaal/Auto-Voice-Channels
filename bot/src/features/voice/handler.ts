@@ -100,6 +100,16 @@ export interface CreateGateDecision {
    * rooms being created at all, and a deploy.
    */
   orderRepairDisabled?: boolean;
+  /**
+   * Whether to skip creating a room's companion text channel, for the same
+   * reason and by the same mechanism as {@link orderRepairDisabled}.
+   *
+   * Creation only. Teardown and membership convergence are never gated: a lever
+   * that stopped deleting would leave a row outliving its channel permanently,
+   * and one that stopped syncing would leave a departed member reading a room
+   * they have left, which is the failure the feature exists to prevent.
+   */
+  companionTextDisabled?: boolean;
 }
 
 /**
@@ -110,6 +120,14 @@ export interface CreateGateDecision {
  */
 export interface CreationGate {
   allowCreate(guildId: string): Promise<CreateGateDecision>;
+  /**
+   * The companion lever alone, for callers that create one OUTSIDE a room
+   * create: the reconciler's "this room should have one and does not" repair.
+   *
+   * Its own method because `allowCreate` also consumes a slot of the per-guild
+   * creation throttle, which a repair must not do. Absent → not disabled.
+   */
+  companionTextDisabled?(): Promise<boolean>;
 }
 
 export interface VoiceFeatureDeps {
@@ -134,6 +152,32 @@ export interface VoiceFeatureDeps {
    * cleaned up. Must be idempotent and tolerate an unknown channel.
    */
   onSecondaryRemoved?: (guildId: string, channelId: string) => Promise<void>;
+  /**
+   * Per-room companion text channels, when the feature is wired.
+   *
+   * Optional like every other companion here, so the feature is testable and
+   * self-host-identical without it. Each hook is called for its own reason and
+   * each one already swallows its failures: a room whose chat could not be made
+   * is a working room, and nothing on the voice path may fail because of one.
+   */
+  companionText?: {
+    createForRoom(
+      guildId: string,
+      roomId: string,
+      primaryChannelId: string,
+      initialMemberIds: readonly string[],
+    ): Promise<string | null>;
+    syncRoom(guildId: string, roomId: string): Promise<void>;
+    handleChannelDeleted(guildId: string, channelId: string): Promise<boolean>;
+    describeRoom(
+      guildId: string,
+      roomId: string,
+    ): Promise<{ channelId: string; roleId: string | null } | null>;
+    reconcileGuild(
+      guildId: string,
+      opts: { allowCreate: boolean; dryRun?: boolean },
+    ): Promise<{ created: number; synced: number; removed: number }>;
+  };
   /**
    * Called when a secondary's ownership is reassigned because the owner left
    * (while others remain), so dependent resources (a private channel's "⇩ Join"
@@ -326,6 +370,8 @@ export interface PrimaryConfig {
   limit?: number | undefined;
   defaultPrivate?: boolean | undefined;
   inheritperms?: string | undefined;
+  /** Whether rooms from this creator channel get a private text channel. */
+  textChannel?: boolean | undefined;
 }
 
 /** Lifts a creator channel's stored template into the reportable subset. */
@@ -337,6 +383,7 @@ function primaryConfig(row: { channelId: string; template: PrimaryTemplate }): P
     limit: row.template.limit,
     defaultPrivate: row.template.defaultPrivate,
     inheritperms: row.template.inheritperms,
+    textChannel: row.template.textChannel,
   };
 }
 
@@ -369,6 +416,15 @@ export interface ChannelInfo {
   general: string;
   enabled: boolean;
   aliasCount: number;
+  /**
+   * This room's companion text channel, when it has one.
+   *
+   * Carried so the readout can DISCLOSE who else can read it. The moderator
+   * role is a guild setting a member never sees, and a private chat whose
+   * audience is larger than the room is exactly the thing they should be able
+   * to check for themselves.
+   */
+  companion?: { channelId: string; roleId: string | null };
 }
 
 type CreateOutcome =
@@ -455,6 +511,10 @@ export class VoiceFeature {
         // `@@owner@@` resolves to the new owner (not "Unknown") and a private
         // channel's "⇩ Join" follows suit.
         await this.handleSecondaryLeave(guildId, beforeChannelId, event.member.id);
+        // The leaver loses sight of the room's text channel. Derived from the
+        // live roster inside, so a missed event is repaired rather than
+        // accumulated, and a no-op costs no request.
+        await this.deps.companionText?.syncRoom(guildId, beforeChannelId);
         this.deps.serverLog?.(guildId, 3, `🚪 <@${event.member.id}> left <#${beforeChannelId}>`);
         touched.push(beforeChannelId);
       } else if (await this.isManaged(guildId, beforeChannelId)) {
@@ -472,6 +532,7 @@ export class VoiceFeature {
       // appends the member to its arrival roster.
       if (await this.deps.secondaries.isSecondary(guildId, afterChannelId)) {
         await this.addToRoster(guildId, afterChannelId, event.member.id);
+        await this.deps.companionText?.syncRoom(guildId, afterChannelId);
         this.deps.serverLog?.(guildId, 3, `🔊 <@${event.member.id}> joined <#${afterChannelId}>`);
         touched.push(afterChannelId);
       } else if (await this.isManaged(guildId, afterChannelId)) {
@@ -791,7 +852,30 @@ export class VoiceFeature {
      * incident on every join, which resets the notifier's escalating backoff
      * and turns four total notices into one per join.
      */
-    this.deps.permissionProblems?.clear(guildId, channelId);
+    /**
+     * Narrowed to the operations this success speaks for.
+     *
+     * A companion failure is recorded against this same creator channel, and a
+     * blanket clear here would reset the notifier's backoff on every room
+     * create, turning a four-notice ladder into one notice per room for any
+     * guild that can make rooms but not their text channels.
+     */
+    this.deps.permissionProblems?.clear(guildId, channelId, ['create', 'move', 'privacy']);
+
+    /**
+     * The companion text channel, for a creator channel that opted in.
+     *
+     * AFTER the move, not after the row insert: both rollbacks above delete the
+     * room they just made, so anything created before them would have to be
+     * unwound by each. By here the room is committed.
+     *
+     * The member is passed BY ID rather than read from the roster for the reason
+     * the seeded `roster` above documents: their move into the room has not
+     * reached the voice cache yet.
+     */
+    if (!gate?.companionTextDisabled) {
+      await this.deps.companionText?.createForRoom(guildId, newChannelId, channelId, [member.id]);
+    }
 
     // Grouped category: slot the new channel into the group block (at the bottom,
     // since it's the newest) with one bulk reorder. Positions aren't rate-limited,
@@ -1181,6 +1265,16 @@ export class VoiceFeature {
       );
       return;
     }
+
+    /**
+     * A companion text channel somebody deleted by hand.
+     *
+     * Before the adopted branch because leaving the row behind is not harmless:
+     * every later sync would write overwrites to a channel that no longer
+     * exists, costing that guild a failed request on every voice event in the
+     * room it used to belong to.
+     */
+    if (await this.deps.companionText?.handleChannelDeleted(guildId, channelId)) return;
 
     const managed = await this.deps.managed?.get(channelId);
     if (managed && managed.guildId === guildId) {
@@ -1933,6 +2027,7 @@ export class VoiceFeature {
 
     if (isRoom) {
       const primary = await this.deps.autoChannels.get(secondary.primaryChannelId);
+      const companion = (await this.deps.companionText?.describeRoom(guildId, channelId)) ?? null;
       const renderCtx = this.buildRenderContext({
         channelId,
         settings,
@@ -1980,6 +2075,7 @@ export class VoiceFeature {
                 : 'server',
         },
         ...(primary ? { primary: primaryConfig(primary) } : {}),
+        ...(companion ? { companion } : {}),
         ...(secondary.state.seed !== undefined ? { seed: secondary.state.seed } : {}),
         ...(secondary.state.index !== undefined ? { index: secondary.state.index } : {}),
       };
@@ -2325,6 +2421,25 @@ export class VoiceFeature {
           });
         }
       }
+    }
+
+    /**
+     * Companion text channels, in all three directions: create the ones an
+     * opted-in room is missing (nothing else ever retries a create that 429'd),
+     * converge each existing one's viewers on who is actually in the room, and
+     * remove the ones whose room is gone.
+     *
+     * Runs after the catch-up pass so rooms created a moment ago are included.
+     * The creation half asks the gate's own lever rather than `allowCreate`,
+     * which would also spend a slot of the guild's creation throttle on a
+     * repair. A gate with no such method means not disabled.
+     */
+    if (this.deps.companionText) {
+      const disabled = (await this.deps.gate?.companionTextDisabled?.()) ?? false;
+      await this.deps.companionText.reconcileGuild(guildId, {
+        allowCreate: !disabled,
+        dryRun,
+      });
     }
 
     // Adopted standalone channels: drop records whose Discord channel vanished;
