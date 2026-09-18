@@ -6,6 +6,7 @@ import {
   type RuntimeFlagsRepository,
   type SecondaryChannelRepository,
 } from '@avc/core';
+import { isPermissionError } from './discordAdapter.js';
 import type { GuildDispatcher } from '../../runtime/dispatcher.js';
 import type { GuildDrift, ReconcileOptions, VoiceFeature } from './handler.js';
 
@@ -50,6 +51,27 @@ export interface ReconcilerDeps {
 }
 
 const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+
+/**
+ * Guilds refusing reconcile on permissions before the operator hears about it,
+ * and the share of the sweep they have to be.
+ *
+ * **One guild's 403 is that guild's own decision, not an incident.** An admin
+ * changing an overwrite, moving a room out of reach or dropping the bot's role
+ * makes every sweep fail for that guild until the bot gives up managing the
+ * channel, and on 2026-09-17 one such guild produced a couple of hours of
+ * `reconcile.failed` on beta - an alert about a server only its own admin can
+ * fix, who had already been sent a DM by `PermissionProblemNotifier`. Paging
+ * the operator for it is the noise this whole file's summary exists to avoid,
+ * one level up.
+ *
+ * Half the fleet refusing at once is the opposite: that is the bot's own role
+ * or a Discord-side change, and it is the only version an operator can act on.
+ * The same shape and the same numbers as `reportIfFleetwide`, deliberately:
+ * two different definitions of "fleet-wide" is how two alerts end up
+ * disagreeing about one outage.
+ */
+const DENIED_MIN_GUILDS = 10;
 const DEFAULT_RECONCILE_CONCURRENCY = 10;
 
 /**
@@ -118,12 +140,29 @@ export class Reconciler {
      * many, with a sample.
      */
     const failures: string[] = [];
+    /**
+     * Permission refusals, counted apart from faults.
+     *
+     * Kept out of `failures` rather than filtered at the report, because the
+     * two are different claims: a fault is something wrong with us, and a 403
+     * is a guild telling us we may no longer touch a channel. The bot acts on
+     * the latter already - it stops managing the channel and the guild's own
+     * contact is notified - so the operator alert below would be a report about
+     * work that is already correctly handled.
+     */
+    const denied: string[] = [];
     const worker = async (): Promise<void> => {
       while (next < ids.length) {
         const id = ids[next++]!;
         try {
           await this.reconcileGuild(id, opts);
         } catch (err) {
+          if (isPermissionError(err)) {
+            // Logged, never counted: the guild-facing path owns this one.
+            this.deps.logger.info({ err, guildId: id }, 'guild reconcile refused on permissions');
+            denied.push(id);
+            continue;
+          }
           this.deps.logger.error({ err, guildId: id }, 'guild reconcile failed (isolated)');
           failures.push(id);
         }
@@ -137,7 +176,21 @@ export class Reconciler {
         failed: failures.length,
         of: ids.length,
         sample: failures.slice(0, 5),
+        // Reported alongside so a sweep that is failing AND being refused reads
+        // as one event rather than two unrelated numbers.
+        ...(denied.length > 0 ? { deniedOnPermissions: denied.length } : {}),
       });
+    }
+
+    /**
+     * The fleet-wide refusal, which IS ours. See {@link DENIED_MIN_GUILDS}.
+     */
+    if (denied.length >= DENIED_MIN_GUILDS && denied.length * 2 >= ids.length) {
+      this.deps.report?.(
+        'reconcile.denied',
+        'Most guilds are refusing reconciliation with a permission error',
+        { denied: denied.length, of: ids.length, sample: denied.slice(0, 5) },
+      );
     }
   }
 
