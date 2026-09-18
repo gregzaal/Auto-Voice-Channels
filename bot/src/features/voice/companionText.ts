@@ -304,7 +304,21 @@ export class CompanionTextService {
             ?.recent(guildId)
             .some((p) => p.channelId === primaryChannelId && p.operation === 'companion_role');
           if (!already) this.reportMissingRole(guildId, primaryChannelId, configuredRole);
-        } else if (configuredRole) {
+        } else {
+          /**
+           * Unconditional, NOT `else if (configuredRole)`.
+           *
+           * The message this incident renders tells the admin they can "clear it
+           * there to stop this notice". Gated on a role still being configured,
+           * clearing the setting was the one action that could never stop it:
+           * `roleMissing` goes false, `configuredRole` goes null, nothing
+           * clears, and `/setup` shows the warning forever. A promise the code
+           * contradicts is worse than no promise.
+           *
+           * Safe to run when there is nothing to clear: the tracker returns
+           * immediately for a guild it holds nothing for, and the operation
+           * filter touches only this fault.
+           */
           this.deps.permissionProblems?.clear(guildId, primaryChannelId, ['companion_role']);
         }
       }

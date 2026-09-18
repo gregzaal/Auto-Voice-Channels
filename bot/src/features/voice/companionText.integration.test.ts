@@ -388,6 +388,26 @@ describe('CompanionTextService (integration)', () => {
     expect(await companions.get(channelId!)).toMatchObject({ viewerRoleId: null });
   });
 
+  it('stops the notice when the admin clears the setting, as its own copy promises', async () => {
+    // The message says "or clear it there to stop this notice". Gated on a role
+    // still being configured, clearing the setting was the one action that
+    // could never stop it.
+    await setupRoom(true);
+    await guilds.updateSettings(GUILD, { text_channel_role: '555000111222333444' });
+    actions.missingCompanionRole = true;
+    await service.createForRoom(GUILD, ROOM, PRIMARY, ['u1']);
+    expect(problems.recent(GUILD)).toContainEqual(
+      expect.objectContaining({ channelId: PRIMARY, operation: 'companion_role' }),
+    );
+
+    // The admin clears the role. The sweep passes the creator channel in.
+    await guilds.updateSettings(GUILD, { text_channel_role: null });
+    actions.missingCompanionRole = false;
+    await service.syncRoom(GUILD, ROOM, undefined, PRIMARY);
+
+    expect(problems.recent(GUILD)).toEqual([]);
+  });
+
   it('still grants a moderator role the guild does have', async () => {
     // The guard above must not cost the feature its normal case.
     await setupRoom(true);
