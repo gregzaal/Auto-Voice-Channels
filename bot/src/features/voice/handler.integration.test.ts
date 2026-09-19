@@ -2023,16 +2023,23 @@ describe('VoiceFeature (integration)', () => {
     let companions: CompanionChannelRepository;
     let problems: PermissionProblemTracker;
     let sent: { channelId: string }[];
+    let edited: { channelId: string; messageId: string; payload: unknown }[];
     let poster: ControlPanelPoster;
 
-    function build(opts: { companionText?: boolean; failSend?: boolean } = {}) {
+    function build(opts: { companionText?: boolean; failSend?: boolean; failEdit?: boolean } = {}) {
       sent = [];
+      edited = [];
       problems = new PermissionProblemTracker();
       poster = new ControlPanelPoster({
         send: (channelId) => {
           if (opts.failSend) return Promise.reject(new Error('Missing Permissions'));
           sent.push({ channelId });
           return Promise.resolve(`msg-${sent.length}`);
+        },
+        edit: (channelId, messageId, payload) => {
+          if (opts.failEdit) return Promise.reject(new Error('Unknown Message'));
+          edited.push({ channelId, messageId, payload });
+          return Promise.resolve();
         },
         guilds,
         secondaries,
@@ -2073,6 +2080,11 @@ describe('VoiceFeature (integration)', () => {
         afterChannelId: PRIMARY,
       });
       const [room] = await secondaries.listByGuild(GUILD);
+      // The recorder notes the move but the fake view does not apply it, and a
+      // rerender bails on an empty room before it reaches the panel. Put her
+      // where the real move would have.
+      voice.drop(PRIMARY, 'alice');
+      voice.put(room!.channelId, alice);
       return room!.channelId;
     }
 
@@ -2130,6 +2142,7 @@ describe('VoiceFeature (integration)', () => {
             void roomId;
             return Promise.resolve();
           },
+          refreshForRoom: () => Promise.resolve(),
         },
         gate: {
           allowCreate: () => Promise.resolve({ allowed: true, companionTextDisabled: true }),
@@ -2155,6 +2168,7 @@ describe('VoiceFeature (integration)', () => {
             sent.push({ channelId: 'should-not-happen' });
             return Promise.resolve();
           },
+          refreshForRoom: () => Promise.resolve(),
         },
         gate: { allowCreate: () => Promise.resolve({ allowed: true, controlPanelDisabled: true }) },
       });
@@ -2179,6 +2193,162 @@ describe('VoiceFeature (integration)', () => {
       expect(problems.recent(GUILD)).toEqual([
         expect.objectContaining({ channelId: PRIMARY, operation: 'panel' }),
       ]);
+    });
+
+    /**
+     * The whole point of a panel that follows the room, end to end: lock the
+     * room and the button it offers has to change, through the real state
+     * write and the real fingerprint in the row.
+     */
+    it('edits the panel when the room is locked, and not before', async () => {
+      build();
+      const room = await makeRoom();
+      expect(edited).toHaveLength(0);
+
+      await secondaries.updateState(room, {
+        ...(await secondaries.get(room))!.state,
+        private: true,
+      });
+      await feature.rerenderSecondary(GUILD, room);
+
+      expect(edited).toHaveLength(1);
+      expect(edited[0]!.messageId).toBe('msg-1');
+      const rendered = JSON.stringify(edited[0]!.payload);
+      expect(rendered).toContain(`avc:panel:unlock:${room}`);
+      expect(rendered).not.toContain(`avc:panel:lock:${room}`);
+    });
+
+    /**
+     * The fingerprint is what lets this hang off every rerender, including the
+     * sweeps that walk a whole guild. If it stops short-circuiting, each of
+     * those becomes one edit per room.
+     */
+    it('issues no edit when a rerender would change nothing', async () => {
+      build();
+      await makeRoom();
+      await feature.reconcileGuild(GUILD);
+      await feature.reconcileGuild(GUILD);
+      expect(edited).toHaveLength(0);
+    });
+
+    it('edits every open room when a button is switched off server-wide', async () => {
+      build();
+      const room = await makeRoom();
+      await guilds.updateSettings(GUILD, { control_panel: { kick: false } });
+
+      const summary = await feature.refreshGuildPanels(GUILD);
+
+      expect(summary.considered).toBe(1);
+      expect(edited).toHaveLength(1);
+      expect(JSON.stringify(edited[0]!.payload)).not.toContain(`avc:panel:kick:${room}`);
+    });
+
+    /**
+     * The panel write is a jsonb MERGE and the rerender's own state write is a
+     * REPLACE of the snapshot read at the top of it, so refreshing before that
+     * write reverted the fingerprint: the next render saw a mismatch and issued
+     * a second, byte-identical edit, for ever. This is that, through the real
+     * row: a change that moves the owner moves the rendered NAME too, so both
+     * writes happen in one pass.
+     */
+    it('does not revert the fingerprint when the name changes in the same pass', async () => {
+      build();
+      await autoChannels.upsert(GUILD, PRIMARY, { name: '@@owner@@' });
+      const room = await makeRoom();
+      expect(edited).toHaveLength(0);
+
+      // Bea takes over: the panel description AND the rendered name both move.
+      const bea = member('bea');
+      voice.put(room, bea);
+      await secondaries.setOwnerAndCreator(room, bea.id, bea.displayName);
+      await feature.rerenderSecondary(GUILD, room);
+      expect(edited).toHaveLength(1);
+
+      // Nothing has moved since, so no further edit may be issued.
+      await feature.rerenderSecondary(GUILD, room);
+      await feature.rerenderSecondary(GUILD, room);
+      expect(edited).toHaveLength(1);
+    });
+
+    /**
+     * Same ordering, the other direction: a cleared binding must not be
+     * resurrected by the state write that follows it.
+     */
+    it('does not resurrect a panel it just forgot when the name changes too', async () => {
+      build({ failEdit: true });
+      await autoChannels.upsert(GUILD, PRIMARY, { name: '@@owner@@' });
+      const room = await makeRoom();
+
+      const bea = member('bea');
+      voice.put(room, bea);
+      await secondaries.setOwnerAndCreator(room, bea.id, bea.displayName);
+      await feature.rerenderSecondary(GUILD, room);
+
+      const row = await secondaries.get(room);
+      expect(row!.state.controlPanelMessageId).toBeUndefined();
+      expect(row!.state.controlPanelHash).toBeUndefined();
+    });
+
+    /**
+     * The lever stops EDITS as well as posts, so it can shed the load its name
+     * implies, and that is only safe because it self-heals: the fingerprint
+     * still holds what was last drawn, so lifting it catches the panel up.
+     */
+    it('freezes re-rendering while the lever is on, and catches up when it is lifted', async () => {
+      let disabled = false;
+      build();
+      feature = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+        controlPanel: poster,
+        permissionProblems: problems,
+        gate: {
+          allowCreate: () => Promise.resolve({ allowed: true }),
+          controlPanelDisabled: () => Promise.resolve(disabled),
+        },
+      });
+      const room = await makeRoom();
+      expect(sent).toHaveLength(1);
+
+      disabled = true;
+      await secondaries.updateState(room, {
+        ...(await secondaries.get(room))!.state,
+        private: true,
+      });
+      await feature.rerenderSecondary(GUILD, room);
+      expect(edited).toHaveLength(0);
+
+      disabled = false;
+      await feature.rerenderSecondary(GUILD, room);
+      expect(edited).toHaveLength(1);
+      expect(JSON.stringify(edited[0]!.payload)).toContain(`avc:panel:unlock:${room}`);
+    });
+
+    /**
+     * Almost always a message somebody deleted. Retrying it on every rerender
+     * for the life of the room would be a request per render forever.
+     */
+    it('forgets a panel it cannot edit, and stops trying', async () => {
+      build({ failEdit: true });
+      const room = await makeRoom();
+      await secondaries.updateState(room, {
+        ...(await secondaries.get(room))!.state,
+        private: true,
+      });
+
+      await feature.rerenderSecondary(GUILD, room);
+
+      const row = await secondaries.get(room);
+      expect(row!.state.controlPanelMessageId).toBeUndefined();
+      expect(row!.state.controlPanelChannelId).toBeUndefined();
+      expect(row!.state.controlPanelHash).toBeUndefined();
+      // Nothing is reported: the post proved the permissions were fine.
+      expect(problems.recent(GUILD)).toEqual([]);
     });
 
     /**

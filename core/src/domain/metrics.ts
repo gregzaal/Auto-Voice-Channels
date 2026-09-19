@@ -148,6 +148,15 @@ export const METRICS = {
   /** Room control panels posted into a new room's chat. */
   CONTROL_PANEL_POSTED: 'control_panel.posted',
   /**
+   * Room control panels edited to match a room that changed.
+   *
+   * Counts EDITS ACTUALLY ISSUED, not re-renders considered: the panel is
+   * re-derived on every rerender and a fingerprint stops the ones that would
+   * change nothing, so this number is the traffic and the difference between it
+   * and the rerender rate is what the fingerprint is saving.
+   */
+  CONTROL_PANEL_UPDATED: 'control_panel.updated',
+  /**
    * Room control panels that could not be posted. The room itself still works.
    *
    * Counted separately from `errors` for the reason `companion_text.failed` is:
@@ -298,6 +307,12 @@ const DEFINITIONS: Record<MetricName, MetricDefinition> = {
     scope: 'fleet',
     dimension: null,
     describe: "Room control panels posted into a new room's chat.",
+  },
+  [METRICS.CONTROL_PANEL_UPDATED]: {
+    kind: 'counter',
+    scope: 'fleet',
+    dimension: null,
+    describe: 'Room control panels edited to match a room that changed.',
   },
   [METRICS.CONTROL_PANEL_FAILED]: {
     kind: 'counter',

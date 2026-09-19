@@ -3,9 +3,8 @@ import {
   ButtonBuilder,
   ButtonStyle,
   EmbedBuilder,
-  StringSelectMenuBuilder,
-  StringSelectMenuOptionBuilder,
   type APIEmbed,
+  type APIEmbedField,
   type InteractionReplyOptions,
 } from 'discord.js';
 import {
@@ -14,7 +13,7 @@ import {
   type ControlPanelConfig,
   type ControlPanelControl,
 } from '../features/voice/guildSettings.js';
-import { CONTROL_PANEL_LABELS } from '../features/voice/controlPanel.js';
+import { settingsFaceOf } from '../features/voice/controlPanel.js';
 
 /**
  * `/controlpanel`: the admin surface for what the room control panel carries.
@@ -24,28 +23,37 @@ import { CONTROL_PANEL_LABELS } from '../features/voice/controlPanel.js';
  * Discord select can, and shipping a half of either here would be a surface to
  * maintain forever in exchange for very little.
  *
+ * Laid out like the panel it configures - a field per control, carrying the
+ * same emoji, label and description a member reads on the room's own panel - so
+ * an admin switching something off is looking at the thing they are taking
+ * away. `✅` and `❌` in the field name carry the state, which a Discord embed
+ * has no checkbox for.
+ *
  * Follows `/setup`'s rendering rules (`rewrite.md` decision 11): at most one
  * Success button, never a Primary, a Danger or a disabled one. The Success
  * button is whatever this state's answer is, which here means it exists only
- * when the panel is switched off and turning it back on is the thing to do.
+ * when the whole panel is switched off and turning it back on is the thing to
+ * do. The per-control toggles are all Secondary, because none of them is more
+ * the thing to press than the others.
  */
 
 /** Custom-id namespace for the `/controlpanel` configuration panel. */
 export const CONTROL_SETTINGS_PREFIX = 'avc:cp:';
 
-/** Custom id of the panel's button picker (a message-level string select). */
-export const CONTROL_SETTINGS_SELECT_ID = `${CONTROL_SETTINGS_PREFIX}pick`;
-
-/** The panel's own actions, which the select's values are not. */
+/** The panel's own whole-panel actions, as opposed to the per-control toggles. */
 export type ControlSettingsAction = 'on' | 'off' | 'close';
 
 const ACTIONS: readonly string[] = ['on', 'off', 'close'];
 
-/** Builds `avc:cp:<action>`. */
+/** Builds `avc:cp:<action>`, or `avc:cp:t:<control>` for a toggle. */
 export const controlSettingsId = (action: ControlSettingsAction): string =>
   `${CONTROL_SETTINGS_PREFIX}${action}`;
 
-/** Parses `avc:cp:<action>`, or null when it is not one of ours. */
+/** Builds the custom id of one control's toggle button. */
+export const controlToggleId = (control: ControlPanelControl): string =>
+  `${CONTROL_SETTINGS_PREFIX}t:${control}`;
+
+/** Parses `avc:cp:<action>`, or null when it is not one of ours (or is a toggle). */
 export function parseControlSettingsId(customId: string): ControlSettingsAction | null {
   if (!customId.startsWith(CONTROL_SETTINGS_PREFIX)) return null;
   const action = customId.slice(CONTROL_SETTINGS_PREFIX.length);
@@ -53,73 +61,49 @@ export function parseControlSettingsId(customId: string): ControlSettingsAction 
 }
 
 /**
- * Reads a select value back into a control id.
+ * Parses a toggle button's custom id back into a control.
  *
- * Validated against the known list rather than trusted, because a select's
- * values are chosen client side: hiding an option enforces nothing, and this
- * value goes straight into a settings key.
+ * Validated against the known list rather than trusted. A custom id comes back
+ * from a message we posted, but it is still client input on the wire and it
+ * goes straight into a settings key, so it is checked the same way a select
+ * value would be.
  */
-export function parseControlSelection(value: string): ControlPanelControl | null {
-  return isControlPanelControl(value) ? value : null;
+export function parseControlToggleId(customId: string): ControlPanelControl | null {
+  const prefix = `${CONTROL_SETTINGS_PREFIX}t:`;
+  if (!customId.startsWith(prefix)) return null;
+  const control = customId.slice(prefix.length);
+  return isControlPanelControl(control) ? control : null;
 }
 
-/**
- * What each control does, for the picker's descriptions.
- *
- * Its own wording, in its own register: these are sentences an admin reads
- * about a control, where the panel's own lines continue from a bold label. The
- * LABELS are imported rather than repeated, because an admin switching "Kick"
- * off has to be looking at the word on the member's button.
- */
-const CONTROL_BLURBS: Record<ControlPanelControl, string> = {
-  lock: 'Close the room, others can ask to join',
-  unlock: 'Open the room to everyone again',
-  limit: 'Set how many people fit in the room',
-  rename: 'Give the room a different name',
-  claim: 'Take your room back, or one with nobody in charge',
-  transfer: 'Hand the room to someone else in it',
-  kick: 'Start a vote to remove someone',
-  info: 'Show how the room is named and configured',
-};
-
-/** How the rooms that exist right now are unaffected, said the same way everywhere. */
-const EXISTING_ROOMS = 'Rooms that already exist keep the panel they were given.';
+/** How the rooms that exist right now are affected, said the same way everywhere. */
+const EXISTING_ROOMS = 'Panels already posted are updated too.';
 
 /**
  * What this server's rooms actually get, in three states rather than two.
  *
- * Switching every button off leaves `enabled` true but produces no message at
+ * Switching every button off leaves the panel "on" but produces no message at
  * all, because a panel with no buttons is an embed nobody can act on. Read as
- * two states, that server was told "every new room gets these buttons posted in
- * its chat" while nothing was being posted anywhere.
+ * two states, that server was told "every new room gets these buttons" while
+ * nothing was being posted anywhere.
  */
-function describeControlState(
-  config: ControlPanelConfig,
-  off: readonly ControlPanelControl[],
-): string {
+function describeControlState(config: ControlPanelConfig, offCount: number): string {
   if (!config.enabled) {
     return (
-      'New rooms are not getting a control panel. ' +
+      'Rooms are not getting a control panel. ' +
       EXISTING_ROOMS +
       ' Every button has a command that still works, so nothing is lost except the shortcut.'
     );
   }
-  if (off.length === CONTROL_PANEL_CONTROLS.length) {
+  if (offCount === CONTROL_PANEL_CONTROLS.length) {
     return (
-      'Every button is switched off, so new rooms are getting no control panel at all. ' +
+      'Every button is switched off, so rooms are getting no control panel at all. ' +
       'Switch one back on below, or leave it: every button has a command that still works. ' +
       EXISTING_ROOMS
     );
   }
   return (
-    'Every new room gets these buttons posted in its chat, so members never have to learn a ' +
-    'command name. Pick a button below to switch it on or off.\n\n' +
-    // Counted rather than written out, so adding a ninth control does not
-    // leave this panel quietly claiming there are eight.
-    (off.length === 0
-      ? `All ${CONTROL_PANEL_CONTROLS.length} buttons are on.`
-      : `Switched off: ${off.map((c) => CONTROL_PANEL_LABELS[c].label).join(', ')}.`) +
-    '\n\n' +
+    'Rooms get these buttons posted in their chat, so members never have to learn a command ' +
+    'name. Press one below to switch it on or off. ' +
     EXISTING_ROOMS
   );
 }
@@ -127,49 +111,52 @@ function describeControlState(
 /**
  * The configuration panel.
  *
- * The select is the whole interface: choosing a button toggles it, so there is
- * no save step and nothing to lose by closing the panel. Each option's
- * description says what the control does and its label says whether it is on,
- * because a select cannot show a checkbox and an admin should not have to
- * cross-reference the embed above it.
+ * Buttons rather than a select, so the whole state is visible at once: seven
+ * fields showing what each control does and whether it is on, and seven buttons
+ * under them that flip it. A select would hide six of the seven behind a click
+ * and could not show state without repeating it in every option label.
  */
 export function buildControlSettingsPanel(
   config: ControlPanelConfig,
   opts: { note?: string } = {},
 ): InteractionReplyOptions {
-  const off = CONTROL_PANEL_CONTROLS.filter((c) => !config.controls[c]);
-  const embed = new EmbedBuilder()
-    .setTitle('🎛️ Room control panel')
-    .setColor(0x5865f2)
-    .setDescription(describeControlState(config, off));
-  const json: APIEmbed = embed.toJSON();
-  if (opts.note) json.fields = [{ name: '​', value: opts.note.slice(0, 1024) }];
+  const offCount = CONTROL_PANEL_CONTROLS.filter((c) => !config.controls[c]).length;
 
-  const rows: (ActionRowBuilder<StringSelectMenuBuilder> | ActionRowBuilder<ButtonBuilder>)[] = [];
+  const fields: APIEmbedField[] = CONTROL_PANEL_CONTROLS.map((c) => {
+    const face = settingsFaceOf(c);
+    return {
+      name: `${config.controls[c] ? '✅' : '❌'} ${face.emoji} ${face.label}`,
+      value: face.blurb,
+      inline: true,
+    };
+  });
+
+  const embed = new EmbedBuilder()
+    .setTitle('Control panel')
+    .setColor(0x5865f2)
+    .setDescription(describeControlState(config, offCount))
+    .addFields(fields);
+  const json: APIEmbed = embed.toJSON();
+  if (opts.note) {
+    json.fields = [...(json.fields ?? []), { name: '​', value: opts.note.slice(0, 1024) }];
+  }
+
+  const rows: ActionRowBuilder<ButtonBuilder>[] = [];
   if (config.enabled) {
-    rows.push(
-      new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
-        new StringSelectMenuBuilder()
-          .setCustomId(CONTROL_SETTINGS_SELECT_ID)
-          .setPlaceholder('Switch a button on or off')
-          .setMinValues(1)
-          .setMaxValues(1)
-          .addOptions(
-            CONTROL_PANEL_CONTROLS.map((c) =>
-              new StringSelectMenuOptionBuilder()
-                .setValue(c)
-                .setLabel(
-                  `${CONTROL_PANEL_LABELS[c].label}${config.controls[c] ? '' : ' (off)'}`.slice(
-                    0,
-                    100,
-                  ),
-                )
-                .setDescription(CONTROL_BLURBS[c].slice(0, 100))
-                .setEmoji(CONTROL_PANEL_LABELS[c].emoji),
-            ),
+    // Five per row is Discord's ceiling, so seven controls land as five and two.
+    for (let i = 0; i < CONTROL_PANEL_CONTROLS.length; i += 5) {
+      rows.push(
+        new ActionRowBuilder<ButtonBuilder>().addComponents(
+          CONTROL_PANEL_CONTROLS.slice(i, i + 5).map((c) =>
+            new ButtonBuilder()
+              .setCustomId(controlToggleId(c))
+              .setLabel(settingsFaceOf(c).label)
+              .setEmoji(config.controls[c] ? '✅' : '❌')
+              .setStyle(ButtonStyle.Secondary),
           ),
-      ),
-    );
+        ),
+      );
+    }
   }
   rows.push(
     new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -181,7 +168,6 @@ export function buildControlSettingsPanel(
         : new ButtonBuilder()
             .setCustomId(controlSettingsId('on'))
             .setLabel('Turn the panel on')
-            .setEmoji('🎛️')
             .setStyle(ButtonStyle.Success),
       new ButtonBuilder()
         .setCustomId(controlSettingsId('close'))

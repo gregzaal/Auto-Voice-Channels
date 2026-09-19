@@ -513,6 +513,33 @@ async function main(): Promise<void> {
       const message = await channel.send({ ...payload, allowedMentions: { parse: [] } });
       return message.id;
     },
+    /**
+     * Edits a posted panel in place.
+     *
+     * `messages.edit` rather than fetching the message first: one request
+     * instead of two, and a message that is gone rejects either way, which is
+     * exactly what the caller needs to hear. `allowedMentions` is carried here
+     * too - an embed mention never notifies, but the option is what makes that
+     * true rather than incidental.
+     */
+    edit: async (channelId, messageId, payload) => {
+      const channel = await client.channels.fetch(channelId);
+      if (!channel?.isTextBased() || !('messages' in channel)) {
+        throw new Error(`channel ${channelId} cannot carry a control panel`);
+      }
+      await channel.messages.edit(messageId, {
+        ...payload,
+        /**
+         * Always sent, never omitted, for the reason `toUpdate` in the
+         * interaction router carries the same line: an omitted `content` is
+         * dropped from the request body rather than cleared. Without this, a
+         * panel switched off and then back on would keep "the room controls
+         * were switched off" sitting above the restored buttons forever.
+         */
+        content: payload.content ?? '',
+        allowedMentions: { parse: [] },
+      });
+    },
     guilds: settingsCache,
     secondaries,
     logger: logger.child({ component: 'control-panel' }),
@@ -520,7 +547,11 @@ async function main(): Promise<void> {
     serverLog: (gid, level, message) => serverLogger.log(gid, level, message),
     count: (outcome) => {
       metricsCollector.increment(
-        outcome === 'posted' ? METRICS.CONTROL_PANEL_POSTED : METRICS.CONTROL_PANEL_FAILED,
+        outcome === 'posted'
+          ? METRICS.CONTROL_PANEL_POSTED
+          : outcome === 'updated'
+            ? METRICS.CONTROL_PANEL_UPDATED
+            : METRICS.CONTROL_PANEL_FAILED,
       );
     },
   });

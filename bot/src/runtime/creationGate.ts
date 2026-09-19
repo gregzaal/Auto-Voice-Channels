@@ -109,6 +109,23 @@ export class RuntimeCreationGate implements CreationGate {
     }
   }
 
+  /**
+   * The control panel lever alone, for the re-render path, which runs far more
+   * often than a create and must not spend a throttle slot to ask.
+   *
+   * Fails OPEN like the companion's, and for the same reason: a database blip
+   * must not withdraw a feature that is on by default. Shares the cached
+   * snapshot, so asking costs no extra query.
+   */
+  async controlPanelDisabled(): Promise<boolean> {
+    try {
+      return (await this.readFlags()).controlPanelDisabled;
+    } catch (err) {
+      this.opts.logger.warn({ err }, 'control panel flag read failed; treating as enabled');
+      return false;
+    }
+  }
+
   private async readFlags(): Promise<{
     paused: boolean;
     limit: number;

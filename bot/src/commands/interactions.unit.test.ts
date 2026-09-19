@@ -15,7 +15,7 @@ import { editorId } from './templatePanel.js';
 import { ALIAS_MODAL_ID } from './aliasModal.js';
 import { ALIAS_SELECT_ID, aliasHash, aliasId } from './aliasPanel.js';
 import { controlPanelId } from '../features/voice/controlPanel.js';
-import { controlSettingsId, CONTROL_SETTINGS_SELECT_ID } from './controlPanelSettings.js';
+import { controlSettingsId, controlToggleId } from './controlPanelSettings.js';
 
 /** A Discord "Missing Permissions" (50013) rejection, as thrown by a failed create. */
 function missingPermissions(): DiscordAPIError {
@@ -208,12 +208,11 @@ function setup(overrides: Partial<InteractionDeps> = {}) {
     getControlPanel: vi.fn().mockResolvedValue({
       enabled: true,
       controls: {
-        lock: true,
-        unlock: true,
+        privacy: true,
         limit: true,
         rename: true,
-        claim: true,
-        transfer: true,
+        claim: false,
+        transfer: false,
         kick: true,
         info: true,
       },
@@ -2770,16 +2769,15 @@ describe('registerInteractionHandler (/controlpanel)', () => {
     });
     env.client.emit('interactionCreate', interaction);
     await flush();
-    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain(CONTROL_SETTINGS_SELECT_ID);
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain(controlToggleId('kick'));
   });
 
-  it('toggles the chosen control and re-renders in place', async () => {
+  it('toggles the control whose button was pressed, and re-renders in place', async () => {
     const env = setup();
     dispose = env.dispose;
     const { interaction, editReply } = fakeInteraction({
-      kind: 'stringSelect',
-      customId: CONTROL_SETTINGS_SELECT_ID,
-      values: ['kick'],
+      kind: 'button',
+      customId: controlToggleId('kick'),
       manageChannels: true,
     });
     env.client.emit('interactionCreate', interaction);
@@ -2789,23 +2787,70 @@ describe('registerInteractionHandler (/controlpanel)', () => {
     expect(editReply).toHaveBeenCalled();
   });
 
+  /** Claim is off by default, so its button switches it ON. */
+  it('toggles in the other direction for a control that is off', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'button',
+      customId: controlToggleId('claim'),
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(env.settings.setControlPanelEntry).toHaveBeenCalledWith('g1', 'claim', true);
+  });
+
   /**
-   * A select's values are chosen client side and this one goes straight into a
-   * settings key, so hiding an option enforces nothing.
+   * The promise the reply makes is that the rooms already open are updated too,
+   * so the fan-out has to actually be fired. Detached, so the admin's answer
+   * does not wait on one edit per room.
    */
-  it('refuses a selection that is not a known control', async () => {
+  it('refreshes the panels of rooms that are already open', async () => {
+    const refreshGuildPanels = vi.fn().mockResolvedValue({ considered: 3 });
+    const env = setup({ feature: { refreshGuildPanels } as never });
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'button',
+      customId: controlToggleId('kick'),
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(refreshGuildPanels).toHaveBeenCalledWith('g1');
+  });
+
+  /**
+   * A custom id comes back from a message we posted, but it is still client
+   * input on the wire and it goes straight into a settings key.
+   */
+  it('refuses a toggle that is not a known control', async () => {
     const env = setup();
     dispose = env.dispose;
     const { interaction, reply } = fakeInteraction({
-      kind: 'stringSelect',
-      customId: CONTROL_SETTINGS_SELECT_ID,
-      values: ['panel'],
+      kind: 'button',
+      customId: 'avc:cp:t:somethingnew',
       manageChannels: true,
     });
     env.client.emit('interactionCreate', interaction);
     await flush();
     expect(env.settings.setControlPanelEntry).not.toHaveBeenCalled();
     expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('out of date');
+  });
+
+  it('refuses a non-admin pressing a control toggle', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'button',
+      customId: controlToggleId('kick'),
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(env.settings.setControlPanelEntry).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'You need the Manage Channels permission.' }),
+    );
   });
 
   it('switches the whole panel off through the same key', async () => {

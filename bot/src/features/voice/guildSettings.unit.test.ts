@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_CHANNEL_NAME_TEMPLATE } from './nameTemplate.js';
 import {
   CONTROL_PANEL_CONTROLS,
+  CONTROL_PANEL_DEFAULTS,
   controlPanelConfirmation,
   readControlPanel,
   ROOT_GROUP_KEY,
@@ -133,28 +134,38 @@ describe('readContact', () => {
 });
 
 describe('readControlPanel', () => {
-  it('is entirely on for a server that has never configured it', () => {
+  it('is the defaults for a server that has never configured it', () => {
     const config = readControlPanel({});
     expect(config.enabled).toBe(true);
-    for (const control of CONTROL_PANEL_CONTROLS) {
-      expect(config.controls[control], control).toBe(true);
-    }
+    expect(config.controls).toEqual(CONTROL_PANEL_DEFAULTS);
   });
 
-  it('switches off exactly what the blob names', () => {
-    const config = readControlPanel({ control_panel: { kick: false, limit: false } });
+  /**
+   * Claim and Transfer are off out of the box: both are handovers, and Claim
+   * in particular only works when nobody is in charge, because ownership passes
+   * to the longest-present member the moment an owner leaves.
+   */
+  it('leaves Claim and Transfer off out of the box', () => {
+    const config = readControlPanel({});
+    expect(config.controls.claim).toBe(false);
+    expect(config.controls.transfer).toBe(false);
+    expect(config.controls.privacy).toBe(true);
+  });
+
+  it('applies exactly what the blob names, in either direction', () => {
+    const config = readControlPanel({ control_panel: { kick: false, claim: true } });
     expect(config.enabled).toBe(true);
     expect(config.controls.kick).toBe(false);
-    expect(config.controls.limit).toBe(false);
-    expect(config.controls.lock).toBe(true);
+    expect(config.controls.claim).toBe(true);
+    expect(config.controls.privacy).toBe(true);
   });
 
   it('reads the panel sentinel as the panel itself, never as a control', () => {
     const config = readControlPanel({ control_panel: { panel: false } });
     expect(config.enabled).toBe(false);
-    // Every control is still on, so turning the panel back on restores what
+    // The controls are untouched, so turning the panel back on restores what
     // the server had rather than an empty one.
-    expect(config.controls.lock).toBe(true);
+    expect(config.controls).toEqual(CONTROL_PANEL_DEFAULTS);
   });
 
   /**
@@ -175,28 +186,30 @@ describe('readControlPanel', () => {
     for (const raw of [null, 'off', 42, ['kick']]) {
       const config = readControlPanel({ control_panel: raw });
       expect(config.enabled).toBe(true);
-      expect(config.controls.kick).toBe(true);
+      expect(config.controls).toEqual(CONTROL_PANEL_DEFAULTS);
     }
   });
 
   /**
    * The settings cache serves one row object to every caller on the instance,
-   * so a reader that handed back a stored reference would let one caller's
-   * mutation corrupt every other guild read in the process.
+   * so a reader that handed back a stored reference - or the defaults map
+   * itself - would let one caller's mutation corrupt every other guild read in
+   * the process.
    */
-  it('hands back a fresh object each time', () => {
+  it('hands back a fresh object each time, never the defaults map', () => {
     const settings = { control_panel: { kick: false } };
     const first = readControlPanel(settings);
-    first.controls.lock = false;
-    expect(readControlPanel(settings).controls.lock).toBe(true);
+    first.controls.privacy = false;
+    expect(readControlPanel(settings).controls.privacy).toBe(true);
+    expect(CONTROL_PANEL_DEFAULTS.privacy).toBe(true);
   });
 });
 
 describe('controlPanelConfirmation', () => {
-  it('always says existing rooms keep the panel they were given', () => {
+  it('always says the panels already posted are updated too', () => {
     for (const on of [true, false]) {
-      expect(controlPanelConfirmation('panel', on)).toContain('already exist');
-      expect(controlPanelConfirmation('kick', on)).toContain('already exist');
+      expect(controlPanelConfirmation('panel', on)).toContain('already posted');
+      expect(controlPanelConfirmation('kick', on)).toContain('already posted');
     }
   });
 

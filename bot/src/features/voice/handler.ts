@@ -32,6 +32,8 @@ import {
   type PermissionProblemTracker,
 } from './permissionProblems.js';
 import type { CommandResult } from './commands.js';
+import type { RoomPanelView } from './controlPanel.js';
+import type { PanelRoomRow } from './controlPanelPoster.js';
 
 /** A fresh 31-bit random seed for a channel's `[[random]]` picks. */
 function randomSeed(): number {
@@ -137,6 +139,14 @@ export interface CreationGate {
    * creation throttle, which a repair must not do. Absent → not disabled.
    */
   companionTextDisabled?(): Promise<boolean>;
+  /**
+   * The control panel lever alone, for the re-render path.
+   *
+   * Its own method for the same reason the companion's is: `allowCreate` also
+   * spends a slot of the per-guild creation throttle, and a re-render must not.
+   * Absent means not disabled.
+   */
+  controlPanelDisabled?(): Promise<boolean>;
 }
 
 export interface VoiceFeatureDeps {
@@ -206,7 +216,14 @@ export interface VoiceFeatureDeps {
       roomId: string,
       primaryChannelId: string,
       destinationChannelId: string,
-      known?: { guildId: string; state: { controlPanelMessageId?: string | undefined } },
+      view: RoomPanelView,
+      known?: PanelRoomRow,
+    ): Promise<void>;
+    refreshForRoom(
+      guildId: string,
+      roomId: string,
+      row: PanelRoomRow,
+      view: RoomPanelView,
     ): Promise<void>;
   };
   /**
@@ -948,6 +965,16 @@ export class VoiceFeature {
         newChannelId,
         channelId,
         companionId ?? newChannelId,
+        {
+          ownerId: member.id,
+          primaryChannelId: channelId,
+          // Read from the row we just wrote rather than from Discord: the
+          // privacy overwrite was applied moments ago and the channel cache
+          // may not carry it yet, and a create is the one moment we know the
+          // answer for certain.
+          isPrivate: primary?.template.defaultPrivate === true,
+          userLimit: primary?.template.limit ?? 0,
+        },
         // The row the insert above returned, which on a conflict is the LIVE
         // one, so it answers the poster's replay guard without a second read
         // on the path a member is waiting on. Nothing between here and there
@@ -1695,6 +1722,34 @@ export class VoiceFeature {
       allowEmpty: true,
     });
 
+    /**
+     * The control panel, brought back into step with the room.
+     *
+     * Here rather than in each of the six places that change a room, because
+     * this method is already called from every one of them: `/limit`, `/name`,
+     * `/transfer`, `/reclaim`, `/private`, `/public`, and the debounced
+     * scheduler that fires after an owner leaves and ownership moves. It is
+     * ABOVE the name/status early-return on purpose - the panel can change when
+     * the name does not, which is most of the time.
+     *
+     * Free when nothing moved: the poster fingerprints the rendered payload and
+     * returns without a request when it matches what was last drawn, so the
+     * bulk sweeps that walk a whole guild cost a hash per room.
+     *
+     * Below the empty-room early return above, and deliberately: a room nobody
+     * is in is about to be cleaned up, and editing the panel of a message that
+     * is seconds from being deleted with its channel is work for nobody.
+     *
+     * **After the `updateState` below, in both paths, and that ordering is
+     * load-bearing.** The panel keys live in the same `state` blob, the poster
+     * writes them with a jsonb merge, and `updateState` REPLACES the column
+     * with the snapshot read at the top of this method. Refreshing first
+     * therefore wrote a fingerprint and then reverted it, so the next render
+     * saw a mismatch and issued a second, byte-identical edit - the "an edit per
+     * room on every sweep" outcome the fingerprint exists to prevent - and it
+     * resurrected a message id the poster had just cleared, so a deleted panel
+     * was retried for the life of the room.
+     */
     const nameChanged = name !== secondary.state.name;
     const statusChanged = status !== (secondary.state.status ?? '');
 
@@ -1703,7 +1758,11 @@ export class VoiceFeature {
       'rerenderSecondary evaluated',
     );
 
-    if (!nameChanged && !statusChanged) return {};
+    if (!nameChanged && !statusChanged) {
+      await this.refreshRoomPanel(guildId, secondary, primary?.channelId);
+      return {};
+    }
+    // No panel write under a dry run, which must not touch anything.
     if (opts.dryRun) {
       return { ...(nameChanged ? { name } : {}), ...(statusChanged ? { status } : {}) };
     }
@@ -1743,6 +1802,9 @@ export class VoiceFeature {
       status,
       index,
     });
+
+    // Strictly after the write above: see the note on the other call site.
+    await this.refreshRoomPanel(guildId, secondary, primary?.channelId);
 
     this.deps.logger.info(
       { guildId, secondaryId: channelId, name, status, rateLimited },
@@ -2226,6 +2288,69 @@ export class VoiceFeature {
     }
 
     return { ...base, kind: 'unmanaged' };
+  }
+
+  /**
+   * Re-renders one room's control panel if it has drifted from the room.
+   *
+   * Never throws: it hangs off work that has already succeeded, and a panel one
+   * edit behind is not worth failing a rename or a command over, let alone
+   * counting against the guild's circuit breaker.
+   */
+  private async refreshRoomPanel(
+    guildId: string,
+    secondary: SecondaryChannelRow,
+    primaryChannelId?: string,
+  ): Promise<void> {
+    if (!this.deps.controlPanel) return;
+    try {
+      /**
+       * The lever stops EDITS as well as posts, so it can actually shed the
+       * load its doc comment claims. Safe to do because it self-heals: the
+       * stored fingerprint still holds whatever was last drawn, so the first
+       * re-render after the lever is lifted sees a mismatch and catches every
+       * frozen panel up in one edit each. A briefly stale panel is what load
+       * shedding is; a permanently stale one would not be.
+       */
+      if (await this.deps.gate?.controlPanelDisabled?.()) return;
+      await this.deps.controlPanel.refreshForRoom(guildId, secondary.channelId, secondary, {
+        ownerId: secondary.ownerId,
+        primaryChannelId: primaryChannelId ?? secondary.primaryChannelId,
+        isPrivate: secondary.state.private === true,
+        userLimit: this.deps.voice.userLimitOf?.(secondary.channelId) ?? 0,
+      });
+    } catch (err) {
+      this.deps.logger.warn(
+        { err, guildId, secondaryId: secondary.channelId },
+        'could not refresh the room control panel',
+      );
+    }
+  }
+
+  /**
+   * Re-renders every live panel in a guild, for a `/controlpanel` change.
+   *
+   * The one caller is an admin toggling a button, and the promise the reply
+   * makes is that the rooms already open are updated too. Bounded by the
+   * guild's live room count, and each one is fingerprinted, so the rooms whose
+   * panel did not actually change cost nothing.
+   *
+   * Sequential rather than concurrent: this is a background fan-out behind an
+   * already-sent reply, nobody is waiting on it, and a guild with thirty rooms
+   * firing thirty simultaneous edits is how a bot finds a rate limit it did not
+   * know it had.
+   */
+  async refreshGuildPanels(guildId: string): Promise<{ considered: number }> {
+    if (!this.deps.controlPanel) return { considered: 0 };
+    const rows = await this.deps.secondaries.listByGuild(guildId);
+    // Only the rows that have a panel are work, and the count says so: an admin
+    // reading the log should not see a guild's whole room list reported as
+    // panels considered.
+    const withPanels = rows.filter((r) => r.state.controlPanelMessageId);
+    for (const row of withPanels) {
+      await this.refreshRoomPanel(guildId, row);
+    }
+    return { considered: withPanels.length };
   }
 
   /**

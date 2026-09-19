@@ -30,12 +30,18 @@ export const RUNTIME_FLAGS = {
   /**
    * Stops posting the room control panel on **this fleet**.
    *
-   * The scoped no-deploy switch for the one thing a room create now does that
-   * is neither a channel nor a permission: it posts a message. It stops new
-   * panels only. Panels already posted keep working, because their buttons run
-   * the same checked command paths the slash commands do, and withdrawing them
+   * The scoped no-deploy switch for the one thing a room does that is neither a
+   * channel nor a permission: it keeps a message. It stops both halves of that,
+   * posting a panel into a new room and re-rendering one that already exists,
+   * so it can actually shed the load its name implies.
+   *
+   * Panels already posted keep WORKING while it is on: their buttons run the
+   * same checked command paths the slash commands do, and withdrawing those
    * would mean editing a message in every live room to take away controls that
-   * are still safe to press.
+   * are still safe to press. What they stop doing is keeping up with their
+   * room, which self-heals: the stored fingerprint still holds whatever was
+   * last drawn, so the first re-render after this is lifted sees a mismatch and
+   * catches every frozen panel up in one edit each.
    *
    * A failed flag read is treated as NOT disabled, matching
    * `companion_text.disabled`: a database blip must not silently withdraw a

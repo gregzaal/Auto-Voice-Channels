@@ -359,8 +359,7 @@ export function readGroups(settings: Record<string, unknown>): Record<string, Gr
  * the stored map is keyed by these strings.
  */
 export const CONTROL_PANEL_CONTROLS = [
-  'lock',
-  'unlock',
+  'privacy',
   'limit',
   'rename',
   'claim',
@@ -370,6 +369,28 @@ export const CONTROL_PANEL_CONTROLS = [
 ] as const;
 
 export type ControlPanelControl = (typeof CONTROL_PANEL_CONTROLS)[number];
+
+/**
+ * Which controls a server that has never run `/controlpanel` gets.
+ *
+ * Claim and Transfer are off: both are handovers, both are refused far more
+ * often than they succeed (Claim only works when nobody is in charge, because
+ * ownership passes to the longest-present member the moment an owner leaves),
+ * and a panel whose buttons mostly say no is a worse panel. A server that wants
+ * them switches them on.
+ *
+ * **Only a departure from this map is ever stored**, so changing a default here
+ * changes it for every server that has not said otherwise, which is the point.
+ */
+export const CONTROL_PANEL_DEFAULTS: Record<ControlPanelControl, boolean> = {
+  privacy: true,
+  limit: true,
+  rename: true,
+  claim: false,
+  transfer: false,
+  kick: true,
+  info: true,
+};
 
 /**
  * The entry inside the control panel map that switches the whole panel off.
@@ -405,11 +426,11 @@ export interface ControlPanelConfig {
 /**
  * Reads the control panel configuration from the settings blob.
  *
- * **Only what an admin has switched OFF is ever stored**, so an absent key, an
- * empty map and a corrupt value all read as "everything on", which is the
- * documented default. Unknown ids are ignored rather than refused: a file
- * exported from a newer build can carry a control this one has never heard of,
- * and losing the rest of the map over it would be worse than ignoring it.
+ * **Only a departure from {@link CONTROL_PANEL_DEFAULTS} is ever stored**, so an
+ * absent key, an empty map and a corrupt value all read as the defaults.
+ * Unknown ids are ignored rather than refused: a file exported from a newer
+ * build can carry a control this one has never heard of, and losing the rest of
+ * the map over it would be worse than ignoring it.
  *
  * The returned object is freshly built every call rather than handed back by
  * reference. `SettingsCache` serves the same row object to every caller on the
@@ -418,11 +439,10 @@ export interface ControlPanelConfig {
  * invalidation behind it.
  */
 export function readControlPanel(settings: Record<string, unknown>): ControlPanelConfig {
-  const controls = Object.fromEntries(CONTROL_PANEL_CONTROLS.map((c) => [c, true])) as Record<
-    ControlPanelControl,
-    boolean
-  >;
-  const config: ControlPanelConfig = { enabled: true, controls };
+  const config: ControlPanelConfig = {
+    enabled: true,
+    controls: { ...CONTROL_PANEL_DEFAULTS },
+  };
   const raw = settings[SETTINGS_KEYS.controlPanel];
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return config;
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
@@ -438,10 +458,9 @@ export function readControlPanel(settings: Record<string, unknown>): ControlPane
 
 /** How each control reads in a `/controlpanel` confirmation. */
 const CONTROL_PANEL_NAMES: Record<ControlPanelControl, string> = {
-  lock: 'Lock',
-  unlock: 'Unlock',
-  limit: 'Limit',
-  rename: 'Rename',
+  privacy: 'Private and Public',
+  limit: 'Size',
+  rename: 'Name',
   claim: 'Claim',
   transfer: 'Transfer',
   kick: 'Kick',
@@ -451,13 +470,14 @@ const CONTROL_PANEL_NAMES: Record<ControlPanelControl, string> = {
 /**
  * What `/controlpanel` says after a toggle.
  *
- * Every one of them names the rooms that already exist, because the panel is
- * posted once when a room is made and is never edited afterwards. An admin who
- * is told only "turned off" and then finds the button still there in the room
- * they are sitting in will reasonably conclude the setting did not save.
+ * It promises the rooms that already exist, because they are updated: a toggle
+ * re-renders every live panel in the server. Saying otherwise would be the
+ * easier copy and would now be a lie.
  */
 export function controlPanelConfirmation(control: ControlPanelEntry, on: boolean): string {
-  const rooms = ' Rooms that already exist keep the panel they were given.';
+  // The same sentence `/controlpanel`'s own panel uses, word for word: an admin
+  // reads both in the same breath and two phrasings read as two behaviours.
+  const rooms = ' Panels already posted are updated too.';
   if (control === CONTROL_PANEL_ENABLED_KEY) {
     return on
       ? 'New rooms will get the control panel in their chat again.' + rooms
@@ -467,10 +487,8 @@ export function controlPanelConfirmation(control: ControlPanelEntry, on: boolean
   }
   const name = CONTROL_PANEL_NAMES[control];
   return on
-    ? `New rooms will show the **${name}** button again.` + rooms
-    : `New rooms will not show the **${name}** button.` +
-        rooms +
-        ' The command behind it still works.';
+    ? `Rooms will show the **${name}** button.` + rooms
+    : `Rooms will not show the **${name}** button.` + rooms + ' The command behind it still works.';
 }
 
 /** One category's grouping config, or `undefined` when that category isn't grouped. */

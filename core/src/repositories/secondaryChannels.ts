@@ -67,15 +67,20 @@ export const secondaryStateSchema = z
     /**
      * The room control panel message posted into the room's chat at creation.
      *
-     * A replay guard and nothing else: it exists so a create that runs twice
-     * (a caught-up reconcile, a redelivered voice event) does not post a second
-     * panel into the same room. Nothing ever edits or deletes the message,
-     * because it lives in a channel that dies with the room.
+     * Two jobs. It is the replay guard, so a create that runs twice (a
+     * caught-up reconcile, a redelivered voice event) does not post a second
+     * panel into the same room. And it is how the panel is found again: the
+     * panel follows its room, so it is EDITED whenever the room's privacy,
+     * owner or size changes, or an admin changes what the panel carries.
      *
-     * Written through {@link SecondaryChannelRepository.setControlPanelMessage},
-     * never through `updateState`: the post is a Discord round trip, so a
-     * read-modify-write around it would discard whatever the roster, rename or
-     * privacy paths wrote in the meantime.
+     * Written through {@link SecondaryChannelRepository.setControlPanelMessage}
+     * and {@link SecondaryChannelRepository.clearControlPanelMessage}, never
+     * through `updateState`: those merge server side, where `updateState`
+     * replaces the whole column, so a read-modify-write around a Discord round
+     * trip would discard whatever else landed in the meantime. **A caller that
+     * does both must refresh the panel AFTER its `updateState`**, or the
+     * replace reverts the merge - which is exactly what `rerenderSecondary` did
+     * until the ordering was fixed.
      */
     controlPanelMessageId: z.string().optional(),
     /**
@@ -84,9 +89,20 @@ export const secondaryStateSchema = z
      *
      * Recorded rather than recomputed because the answer can change after the
      * fact - a companion the reconciler builds later does not move the panel -
-     * so the stored id is the only honest record of where it went.
+     * so the stored id is the only honest record of where it went, and the only
+     * way a later edit knows where to aim.
      */
     controlPanelChannelId: z.string().optional(),
+    /**
+     * A digest of the panel as it was last rendered, so a re-render that would
+     * change nothing issues no request.
+     *
+     * The panel follows the room - its privacy button, its owner, its size -
+     * so it is re-derived on every `rerenderSecondary`, including the bulk
+     * sweeps that walk a whole guild. Without this every one of those would be
+     * an edit per room. With it they are a hash per room and no traffic at all.
+     */
+    controlPanelHash: z.string().optional(),
   })
   .passthrough();
 
@@ -302,6 +318,7 @@ export class SecondaryChannelRepository {
     channelId: string,
     messageId: string,
     panelChannelId: string,
+    hash: string,
   ): Promise<void> {
     await this.db
       .update(secondaryChannels)
@@ -309,7 +326,25 @@ export class SecondaryChannelRepository {
         state: sql`coalesce(${secondaryChannels.state}, '{}'::jsonb) || ${JSON.stringify({
           controlPanelMessageId: messageId,
           controlPanelChannelId: panelChannelId,
+          controlPanelHash: hash,
         })}::jsonb`,
+      })
+      .where(this.scoped(eq(secondaryChannels.channelId, channelId)));
+  }
+
+  /**
+   * Forgets a room's control panel, after an edit proved the message is gone.
+   *
+   * A merge cannot delete a key, so this is the one panel write that has to
+   * name the survivors: `state - 'key'` removes them server side, which keeps
+   * it a single statement and leaves everything else in the blob untouched.
+   */
+  async clearControlPanelMessage(channelId: string): Promise<void> {
+    await this.db
+      .update(secondaryChannels)
+      .set({
+        state: sql`coalesce(${secondaryChannels.state}, '{}'::jsonb)
+          - 'controlPanelMessageId' - 'controlPanelChannelId' - 'controlPanelHash'`,
       })
       .where(this.scoped(eq(secondaryChannels.channelId, channelId)));
   }

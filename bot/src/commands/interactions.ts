@@ -184,9 +184,8 @@ import {
 import {
   buildControlSettingsPanel,
   CONTROL_SETTINGS_PREFIX,
-  CONTROL_SETTINGS_SELECT_ID,
-  parseControlSelection,
   parseControlSettingsId,
+  parseControlToggleId,
 } from './controlPanelSettings.js';
 import { describeError } from '../ops/describeError.js';
 import { reinviteUrlFor } from '../ops/announce.js';
@@ -318,6 +317,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   // cannot ride in a custom id; the id carries a session key instead. Losing
   // these on restart just means the admin re-asks, which is the safe direction.
   const assistantSessions = new Map<string, AssistantSession>();
+  // Guilds whose room panels are being brought back into line after a
+  // `/controlpanel` change, so several toggles in a row cost one sweep and not
+  // one each. See `refreshPanelsSoon`.
+  const panelRefreshes = new Map<string, 'running' | 'again'>();
 
   const onInteraction = (interaction: Interaction): void => {
     void route(interaction).catch((err: unknown) => {
@@ -2324,8 +2327,6 @@ Already subscribed? Add the new server ` +
   async function handleStringSelect(interaction: StringSelectMenuInteraction): Promise<void> {
     if (interaction.customId.startsWith(CONTROL_PANEL_PREFIX))
       return handleControlPanelSelect(interaction);
-    if (interaction.customId === CONTROL_SETTINGS_SELECT_ID)
-      return handleControlSettingsSelect(interaction);
     if (interaction.customId === SETUP_SETTINGS_ID) {
       const chosen = interaction.values[0];
       if (!chosen || !chosen.startsWith(SETUP_PREFIX)) {
@@ -2928,7 +2929,7 @@ Already subscribed? Add the new server ` +
          * A compile error, not a runtime message.
          *
          * Appending to `CONTROL_PANEL_CONTROLS` is documented as the way to add
-         * a ninth button, and `buildControlPanel` renders one for every entry
+         * another button, and `buildControlPanel` renders one for every entry
          * in that list. Without this, adding one shipped a button that rendered,
          * was pressable, and answered "that button is from an older version"
          * forever.
@@ -3292,8 +3293,22 @@ Already subscribed? Add the new server ` +
     await interaction.reply(buildControlSettingsPanel(config));
   }
 
-  /** The configuration panel's own buttons: on, off, close. */
+  /**
+   * The configuration panel's buttons: one per control, plus on, off and close.
+   *
+   * The per-control toggles are checked first, because `avc:cp:t:` shares the
+   * namespace with them and {@link parseControlSettingsId} deliberately does
+   * not claim it.
+   */
   async function handleControlSettingsButton(interaction: ButtonInteraction): Promise<void> {
+    const control = parseControlToggleId(interaction.customId);
+    if (control) {
+      if (!(await requireManageChannels(interaction))) return;
+      await interaction.deferUpdate();
+      const config = await deps.settings.getControlPanel(interaction.guildId!);
+      await refreshControlSettings(interaction, control, !config.controls[control]);
+      return;
+    }
     const action = parseControlSettingsId(interaction.customId);
     if (!action) {
       await safeReply(interaction, 'That button is out of date. Run `/controlpanel` again.');
@@ -3306,24 +3321,6 @@ Already subscribed? Add the new server ` +
     }
     await interaction.deferUpdate();
     await refreshControlSettings(interaction, CONTROL_PANEL_ENABLED_KEY, action === 'on');
-  }
-
-  /** The configuration panel's button picker: one control toggles on selection. */
-  async function handleControlSettingsSelect(
-    interaction: StringSelectMenuInteraction,
-  ): Promise<void> {
-    if (!(await requireManageChannels(interaction))) return;
-    const raw = interaction.values[0];
-    // Select values are chosen client side, so this is validated rather than
-    // trusted: it goes straight into a settings key.
-    const control = raw ? parseControlSelection(raw) : null;
-    if (!control) {
-      await safeReply(interaction, 'That option is out of date. Run `/controlpanel` again.');
-      return;
-    }
-    await interaction.deferUpdate();
-    const config = await deps.settings.getControlPanel(interaction.guildId!);
-    await refreshControlSettings(interaction, control, !config.controls[control]);
   }
 
   /**
@@ -3348,6 +3345,7 @@ Already subscribed? Add the new server ` +
       await interaction.editReply(
         toUpdate(buildControlSettingsPanel(config, { note: formatResult(res) })),
       );
+      refreshPanelsSoon(guildId);
     } catch (err) {
       deps.logger.warn({ err, guildId, entry }, 'control panel setting could not be saved');
       deps.reportError?.('Control panel setting failed', {
@@ -3360,6 +3358,42 @@ Already subscribed? Add the new server ` +
         ephemeral: true,
       });
     }
+  }
+
+  /**
+   * Brings the panels already posted into line with a `/controlpanel` change,
+   * once, however many buttons the admin presses.
+   *
+   * **Coalesced, because an admin configures several controls in a row.** Each
+   * press would otherwise queue a whole-guild sweep onto that guild's SERIAL
+   * work queue: seven presses against a thirty-room server is two hundred
+   * sequential edits, and the guild's voice events - room creation, cleanup -
+   * wait behind all of them. So a sweep already in flight is not joined by a
+   * second; it is asked to run once more when it finishes, which is enough
+   * because the sweep re-reads the settings and therefore always finishes on
+   * the latest answer.
+   *
+   * Detached from the interaction on purpose: the admin has their reply, and
+   * nothing about somebody else's room should hold it open.
+   */
+  function refreshPanelsSoon(guildId: string): void {
+    if (panelRefreshes.has(guildId)) {
+      panelRefreshes.set(guildId, 'again');
+      return;
+    }
+    panelRefreshes.set(guildId, 'running');
+    void run(guildId, 'controlpanel:refresh', () => deps.feature.refreshGuildPanels(guildId))
+      .then((r) => {
+        deps.logger.debug({ guildId, ...r }, 'refreshed room panels after a settings change');
+      })
+      .catch((err: unknown) => {
+        deps.logger.warn({ err, guildId }, 'could not refresh room panels');
+      })
+      .finally(() => {
+        const again = panelRefreshes.get(guildId) === 'again';
+        panelRefreshes.delete(guildId);
+        if (again) refreshPanelsSoon(guildId);
+      });
   }
 
   async function handleKickVote(interaction: ButtonInteraction): Promise<void> {
@@ -3592,6 +3626,7 @@ Already subscribed? Add the new server ` +
     voteTimers.clear();
     createRetries.clear();
     assistantSessions.clear();
+    panelRefreshes.clear();
   };
 }
 

@@ -195,6 +195,35 @@ describe('RuntimeCreationGate', () => {
     it('is absent from the decision when unset', async () => {
       const gate = new RuntimeCreationGate({ flags: fakeFlags(), logger: fakeLogger() });
       expect((await gate.allowCreate('g1')).controlPanelDisabled).toBeUndefined();
+      expect(await gate.controlPanelDisabled()).toBe(false);
+    });
+
+    /**
+     * The re-render path asks separately, and far more often than a create, so
+     * it must not spend a slot of the per-guild creation throttle to ask.
+     */
+    it('answers the re-render path without consuming a throttle slot', async () => {
+      const gate = new RuntimeCreationGate({
+        flags: fakeFlags({
+          [RUNTIME_FLAGS.CONTROL_PANEL_DISABLED]: true,
+          [RUNTIME_FLAGS.CREATE_RATE_LIMIT]: 1,
+        }),
+        logger: fakeLogger(),
+      });
+      expect(await gate.controlPanelDisabled()).toBe(true);
+      expect(await gate.controlPanelDisabled()).toBe(true);
+      // The one slot is still available, so the asking cost nothing.
+      expect((await gate.allowCreate('g1')).allowed).toBe(true);
+    });
+
+    /** Fails OPEN: a database blip must not withdraw a feature that is on by default. */
+    it('treats a failed flag read as not disabled', async () => {
+      const flags = { getAll: () => Promise.reject(new Error('db down')) };
+      const gate = new RuntimeCreationGate({
+        flags: flags as unknown as RuntimeFlagsRepository,
+        logger: fakeLogger(),
+      });
+      expect(await gate.controlPanelDisabled()).toBe(false);
     });
   });
 });

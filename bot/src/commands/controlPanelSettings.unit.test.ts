@@ -1,14 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fakeLogger } from '../runtime/testUtils.js';
 import { GuildSettingsService } from '../features/voice/settings.js';
-import { readControlPanel } from '../features/voice/guildSettings.js';
+import {
+  CONTROL_PANEL_CONTROLS,
+  CONTROL_PANEL_DEFAULTS,
+  readControlPanel,
+} from '../features/voice/guildSettings.js';
 import {
   buildControlSettingsPanel,
   CONTROL_SETTINGS_PREFIX,
-  CONTROL_SETTINGS_SELECT_ID,
   controlSettingsId,
-  parseControlSelection,
+  controlToggleId,
   parseControlSettingsId,
+  parseControlToggleId,
 } from './controlPanelSettings.js';
 
 const GUILD = '460459401086763010';
@@ -45,7 +49,7 @@ function makeService(settings: Record<string, unknown> = {}) {
 }
 
 describe('control settings custom ids', () => {
-  it('round-trips its three actions and refuses anything else', () => {
+  it('round-trips its three whole-panel actions and refuses anything else', () => {
     expect(parseControlSettingsId(controlSettingsId('off'))).toBe('off');
     expect(parseControlSettingsId(controlSettingsId('on'))).toBe('on');
     expect(parseControlSettingsId(controlSettingsId('close'))).toBe('close');
@@ -53,31 +57,54 @@ describe('control settings custom ids', () => {
     expect(parseControlSettingsId('avc:setup:open')).toBeNull();
   });
 
+  it('round-trips a per-control toggle', () => {
+    for (const c of CONTROL_PANEL_CONTROLS) {
+      expect(parseControlToggleId(controlToggleId(c))).toBe(c);
+    }
+  });
+
   /**
-   * Select values are chosen client side, and this one goes straight into a
-   * settings key, so it is validated rather than trusted.
+   * The two parsers share a namespace, so each has to refuse the other's ids or
+   * a toggle would be read as a whole-panel action and switch the wrong thing.
    */
-  it('validates a selection against the known controls', () => {
-    expect(parseControlSelection('kick')).toBe('kick');
-    expect(parseControlSelection('panel')).toBeNull();
-    expect(parseControlSelection('__proto__')).toBeNull();
-    expect(parseControlSelection('')).toBeNull();
+  it('keeps the toggles and the whole-panel actions apart', () => {
+    expect(parseControlSettingsId(controlToggleId('kick'))).toBeNull();
+    expect(parseControlToggleId(controlSettingsId('off'))).toBeNull();
+  });
+
+  /**
+   * A custom id comes back from a message we posted, but it is still client
+   * input on the wire and it goes straight into a settings key.
+   */
+  it('refuses a toggle for anything that is not a known control', () => {
+    expect(parseControlToggleId(`${CONTROL_SETTINGS_PREFIX}t:panel`)).toBeNull();
+    expect(parseControlToggleId(`${CONTROL_SETTINGS_PREFIX}t:__proto__`)).toBeNull();
+    expect(parseControlToggleId(`${CONTROL_SETTINGS_PREFIX}t:`)).toBeNull();
   });
 });
 
 describe('buildControlSettingsPanel', () => {
-  it('offers every control, marking the ones that are off', () => {
-    const config = readControlPanel({ control_panel: { kick: false } });
-    const json = JSON.stringify(buildControlSettingsPanel(config));
-    expect(json).toContain(CONTROL_SETTINGS_SELECT_ID);
-    expect(json).toContain('Kick (off)');
-    expect(json).toContain('Switched off: Kick.');
+  it('describes every control in a field, with its state', () => {
+    const json = buildControlSettingsPanel(readControlPanel({}));
+    const fields = json.embeds![0]! as { fields?: { name: string; value: string }[] };
+    expect(fields.fields).toHaveLength(CONTROL_PANEL_CONTROLS.length);
+    // Claim is off by default, Size is on, and the state is in the field name.
+    expect(fields.fields!.map((f) => f.name)).toContain('❌ 👑 Claim');
+    expect(fields.fields!.map((f) => f.name)).toContain('✅ 👥 Size');
   });
 
-  it('drops the picker and offers the way back when the panel is off', () => {
-    const config = readControlPanel({ control_panel: { panel: false } });
-    const json = JSON.stringify(buildControlSettingsPanel(config));
-    expect(json).not.toContain(CONTROL_SETTINGS_SELECT_ID);
+  it('gives every control a toggle button carrying its state', () => {
+    const json = JSON.stringify(buildControlSettingsPanel(readControlPanel({})));
+    for (const c of CONTROL_PANEL_CONTROLS) expect(json).toContain(controlToggleId(c));
+    expect(json).toContain('✅');
+    expect(json).toContain('❌');
+  });
+
+  it('drops the toggles and offers the way back when the panel is off', () => {
+    const json = JSON.stringify(
+      buildControlSettingsPanel(readControlPanel({ control_panel: { panel: false } })),
+    );
+    expect(json).not.toContain(controlToggleId('kick'));
     expect(json).toContain(controlSettingsId('on'));
     expect(json).not.toContain(controlSettingsId('off'));
   });
@@ -97,12 +124,16 @@ describe('buildControlSettingsPanel', () => {
     expect(on).not.toContain('"disabled":true');
   });
 
+  /** Every button off is a third state: the panel is on and yet nothing is posted. */
+  it('says so when every button is off', () => {
+    const none = Object.fromEntries(CONTROL_PANEL_CONTROLS.map((c) => [c, false]));
+    const json = buildControlSettingsPanel(readControlPanel({ control_panel: none }));
+    expect(JSON.stringify(json.embeds![0])).toContain('no control panel at all');
+  });
+
   it('follows the copy rules', () => {
-    for (const settings of [
-      {},
-      { control_panel: { panel: false } },
-      { control_panel: { kick: false } },
-    ]) {
+    const none = Object.fromEntries(CONTROL_PANEL_CONTROLS.map((c) => [c, false]));
+    for (const settings of [{}, { control_panel: { panel: false } }, { control_panel: none }]) {
       const text = JSON.stringify(
         buildControlSettingsPanel(readControlPanel(settings), { note: 'a note' }),
       );
@@ -114,29 +145,34 @@ describe('buildControlSettingsPanel', () => {
 });
 
 describe('setControlPanelEntry', () => {
-  it('stores only what is switched off', async () => {
-    const { service, writes } = makeService();
-    await service.setControlPanelEntry(GUILD, 'kick', false);
-    expect(writes[0]!.patch).toEqual({ control_panel: { kick: false } });
-    expect(writes[0]!.remove).toEqual([]);
+  it('stores a control only when it differs from its default', async () => {
+    const off = makeService();
+    await off.service.setControlPanelEntry(GUILD, 'kick', false);
+    expect(off.writes[0]!.patch).toEqual({ control_panel: { kick: false } });
+
+    // Claim is off by DEFAULT, so switching it on is the departure worth storing.
+    expect(CONTROL_PANEL_DEFAULTS.claim).toBe(false);
+    const on = makeService();
+    await on.service.setControlPanelEntry(GUILD, 'claim', true);
+    expect(on.writes[0]!.patch).toEqual({ control_panel: { claim: true } });
   });
 
   /**
-   * Writing `{}` would make "deliberately all on" indistinguishable from
-   * "never configured" on an export round trip, and the format's rule is that
-   * `null` on the wire means the key is absent from the blob.
+   * Writing the default out would pin a server to today's answer for a control
+   * they never touched, and writing `{}` would make "deliberately default"
+   * indistinguishable from "never configured" on an export round trip.
    */
-  it('removes the key entirely once nothing is off any more', async () => {
+  it('removes the key entirely once everything is back to its default', async () => {
     const { service, writes } = makeService({ control_panel: { kick: false } });
     await service.setControlPanelEntry(GUILD, 'kick', true);
     expect(writes[0]!.patch).toEqual({});
     expect(writes[0]!.remove).toEqual(['control_panel']);
   });
 
-  it('keeps the other entries when one is switched back on', async () => {
-    const { service, writes } = makeService({ control_panel: { kick: false, info: false } });
+  it('keeps the other entries when one goes back to its default', async () => {
+    const { service, writes } = makeService({ control_panel: { kick: false, claim: true } });
     await service.setControlPanelEntry(GUILD, 'kick', true);
-    expect(writes[0]!.patch).toEqual({ control_panel: { info: false } });
+    expect(writes[0]!.patch).toEqual({ control_panel: { claim: true } });
   });
 
   it('switches the whole panel through the same key', async () => {
@@ -146,28 +182,23 @@ describe('setControlPanelEntry', () => {
   });
 
   /**
-   * Golden rule 3: preserve unknown JSON fields on writes.
-   *
-   * Filtering to booleans looked tidier and would break the very migration
-   * `feature-parity.md` §3.5 names next, which widens a value in this same key
-   * from a boolean to `false | 'everyone' | [role ids]`. An OLD instance mid
-   * rollout would then delete every role-valued entry the moment an admin
-   * toggled any single button. A value this build cannot read is ignored by
-   * `readControlPanel`, which is inert; one it DELETES is gone.
+   * Golden rule 3: preserve unknown JSON fields on writes. Filtering to
+   * booleans would break the migration `feature-parity.md` §3.5 names next,
+   * which widens a value in this same key to `false | 'everyone' | [role ids]`.
    */
   it('keeps a value it cannot read rather than deleting it', async () => {
     const { service, writes } = makeService({
-      control_panel: { kick: ['role-1'], info: false },
+      control_panel: { kick: ['role-1'], claim: true },
     });
-    await service.setControlPanelEntry(GUILD, 'lock', false);
+    await service.setControlPanelEntry(GUILD, 'rename', false);
     expect(writes[0]!.patch).toEqual({
-      control_panel: { kick: ['role-1'], info: false, lock: false },
+      control_panel: { kick: ['role-1'], claim: true, rename: false },
     });
   });
 
   it('keeps the key alive for an entry it cannot read, rather than sweeping it away', async () => {
-    const { service, writes } = makeService({ control_panel: { kick: ['role-1'], info: false } });
-    await service.setControlPanelEntry(GUILD, 'info', true);
+    const { service, writes } = makeService({ control_panel: { kick: ['role-1'], claim: true } });
+    await service.setControlPanelEntry(GUILD, 'claim', false);
     expect(writes[0]!.remove).toEqual([]);
     expect(writes[0]!.patch).toEqual({ control_panel: { kick: ['role-1'] } });
   });
