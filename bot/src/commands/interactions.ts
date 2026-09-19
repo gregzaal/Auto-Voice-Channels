@@ -47,6 +47,7 @@ import {
 import {
   isPermissionError,
   JOIN_PREFIX,
+  MAX_USER_LIMIT,
   parseJoinId,
   rateLimitNote,
   type ChannelDebug,
@@ -54,6 +55,7 @@ import {
   type EditorField,
   type EditorScope,
   type EditorState,
+  type RoomPanelState,
   type GuildSettingsService,
   type PermissionProblemTracker,
   type PrivacyService,
@@ -165,7 +167,27 @@ import {
   GROUP_PREFIX,
   parseGroupId,
 } from './groupPanel.js';
-import { groupKeyFor, ROOT_GROUP_KEY } from '../features/voice/guildSettings.js';
+import {
+  CONTROL_PANEL_ENABLED_KEY,
+  groupKeyFor,
+  ROOT_GROUP_KEY,
+  type ControlPanelEntry,
+} from '../features/voice/guildSettings.js';
+import {
+  buildLimitModal,
+  buildMemberPicker,
+  buildRenameModal,
+  CONTROL_PANEL_INPUT_ID,
+  CONTROL_PANEL_PREFIX,
+  parseControlPanelId,
+} from '../features/voice/controlPanel.js';
+import {
+  buildControlSettingsPanel,
+  CONTROL_SETTINGS_PREFIX,
+  CONTROL_SETTINGS_SELECT_ID,
+  parseControlSelection,
+  parseControlSettingsId,
+} from './controlPanelSettings.js';
 import { describeError } from '../ops/describeError.js';
 import { reinviteUrlFor } from '../ops/announce.js';
 
@@ -401,6 +423,18 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       // A `/channelinfo` view button, or the command's own exemption stops at
       // the first click and the panel answers with the reactivation notice.
       if (interaction.customId.startsWith(CHANNELINFO_PREFIX)) return true;
+      /**
+       * The room panel's Info button, and only that one.
+       *
+       * It runs `/channelinfo`, which is on the command list above for
+       * `/export`'s reason: refusing to tell somebody how their own server is
+       * configured because a payment lapsed is not what the hard gate is for.
+       * A button that did the same thing and was refused would make the
+       * exemption depend on which surface you reached it from. Every other
+       * button on the panel is a write and stays refused, which is why this
+       * matches the whole `info:` id rather than the namespace.
+       */
+      if (interaction.customId.startsWith(`${CONTROL_PANEL_PREFIX}info:`)) return true;
       return interaction.customId.startsWith(SETUP_PREFIX);
     }
     if (interaction.isStringSelectMenu()) {
@@ -573,6 +607,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return handleDebug(interaction);
       case 'channelinfo':
         return handleChannelInfo(interaction, entitled);
+      case 'controlpanel':
+        return openControlSettings(interaction);
       case 'create':
         return openCreateModal(interaction);
       case 'alias':
@@ -2286,6 +2322,10 @@ Already subscribed? Add the new server ` +
 
   /** The `/setup` "More settings" select, and the alias picker. */
   async function handleStringSelect(interaction: StringSelectMenuInteraction): Promise<void> {
+    if (interaction.customId.startsWith(CONTROL_PANEL_PREFIX))
+      return handleControlPanelSelect(interaction);
+    if (interaction.customId === CONTROL_SETTINGS_SELECT_ID)
+      return handleControlSettingsSelect(interaction);
     if (interaction.customId === SETUP_SETTINGS_ID) {
       const chosen = interaction.values[0];
       if (!chosen || !chosen.startsWith(SETUP_PREFIX)) {
@@ -2726,6 +2766,10 @@ Already subscribed? Add the new server ` +
       // by a second click either.
       return handleImportButton(interaction, importDependencies);
     }
+    if (interaction.customId.startsWith(CONTROL_PANEL_PREFIX))
+      return handleControlPanelButton(interaction, entitled);
+    if (interaction.customId.startsWith(CONTROL_SETTINGS_PREFIX))
+      return handleControlSettingsButton(interaction);
     if (interaction.customId.startsWith(SETUP_PREFIX)) return handleSetupButton(interaction);
 
     /**
@@ -2793,6 +2837,531 @@ Already subscribed? Add the new server ` +
     }
   }
 
+  // -- the room control panel ------------------------------------------------
+
+  /**
+   * A button on a room's control panel.
+   *
+   * **Every branch answers ephemerally, and none of them edits the message it
+   * was pressed on.** The panel is a persistent public message in a channel
+   * many people can read, so the `respond()` / `interaction.update()` shape the
+   * ephemeral admin panels use would replace it for everyone, permanently, on
+   * the first press.
+   *
+   * **The room comes from the custom id, not from `interaction.channelId` and
+   * not from the clicker's voice state.** When a creator channel has companion
+   * text channels switched on the panel is posted into the companion, and that
+   * channel names no `secondary_channels` row; reading the clicker's voice
+   * state instead would act on whatever room a moderator with companion access
+   * happened to be sitting in. The id is ours, it came from a message we
+   * posted, and every action below re-resolves the row and re-checks ownership
+   * from it, so it is an identity and never a permission.
+   */
+  async function handleControlPanelButton(
+    interaction: ButtonInteraction,
+    entitled: boolean,
+  ): Promise<void> {
+    const parsed = parseControlPanelId(interaction.customId);
+    if (!parsed) {
+      /**
+       * A panel outlives a deploy, unlike every ephemeral panel here: it stays
+       * clickable for the whole life of its room. So this is the one
+       * out-of-date path that is genuinely likely, and it must not tell the
+       * member to "run the command again" when there is no command to run.
+       */
+      await safeReply(
+        interaction,
+        'That button is from an older version. Try the command instead.',
+      );
+      return;
+    }
+    const guildId = interaction.guildId!;
+    const userId = interaction.user.id;
+    const { action, roomId } = parsed;
+
+    /**
+     * The four ids that are never on a button: two modal submits and two
+     * select values. Handled here so the switch below is over the CONTROLS
+     * alone and can be made exhaustive.
+     */
+    if (
+      action === 'limitset' ||
+      action === 'renameset' ||
+      action === 'transferpick' ||
+      action === 'kickpick'
+    ) {
+      await safeReply(interaction, 'That button is from an older version.');
+      return;
+    }
+
+    switch (action) {
+      case 'lock':
+        return replyPanelResult(
+          interaction,
+          () => deps.privacy.makePrivate(guildId, roomId, userId),
+          'panel:lock',
+        );
+      case 'unlock':
+        return replyPanelResult(
+          interaction,
+          () => deps.privacy.makePublic(guildId, roomId, userId),
+          'panel:unlock',
+        );
+      case 'claim':
+        return replyPanelResult(
+          interaction,
+          () => deps.voiceCommands.claim(guildId, roomId, userId),
+          'panel:claim',
+        );
+      case 'limit':
+        return openPanelModal(interaction, roomId, 'limit');
+      case 'rename':
+        return openPanelModal(interaction, roomId, 'rename');
+      case 'transfer':
+        return openPanelPicker(interaction, roomId, 'transferpick');
+      case 'kick':
+        return openPanelPicker(interaction, roomId, 'kickpick');
+      case 'info':
+        return panelChannelInfo(interaction, roomId, entitled);
+      default: {
+        /**
+         * A compile error, not a runtime message.
+         *
+         * Appending to `CONTROL_PANEL_CONTROLS` is documented as the way to add
+         * a ninth button, and `buildControlPanel` renders one for every entry
+         * in that list. Without this, adding one shipped a button that rendered,
+         * was pressable, and answered "that button is from an older version"
+         * forever.
+         */
+        const unreachable: never = action;
+        await safeReply(interaction, `That button is not one I know: ${String(unreachable)}.`);
+      }
+    }
+  }
+
+  /**
+   * Runs one panel action and answers with exactly what the slash command
+   * would have said.
+   *
+   * The message is passed through verbatim rather than replaced with one shared
+   * refusal, because the four ownership refusals are deliberately worded
+   * differently ("can make it private", "can do that. Use `/reclaim`…") and the
+   * panel is meant to be the same thing as the command, not a paraphrase of it.
+   *
+   * Deferred first: every one of these makes a Discord REST call on the
+   * channel's bucket, which is the bucket a queued rename holds, and the reply
+   * must land inside the three-second window.
+   */
+  async function replyPanelResult(
+    interaction: ButtonInteraction | StringSelectMenuInteraction | ModalSubmitInteraction,
+    task: () => Promise<CommandResult>,
+    name: string,
+  ): Promise<void> {
+    const guildId = interaction.guildId!;
+    if (!interaction.deferred && !interaction.replied) {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    }
+    try {
+      const result = await run(guildId, name, task);
+      await interaction.editReply({ content: formatResult(result), components: [] });
+    } catch (err) {
+      /**
+       * Caught here rather than in `route` because the interaction is already
+       * DEFERRED: `route`'s catch reaches for `safeReply`, which follows up on
+       * a deferred interaction and leaves the member looking at a spinner that
+       * never resolves above the answer.
+       *
+       * The wording covers both reasons `run` rejects and claims neither. A
+       * tripped circuit breaker or a draining queue is one, and it is exactly
+       * the guild where somebody is pressing buttons to work out what is
+       * wrong; the task simply failing is the other, and `describeError` is
+       * what every command says about that.
+       */
+      deps.logger.warn({ err, guildId, name }, 'control panel action failed');
+      deps.reportError?.('Control panel action failed', { guildId, name, error: String(err) });
+      await interaction.editReply({
+        content:
+          `⚠️ I couldn't do that: ${describeError(err)}. If this keeps happening, AVC may be ` +
+          'backing off in this server after repeated errors, which usually clears on its own ' +
+          'within a few minutes.',
+        components: [],
+      });
+    }
+  }
+
+  /**
+   * The Limit and Rename modals.
+   *
+   * `showModal` IS the acknowledgement, so nothing here may defer, and the
+   * pre-fill read has to be UNDISPATCHED: a queued read sits behind every
+   * create and rename in flight for this guild and would blow the three-second
+   * budget before the modal ever opened. Same reasoning as the alias and lists
+   * panels, which say so at their own reads.
+   */
+  async function openPanelModal(
+    interaction: ButtonInteraction,
+    roomId: string,
+    field: 'limit' | 'rename',
+  ): Promise<void> {
+    const room = await roomOrExcuse(interaction, roomId);
+    if (!room) return;
+    await interaction.showModal(
+      field === 'limit'
+        ? buildLimitModal(roomId, room.userLimit)
+        : buildRenameModal(roomId, room.nameOverride),
+    );
+  }
+
+  /**
+   * The room behind a panel button, or `undefined` after answering with why
+   * there is none.
+   *
+   * The two cases are told apart deliberately. A room that is gone is an
+   * ordinary thing for a panel to outlive, and saying so is the answer. A read
+   * that THREW is a database problem, and telling a member their room is not
+   * managed when it plainly is sends them to an admin with the wrong story.
+   */
+  async function roomOrExcuse(
+    interaction: ButtonInteraction,
+    roomId: string,
+  ): Promise<RoomPanelState | undefined> {
+    const guildId = interaction.guildId!;
+    try {
+      const room = await deps.feature.getRoomPanelState(guildId, roomId);
+      if (room) return room;
+      await interaction.reply({
+        content: "This room isn't being managed by AVC any more.",
+        ephemeral: true,
+      });
+      return undefined;
+    } catch (err) {
+      deps.logger.info({ err, guildId, roomId }, 'control panel could not read the room');
+      await interaction.reply({
+        content: "⚠️ I couldn't read that room just now. Try again in a moment.",
+        ephemeral: true,
+      });
+      return undefined;
+    }
+  }
+
+  /** The Limit and Rename modal submits. */
+  async function handleControlPanelModal(interaction: ModalSubmitInteraction): Promise<void> {
+    const parsed = parseControlPanelId(interaction.customId);
+    if (!parsed || (parsed.action !== 'limitset' && parsed.action !== 'renameset')) {
+      /**
+       * A modal opened by a newer instance and submitted against an older one
+       * mid-deploy. Answering matters more here than on the panels beside it:
+       * an unanswered modal submit shows a bare "This interaction failed" over
+       * whatever the member just typed, and they have no way to tell that the
+       * text was never going to be saved.
+       */
+      await safeReply(interaction, 'That form is from an older version. Try the command instead.');
+      return;
+    }
+    const guildId = interaction.guildId!;
+    const userId = interaction.user.id;
+    const raw = interaction.fields.getTextInputValue(CONTROL_PANEL_INPUT_ID).trim();
+
+    if (parsed.action === 'limitset') {
+      // Blank is "no limit", which is what `/unlimit` does, so the panel needs
+      // no ninth button for it.
+      const limit = raw === '' ? 0 : Number(raw);
+      if (!Number.isInteger(limit) || limit < 0 || limit > MAX_USER_LIMIT) {
+        await interaction.reply({
+          content: `⚠️ The limit must be a whole number between 0 and ${MAX_USER_LIMIT}.`,
+          ephemeral: true,
+        });
+        return;
+      }
+      return replyPanelResult(
+        interaction,
+        () => deps.voiceCommands.setLimit(guildId, parsed.roomId, userId, limit),
+        'panel:limit',
+      );
+    }
+    if (parsed.action === 'renameset') {
+      return replyPanelResult(
+        interaction,
+        () =>
+          deps.voiceCommands.setName(guildId, parsed.roomId, userId, raw === '' ? 'reset' : raw, {
+            admin: hasManageChannels(interaction),
+          }),
+        'panel:rename',
+      );
+    }
+  }
+
+  /**
+   * The Transfer and Kick member pickers.
+   *
+   * A string select built from the room's live occupants rather than Discord's
+   * own user select: the router has no user-select branch, and both actions
+   * already refuse anyone who is not in the room, so offering the whole server
+   * would be offering choices that cannot work.
+   */
+  async function openPanelPicker(
+    interaction: ButtonInteraction,
+    roomId: string,
+    action: 'transferpick' | 'kickpick',
+  ): Promise<void> {
+    const userId = interaction.user.id;
+    const room = await roomOrExcuse(interaction, roomId);
+    if (!room) return;
+    // The owner is excluded from a kick because `VoteKickManager` refuses to
+    // target them, and offering a name that is always refused is worse than
+    // not offering it.
+    const candidates = room.members.filter(
+      (m) => !m.bot && m.id !== userId && (action === 'transferpick' || m.id !== room.ownerId),
+    );
+    if (candidates.length === 0) {
+      await interaction.reply({
+        content:
+          action === 'transferpick'
+            ? 'There is nobody else in the room to hand it to.'
+            : 'There is nobody in the room you can start a vote about.',
+        ephemeral: true,
+      });
+      return;
+    }
+    await interaction.reply({
+      content:
+        action === 'transferpick'
+          ? 'Who should own this room?'
+          : 'Who should the room vote on removing?',
+      components: [buildMemberPicker(action, roomId, candidates)],
+      ephemeral: true,
+    });
+  }
+
+  /** A choice from one of those pickers. */
+  async function handleControlPanelSelect(interaction: StringSelectMenuInteraction): Promise<void> {
+    const parsed = parseControlPanelId(interaction.customId);
+    const targetId = interaction.values[0];
+    if (!parsed || !targetId) {
+      await safeReply(interaction, 'That menu is from an older version. Try the command instead.');
+      return;
+    }
+    const guildId = interaction.guildId!;
+    const userId = interaction.user.id;
+
+    if (parsed.action === 'transferpick') {
+      return replyPanelResult(
+        interaction,
+        () => deps.voiceCommands.transfer(guildId, parsed.roomId, userId, targetId),
+        'panel:transfer',
+      );
+    }
+    if (parsed.action !== 'kickpick') {
+      // Only the two pickers are selects, so this needs a crafted id or a
+      // deploy that retired one. Answered rather than dropped either way: a
+      // dropped select shows a bare "This interaction failed".
+      await safeReply(interaction, 'That menu is from an older version. Try the command instead.');
+      return;
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    /**
+     * Its own dispatch rather than `replyPanelResult`, because a vote is not a
+     * `CommandResult`: it has three outcomes, one of which posts a public
+     * message. The rejection is caught HERE for the reason that helper catches
+     * it - the interaction is already deferred, and `route`'s catch reaches for
+     * `safeReply`, which follows up and leaves a spinner that never resolves.
+     */
+    let result;
+    try {
+      result = await run(guildId, 'panel:kick', () =>
+        deps.votekick.start(guildId, parsed.roomId, userId, targetId),
+      );
+    } catch (err) {
+      deps.logger.warn({ err, guildId, roomId: parsed.roomId }, 'panel votekick failed');
+      deps.reportError?.('Control panel action failed', {
+        guildId,
+        name: 'panel:kick',
+        error: String(err),
+      });
+      await interaction.editReply({
+        content: `⚠️ I couldn't start that vote: ${describeError(err)}.`,
+        components: [],
+      });
+      return;
+    }
+    if (!result.ok) {
+      await interaction.editReply({ content: `⚠️ ${result.message}`, components: [] });
+      return;
+    }
+    if (!deps.votekick.hasSession(parsed.roomId)) {
+      // Resolved immediately (1v1) - already kicked.
+      await interaction.editReply({ content: `✅ ${result.message}`, components: [] });
+      await notifyChannel(deps.client, interaction.channelId, `✅ ${result.message}`);
+      return;
+    }
+    armVoteTimeout(parsed.roomId, result.epoch);
+    /**
+     * The vote itself is PUBLIC, in the channel the panel is in, because the
+     * people who have to vote are the ones who can read it. That is the one
+     * place the panel cannot be ephemeral, and it matches `/kick`, whose reply
+     * is public for the same reason.
+     */
+    const posted = await postVoteMessage(
+      interaction.channelId,
+      parsed.roomId,
+      userId,
+      targetId,
+      // `required` is optional on the result type and is always present on a
+      // success, so this narrows rather than guesses: a vote needing one more
+      // than the initiator is the smallest a real session can be.
+      result.required ?? 2,
+    );
+    await interaction.editReply({
+      content: posted
+        ? '🗳️ Started. The vote is in this channel for everyone to see.'
+        : "⚠️ I started the vote but couldn't post it here, so nobody can vote. " +
+          'I need **Send Messages** in this channel.',
+      components: [],
+    });
+  }
+
+  /** Posts the public vote message. Returns false when it could not. */
+  async function postVoteMessage(
+    channelId: string,
+    roomId: string,
+    initiatorId: string,
+    targetId: string,
+    required: number,
+  ): Promise<boolean> {
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`${KICK_PREFIX}${roomId}`)
+        .setLabel('Vote to kick')
+        .setStyle(ButtonStyle.Danger),
+    );
+    const channel = await deps.client.channels.fetch(channelId).catch(() => null);
+    if (!channel?.isTextBased() || !('send' in channel)) return false;
+    return channel
+      .send({
+        content:
+          `🗳️ <@${initiatorId}> started a vote to kick <@${targetId}>.\n` +
+          `Need **${required}** votes. (1 so far)`,
+        components: [row],
+      })
+      .then(() => true)
+      .catch(() => false);
+  }
+
+  /**
+   * The Info button.
+   *
+   * Answers with a NEW ephemeral message rather than reusing an `avc:info:`
+   * custom id, which would put the info panel's own in-place edit over the
+   * shared control panel.
+   *
+   * The kill-switch and the caller-visibility check are both applied, and the
+   * hard gate exempts this button the way it exempts the command
+   * (`allowedWhileExpired`). What is NOT applied is the `ManageChannels` gate
+   * on `/channelinfo`'s explicit `channel` option, and deliberately: that gate
+   * asks who may look ELSEWHERE, and this asks about the room whose chat the
+   * caller is reading. `callerCanSee` is what binds it to what they can
+   * already see.
+   */
+  async function panelChannelInfo(
+    interaction: ButtonInteraction,
+    roomId: string,
+    entitled: boolean,
+  ): Promise<void> {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    if (await channelInfoDisabled(interaction.guildId!)) {
+      await interaction.editReply({ content: CHANNELINFO_OFF });
+      return;
+    }
+    if (!callerCanSee(interaction, roomId)) {
+      await interaction.editReply({ content: CANNOT_SEE_CHANNEL });
+      return;
+    }
+    const input = await channelInfoInputOrExcuse(interaction, roomId, entitled);
+    if (!input) return;
+    const { embeds, components } = buildChannelInfoView('summary', input);
+    await interaction.editReply({ embeds: embeds ?? [], components: components ?? [] });
+  }
+
+  // -- /controlpanel : configuring what the panel carries --------------------
+
+  /** `/controlpanel` -> the configuration panel for this server. */
+  async function openControlSettings(interaction: ChatInputCommandInteraction): Promise<void> {
+    if (!(await requireManageChannels(interaction))) return;
+    const config = await deps.settings.getControlPanel(interaction.guildId!);
+    await interaction.reply(buildControlSettingsPanel(config));
+  }
+
+  /** The configuration panel's own buttons: on, off, close. */
+  async function handleControlSettingsButton(interaction: ButtonInteraction): Promise<void> {
+    const action = parseControlSettingsId(interaction.customId);
+    if (!action) {
+      await safeReply(interaction, 'That button is out of date. Run `/controlpanel` again.');
+      return;
+    }
+    if (!(await requireManageChannels(interaction))) return;
+    if (action === 'close') {
+      await interaction.update({ content: 'Closed.', embeds: [], components: [] });
+      return;
+    }
+    await interaction.deferUpdate();
+    await refreshControlSettings(interaction, CONTROL_PANEL_ENABLED_KEY, action === 'on');
+  }
+
+  /** The configuration panel's button picker: one control toggles on selection. */
+  async function handleControlSettingsSelect(
+    interaction: StringSelectMenuInteraction,
+  ): Promise<void> {
+    if (!(await requireManageChannels(interaction))) return;
+    const raw = interaction.values[0];
+    // Select values are chosen client side, so this is validated rather than
+    // trusted: it goes straight into a settings key.
+    const control = raw ? parseControlSelection(raw) : null;
+    if (!control) {
+      await safeReply(interaction, 'That option is out of date. Run `/controlpanel` again.');
+      return;
+    }
+    await interaction.deferUpdate();
+    const config = await deps.settings.getControlPanel(interaction.guildId!);
+    await refreshControlSettings(interaction, control, !config.controls[control]);
+  }
+
+  /**
+   * Applies one change and re-renders the configuration panel in place.
+   *
+   * The rejection is caught here for the same reason the panel's own actions
+   * catch it: `deferUpdate` has already run, so `route`'s catch would follow up
+   * on a deferred interaction and leave the admin looking at a panel that never
+   * changed and a spinner that never resolves.
+   */
+  async function refreshControlSettings(
+    interaction: ButtonInteraction | StringSelectMenuInteraction,
+    entry: ControlPanelEntry,
+    on: boolean,
+  ): Promise<void> {
+    const guildId = interaction.guildId!;
+    try {
+      const res = await run(guildId, 'cmd:controlpanel', () =>
+        deps.settings.setControlPanelEntry(guildId, entry, on),
+      );
+      const config = await deps.settings.getControlPanel(guildId);
+      await interaction.editReply(
+        toUpdate(buildControlSettingsPanel(config, { note: formatResult(res) })),
+      );
+    } catch (err) {
+      deps.logger.warn({ err, guildId, entry }, 'control panel setting could not be saved');
+      deps.reportError?.('Control panel setting failed', {
+        guildId,
+        entry,
+        error: String(err),
+      });
+      await interaction.followUp({
+        content: `⚠️ I couldn't save that: ${describeError(err)}.`,
+        ephemeral: true,
+      });
+    }
+  }
+
   async function handleKickVote(interaction: ButtonInteraction): Promise<void> {
     const guildId = interaction.guildId!;
     const channelId = interaction.customId.slice(KICK_PREFIX.length);
@@ -2833,6 +3402,8 @@ Already subscribed? Add the new server ` +
     if (interaction.customId === TIMEZONE_MODAL_ID) return handleTimeZoneSubmit(interaction);
     if (interaction.customId === TEXT_CHANNELS_MODAL_ID)
       return handleTextChannelsSubmit(interaction);
+    if (interaction.customId.startsWith(CONTROL_PANEL_PREFIX))
+      return handleControlPanelModal(interaction);
     if (interaction.customId.startsWith(LISTS_PREFIX)) return handleListSaveSubmit(interaction);
     // `avc:alias` is the pre-panel id of the Add modal, still accepted so a
     // modal opened on an old instance mid-deploy can submit against a new one.

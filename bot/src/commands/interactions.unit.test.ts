@@ -14,6 +14,8 @@ import { TIMEZONE_MODAL_ID } from './timezoneModal.js';
 import { editorId } from './templatePanel.js';
 import { ALIAS_MODAL_ID } from './aliasModal.js';
 import { ALIAS_SELECT_ID, aliasHash, aliasId } from './aliasPanel.js';
+import { controlPanelId } from '../features/voice/controlPanel.js';
+import { controlSettingsId, CONTROL_SETTINGS_SELECT_ID } from './controlPanelSettings.js';
 
 /** A Discord "Missing Permissions" (50013) rejection, as thrown by a failed create. */
 function missingPermissions(): DiscordAPIError {
@@ -203,6 +205,20 @@ function setup(overrides: Partial<InteractionDeps> = {}) {
     setTextChannelName: vi.fn().mockResolvedValue({ ok: true, message: 'named' }),
     setTextChannelRole: vi.fn().mockResolvedValue({ ok: true, message: 'role set' }),
     toggleTextChannel: vi.fn().mockResolvedValue({ ok: true, message: 'toggled' }),
+    getControlPanel: vi.fn().mockResolvedValue({
+      enabled: true,
+      controls: {
+        lock: true,
+        unlock: true,
+        limit: true,
+        rename: true,
+        claim: true,
+        transfer: true,
+        kick: true,
+        info: true,
+      },
+    }),
+    setControlPanelEntry: vi.fn().mockResolvedValue({ ok: true, message: 'switched' }),
   };
   const guilds = {
     get: vi.fn().mockResolvedValue({ authStatus: 'active' }),
@@ -2255,5 +2271,568 @@ describe('registerInteractionHandler (template advice)', () => {
     dispose = env.dispose;
     const panel = await save(env, '@@weekday@@ [[list:nope]]');
     expect(panel).toContain('Saved.');
+  });
+});
+
+/**
+ * The room control panel, which is unlike every other panel here in one way
+ * that governs the whole design: it is a PERSISTENT, PUBLIC message, posted
+ * into a channel many people can read and left there for the life of the room.
+ *
+ * So the two failure modes worth pinning are the two an ephemeral panel cannot
+ * have. A handler that answered with `update()` would replace the panel for
+ * everybody on the first press, and a handler that resolved the room from
+ * `interaction.channelId` would be wrong in exactly the servers that have
+ * companion text channels switched on, where the panel does not sit in the room
+ * it controls.
+ */
+describe('registerInteractionHandler (room control panel)', () => {
+  let dispose: (() => void) | undefined;
+  afterEach(() => dispose?.());
+
+  const voiceCommands = () => ({
+    setLimit: vi.fn().mockResolvedValue({ ok: true, message: 'limit set' }),
+    setName: vi.fn().mockResolvedValue({ ok: true, message: 'renamed' }),
+    claim: vi.fn().mockResolvedValue({ ok: true, message: 'claimed' }),
+    transfer: vi.fn().mockResolvedValue({ ok: true, message: 'transferred' }),
+  });
+  const privacy = () => ({
+    makePrivate: vi.fn().mockResolvedValue({ ok: false, message: 'Only the channel owner can.' }),
+    makePublic: vi.fn().mockResolvedValue({ ok: true, message: 'opened' }),
+  });
+  const feature = (overrides: Record<string, unknown> = {}) => ({
+    getRoomPanelState: vi.fn().mockResolvedValue({
+      ownerId: 'u1',
+      members: [
+        { id: 'u1', displayName: 'Kay', bot: false },
+        { id: 'u2', displayName: 'Ana', bot: false },
+        { id: 'bot', displayName: 'AVC', bot: true },
+      ],
+      userLimit: 4,
+      nameOverride: 'den',
+    }),
+    ...overrides,
+  });
+
+  it('acts on the room named in the custom id, not the channel it was clicked in', async () => {
+    const p = privacy();
+    const env = setup({ privacy: p as never, voiceCommands: voiceCommands() as never });
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'button',
+      customId: controlPanelId('unlock', 'room-9'),
+      // The clicker is somewhere else entirely, which is what a moderator
+      // reading a companion text channel looks like.
+      voiceChannelId: 'some-other-room',
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(p.makePublic).toHaveBeenCalledWith('g1', 'room-9', 'u1');
+  });
+
+  it('never edits the panel it was pressed on', async () => {
+    const env = setup({ privacy: privacy() as never, voiceCommands: voiceCommands() as never });
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'button',
+      customId: controlPanelId('unlock', 'room-9'),
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(interaction.update).not.toHaveBeenCalled();
+    expect(interaction.deferReply).toHaveBeenCalled();
+    expect(editReply).toHaveBeenCalled();
+  });
+
+  /**
+   * "The same ephemeral refusal /private gives them" is only satisfied by
+   * passing the service's own message through: the four ownership refusals are
+   * deliberately worded differently from each other.
+   */
+  it('passes an ownership refusal through verbatim', async () => {
+    const p = privacy();
+    const env = setup({ privacy: p as never, voiceCommands: voiceCommands() as never });
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'button',
+      customId: controlPanelId('lock', 'room-9'),
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(editReply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: '⚠️ Only the channel owner can.' }),
+    );
+  });
+
+  /**
+   * The interaction is already DEFERRED by the time the work runs, and
+   * `route`'s catch reaches for `safeReply`, which follows up on a deferred
+   * interaction and leaves the member looking at a spinner that never resolves
+   * above the answer. So a rejected dispatch has to be answered here.
+   */
+  it('answers a rejected dispatch itself, over the deferred reply', async () => {
+    const env = setup({
+      privacy: privacy() as never,
+      voiceCommands: voiceCommands() as never,
+      dispatcher: { dispatch: () => Promise.reject(new Error('circuit open')) } as never,
+    });
+    dispose = env.dispose;
+    const { interaction, editReply, followUp } = fakeInteraction({
+      kind: 'button',
+      customId: controlPanelId('unlock', 'room-9'),
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    const answered = JSON.stringify(editReply.mock.calls[0]?.[0]);
+    expect(answered).toContain('circuit open');
+    expect(answered).toContain('backing off');
+    expect(followUp).not.toHaveBeenCalled();
+    // Still reported, because the other reason a dispatch rejects is the task
+    // simply failing, and that is a real error somebody has to see.
+    expect(env.reportError).toHaveBeenCalled();
+  });
+
+  it('opens the limit modal without deferring, prefilled from the live limit', async () => {
+    const env = setup({ feature: feature() as never, voiceCommands: voiceCommands() as never });
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'button',
+      customId: controlPanelId('limit', 'room-9'),
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    // showModal IS the acknowledgement, so a defer before it would throw.
+    expect(interaction.deferReply).not.toHaveBeenCalled();
+    expect(interaction.deferUpdate).not.toHaveBeenCalled();
+    expect(JSON.stringify(interaction.showModal.mock.calls[0]?.[0])).toContain('"value":"4"');
+  });
+
+  it('turns a blank limit into no limit rather than refusing it', async () => {
+    const vc = voiceCommands();
+    const env = setup({ voiceCommands: vc as never });
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'modal',
+      customId: controlPanelId('limitset', 'room-9'),
+      textInputs: { input: '  ' },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(vc.setLimit).toHaveBeenCalledWith('g1', 'room-9', 'u1', 0);
+  });
+
+  it('refuses a limit that is not a number, without calling the service', async () => {
+    const vc = voiceCommands();
+    const env = setup({ voiceCommands: vc as never });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'modal',
+      customId: controlPanelId('limitset', 'room-9'),
+      textInputs: { input: 'lots' },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(vc.setLimit).not.toHaveBeenCalled();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('whole number');
+  });
+
+  it('turns a blank rename into a reset', async () => {
+    const vc = voiceCommands();
+    const env = setup({ voiceCommands: vc as never });
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'modal',
+      customId: controlPanelId('renameset', 'room-9'),
+      textInputs: { input: '' },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(vc.setName).toHaveBeenCalledWith('g1', 'room-9', 'u1', 'reset', { admin: false });
+  });
+
+  /**
+   * The owner is left out because `VoteKickManager.start` refuses to target
+   * them, and offering a name that is always refused is worse than not
+   * offering it. The CLICKER here is deliberately not the owner: with the
+   * two being the same person, the "not me" filter alone would pass this
+   * and the owner rule would never be exercised.
+   */
+  it('offers the room members, without bots, the clicker, or the owner', async () => {
+    const env = setup({
+      feature: feature({
+        getRoomPanelState: vi.fn().mockResolvedValue({
+          ownerId: 'owner',
+          members: [
+            { id: 'u1', displayName: 'Kay', bot: false },
+            { id: 'owner', displayName: 'Ana', bot: false },
+            { id: 'u3', displayName: 'Sam', bot: false },
+            { id: 'bot', displayName: 'AVC', bot: true },
+          ],
+          userLimit: 0,
+        }),
+      }) as never,
+    });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'button',
+      customId: controlPanelId('kick', 'room-9'),
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    const rendered = JSON.stringify(reply.mock.calls[0]?.[0]);
+    expect(rendered).toContain('"value":"u3"');
+    expect(rendered).not.toContain('"value":"owner"');
+    expect(rendered).not.toContain('"value":"u1"');
+    expect(rendered).not.toContain('"value":"bot"');
+  });
+
+  /** Transfer has no owner rule: handing it to the current owner is simply refused later. */
+  it('offers the owner when transferring, unlike a kick', async () => {
+    const env = setup({
+      feature: feature({
+        getRoomPanelState: vi.fn().mockResolvedValue({
+          ownerId: 'owner',
+          members: [
+            { id: 'u1', displayName: 'Kay', bot: false },
+            { id: 'owner', displayName: 'Ana', bot: false },
+          ],
+          userLimit: 0,
+        }),
+      }) as never,
+    });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'button',
+      customId: controlPanelId('transfer', 'room-9'),
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('"value":"owner"');
+  });
+
+  it('says so plainly when there is nobody to pick', async () => {
+    const env = setup({
+      feature: feature({
+        getRoomPanelState: vi.fn().mockResolvedValue({
+          ownerId: 'u1',
+          members: [{ id: 'u1', displayName: 'Kay', bot: false }],
+          userLimit: 0,
+        }),
+      }) as never,
+    });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'button',
+      customId: controlPanelId('transfer', 'room-9'),
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('nobody else in the room');
+  });
+
+  it('transfers to the member chosen in the picker', async () => {
+    const vc = voiceCommands();
+    const env = setup({ voiceCommands: vc as never });
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'stringSelect',
+      customId: controlPanelId('transferpick', 'room-9'),
+      values: ['u2'],
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(vc.transfer).toHaveBeenCalledWith('g1', 'room-9', 'u1', 'u2');
+  });
+
+  /**
+   * The one place the panel cannot be ephemeral: the people who have to vote
+   * are the ones who need to see it. Matches `/kick`, whose reply is public.
+   */
+  it('posts the kick vote publicly, in the channel the panel is in', async () => {
+    const send = vi.fn().mockResolvedValue({ id: 'm1' });
+    const client = fakeClient() as EventEmitter & { channels: unknown };
+    client.channels = {
+      fetch: vi.fn().mockResolvedValue({ isTextBased: () => true, send }),
+    };
+    const env = setup({
+      client: client as never,
+      votekick: {
+        start: vi.fn().mockResolvedValue({ ok: true, required: 2, epoch: 1, message: 'started' }),
+        hasSession: () => true,
+        cancel: vi.fn(),
+      } as never,
+    });
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'stringSelect',
+      customId: controlPanelId('kickpick', 'room-9'),
+      values: ['u2'],
+    });
+    // On this one the handler listens on the client we supplied, not on the
+    // one `setup` builds, so the event has to be emitted there.
+    client.emit('interactionCreate', interaction);
+    await flush();
+    expect(send).toHaveBeenCalled();
+    expect(JSON.stringify(send.mock.calls[0]?.[0])).toContain('avc:kick:room-9');
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('everyone to see');
+  });
+
+  /**
+   * An unanswered modal submit shows a bare "This interaction failed" over
+   * whatever the member just typed, with no hint that the text was never
+   * going to be saved. Reachable mid-deploy: a modal opened by a new
+   * instance, submitted while an old one owns the shard.
+   */
+  it('answers a modal submit it cannot route rather than dropping it', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'modal',
+      customId: 'avc:panel:somethingnew:room-9',
+      textInputs: { input: 'a name they typed' },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('older version');
+  });
+
+  /**
+   * A read that THREW is a database problem. Telling a member their room is
+   * not managed when it plainly is sends them to an admin with the wrong
+   * story, which is the one outcome worse than saying nothing.
+   */
+  it('tells a member the read failed rather than that their room is gone', async () => {
+    const env = setup({
+      feature: {
+        getRoomPanelState: vi.fn().mockRejectedValue(new Error('db down')),
+      } as never,
+    });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'button',
+      customId: controlPanelId('limit', 'room-9'),
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    const answered = JSON.stringify(reply.mock.calls[0]?.[0]);
+    expect(answered).toContain("couldn't read that room");
+    expect(answered).not.toContain('any more');
+    expect(interaction.showModal).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Info answers with a NEW ephemeral message rather than an `avc:info:`
+   * custom id, whose handler edits the message it was pressed on: that would
+   * put the channel-info panel over the shared control panel for everyone.
+   */
+  it('answers Info without touching the panel it was pressed on', async () => {
+    const env = setup({
+      feature: {
+        channelInfo: vi.fn().mockResolvedValue({
+          channelId: 'room-9',
+          isSecondary: true,
+          members: [],
+        }),
+      } as never,
+    });
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'button',
+      customId: controlPanelId('info', 'room-9'),
+      voiceChannels: { 'room-9': { name: 'Room', callerCanSee: true } },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(interaction.deferReply).toHaveBeenCalledWith(
+      expect.objectContaining({ flags: expect.anything() }),
+    );
+    expect(interaction.update).not.toHaveBeenCalled();
+  });
+
+  it('refuses Info for a room the caller cannot see', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'button',
+      customId: controlPanelId('info', 'room-9'),
+      voiceChannels: { 'room-9': { name: 'Room', callerCanSee: false } },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain("can't show you");
+  });
+
+  it('honours the /channelinfo kill switch, so the button is no way around it', async () => {
+    const env = setup({
+      flags: { getBool: vi.fn().mockResolvedValue(true) } as never,
+    });
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'button',
+      customId: controlPanelId('info', 'room-9'),
+      voiceChannels: { 'room-9': { name: 'Room', callerCanSee: true } },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('switched off');
+  });
+
+  /**
+   * `/channelinfo` is on the hard gate's exemption list because refusing to
+   * tell somebody how their own server is configured over a lapsed payment is
+   * not what the gate is for. The button does the same thing, so it is exempt
+   * too, and every OTHER panel button is a write and stays refused.
+   */
+  it('lets Info through in an expired guild, and nothing else on the panel', async () => {
+    const env = setup({
+      selfHosted: false,
+      guilds: { get: vi.fn().mockResolvedValue({ authStatus: 'expired' }) } as never,
+      feature: {
+        channelInfo: vi
+          .fn()
+          .mockResolvedValue({ channelId: 'room-9', isSecondary: true, members: [] }),
+      } as never,
+    });
+    dispose = env.dispose;
+    const info = fakeInteraction({
+      kind: 'button',
+      customId: controlPanelId('info', 'room-9'),
+      voiceChannels: { 'room-9': { name: 'Room', callerCanSee: true } },
+    });
+    env.client.emit('interactionCreate', info.interaction);
+    await flush();
+    expect(JSON.stringify(info.reply.mock.calls[0]?.[0] ?? '')).not.toContain('auto-voice.io');
+  });
+
+  /**
+   * A panel outlives a deploy, so this is the one out-of-date path that is
+   * genuinely likely, and it must not tell a member to run a command that does
+   * not exist.
+   */
+  it('answers an unrecognised panel id rather than leaving it hanging', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'button',
+      customId: 'avc:panel:somethingnew:room-9',
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('older version');
+  });
+
+  /**
+   * Panel buttons are write paths, like every other write path, so a hard-gated
+   * guild gets the reactivation notice rather than a working Lock button.
+   */
+  it('refuses panel buttons in an expired guild', async () => {
+    const env = setup({
+      selfHosted: false,
+      guilds: { get: vi.fn().mockResolvedValue({ authStatus: 'expired' }) } as never,
+    });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'button',
+      customId: controlPanelId('lock', 'room-9'),
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('auto-voice.io');
+  });
+});
+
+describe('registerInteractionHandler (/controlpanel)', () => {
+  let dispose: (() => void) | undefined;
+  afterEach(() => dispose?.());
+
+  it('refuses a caller without Manage Channels', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'controlpanel',
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'You need the Manage Channels permission.' }),
+    );
+    expect(env.settings.getControlPanel).not.toHaveBeenCalled();
+  });
+
+  it('opens the configuration panel for an admin', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'controlpanel',
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain(CONTROL_SETTINGS_SELECT_ID);
+  });
+
+  it('toggles the chosen control and re-renders in place', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'stringSelect',
+      customId: CONTROL_SETTINGS_SELECT_ID,
+      values: ['kick'],
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(env.settings.setControlPanelEntry).toHaveBeenCalledWith('g1', 'kick', false);
+    expect(interaction.deferUpdate).toHaveBeenCalled();
+    expect(editReply).toHaveBeenCalled();
+  });
+
+  /**
+   * A select's values are chosen client side and this one goes straight into a
+   * settings key, so hiding an option enforces nothing.
+   */
+  it('refuses a selection that is not a known control', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'stringSelect',
+      customId: CONTROL_SETTINGS_SELECT_ID,
+      values: ['panel'],
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(env.settings.setControlPanelEntry).not.toHaveBeenCalled();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('out of date');
+  });
+
+  it('switches the whole panel off through the same key', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'button',
+      customId: controlSettingsId('off'),
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(env.settings.setControlPanelEntry).toHaveBeenCalledWith('g1', 'panel', false);
+  });
+
+  it('refuses a non-admin pressing a configuration button', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'button',
+      customId: controlSettingsId('off'),
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(env.settings.setControlPanelEntry).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'You need the Manage Channels permission.' }),
+    );
   });
 });

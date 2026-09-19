@@ -15,7 +15,9 @@ export type PermissionOperation =
   | 'privacy'
   /** A room was made but its companion text channel could not be. */
   | 'companion'
-  | 'companion_role';
+  | 'companion_role'
+  /** A room was made but its control panel could not be posted into the chat. */
+  | 'panel';
 
 export interface PermissionProblem {
   channelId: string;
@@ -64,11 +66,33 @@ export class PermissionProblemTracker {
    */
   onResolved: ((guildId: string) => void) | undefined;
 
-  /** Records an incident, keeping only the latest per channel (most-recent first). */
+  /**
+   * Records an incident, keeping only the latest per channel AND OPERATION
+   * (most-recent first).
+   *
+   * **Keyed on both, not on the channel alone.** One creator channel can have
+   * several genuinely different problems at once: a guild with Manage Channels
+   * but no Manage Roles on the category makes rooms happily, fails every
+   * companion text channel, and, with no Send Messages, fails every control
+   * panel too. Keying on the channel alone made the newest of those EVICT the
+   * others, so the guild was told about a different one on every room create,
+   * each eviction re-recorded the evicted one, and the notifier's escalating
+   * backoff reset every time - which is the exact failure `clear`'s
+   * `operations` argument below exists to prevent, arriving through the other
+   * door. `clear` has always reasoned in terms of (channel, operation); this
+   * makes recording agree with it.
+   *
+   * {@link MAX_PER_GUILD} is unchanged and still counts ENTRIES, so a guild
+   * with many broken channels now fits fewer of them. That is already how the
+   * summary reads it: it says "and at least N more" precisely because the cap
+   * makes the number a lower bound.
+   */
   record(guildId: string, problem: PermissionProblem): void {
     const next = [
       problem,
-      ...(this.byGuild.get(guildId) ?? []).filter((p) => p.channelId !== problem.channelId),
+      ...(this.byGuild.get(guildId) ?? []).filter(
+        (p) => p.channelId !== problem.channelId || p.operation !== problem.operation,
+      ),
     ];
     this.byGuild.set(guildId, next.slice(0, MAX_PER_GUILD));
     this.fire(this.onRecord, guildId, problem);
@@ -209,6 +233,23 @@ export function permissionProblemMessage(
       'this notice.'
     );
   }
+  if (operation === 'panel') {
+    /**
+     * The mildest of the lot, and the one whose wording matters most because
+     * it is the likeliest to be seen. A created room grants the bot View
+     * Channel, Connect, Manage Channels and Move Members and nothing else, so
+     * any category that denies Send Messages produces this on every single
+     * room while everything else works perfectly. It must not read like an
+     * outage, and it must name the two permissions that actually fix it.
+     */
+    return (
+      `⚠️ I made a room from <#${channelId}> but could not post the buttons into its chat. I ` +
+      'need **Send Messages** and **Embed Links** on the category the rooms are made in, or on ' +
+      'my role. The rooms themselves are working and every button has a command that still ' +
+      'works, so this only costs the shortcut. Turn the buttons off with `/controlpanel` if you ' +
+      'would rather not see this.'
+    );
+  }
   if (operation === 'companion') {
     return (
       `⚠️ I made a room from <#${channelId}> but could not create its text channel. Two things ` +
@@ -270,13 +311,22 @@ export function permissionProblemSummary(problems: readonly ProblemLike[]): stri
   const privacyFails = problems.filter((p) => p.operation === 'privacy');
   const companions = problems.filter((p) => p.operation === 'companion');
   const companionRoles = problems.filter((p) => p.operation === 'companion_role');
+  const panels = problems.filter((p) => p.operation === 'panel');
+  /**
+   * The catch-all, and the reason every operation above has to be named here
+   * too: this is a NEGATIVE filter, so an operation left out of it renders as
+   * "I lost access and stopped managing it", which names four permissions that
+   * have nothing to do with the failure and claims the bot has given up on a
+   * channel it is happily managing.
+   */
   const access = problems.filter(
     (p) =>
       p.operation !== 'create' &&
       p.operation !== 'move' &&
       p.operation !== 'privacy' &&
       p.operation !== 'companion' &&
-      p.operation !== 'companion_role',
+      p.operation !== 'companion_role' &&
+      p.operation !== 'panel',
   );
   const lines: string[] = [];
   if (creates.length > 0) {
@@ -335,6 +385,19 @@ export function permissionProblemSummary(problems: readonly ProblemLike[]): stri
       `The moderator role set for the text channels on ${list(companionRoles)} no longer exists, ` +
         'so I am leaving it off them. The rooms and their text channels are fine. Pick a role ' +
         'again under `/setup`, More settings, Room text channels, or clear it there.',
+    );
+  }
+  /**
+   * Its own line, and the mildest of them: only the shortcut is missing. Every
+   * button on the panel stands in for a command that still works, so this must
+   * not read like anything is broken.
+   */
+  if (panels.length > 0) {
+    lines.push(
+      `I made rooms from ${list(panels)} but could not post the buttons into their chats. I ` +
+        'need **Send Messages** and **Embed Links** on the category the rooms are made in, or ' +
+        'on my role. The rooms are working, and every button has a command that still works. ' +
+        'Turn the buttons off with `/controlpanel` if you would rather not see this.',
     );
   }
   if (access.length > 0) {

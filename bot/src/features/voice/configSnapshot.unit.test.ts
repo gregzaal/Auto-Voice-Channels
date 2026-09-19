@@ -74,6 +74,9 @@ function configured(): CurrentConfig {
       groups: { '@root': { above: true } },
       contact_user_id: CONTACT,
       problem_alerts: 'quiet',
+      // Only what an admin switched OFF is ever stored, and the sentinel for the
+      // panel itself shares the map with the per-button flags.
+      control_panel: { kick: false, panel: false },
     },
     creatorChannels: [
       {

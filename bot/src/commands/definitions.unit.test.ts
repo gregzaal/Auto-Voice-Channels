@@ -12,6 +12,7 @@ describe('buildCommandDefinitions', () => {
         'alias',
         'alwaysprivate',
         'channelinfo',
+        'controlpanel',
         'create',
         'defaultlimit',
         'export',
@@ -65,6 +66,7 @@ describe('buildCommandDefinitions', () => {
       'template',
       'position',
       'alwaysprivate',
+      'controlpanel',
       'group',
       'inheritpermissions',
       'logging',
@@ -131,6 +133,7 @@ describe('buildCommandDefinitions', () => {
       'template',
       'position',
       'alwaysprivate',
+      'controlpanel',
       'group',
       'logging',
     ]) {

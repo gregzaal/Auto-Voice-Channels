@@ -13,6 +13,7 @@ import { startPostgres } from '../../test/pgContainer.js';
 import { fakeLogger } from '../../runtime/testUtils.js';
 import { RecordingVoiceActions } from './actions.js';
 import { CompanionTextService } from './companionText.js';
+import { ControlPanelPoster } from './controlPanelPoster.js';
 import { VoiceFeature } from './handler.js';
 import { renderChannelName } from './nameTemplate.js';
 import { PermissionProblemTracker } from './permissionProblems.js';
@@ -2006,6 +2007,194 @@ describe('VoiceFeature (integration)', () => {
       expect(await companions.get(companion!.channelId)).toBeUndefined();
       // The room itself is untouched.
       expect(await secondaries.get(room!.channelId)).toBeDefined();
+    });
+  });
+
+  /**
+   * The room control panel, which the create path posts into the room's chat.
+   *
+   * What is worth pinning here is not the message, which is covered by the
+   * builder's own unit tests, but the two wiring facts nothing else can see:
+   * WHERE it goes (the room, or its companion text channel when the creator
+   * channel has those switched on), and that a failure to post it leaves a
+   * perfectly working room behind.
+   */
+  describe('the room control panel', () => {
+    let companions: CompanionChannelRepository;
+    let problems: PermissionProblemTracker;
+    let sent: { channelId: string }[];
+    let poster: ControlPanelPoster;
+
+    function build(opts: { companionText?: boolean; failSend?: boolean } = {}) {
+      sent = [];
+      problems = new PermissionProblemTracker();
+      poster = new ControlPanelPoster({
+        send: (channelId) => {
+          if (opts.failSend) return Promise.reject(new Error('Missing Permissions'));
+          sent.push({ channelId });
+          return Promise.resolve(`msg-${sent.length}`);
+        },
+        guilds,
+        secondaries,
+        logger: fakeLogger(),
+        permissionProblems: problems,
+      });
+      const companionText = opts.companionText
+        ? new CompanionTextService({
+            companions,
+            secondaries,
+            autoChannels,
+            guilds,
+            actions,
+            voice,
+            logger: fakeLogger(),
+          })
+        : undefined;
+      feature = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+        controlPanel: poster,
+        permissionProblems: problems,
+        ...(companionText ? { companionText } : {}),
+      });
+    }
+
+    async function makeRoom(): Promise<string> {
+      const alice = member('alice');
+      voice.put(PRIMARY, alice);
+      await feature.handleVoiceStateUpdate({
+        guildId: GUILD,
+        member: alice,
+        afterChannelId: PRIMARY,
+      });
+      const [room] = await secondaries.listByGuild(GUILD);
+      return room!.channelId;
+    }
+
+    beforeEach(async () => {
+      companions = new CompanionChannelRepository(env.handle.db);
+      await env.handle.db.delete(db.schema.companionChannels);
+      await autoChannels.upsert(GUILD, PRIMARY, { name: 'Room' });
+    });
+
+    it("posts into the room's own chat and records where it went", async () => {
+      build();
+      const room = await makeRoom();
+      expect(sent).toEqual([{ channelId: room }]);
+      const row = await secondaries.get(room);
+      expect(row!.state.controlPanelMessageId).toBe('msg-1');
+      expect(row!.state.controlPanelChannelId).toBe(room);
+    });
+
+    /**
+     * The owner's 2026-09-19 override: when a creator channel has companion
+     * text channels switched on, the panel goes in the companion instead. Which
+     * is also why the create path captures the companion id rather than
+     * discarding it.
+     */
+    it('posts into the companion text channel when the creator channel has one', async () => {
+      await autoChannels.upsert(GUILD, PRIMARY, { name: 'Room', textChannel: true });
+      build({ companionText: true });
+      const room = await makeRoom();
+      const companion = await companions.getBySecondary(room);
+      expect(companion).toBeDefined();
+      expect(sent).toEqual([{ channelId: companion!.channelId }]);
+      expect((await secondaries.get(room))!.state.controlPanelChannelId).toBe(companion!.channelId);
+    });
+
+    /**
+     * The scoped no-deploy lever for companions must not take the panel with
+     * it: a guild whose companions are frozen still gets rooms, and those rooms
+     * still have a chat to put the buttons in.
+     */
+    it('falls back to the room when the companion lever is on', async () => {
+      await autoChannels.upsert(GUILD, PRIMARY, { name: 'Room', textChannel: true });
+      build({ companionText: true });
+      feature = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+        controlPanel: {
+          postForRoom: (g, roomId, _p, destination) => {
+            sent.push({ channelId: destination });
+            void g;
+            void roomId;
+            return Promise.resolve();
+          },
+        },
+        gate: {
+          allowCreate: () => Promise.resolve({ allowed: true, companionTextDisabled: true }),
+        },
+      });
+      const room = await makeRoom();
+      expect(sent).toEqual([{ channelId: room }]);
+      expect(await companions.getBySecondary(room)).toBeUndefined();
+    });
+
+    it('posts nothing when the panel lever is on', async () => {
+      build();
+      feature = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+        controlPanel: {
+          postForRoom: () => {
+            sent.push({ channelId: 'should-not-happen' });
+            return Promise.resolve();
+          },
+        },
+        gate: { allowCreate: () => Promise.resolve({ allowed: true, controlPanelDisabled: true }) },
+      });
+      await makeRoom();
+      expect(sent).toEqual([]);
+    });
+
+    /**
+     * The realistic failure, and the whole reason the post is fail-soft: a
+     * created room grants the bot no Send Messages, so any category that denies
+     * it produces this on every room.
+     */
+    it('leaves a working room behind when it cannot post, and tells the admin', async () => {
+      build({ failSend: true });
+      const room = await makeRoom();
+      expect(await secondaries.get(room)).toBeDefined();
+      expect(actions.actions.filter((a) => a.type === 'create')).toHaveLength(1);
+      expect(actions.actions.some((a) => a.type === 'delete')).toBe(false);
+      expect((await secondaries.get(room))!.state.controlPanelMessageId).toBeUndefined();
+      // Against the CREATOR channel, so ten rooms do not evict every other
+      // incident the guild has.
+      expect(problems.recent(GUILD)).toEqual([
+        expect.objectContaining({ channelId: PRIMARY, operation: 'panel' }),
+      ]);
+    });
+
+    /**
+     * The replay guard, against a real row rather than a fake repository:
+     * what stops a redelivered voice event or a caught-up reconcile giving
+     * one room two panels is the stored message id, so the guard has to read
+     * what the first post actually wrote.
+     */
+    it('posts once per room, however many times the path runs', async () => {
+      build();
+      const room = await makeRoom();
+      expect(sent).toHaveLength(1);
+      await poster.postForRoom(GUILD, room, PRIMARY, room);
+      await poster.postForRoom(GUILD, room, PRIMARY, room);
+      expect(sent).toHaveLength(1);
+      expect((await secondaries.get(room))!.state.controlPanelMessageId).toBe('msg-1');
     });
   });
 });

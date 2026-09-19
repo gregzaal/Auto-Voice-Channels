@@ -64,6 +64,29 @@ export const secondaryStateSchema = z
      * rolling deploy is the OLD image.
      */
     originalCreatorName: z.string().optional(),
+    /**
+     * The room control panel message posted into the room's chat at creation.
+     *
+     * A replay guard and nothing else: it exists so a create that runs twice
+     * (a caught-up reconcile, a redelivered voice event) does not post a second
+     * panel into the same room. Nothing ever edits or deletes the message,
+     * because it lives in a channel that dies with the room.
+     *
+     * Written through {@link SecondaryChannelRepository.setControlPanelMessage},
+     * never through `updateState`: the post is a Discord round trip, so a
+     * read-modify-write around it would discard whatever the roster, rename or
+     * privacy paths wrote in the meantime.
+     */
+    controlPanelMessageId: z.string().optional(),
+    /**
+     * Where that panel was posted: the room itself, or its companion text
+     * channel when the creator channel has those switched on.
+     *
+     * Recorded rather than recomputed because the answer can change after the
+     * fact - a companion the reconciler builds later does not move the panel -
+     * so the stored id is the only honest record of where it went.
+     */
+    controlPanelChannelId: z.string().optional(),
   })
   .passthrough();
 
@@ -255,6 +278,39 @@ export class SecondaryChannelRepository {
     await this.db
       .update(secondaryChannels)
       .set({ state, updatedAt: new Date() })
+      .where(this.scoped(eq(secondaryChannels.channelId, channelId)));
+  }
+
+  /**
+   * Records where the room's control panel was posted, merging into `state`
+   * rather than replacing it.
+   *
+   * **A merge, deliberately, and not {@link updateState}.** The panel is posted
+   * over a Discord round trip that takes tens to hundreds of milliseconds, and
+   * the create path has two other writers active in that window: the roster
+   * append and, on a default-private room, the privacy toggle. A
+   * read-modify-write around the post would carry a `state` read from before
+   * it and silently discard whichever of them landed first, taking the roster
+   * (which decides who inherits the room) with it. `||` merges server side, so
+   * only these two keys are touched. Same shape and same reason as
+   * {@link setOwnerAndCreator}.
+   *
+   * `updatedAt` is deliberately NOT bumped: this records something about a
+   * message, not about the channel, and the rename paths read `updatedAt`.
+   */
+  async setControlPanelMessage(
+    channelId: string,
+    messageId: string,
+    panelChannelId: string,
+  ): Promise<void> {
+    await this.db
+      .update(secondaryChannels)
+      .set({
+        state: sql`coalesce(${secondaryChannels.state}, '{}'::jsonb) || ${JSON.stringify({
+          controlPanelMessageId: messageId,
+          controlPanelChannelId: panelChannelId,
+        })}::jsonb`,
+      })
       .where(this.scoped(eq(secondaryChannels.channelId, channelId)));
   }
 

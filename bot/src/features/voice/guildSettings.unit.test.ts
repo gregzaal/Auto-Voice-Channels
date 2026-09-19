@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_CHANNEL_NAME_TEMPLATE } from './nameTemplate.js';
 import {
+  CONTROL_PANEL_CONTROLS,
+  controlPanelConfirmation,
+  readControlPanel,
   ROOT_GROUP_KEY,
   groupKeyFor,
   isStringMap,
@@ -126,5 +129,90 @@ describe('readContact', () => {
     expect(readContact({ contact_user_id: '123' })).toBeNull();
     expect(readContact({ contact_user_id: null })).toBeNull();
     expect(readContact({ contact_user_id: { id: '201444089835552768' } })).toBeNull();
+  });
+});
+
+describe('readControlPanel', () => {
+  it('is entirely on for a server that has never configured it', () => {
+    const config = readControlPanel({});
+    expect(config.enabled).toBe(true);
+    for (const control of CONTROL_PANEL_CONTROLS) {
+      expect(config.controls[control], control).toBe(true);
+    }
+  });
+
+  it('switches off exactly what the blob names', () => {
+    const config = readControlPanel({ control_panel: { kick: false, limit: false } });
+    expect(config.enabled).toBe(true);
+    expect(config.controls.kick).toBe(false);
+    expect(config.controls.limit).toBe(false);
+    expect(config.controls.lock).toBe(true);
+  });
+
+  it('reads the panel sentinel as the panel itself, never as a control', () => {
+    const config = readControlPanel({ control_panel: { panel: false } });
+    expect(config.enabled).toBe(false);
+    // Every control is still on, so turning the panel back on restores what
+    // the server had rather than an empty one.
+    expect(config.controls.lock).toBe(true);
+  });
+
+  /**
+   * A file exported from a newer build can name a control this one has never
+   * heard of. Losing the rest of the map over it would be worse than ignoring
+   * it, and an unknown id is inert because nothing ever looks it up.
+   */
+  it('ignores unknown ids and malformed values rather than giving up on the map', () => {
+    const config = readControlPanel({
+      control_panel: { somethingnew: false, kick: 'no', info: false },
+    });
+    expect(config.controls.info).toBe(false);
+    expect(config.controls.kick).toBe(true);
+    expect(Object.keys(config.controls).sort()).toEqual([...CONTROL_PANEL_CONTROLS].sort());
+  });
+
+  it('treats a corrupt key as never configured', () => {
+    for (const raw of [null, 'off', 42, ['kick']]) {
+      const config = readControlPanel({ control_panel: raw });
+      expect(config.enabled).toBe(true);
+      expect(config.controls.kick).toBe(true);
+    }
+  });
+
+  /**
+   * The settings cache serves one row object to every caller on the instance,
+   * so a reader that handed back a stored reference would let one caller's
+   * mutation corrupt every other guild read in the process.
+   */
+  it('hands back a fresh object each time', () => {
+    const settings = { control_panel: { kick: false } };
+    const first = readControlPanel(settings);
+    first.controls.lock = false;
+    expect(readControlPanel(settings).controls.lock).toBe(true);
+  });
+});
+
+describe('controlPanelConfirmation', () => {
+  it('always says existing rooms keep the panel they were given', () => {
+    for (const on of [true, false]) {
+      expect(controlPanelConfirmation('panel', on)).toContain('already exist');
+      expect(controlPanelConfirmation('kick', on)).toContain('already exist');
+    }
+  });
+
+  it('says the command still works when a button is taken away', () => {
+    expect(controlPanelConfirmation('kick', false)).toContain('command behind it still works');
+    expect(controlPanelConfirmation('panel', false)).toContain('command that still works');
+  });
+
+  it('follows the copy rules', () => {
+    for (const control of [...CONTROL_PANEL_CONTROLS, 'panel'] as const) {
+      for (const on of [true, false]) {
+        const text = controlPanelConfirmation(control, on);
+        expect(text).not.toMatch(/[—–]/);
+        expect(text).not.toMatch(/[‘’“”]/);
+        expect(text).not.toMatch(/;/);
+      }
+    }
   });
 });

@@ -521,6 +521,40 @@ describe('diffGuildConfig: settings', () => {
     expect(noteCodes(plan)).toContain('setting_invalid');
   });
 
+  it('carries the control panel map through, keeping ids it does not know', () => {
+    const file = nativeFile();
+    // `panel` is the sentinel for the whole panel, `kick` is a control, and
+    // `somethingnew` is what a file written by a newer build looks like.
+    file.settings.control_panel = { panel: false, kick: false, somethingnew: false };
+    const plan = planOf(file);
+    expect(plan.settingsPatch.control_panel).toEqual({
+      panel: false,
+      kick: false,
+      somethingnew: false,
+    });
+  });
+
+  /**
+   * Shape is enforced even though ids are not: an unknown id is inert,
+   * because the reader looks each control up by name, but a non-boolean value
+   * is junk that would sit in the blob forever.
+   */
+  it('drops a control panel entry whose value is not a flag', () => {
+    const file = nativeFile();
+    file.settings.control_panel = { kick: 'off', info: false };
+    const plan = planOf(file);
+    expect(plan.settingsPatch.control_panel).toEqual({ info: false });
+    expect(noteCodes(plan)).toContain('setting_invalid');
+  });
+
+  it('refuses a control panel value that is not a map at all', () => {
+    const file = nativeFile();
+    file.settings.control_panel = ['kick'];
+    const plan = planOf(file);
+    expect(plan.settingsPatch.control_panel).toBeUndefined();
+    expect(noteCodes(plan)).toContain('setting_invalid');
+  });
+
   it('drops an out-of-range log level rather than clamping it', () => {
     const file = nativeFile();
     file.settings.log_level = 9;

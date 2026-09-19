@@ -19,10 +19,12 @@ import { MAX_USER_LIMIT } from './commands.js';
 import {
   SETTINGS_KEYS,
   isSnowflake,
+  controlPanelConfirmation,
   DEFAULT_TEXT_CHANNEL_NAME,
   isStringMap,
   parseVoiceSettings,
   readContact,
+  readControlPanel,
   readGroups,
   readLogging,
   readProblemAlerts,
@@ -31,7 +33,12 @@ import {
   problemAlertConfirmation,
   timeZoneConfirmation,
 } from './guildSettings.js';
-import type { GroupConfig, ProblemAlertMode } from './guildSettings.js';
+import type {
+  ControlPanelConfig,
+  ControlPanelEntry,
+  GroupConfig,
+  ProblemAlertMode,
+} from './guildSettings.js';
 import type { GameNameMode } from './nameTemplate.js';
 import { type CommandResult } from './commands.js';
 
@@ -130,6 +137,8 @@ export interface GuildConfig {
   textChannelName?: string;
   /** Role that may read every companion text channel, absent when none is set. */
   textChannelRoleId?: string;
+  /** The room control panel: whether it is posted, and which buttons it carries. */
+  controlPanel: ControlPanelConfig;
   primaries: { channelId: string; template: string; limit: number }[];
 }
 
@@ -202,6 +211,9 @@ export class GuildSettingsService {
       gameNameMode: s.gameNameMode,
       aliases: s.aliases,
       lists: s.lists,
+      // Freshly built by `readControlPanel` every call, so no caller can reach
+      // back through it into the shared settings-cache row.
+      controlPanel: readControlPanel(guild.settings),
       primaries: primaries.map((p) => toPrimaryView(p)),
       ...(s.timezone !== undefined ? { timezone: s.timezone } : {}),
       ...(readTextChannelName(guild.settings) !== undefined
@@ -755,6 +767,78 @@ export class GuildSettingsService {
       `<@&${roleId}> can now read every room text channel, including private rooms. ` +
         'Existing channels are updated within a few minutes.',
     );
+  }
+
+  /**
+   * The room control panel configuration, as a copy.
+   *
+   * Deliberately not `getConfig`, which also runs `autoChannels.listByGuild`:
+   * an uncached query the panel does not need and would repeat on every
+   * re-render, exactly as `listAliases` documents.
+   */
+  async getControlPanel(guildId: string): Promise<ControlPanelConfig> {
+    const guild = await this.deps.guilds.ensure(guildId);
+    return readControlPanel(guild.settings);
+  }
+
+  /**
+   * Switches one control, or the whole panel, on or off.
+   *
+   * **`mergeSettings`, not `updateSettings`, for the reason `editAliases`
+   * documents**: `updateSettings` merges DB-side at the top level only, so the
+   * whole map is replaced wholesale and a read-then-write of it loses whatever
+   * landed in between. Two admins toggling different buttons, or an `/import`
+   * pass running for minutes against a live guild, are both concrete writers
+   * in that window, and the per-guild dispatcher does not help because it is
+   * per instance and two fleets already share guilds.
+   *
+   * **Only `false` is ever stored, and the key is removed once nothing is left
+   * in it.** Every default is on, so storing `true` would pin a server to
+   * today's answer for a control that has not been invented yet, and writing
+   * `{}` would make "deliberately all on" indistinguishable from "never
+   * configured" on an export round trip. "Nothing left" counts entries this
+   * build does not understand too, so a future role-valued entry keeps the key
+   * alive rather than being quietly swept away with it.
+   *
+   * @param control a control id, or {@link CONTROL_PANEL_ENABLED_KEY} for the
+   * panel itself.
+   */
+  setControlPanelEntry(
+    guildId: string,
+    control: ControlPanelEntry,
+    on: boolean,
+  ): Promise<CommandResult> {
+    return this.deps.guilds.mergeSettings(guildId, (existing) => {
+      const stored = existing?.settings?.[SETTINGS_KEYS.controlPanel];
+      /**
+       * Copied WHOLE, values and all, and only the one entry being changed is
+       * touched. Golden rule 3: preserve unknown JSON fields on writes.
+       *
+       * Filtering to booleans looked tidier and broke the very migration §3.5
+       * of `feature-parity.md` names next. That column widens a value from a
+       * boolean to `false | 'everyone' | [role ids]` in this same key, and a
+       * filter would mean an OLD instance, during the rollout, silently
+       * deleting every role-valued entry the moment an admin toggled any single
+       * button. A value this build cannot read is ignored by `readControlPanel`,
+       * which is inert; a value this build DELETES is gone.
+       *
+       * `Object.fromEntries` rather than assigning into a literal, because a
+       * stored `__proto__` key is reachable through `/import` and assigning it
+       * onto a plain object invokes the prototype setter and drops the entry
+       * instead of keeping it.
+       */
+      const current: Record<string, unknown> =
+        typeof stored === 'object' && stored !== null && !Array.isArray(stored)
+          ? Object.fromEntries(Object.entries(stored as Record<string, unknown>))
+          : {};
+      if (on) delete current[control];
+      else current[control] = false;
+      const result = ok(controlPanelConfirmation(control, on));
+      if (Object.keys(current).length === 0) {
+        return { patch: {}, remove: [SETTINGS_KEYS.controlPanel], result };
+      }
+      return { patch: { [SETTINGS_KEYS.controlPanel]: current }, result };
+    });
   }
 
   /**

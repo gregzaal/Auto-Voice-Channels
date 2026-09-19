@@ -249,6 +249,7 @@ const SETTING_LABELS: Record<string, string> = {
   game_name_mode: 'Tied games',
   text_channel_name: 'Room text channel name',
   text_channel_role: 'Role that can read room text channels',
+  control_panel: 'Room control panel buttons',
 };
 
 const NOTE_LABELS: Record<ImportNoteCode, string> = {

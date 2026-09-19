@@ -110,6 +110,15 @@ export interface CreateGateDecision {
    * they have left, which is the failure the feature exists to prevent.
    */
   companionTextDisabled?: boolean;
+  /**
+   * Whether to skip posting a room's control panel, by the same mechanism as
+   * {@link companionTextDisabled}.
+   *
+   * New panels only. A panel already posted keeps working, because its buttons
+   * run the same checked command paths the slash commands do, and withdrawing
+   * one would mean editing a message in every live room.
+   */
+  controlPanelDisabled?: boolean;
 }
 
 /**
@@ -177,6 +186,28 @@ export interface VoiceFeatureDeps {
       guildId: string,
       opts: { allowCreate: boolean; dryRun?: boolean },
     ): Promise<{ created: number; synced: number; removed: number }>;
+  };
+  /**
+   * The room control panel, when the feature is wired.
+   *
+   * Optional and structural like {@link companionText}, so the feature stays
+   * testable without a Discord client and behaves identically on self-host.
+   * `postForRoom` swallows its own failures: a room with no panel is a working
+   * room, and nothing on the voice path may fail because a message did not send.
+   *
+   * There is deliberately no teardown hook. The panel lives in a channel that
+   * dies with the room, so there is nothing to converge and nothing to clean up
+   * - which is the whole reason the panel is per room rather than the per-guild
+   * pinned message this replaced.
+   */
+  controlPanel?: {
+    postForRoom(
+      guildId: string,
+      roomId: string,
+      primaryChannelId: string,
+      destinationChannelId: string,
+      known?: { guildId: string; state: { controlPanelMessageId?: string | undefined } },
+    ): Promise<void>;
   };
   /**
    * Called when a secondary's ownership is reassigned because the owner left
@@ -458,6 +489,24 @@ export interface EditorState {
   /** The secondary's owner (for the `/name` permission check). */
   ownerId?: string | null;
   primaryChannelId?: string;
+}
+
+/** What the room control panel's buttons need to know about a room. */
+export interface RoomPanelState {
+  ownerId: string | null;
+  /** Who is in the room now, for the Transfer and Kick pickers. */
+  members: VoiceMember[];
+  /**
+   * The room's LIVE user limit (0 = unlimited), for the Limit modal's prefill.
+   *
+   * Read from Discord, not from the creator channel's stored default: `/limit`
+   * writes straight through and stores nothing, so only a live read is true.
+   * Zero when the cache cannot say, which prefills an empty box rather than a
+   * wrong number.
+   */
+  userLimit: number;
+  /** The per-room name override, for the Rename modal's prefill. */
+  nameOverride?: string;
 }
 
 /** What a single-guild reconcile changed (or, under dry-run, would change). */
@@ -766,7 +815,7 @@ export class VoiceFeature {
       return { action: 'skip' };
     }
 
-    await this.deps.secondaries.create({
+    const roomRow = await this.deps.secondaries.create({
       channelId: newChannelId,
       guildId,
       primaryChannelId: channelId,
@@ -873,8 +922,38 @@ export class VoiceFeature {
      * the seeded `roster` above documents: their move into the room has not
      * reached the voice cache yet.
      */
-    if (!gate?.companionTextDisabled) {
-      await this.deps.companionText?.createForRoom(guildId, newChannelId, channelId, [member.id]);
+    const companionId = gate?.companionTextDisabled
+      ? null
+      : ((await this.deps.companionText?.createForRoom(guildId, newChannelId, channelId, [
+          member.id,
+        ])) ?? null);
+
+    /**
+     * The room control panel, in the room's own chat, or in its companion text
+     * channel when the creator channel has those switched on.
+     *
+     * **Outside the companion lever above, not inside it.** Freezing companion
+     * creation fleet-wide must not silently take the panel with it: a guild
+     * whose companions are frozen still gets its rooms, and those rooms still
+     * have a built-in chat to put the buttons in. So the destination is
+     * whatever companion actually got made, and the room itself otherwise.
+     *
+     * Awaited rather than fired off, so its write to `state` cannot race the
+     * rename the debounced scheduler is about to queue for this same room. It
+     * is cheap and it never throws.
+     */
+    if (!gate?.controlPanelDisabled) {
+      await this.deps.controlPanel?.postForRoom(
+        guildId,
+        newChannelId,
+        channelId,
+        companionId ?? newChannelId,
+        // The row the insert above returned, which on a conflict is the LIVE
+        // one, so it answers the poster's replay guard without a second read
+        // on the path a member is waiting on. Nothing between here and there
+        // writes the panel keys, so it is still the right answer.
+        roomRow,
+      );
     }
 
     // Grouped category: slot the new channel into the group block (at the bottom,
@@ -2147,6 +2226,26 @@ export class VoiceFeature {
     }
 
     return { ...base, kind: 'unmanaged' };
+  }
+
+  /**
+   * The room behind a control panel button, or null when there is not one.
+   *
+   * One row read plus two cache lookups, deliberately light: this runs on the
+   * path to `showModal`, which is itself the interaction's acknowledgement, so
+   * it cannot be deferred and has the whole three-second budget to fit inside.
+   * That is also why the caller does NOT route it through the per-guild queue,
+   * where it would sit behind every create and rename in flight.
+   */
+  async getRoomPanelState(guildId: string, channelId: string): Promise<RoomPanelState | null> {
+    const row = await this.deps.secondaries.get(channelId);
+    if (!row || row.guildId !== guildId) return null;
+    return {
+      ownerId: row.ownerId,
+      members: this.deps.voice.membersInChannel(channelId),
+      userLimit: this.deps.voice.userLimitOf?.(channelId) ?? 0,
+      ...(row.state.template === undefined ? {} : { nameOverride: row.state.template }),
+    };
   }
 
   /**

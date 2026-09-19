@@ -27,6 +27,21 @@ export const RUNTIME_FLAGS = {
    * a database blip must not silently withdraw a feature a guild has enabled.
    */
   COMPANION_TEXT_DISABLED: 'companion_text.disabled',
+  /**
+   * Stops posting the room control panel on **this fleet**.
+   *
+   * The scoped no-deploy switch for the one thing a room create now does that
+   * is neither a channel nor a permission: it posts a message. It stops new
+   * panels only. Panels already posted keep working, because their buttons run
+   * the same checked command paths the slash commands do, and withdrawing them
+   * would mean editing a message in every live room to take away controls that
+   * are still safe to press.
+   *
+   * A failed flag read is treated as NOT disabled, matching
+   * `companion_text.disabled`: a database blip must not silently withdraw a
+   * feature that is on by default.
+   */
+  CONTROL_PANEL_DISABLED: 'control_panel.disabled',
   /** Throttle: max secondary creations per guild per minute (number; 0 = unlimited). */
   CREATE_RATE_LIMIT: 'create.rate_limit_per_min',
   /**

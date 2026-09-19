@@ -28,6 +28,7 @@ export const SETTINGS_KEYS = {
   gameNameMode: 'game_name_mode',
   textChannelName: 'text_channel_name',
   textChannelRole: 'text_channel_role',
+  controlPanel: 'control_panel',
 } as const;
 
 /**
@@ -346,6 +347,130 @@ export function readGroups(settings: Record<string, unknown>): Record<string, Gr
     }
   }
   return out;
+}
+
+/**
+ * The controls the room control panel can carry, in the order they are shown.
+ *
+ * Order is fixed here rather than configurable, which is the whole reason this
+ * is a list and not a set: an admin can take a button away, and cannot move one.
+ * Appending is safe; reordering changes every server's panel at once, and
+ * renaming an id silently re-enables a control somebody switched off, because
+ * the stored map is keyed by these strings.
+ */
+export const CONTROL_PANEL_CONTROLS = [
+  'lock',
+  'unlock',
+  'limit',
+  'rename',
+  'claim',
+  'transfer',
+  'kick',
+  'info',
+] as const;
+
+export type ControlPanelControl = (typeof CONTROL_PANEL_CONTROLS)[number];
+
+/**
+ * The entry inside the control panel map that switches the whole panel off.
+ *
+ * It shares the map with the per-button flags rather than taking a settings key
+ * of its own, so `/controlpanel` writes one key and an export carries one
+ * field. It cannot collide with a control id because
+ * {@link isControlPanelControl} checks against the fixed list above, and
+ * `panel` is not on it.
+ */
+export const CONTROL_PANEL_ENABLED_KEY = 'panel';
+
+/** Anything `/controlpanel` can switch: one control, or the panel itself. */
+export type ControlPanelEntry = ControlPanelControl | typeof CONTROL_PANEL_ENABLED_KEY;
+
+/** True only for a string this build recognises as a control id. */
+export function isControlPanelControl(value: unknown): value is ControlPanelControl {
+  return typeof value === 'string' && (CONTROL_PANEL_CONTROLS as readonly string[]).includes(value);
+}
+
+/**
+ * One server's room control panel configuration.
+ *
+ * `enabled` is the panel itself; `controls` is which buttons it carries. Both
+ * default to on, because the panel ships on by default and a server that has
+ * never run `/controlpanel` has no stored key at all.
+ */
+export interface ControlPanelConfig {
+  enabled: boolean;
+  controls: Record<ControlPanelControl, boolean>;
+}
+
+/**
+ * Reads the control panel configuration from the settings blob.
+ *
+ * **Only what an admin has switched OFF is ever stored**, so an absent key, an
+ * empty map and a corrupt value all read as "everything on", which is the
+ * documented default. Unknown ids are ignored rather than refused: a file
+ * exported from a newer build can carry a control this one has never heard of,
+ * and losing the rest of the map over it would be worse than ignoring it.
+ *
+ * The returned object is freshly built every call rather than handed back by
+ * reference. `SettingsCache` serves the same row object to every caller on the
+ * instance, so returning a stored reference would let one caller's mutation
+ * corrupt every other guild read in the process, with no write and no
+ * invalidation behind it.
+ */
+export function readControlPanel(settings: Record<string, unknown>): ControlPanelConfig {
+  const controls = Object.fromEntries(CONTROL_PANEL_CONTROLS.map((c) => [c, true])) as Record<
+    ControlPanelControl,
+    boolean
+  >;
+  const config: ControlPanelConfig = { enabled: true, controls };
+  const raw = settings[SETTINGS_KEYS.controlPanel];
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return config;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value !== 'boolean') continue;
+    if (key === CONTROL_PANEL_ENABLED_KEY) {
+      config.enabled = value;
+      continue;
+    }
+    if (isControlPanelControl(key)) config.controls[key] = value;
+  }
+  return config;
+}
+
+/** How each control reads in a `/controlpanel` confirmation. */
+const CONTROL_PANEL_NAMES: Record<ControlPanelControl, string> = {
+  lock: 'Lock',
+  unlock: 'Unlock',
+  limit: 'Limit',
+  rename: 'Rename',
+  claim: 'Claim',
+  transfer: 'Transfer',
+  kick: 'Kick',
+  info: 'Info',
+};
+
+/**
+ * What `/controlpanel` says after a toggle.
+ *
+ * Every one of them names the rooms that already exist, because the panel is
+ * posted once when a room is made and is never edited afterwards. An admin who
+ * is told only "turned off" and then finds the button still there in the room
+ * they are sitting in will reasonably conclude the setting did not save.
+ */
+export function controlPanelConfirmation(control: ControlPanelEntry, on: boolean): string {
+  const rooms = ' Rooms that already exist keep the panel they were given.';
+  if (control === CONTROL_PANEL_ENABLED_KEY) {
+    return on
+      ? 'New rooms will get the control panel in their chat again.' + rooms
+      : 'New rooms will not get a control panel.' +
+          rooms +
+          ' Every button has a command that still works.';
+  }
+  const name = CONTROL_PANEL_NAMES[control];
+  return on
+    ? `New rooms will show the **${name}** button again.` + rooms
+    : `New rooms will not show the **${name}** button.` +
+        rooms +
+        ' The command behind it still works.';
 }
 
 /** One category's grouping config, or `undefined` when that category isn't grouped. */

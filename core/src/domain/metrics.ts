@@ -145,6 +145,17 @@ export const METRICS = {
    * rooms all work look broken.
    */
   COMPANION_TEXT_FAILED: 'companion_text.failed',
+  /** Room control panels posted into a new room's chat. */
+  CONTROL_PANEL_POSTED: 'control_panel.posted',
+  /**
+   * Room control panels that could not be posted. The room itself still works.
+   *
+   * Counted separately from `errors` for the reason `companion_text.failed` is:
+   * this failure is expected in any server whose category denies the bot Send
+   * Messages, and folding it into the error series would make a fleet whose
+   * rooms all work look broken.
+   */
+  CONTROL_PANEL_FAILED: 'control_panel.failed',
   /** Slash commands invoked, keyed by command name. */
   COMMANDS_INVOKED: 'commands.invoked',
   /** Handled errors, keyed by coarse category. */
@@ -281,6 +292,18 @@ const DEFINITIONS: Record<MetricName, MetricDefinition> = {
     scope: 'fleet',
     dimension: null,
     describe: 'Companion text channels that could not be created. The room itself still works.',
+  },
+  [METRICS.CONTROL_PANEL_POSTED]: {
+    kind: 'counter',
+    scope: 'fleet',
+    dimension: null,
+    describe: "Room control panels posted into a new room's chat.",
+  },
+  [METRICS.CONTROL_PANEL_FAILED]: {
+    kind: 'counter',
+    scope: 'fleet',
+    dimension: null,
+    describe: 'Room control panels that could not be posted. The room itself still works.',
   },
   [METRICS.COMMANDS_INVOKED]: {
     kind: 'counter',

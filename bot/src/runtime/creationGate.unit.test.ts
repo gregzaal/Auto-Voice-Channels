@@ -174,4 +174,27 @@ describe('RuntimeCreationGate', () => {
       expect(await gate.companionTextDisabled()).toBe(false);
     });
   });
+
+  describe('the control panel lever', () => {
+    /**
+     * Its own flag rather than a share of the companion one: freezing
+     * companion text channels fleet-wide must not silently stop posting the
+     * buttons into the rooms that still have a built-in chat.
+     */
+    it('rides the allowed decision, independently of the companion lever', async () => {
+      const gate = new RuntimeCreationGate({
+        flags: fakeFlags({ [RUNTIME_FLAGS.CONTROL_PANEL_DISABLED]: true }),
+        logger: fakeLogger(),
+      });
+      const decision = await gate.allowCreate('g1');
+      expect(decision.allowed).toBe(true);
+      expect(decision.controlPanelDisabled).toBe(true);
+      expect(decision.companionTextDisabled).toBeUndefined();
+    });
+
+    it('is absent from the decision when unset', async () => {
+      const gate = new RuntimeCreationGate({ flags: fakeFlags(), logger: fakeLogger() });
+      expect((await gate.allowCreate('g1')).controlPanelDisabled).toBeUndefined();
+    });
+  });
 });

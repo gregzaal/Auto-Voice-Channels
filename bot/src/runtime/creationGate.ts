@@ -44,6 +44,7 @@ export class RuntimeCreationGate implements CreationGate {
         limit: number;
         orderRepairDisabled: boolean;
         companionTextDisabled: boolean;
+        controlPanelDisabled: boolean;
       }
     | undefined;
 
@@ -68,13 +69,15 @@ export class RuntimeCreationGate implements CreationGate {
       return { allowed: false, reason: 'shard lease could not be refreshed' };
     }
 
-    const { paused, limit, orderRepairDisabled, companionTextDisabled } = await this.readFlags();
+    const { paused, limit, orderRepairDisabled, companionTextDisabled, controlPanelDisabled } =
+      await this.readFlags();
     if (paused) return { allowed: false, reason: 'global pause' };
     // Carried on every allowed decision, so the caller reads one consistent
     // snapshot rather than racing a second flag read against this one.
     const extra = {
       ...(orderRepairDisabled ? { orderRepairDisabled: true } : {}),
       ...(companionTextDisabled ? { companionTextDisabled: true } : {}),
+      ...(controlPanelDisabled ? { controlPanelDisabled: true } : {}),
     };
     if (limit <= 0) return { allowed: true, ...extra };
 
@@ -111,11 +114,13 @@ export class RuntimeCreationGate implements CreationGate {
     limit: number;
     orderRepairDisabled: boolean;
     companionTextDisabled: boolean;
+    controlPanelDisabled: boolean;
   }> {
     const now = Date.now();
     if (this.flagCache && now - this.flagCache.at < this.flagCacheMs) {
-      const { paused, limit, orderRepairDisabled, companionTextDisabled } = this.flagCache;
-      return { paused, limit, orderRepairDisabled, companionTextDisabled };
+      const { paused, limit, orderRepairDisabled, companionTextDisabled, controlPanelDisabled } =
+        this.flagCache;
+      return { paused, limit, orderRepairDisabled, companionTextDisabled, controlPanelDisabled };
     }
     const all = await this.opts.flags.getAll();
     const paused = all[RUNTIME_FLAGS.GLOBAL_PAUSE] === true;
@@ -123,7 +128,15 @@ export class RuntimeCreationGate implements CreationGate {
     const limit = typeof rawLimit === 'number' && rawLimit > 0 ? rawLimit : 0;
     const orderRepairDisabled = all[RUNTIME_FLAGS.VOICE_ORDER_REPAIR_DISABLED] === true;
     const companionTextDisabled = all[RUNTIME_FLAGS.COMPANION_TEXT_DISABLED] === true;
-    this.flagCache = { at: now, paused, limit, orderRepairDisabled, companionTextDisabled };
-    return { paused, limit, orderRepairDisabled, companionTextDisabled };
+    const controlPanelDisabled = all[RUNTIME_FLAGS.CONTROL_PANEL_DISABLED] === true;
+    this.flagCache = {
+      at: now,
+      paused,
+      limit,
+      orderRepairDisabled,
+      companionTextDisabled,
+      controlPanelDisabled,
+    };
+    return { paused, limit, orderRepairDisabled, companionTextDisabled, controlPanelDisabled };
   }
 }

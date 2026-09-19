@@ -361,7 +361,11 @@ export function buildWatchChecks(deps: WatchCheckDeps): WatchCheck[] {
           // a single string and the operator wants all of them.
           message: permissionProblemSummary(g.problems).join(' '),
           details: {
-            channels: g.problems.length,
+            // Incidents, not channels: the tracker keys on (channel,
+            // operation), so one creator channel that fails two different ways
+            // is two entries here.
+            incidents: g.problems.length,
+            channels: new Set(g.problems.map((p) => p.channelId)).size,
             lastAt: new Date(g.lastAt).toISOString(),
             operations: [...new Set(g.problems.map((p) => p.operation))].join(', '),
           },

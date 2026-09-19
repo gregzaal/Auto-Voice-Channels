@@ -14,3 +14,5 @@ export * from './votekick.js';
 export * from './renameScheduler.js';
 export * from './discordAdapter.js';
 export * from './gateway.js';
+export * from './controlPanel.js';
+export * from './controlPanelPoster.js';

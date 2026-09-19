@@ -66,6 +66,7 @@ import { buildGatewayClient } from './gateway/client.js';
 import { createGatewayHealth } from './gateway/gatewayHealth.js';
 import {
   CompanionTextService,
+  ControlPanelPoster,
   DiscordVoiceActions,
   DiscordVoiceView,
   GuildSettingsService,
@@ -494,6 +495,35 @@ async function main(): Promise<void> {
       void guildId;
     },
   });
+  /**
+   * The room control panel, posted into a new room's chat.
+   *
+   * `send` is a closure over the client rather than a `Client` on the service,
+   * so the service unit-tests in one line and `VoiceFeature` keeps knowing
+   * nothing about discord.js. Mentions are suppressed: the panel names nobody,
+   * and a default-mentions send from a message the bot composes in every room
+   * is the shape of accident that pings a whole server.
+   */
+  const controlPanel = new ControlPanelPoster({
+    send: async (channelId, payload) => {
+      const channel = await client.channels.fetch(channelId);
+      if (!channel?.isTextBased() || !('send' in channel)) {
+        throw new Error(`channel ${channelId} cannot carry a control panel`);
+      }
+      const message = await channel.send({ ...payload, allowedMentions: { parse: [] } });
+      return message.id;
+    },
+    guilds: settingsCache,
+    secondaries,
+    logger: logger.child({ component: 'control-panel' }),
+    permissionProblems,
+    serverLog: (gid, level, message) => serverLogger.log(gid, level, message),
+    count: (outcome) => {
+      metricsCollector.increment(
+        outcome === 'posted' ? METRICS.CONTROL_PANEL_POSTED : METRICS.CONTROL_PANEL_FAILED,
+      );
+    },
+  });
   const voiceFeature = new VoiceFeature({
     autoChannels,
     secondaries,
@@ -504,6 +534,7 @@ async function main(): Promise<void> {
     selfHosted: config.selfHosted,
     gate: creationGate,
     companionText,
+    controlPanel,
     /**
      * Both companions hang off the one hook, in this order: the text channel
      * first, because it is the one whose failure is recoverable, and the "⇩ Join"
@@ -1329,6 +1360,16 @@ async function main(): Promise<void> {
         companionText: {
           disabled: runtimeFlags[RUNTIME_FLAGS.COMPANION_TEXT_DISABLED] === true,
           ...(await companionsRepo.counts().catch(() => ({ tracked: null, orphaned: null }))),
+        },
+        /**
+         * The room control panel. Only the lever, because there is nothing
+         * else here to observe: the panel is a message in a channel that dies
+         * with its room, so there is no table to count and nothing that can be
+         * orphaned. How many are posted and how many fail are counters, which
+         * the metric store answers over time rather than this snapshot.
+         */
+        controlPanel: {
+          disabled: runtimeFlags[RUNTIME_FLAGS.CONTROL_PANEL_DISABLED] === true,
         },
       };
     },

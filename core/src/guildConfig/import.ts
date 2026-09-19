@@ -73,6 +73,13 @@ export const IMPORT_LIMITS = {
    * longer imported list could not be edited without silently losing its tail.
    */
   listTotalChars: 4000,
+  /**
+   * Room control panel flags. There are eight controls today, and a file
+   * naming far more than that is describing a panel no build has ever had.
+   * Generous rather than exact so a file written by a newer build carrying a
+   * control this one does not know about still imports.
+   */
+  controlPanel: 40,
 } as const;
 
 export type ChannelKind = 'voice' | 'text' | 'category' | 'other';
@@ -1026,6 +1033,34 @@ function validateSetting(
        */
       if (value === facts.guildId) return drop('setting_invalid');
       return value;
+
+    case 'control_panel': {
+      const record = asRecord(value);
+      if (!record) return drop('setting_invalid');
+      const entries = Object.entries(record);
+      if (entries.length > limits.controlPanel)
+        return drop('setting_over_limit', { limit: limits.controlPanel, count: entries.length });
+      const kept: Record<string, boolean> = {};
+      for (const [control, flag] of entries) {
+        /**
+         * The VALUE is checked and the KEY deliberately is not.
+         *
+         * A control id this build has never heard of is inert: the reader looks
+         * each known control up by name, so an unknown one is never consulted
+         * and never renders anything. Refusing it would instead break the one
+         * case the round trip exists for, a guild exporting from a newer fleet
+         * and importing on an older one, and would lose their whole panel
+         * configuration rather than the one entry that does not apply yet.
+         * Shape is still enforced, so junk cannot reach the blob.
+         */
+        if (typeof flag !== 'boolean' || control.length > 40) {
+          notes.push({ code: 'setting_invalid', severity: 'dropped', subject: `${key}.entry` });
+          continue;
+        }
+        kept[control] = flag;
+      }
+      return kept;
+    }
   }
 
   /**

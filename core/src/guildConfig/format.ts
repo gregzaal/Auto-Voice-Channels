@@ -39,7 +39,11 @@ import { z } from 'zod';
 export const AVC_EXPORT_VERSION = 1;
 
 /**
- * The fourteen settings keys a file carries, as they appear on the wire.
+ * The settings keys a file carries, as they appear on the wire.
+ *
+ * Deliberately not counted in this sentence. It said "fourteen" while the list
+ * held sixteen, because a count is a second thing to keep true and nothing
+ * enforces it.
  *
  * These are the literal keys of the `guilds.settings` blob, mirroring
  * `SETTINGS_KEYS` in `bot/src/features/voice/guildSettings.ts`, which cannot be
@@ -64,6 +68,7 @@ export const EXPORT_SETTINGS_KEYS = [
   'game_name_mode',
   'text_channel_name',
   'text_channel_role',
+  'control_panel',
 ] as const;
 
 export type ExportSettingsKey = (typeof EXPORT_SETTINGS_KEYS)[number];
@@ -111,6 +116,17 @@ export const exportedSettingsSchema = z.object({
   text_channel_name: z.string().nullable(),
   /** Role id that may read every companion text channel. Absent means none. */
   text_channel_role: z.string().nullable(),
+  /**
+   * Which room control panel buttons this server has switched off, as a control
+   * id to a flag.
+   *
+   * Only the controls an admin has changed are stored, and `false` is the only
+   * value worth storing, so an absent key means the panel is on with every
+   * button showing. A bare `z.string()` key rather than an enum for the reason
+   * `game_name_mode` is a bare string: a file written by a newer build naming a
+   * control this one has never heard of must not fail the whole import.
+   */
+  control_panel: z.record(z.string(), z.boolean()).nullable(),
 });
 
 export type ExportedSettings = z.infer<typeof exportedSettingsSchema>;

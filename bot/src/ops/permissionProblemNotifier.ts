@@ -404,7 +404,8 @@ export class PermissionProblemNotifier {
      */
     const mentionId = mode === 'contact' ? contactId.mentionable : null;
     const blocking = problems.some(
-      (p) => p.operation !== 'companion' && p.operation !== 'companion_role',
+      (p) =>
+        p.operation !== 'companion' && p.operation !== 'companion_role' && p.operation !== 'panel',
     );
     const body = problemNoticeBody(permissionProblemSummary(problems), sends, mode, blocking);
 
@@ -677,10 +678,10 @@ export function problemNoticeBody(
   /**
    * Whether anything here actually stopped AVC working.
    *
-   * False when every incident is a companion text channel, the one operation
-   * whose failure leaves the rooms themselves working. Leading with "has
-   * stopped working here" in that case is a false alarm that contradicts the
-   * line printed directly under it.
+   * False when every incident leaves the rooms themselves working: a companion
+   * text channel that could not be made, and a control panel that could not be
+   * posted. Leading with "has stopped working here" in either case is a false
+   * alarm that contradicts the line printed directly under it.
    */
   blocking = true,
 ): string {
@@ -697,6 +698,12 @@ export function problemNoticeBody(
       : 'Run `/setup` for the full picture.';
   const headline = blocking
     ? '⚠️ **Auto Voice Channels has stopped working here.**'
-    : '⚠️ **Auto Voice Channels cannot finish setting up its rooms here.**';
+    : // Covers both non-blocking failures without claiming either. A companion
+      // text channel that could not be made IS a room left half set up; a
+      // control panel that could not be posted is not, because the room is
+      // finished and only the shortcut is missing. A headline that named
+      // room setup would be plainly false on every panel-only notice, and the
+      // lines below it would say so.
+      '⚠️ **Your rooms are working, but something else in this server is not.**';
   return [headline, ...lines, tail].join('\n\n');
 }

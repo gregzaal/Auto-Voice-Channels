@@ -9,17 +9,47 @@ import { buildLoggingModal } from '../../commands/loggingModal.js';
 import { problemAlertConfirmation } from './guildSettings.js';
 
 describe('PermissionProblemTracker', () => {
-  it('records most-recent-first and de-dupes per channel', () => {
+  it('records most-recent-first and de-dupes per channel AND operation', () => {
     const t = new PermissionProblemTracker();
-    t.record('g', { channelId: 'a', operation: 'delete', at: 1 });
+    t.record('g', { channelId: 'a', operation: 'move', at: 1 });
     t.record('g', { channelId: 'b', operation: 'delete', at: 2 });
-    t.record('g', { channelId: 'a', operation: 'move', at: 3 }); // updates 'a', moves it to front
+    t.record('g', { channelId: 'a', operation: 'move', at: 3 }); // same pair, moves to front
 
     const recent = t.recent('g');
     expect(recent.map((p) => p.channelId)).toEqual(['a', 'b']);
     expect(recent[0]).toMatchObject({ operation: 'move', at: 3 });
   });
 
+  /**
+   * One creator channel can be broken in several genuinely different ways at
+   * once: a guild with Manage Channels but no Manage Roles makes rooms
+   * happily and fails every companion text channel, and with no Send Messages
+   * fails every control panel too. Keyed on the channel alone, the newest of
+   * those EVICTED the others, so the guild was told about a different one on
+   * every room create and each eviction re-recorded the evicted one, resetting
+   * the notifier backoff every time.
+   */
+  it('keeps two different failures on the same channel side by side', () => {
+    const t = new PermissionProblemTracker();
+    t.record('g', { channelId: 'a', operation: 'companion', at: 1 });
+    t.record('g', { channelId: 'a', operation: 'panel', at: 2 });
+
+    expect(t.recent('g').map((p) => p.operation)).toEqual(['panel', 'companion']);
+    expect(permissionProblemSummary(t.recent('g'))).toHaveLength(2);
+  });
+
+  it('clears one of them without touching the other', () => {
+    const t = new PermissionProblemTracker();
+    t.record('g', { channelId: 'a', operation: 'companion', at: 1 });
+    t.record('g', { channelId: 'a', operation: 'panel', at: 2 });
+    t.clear('g', 'a', ['panel']);
+    expect(t.recent('g').map((p) => p.operation)).toEqual(['companion']);
+  });
+
+  /**
+   * The cap counts ENTRIES, not channels, which is why the summary says "and
+   * at least N more" rather than an exact number.
+   */
   it('caps the list per guild', () => {
     const t = new PermissionProblemTracker();
     for (let i = 0; i < 15; i++) t.record('g', { channelId: `c${i}`, operation: 'delete', at: i });
@@ -134,6 +164,19 @@ describe('permissionProblemSummary', () => {
     expect(line).toContain('Move Members');
   });
 
+  /**
+   * The negative filter in `permissionProblemSummary` is a trap: an operation
+   * left out of it renders as lost access, which names four permissions that
+   * have nothing to do with a message that could not be posted, and claims the
+   * bot has given up on a channel it is managing perfectly.
+   */
+  it('never describes a panel failure as lost access, and says the rooms work', () => {
+    const line = permissionProblemSummary([problem('a', 'panel')])[0]!;
+    expect(line).not.toContain('lost access');
+    expect(line).not.toContain('could not create rooms');
+    expect(line).toContain('Send Messages');
+    expect(line).toContain('The rooms are working');
+  });
   it('never describes a privacy failure as lost access or a move', () => {
     // Same shape as a move failure (room created then deleted), but the fix is
     // a different permission, so it needs its own line and its own wording.
@@ -220,12 +263,16 @@ describe('copy rules', () => {
     permissionProblemMessage('123', 'create'),
     permissionProblemMessage('123', 'move'),
     permissionProblemMessage('123', 'privacy'),
+    permissionProblemMessage('123', 'panel'),
+    permissionProblemMessage('123', 'companion'),
+    permissionProblemMessage('123', 'companion_role'),
     ...permissionProblemSummary([
       problem('a', 'create'),
       problem('b'),
       problem('c'),
       problem('d', 'move'),
       problem('e', 'privacy'),
+      problem('f', 'panel'),
     ]),
     ...permissionProblemSummary(Array.from({ length: 9 }, (_, i) => problem(`c${i}`, 'create'))),
     problemNoticeBody(permissionProblemSummary([problem('a', 'create')]), 1, 'contact'),

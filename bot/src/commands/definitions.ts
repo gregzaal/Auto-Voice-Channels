@@ -199,6 +199,11 @@ export function buildCommandDefinitions(
     ),
     adminOnly(
       new SlashCommandBuilder()
+        .setName('controlpanel')
+        .setDescription('Choose which buttons new rooms get in their chat, or turn them off.'),
+    ),
+    adminOnly(
+      new SlashCommandBuilder()
         .setName('defaultlimit')
         .setDescription('Set the user limit new rooms from this creator channel start with.')
         .addIntegerOption((o) =>
