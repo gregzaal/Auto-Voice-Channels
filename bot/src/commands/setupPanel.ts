@@ -525,7 +525,11 @@ export function buildSetupPanel(input: SetupPanelInput): InteractionReplyOptions
   if (problems.length > 0) {
     fields.push({
       name: `⚠️ Needs attention (${problems.length})`,
-      value: permissionProblemSummary(problems).join('\n\n'),
+      // Capped: Discord refuses a field value past 1024 and 400s the whole
+      // panel, and several populated categories clear that on their own. The
+      // summary lines are individually short, so the cut lands between them in
+      // every reachable case rather than inside one.
+      value: permissionProblemSummary(problems).join('\n\n').slice(0, 1024),
     });
   }
   // Both lists are omitted when empty rather than explaining themselves. The

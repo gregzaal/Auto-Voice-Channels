@@ -129,7 +129,7 @@ describe('buildControlSettingsPanel', () => {
     expect(
       (
         buildControlSettingsPanel(
-          readControlPanel({ control_panel: { panel: true, color: 0x00ff00 } }),
+          readControlPanel({ ...ON, control_panel_style: { color: 0x00ff00 } }),
         ).embeds![0]! as { color?: number }
       ).color,
     ).toBe(0x00ff00);
@@ -355,26 +355,33 @@ describe('setControlPanelEntry', () => {
  */
 describe('setControlPanelAppearance', () => {
   it('stores a title that differs, and drops one that matches the default', async () => {
-    const { service, writes } = makeService({ control_panel: { panel: true } });
+    const { service, writes } = makeService({});
     await service.setControlPanelAppearance(GUILD, 'title', 'Your room');
-    expect(writes[0]!.patch.control_panel).toEqual({ panel: true, title: 'Your room' });
+    expect(writes[0]!.patch.control_panel_style).toEqual({ title: 'Your room' });
 
-    const back = makeService({ control_panel: { panel: true, title: 'Your room' } });
+    const back = makeService({ control_panel_style: { title: 'Your room', color: 1 } });
     await back.service.setControlPanelAppearance(GUILD, 'title', 'Control your room');
-    expect(back.writes[0]!.patch.control_panel).toEqual({ panel: true });
+    expect(back.writes[0]!.patch.control_panel_style).toEqual({ color: 1 });
   });
 
-  it('removes the whole key when the reset leaves nothing behind', async () => {
-    const { service, writes } = makeService({ control_panel: { color: 0x00ff00 } });
+  /**
+   * The style key is separate from the switches key, so resetting the last
+   * style entry must not take the switches with it.
+   */
+  it('removes the style key when the reset leaves nothing behind, and only that key', async () => {
+    const { service, writes } = makeService({
+      control_panel: { kick: false },
+      control_panel_style: { color: 0x00ff00 },
+    });
     await service.setControlPanelAppearance(GUILD, 'color', null);
     expect(writes[0]!.patch).toEqual({});
-    expect(writes[0]!.remove).toEqual(['control_panel']);
+    expect(writes[0]!.remove).toEqual(['control_panel_style']);
   });
 
   it('stores a colour as the integer, not the string somebody typed', async () => {
-    const { service, writes } = makeService({ control_panel: { panel: true } });
+    const { service, writes } = makeService({});
     await service.setControlPanelAppearance(GUILD, 'color', 0xc43bfe);
-    expect((writes[0]!.patch.control_panel as Record<string, unknown>).color).toBe(0xc43bfe);
+    expect((writes[0]!.patch.control_panel_style as Record<string, unknown>).color).toBe(0xc43bfe);
   });
 
   /**
@@ -384,7 +391,7 @@ describe('setControlPanelAppearance', () => {
    */
   it('refuses a colour outside the range Discord accepts, and writes nothing', async () => {
     for (const bad of [-1, 0x1000000, 1.5]) {
-      const { service, writes } = makeService({ control_panel: { panel: true } });
+      const { service, writes } = makeService({});
       const res = await service.setControlPanelAppearance(GUILD, 'color', bad);
       expect(res.ok).toBe(false);
       expect(writes).toHaveLength(0);
@@ -392,7 +399,7 @@ describe('setControlPanelAppearance', () => {
   });
 
   it('refuses a title that is empty once the spaces come off', async () => {
-    const { service, writes } = makeService({ control_panel: { panel: true } });
+    const { service, writes } = makeService({});
     const res = await service.setControlPanelAppearance(GUILD, 'title', '   ');
     expect(res.ok).toBe(false);
     expect(writes).toHaveLength(0);
@@ -404,21 +411,28 @@ describe('setControlPanelAppearance', () => {
    */
   it('preserves entries it does not understand', async () => {
     const { service, writes } = makeService({
-      control_panel: { panel: true, kick: ['role1'], somethingNew: 7 },
+      control_panel_style: { somethingNew: 7, banner: 'x' },
     });
     await service.setControlPanelAppearance(GUILD, 'title', 'Yours');
-    expect(writes[0]!.patch.control_panel).toEqual({
-      panel: true,
-      kick: ['role1'],
+    expect(writes[0]!.patch.control_panel_style).toEqual({
       somethingNew: 7,
+      banner: 'x',
       title: 'Yours',
     });
   });
 
+  /** The switches key is a different key and must be left completely alone. */
+  it('never touches the switches key', async () => {
+    const { service, writes } = makeService({ control_panel: { panel: false, kick: false } });
+    await service.setControlPanelAppearance(GUILD, 'title', 'Yours');
+    expect(writes[0]!.patch.control_panel).toBeUndefined();
+    expect(writes[0]!.remove).toEqual([]);
+  });
+
   it('caps a stored description rather than letting Discord refuse the render', async () => {
-    const { service, writes } = makeService({ control_panel: { panel: true } });
+    const { service, writes } = makeService({});
     await service.setControlPanelAppearance(GUILD, 'description', 'x'.repeat(9000));
-    const stored = (writes[0]!.patch.control_panel as Record<string, string>).description;
+    const stored = (writes[0]!.patch.control_panel_style as Record<string, string>).description;
     expect(stored.length).toBe(CONTROL_PANEL_DESCRIPTION_MAX);
   });
 });

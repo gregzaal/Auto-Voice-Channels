@@ -250,6 +250,7 @@ const SETTING_LABELS: Record<string, string> = {
   text_channel_name: 'Room text channel name',
   text_channel_role: 'Role that can read room text channels',
   control_panel: 'Room control panel buttons',
+  control_panel_style: 'Room control panel title, description and colour',
 };
 
 const NOTE_LABELS: Record<ImportNoteCode, string> = {

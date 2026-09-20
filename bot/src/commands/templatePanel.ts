@@ -110,7 +110,9 @@ const DOCS_LINK = 'https://auto-voice.io/docs/commands/template';
  */
 const VARIABLE_FIELDS: APIEmbedField[] = [
   { name: '`@@game_name@@`', value: 'The game being played, e.g. `Halo`', inline: true },
-  { name: '`@@owner@@`', value: 'Whoever made the room, e.g. `Kay`', inline: true },
+  // NOT "whoever made the room": ownership passes to the longest-present
+  // member when an owner leaves. `@@original_creator@@` is the other one.
+  { name: '`@@owner@@`', value: 'Who owns the room right now, e.g. `Kay`', inline: true },
   { name: '`@@num@@`', value: 'How many are in it, e.g. `3`', inline: true },
   { name: '`##`', value: 'Counts up per room: `1`, `2`, `3`', inline: true },
   { name: '`@@nato@@`', value: 'Counts up as `Alpha`, `Bravo`, `Charlie`', inline: true },
@@ -172,7 +174,9 @@ export function renderEditorPanel(
     )
     .setFooter(opts.updated ? panelFooterWith('✅ Saved') : PANEL_FOOTER)
     .toJSON();
-  if (opts.note) embed.fields!.push({ name: '\u200b', value: opts.note });
+  // Capped like every other note field: Discord refuses a field value past
+  // 1024 and takes the whole panel down with it.
+  if (opts.note) embed.fields!.push({ name: '\u200b', value: opts.note.slice(0, 1024) });
   // Last, after the note: both are footnotes and this is the outer one.
   embed.fields!.push(VARIABLES_MORE, PANEL_LINKS_FIELD);
 

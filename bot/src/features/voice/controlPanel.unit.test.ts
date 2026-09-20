@@ -343,8 +343,14 @@ describe('copy rules', () => {
  * produces.
  */
 describe('buildControlPanel appearance', () => {
-  const withSettings = (over: Record<string, unknown>): ControlPanelConfig =>
-    readControlPanel({ control_panel: { panel: true, ...over } });
+  /**
+   * The appearance lives in `control_panel_style`, its OWN settings key, not in
+   * `control_panel` beside the switches. See `guildSettings.ts` for why: the
+   * export format types the switches key as `record(string, boolean)`, so a
+   * string title in it makes the whole exported file unreadable.
+   */
+  const withSettings = (style: Record<string, unknown>): ControlPanelConfig =>
+    readControlPanel({ control_panel_style: style });
 
   it('paints the brand violet by default, and whatever is stored otherwise', () => {
     expect(buildControlPanel(ROOM, defaults(), view())!.embeds[0]!.color).toBe(
@@ -363,14 +369,25 @@ describe('buildControlPanel appearance', () => {
     }
   });
 
-  it('resolves the two variables, and leaves anything else standing', () => {
+  it('resolves the two variables in the description, and leaves anything else standing', () => {
     const config = withSettings({
-      title: 'Hi @@owner@@',
       description: 'Yours: @@owner@@, ours: @@creator_channel@@, mystery: @@game@@',
     });
     const embed = buildControlPanel(ROOM, config, view())!.embeds[0]!;
-    expect(embed.title).toBe(`Hi <@${OWNER}>`);
     expect(embed.description).toBe(`Yours: <@${OWNER}>, ours: <#${CREATOR}>, mystery: @@game@@`);
+  });
+
+  /**
+   * The TITLE takes no variables at all. Discord renders an embed title as
+   * plain text - no markdown, no mentions - so substituting there would print
+   * a raw `<@2234...>` at the top of every panel in the server. A token typed
+   * into it stands literally, which is visible and which the admin then fixes.
+   */
+  it('leaves the title exactly as typed, tokens included', () => {
+    const embed = buildControlPanel(ROOM, withSettings({ title: 'Hi @@owner@@' }), view())!
+      .embeds[0]!;
+    expect(embed.title).toBe('Hi @@owner@@');
+    expect(embed.title).not.toContain('<@');
   });
 
   it('renders an ownerless room as nobody, in a custom description too', () => {

@@ -1034,6 +1034,33 @@ function validateSetting(
       if (value === facts.guildId) return drop('setting_invalid');
       return value;
 
+    /**
+     * The panel's colour, title and description. Strings and numbers, where
+     * `control_panel` beside it is booleans, which is why they are two keys and
+     * not one (see `format.ts`). The KEY is not checked here for the same
+     * reason it is not checked there: an entry a newer build writes is inert to
+     * this one, and refusing it would lose the whole style over one field.
+     */
+    case 'control_panel_style': {
+      const record = asRecord(value);
+      if (!record) return drop('setting_invalid');
+      const entries = Object.entries(record);
+      if (entries.length > limits.controlPanel)
+        return drop('setting_over_limit', { limit: limits.controlPanel, count: entries.length });
+      const kept: Record<string, string | number> = {};
+      for (const [field, raw] of entries) {
+        const okShape =
+          (typeof raw === 'string' && raw.length <= 4000) ||
+          (typeof raw === 'number' && Number.isFinite(raw));
+        if (!okShape || field.length > 40) {
+          notes.push({ code: 'setting_invalid', severity: 'dropped', subject: `${key}.entry` });
+          continue;
+        }
+        kept[field] = raw;
+      }
+      return Object.keys(kept).length > 0 ? kept : drop('setting_invalid');
+    }
+
     case 'control_panel': {
       const record = asRecord(value);
       if (!record) return drop('setting_invalid');

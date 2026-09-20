@@ -69,6 +69,7 @@ export const EXPORT_SETTINGS_KEYS = [
   'text_channel_name',
   'text_channel_role',
   'control_panel',
+  'control_panel_style',
 ] as const;
 
 export type ExportSettingsKey = (typeof EXPORT_SETTINGS_KEYS)[number];
@@ -127,6 +128,23 @@ export const exportedSettingsSchema = z.object({
    * control this one has never heard of must not fail the whole import.
    */
   control_panel: z.record(z.string(), z.boolean()).nullable(),
+  /**
+   * What the room control panel LOOKS like: its colour, title and description.
+   *
+   * A key of its own rather than more entries in `control_panel`, and the
+   * reason is the compatibility direction this file's `settingsReadSchema`
+   * comment describes. Zod strips an unknown KEY, so an older build reading a
+   * newer file ignores this one and accepts the rest. Zod REFUSES a known key
+   * whose value has a new shape, so putting a string title inside
+   * `control_panel`'s `record(string, boolean)` would make every file a
+   * customised guild writes unreadable by the build running on the other
+   * fleets - including the pre-import snapshot that IS the documented undo.
+   *
+   * Values are a union rather than `unknown` so junk still cannot reach the
+   * blob; the bot validates each entry again on read, since a colour outside
+   * Discord's range fails every panel render rather than one write.
+   */
+  control_panel_style: z.record(z.string(), z.union([z.string(), z.number()])).nullable(),
 });
 
 export type ExportedSettings = z.infer<typeof exportedSettingsSchema>;

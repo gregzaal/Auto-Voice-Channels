@@ -904,13 +904,13 @@ export class GuildSettingsService {
       return Promise.resolve(
         fail(
           key === CONTROL_PANEL_COLOR_KEY
-            ? 'That is not a colour I can use. Give me a hex code like `#c43bff`, or leave it blank to go back to the default.'
+            ? 'That is not a colour I can use. Give me a hex code like `#c43bff`, or submit it blank to go back to the default.'
             : 'That is empty once the spaces come off. Leave it blank to go back to the default.',
         ),
       );
     }
     return this.deps.guilds.mergeSettings(guildId, (existing) => {
-      const stored = existing?.settings?.[SETTINGS_KEYS.controlPanel];
+      const stored = existing?.settings?.[SETTINGS_KEYS.controlPanelStyle];
       // Copied whole, for the reason `setControlPanelEntry` documents at
       // length: golden rule 3, and `Object.fromEntries` so a stored
       // `__proto__` survives rather than invoking the prototype setter.
@@ -928,9 +928,9 @@ export class GuildSettingsService {
       else current[key] = cleaned;
       const result = ok(controlPanelAppearanceConfirmation(key, reset));
       if (Object.keys(current).length === 0) {
-        return { patch: {}, remove: [SETTINGS_KEYS.controlPanel], result };
+        return { patch: {}, remove: [SETTINGS_KEYS.controlPanelStyle], result };
       }
-      return { patch: { [SETTINGS_KEYS.controlPanel]: current }, result };
+      return { patch: { [SETTINGS_KEYS.controlPanelStyle]: current }, result };
     });
   }
 

@@ -273,7 +273,15 @@ export function buildControlPanel(
    */
   const embed: APIEmbed = new EmbedBuilder()
     .setColor(config.color)
-    .setTitle(renderPanelText(config.title, view).slice(0, CONTROL_PANEL_TITLE_MAX))
+    /**
+     * As typed, with NO substitution. Discord renders an embed title as plain
+     * text: no markdown, no mentions. `@@owner@@` there would print the raw
+     * `<@2234...>` at the top of every panel in the server, so the title takes
+     * no variables at all and the modal that edits it says so. An admin who
+     * types one anyway sees it standing literally and removes it, which is the
+     * same way an unknown token behaves in the description.
+     */
+    .setTitle(config.title.slice(0, CONTROL_PANEL_TITLE_MAX))
     .setDescription(
       renderPanelText(config.description, view).slice(0, CONTROL_PANEL_DESCRIPTION_MAX),
     )

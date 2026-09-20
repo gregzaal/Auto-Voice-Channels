@@ -149,10 +149,16 @@ export function buildAppearanceModal(
     .setStyle(isDescription ? TextInputStyle.Paragraph : TextInputStyle.Short)
     .setRequired(false)
     .setValue(current)
+    /**
+     * Only the DESCRIPTION advertises the two variables. Discord renders an
+     * embed title as plain text, so a mention in one prints as raw markup.
+     */
     .setPlaceholder(
       key === CONTROL_PANEL_COLOR_KEY
         ? 'A hex code like #c43bff. Blank for the default'
-        : `Blank for the default. ${CONTROL_PANEL_OWNER_TOKEN} and ${CONTROL_PANEL_CREATOR_TOKEN} work here`,
+        : isDescription
+          ? `Blank for the default. ${CONTROL_PANEL_OWNER_TOKEN} and ${CONTROL_PANEL_CREATOR_TOKEN} work here`
+          : 'Blank for the default. Plain text only, no variables',
     );
   if (key === CONTROL_PANEL_COLOR_KEY) input.setMaxLength(7);
   else if (isDescription) input.setMaxLength(CONTROL_PANEL_DESCRIPTION_MAX);
@@ -173,8 +179,8 @@ export function buildAppearanceModal(
  * self-referential copy AGENTS.md rules out.
  */
 const WHAT_IT_IS =
-  'The control panel is a message sent to every voice chat so that members can see, and easily ' +
-  'reach, the things they can do with their room. Choose which buttons it shows below.';
+  'The control panel is a message posted in every room this server makes, so members can see, and ' +
+  'easily reach, the things they can do with their own room. Each button can be switched off.';
 
 /**
  * What this server's rooms actually get, in three states rather than two.
@@ -267,9 +273,9 @@ export function buildControlSettingsPanel(
       );
     }
     // Three more, in their own row: they change what the panel says rather than
-    // what it carries, so mixing them in with the toggles would read as four
-    // more buttons to switch off. Four rows of five is Discord's ceiling and
-    // this is the fourth.
+    // what it carries, so mixing them in with the toggles would read as three
+    // more buttons to switch off. Discord's ceiling is FIVE action rows; this
+    // is the fourth, and the whole-panel row below is the fifth.
     rows.push(
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         (Object.keys(APPEARANCE_FACES) as ControlPanelAppearanceKey[]).map((key) =>

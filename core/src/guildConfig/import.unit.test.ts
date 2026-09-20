@@ -1104,3 +1104,73 @@ describe('the differ writes no auth state, by construction', () => {
     expect(serialized).not.toContain('xxxx');
   });
 });
+
+/**
+ * The room control panel's APPEARANCE round trip (2026-09-20).
+ *
+ * It lives in `control_panel_style`, not in `control_panel`, and these tests
+ * exist because putting it in `control_panel` broke the round trip outright:
+ * that key is typed `record(string, boolean)`, so a string title made the whole
+ * exported file unreadable, including the pre-import snapshot that is the
+ * documented undo.
+ */
+describe('control panel appearance round trip', () => {
+  const withSettings = (settings: Record<string, unknown>): GuildConfigFile =>
+    nativeFile({ settings: { ...nativeFile().settings, ...settings } as never });
+
+  it('accepts a file carrying a title, a description and a colour', () => {
+    const parsed = parseNativeFile(
+      withSettings({
+        control_panel_style: {
+          title: 'Your room',
+          description: 'Owner: @@owner@@',
+          color: 12860415,
+        },
+      }),
+    );
+    expect(parsed.ok).toBe(true);
+  });
+
+  /** The regression that started this: a string inside the boolean-typed key. */
+  it('still refuses a string inside the switches key, which is why they are two keys', () => {
+    const parsed = parseNativeFile(withSettings({ control_panel: { title: 'Your room' } }));
+    expect(parsed.ok).toBe(false);
+  });
+
+  it('accepts both keys together, and either alone', () => {
+    for (const settings of [
+      { control_panel: { kick: false } },
+      { control_panel_style: { title: 'T' } },
+      { control_panel: { kick: false }, control_panel_style: { title: 'T' } },
+      { control_panel_style: null },
+    ]) {
+      expect(parseNativeFile(withSettings(settings)).ok).toBe(true);
+    }
+  });
+
+  /**
+   * An older build reading a newer file must IGNORE this key rather than refuse
+   * the file, which is the property that made a separate key the right answer.
+   * Zod strips unknown keys, so a key no schema knows behaves the same way.
+   */
+  it('ignores a style key an older schema would not know, rather than refusing', () => {
+    const parsed = parseNativeFile(withSettings({ some_future_key: { a: 1 } }));
+    expect(parsed.ok).toBe(true);
+  });
+
+  it('carries the appearance through the import plan', () => {
+    const plan = planOf(
+      withSettings({ control_panel_style: { title: 'Your room', color: 12860415 } }),
+    );
+    expect(plan.settingsPatch.control_panel_style).toEqual({
+      title: 'Your room',
+      color: 12860415,
+    });
+  });
+
+  /** Junk still cannot reach the blob: shape is enforced entry by entry. */
+  it('drops an entry of the wrong shape and keeps the rest', () => {
+    const plan = planOf(withSettings({ control_panel_style: { title: 'Kept', color: { no: 1 } } }));
+    expect(plan.settingsPatch.control_panel_style).toEqual({ title: 'Kept' });
+  });
+});

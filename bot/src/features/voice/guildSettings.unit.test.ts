@@ -136,9 +136,9 @@ describe('readContact', () => {
 
 describe('readControlPanel', () => {
   /**
-   * The panel is OFF for a server that has never configured it, while the
-   * feature is proved on beta. The control defaults still apply underneath, so
-   * turning it on gives that server the intended set rather than everything.
+   * On for a server that has never configured it, since 2026-09-20. The control
+   * defaults still apply underneath, so that server gets the intended set of
+   * buttons rather than every one of them.
    */
   it('is on for a server that has never configured it', () => {
     const config = readControlPanel({});

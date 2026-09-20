@@ -29,6 +29,7 @@ export const SETTINGS_KEYS = {
   textChannelName: 'text_channel_name',
   textChannelRole: 'text_channel_role',
   controlPanel: 'control_panel',
+  controlPanelStyle: 'control_panel_style',
 } as const;
 
 /**
@@ -390,10 +391,20 @@ export type ControlPanelControl = (typeof CONTROL_PANEL_CONTROLS)[number];
  * not a change to make for a whole install base on the strength of a dev guild.
  *
  * Moving this moves every server that has not said otherwise, which is the
- * point of storing only a DEPARTURE from it: a server that switched the panel
- * off keeps it off, because `false` differs from this and is stored. Change the
- * `/docs/commands` row and `feature-parity.md` §3.4 in the same commit as any
- * future flip - both state which way round this is.
+ * point of storing only a DEPARTURE from it.
+ *
+ * **Flipping it is not symmetric, and this one was not clean.** Only a
+ * departure is stored, so "off" under the OLD default was the ABSENCE of a key,
+ * indistinguishable from never having configured it at all. Every guild that
+ * switched the panel off during the one release where off was the default
+ * therefore has it switched back on here, and no migration can find them: the
+ * information was never written down. Guilds that switch it off from now on
+ * store `false`, which differs from this default and survives. A flip back
+ * would have the mirror of this problem, so do that one by writing explicit
+ * values first.
+ *
+ * Change the `/docs/commands` row and `feature-parity.md` §3.4 in the same
+ * commit as any future flip - both state which way round this is.
  */
 export const CONTROL_PANEL_DEFAULT_ENABLED = true;
 
@@ -422,12 +433,14 @@ export const CONTROL_PANEL_ENABLED_KEY = 'panel';
 export type ControlPanelEntry = ControlPanelControl | typeof CONTROL_PANEL_ENABLED_KEY;
 
 /**
- * The three appearance entries, which share the same map as the switches.
+ * The three appearance entries, which live in their OWN settings key.
  *
- * They hold a string or a number rather than a boolean, which is why
- * {@link readControlPanel} checks the key before the value type. None of them
- * can collide with a control id: {@link isControlPanelControl} answers against
- * the fixed list, and none of `color`, `title` or `description` is on it.
+ * `control_panel_style`, not more entries in `control_panel`, because the
+ * export format types that key as `record(string, boolean)`: a string title
+ * inside it makes the whole exported file unreadable by any build whose schema
+ * predates this change, and one of those files is the pre-import snapshot that
+ * is the documented undo. Zod strips an unknown KEY and ignores it; it REFUSES
+ * a known key whose value has a new shape. See `core/src/guildConfig/format.ts`.
  */
 export const CONTROL_PANEL_COLOR_KEY = 'color';
 export const CONTROL_PANEL_TITLE_KEY = 'title';
@@ -537,33 +550,35 @@ export function readControlPanel(settings: Record<string, unknown>): ControlPane
     description: CONTROL_PANEL_DEFAULT_DESCRIPTION,
   };
   const raw = settings[SETTINGS_KEYS.controlPanel];
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return config;
-  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    // The key decides which shape is expected, and a value of the wrong shape
-    // falls through to the default rather than being coerced. `/import` can
-    // hand us anything, including a colour somebody wrote as a `"#c43bff"`
-    // string, and a half-parsed one would be worse than the brand colour.
+  if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
+    for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof value !== 'boolean') continue;
+      if (key === CONTROL_PANEL_ENABLED_KEY) {
+        config.enabled = value;
+        continue;
+      }
+      if (isControlPanelControl(key)) config.controls[key] = value;
+    }
+  }
+  /**
+   * The appearance, from its own key. A value of the wrong shape falls through
+   * to the default rather than being coerced: `/import` can hand us anything,
+   * including a colour somebody wrote as a `"#c43bff"` string, and a
+   * half-parsed one would be worse than the brand colour.
+   */
+  const style = settings[SETTINGS_KEYS.controlPanelStyle];
+  if (typeof style !== 'object' || style === null || Array.isArray(style)) return config;
+  for (const [key, value] of Object.entries(style as Record<string, unknown>)) {
     if (key === CONTROL_PANEL_COLOR_KEY) {
       const color = readPanelColor(value);
       if (color !== null) config.color = color;
-      continue;
-    }
-    if (key === CONTROL_PANEL_TITLE_KEY) {
+    } else if (key === CONTROL_PANEL_TITLE_KEY) {
       const title = readPanelText(value, CONTROL_PANEL_TITLE_MAX);
       if (title !== null) config.title = title;
-      continue;
-    }
-    if (key === CONTROL_PANEL_DESCRIPTION_KEY) {
+    } else if (key === CONTROL_PANEL_DESCRIPTION_KEY) {
       const description = readPanelText(value, CONTROL_PANEL_DESCRIPTION_MAX);
       if (description !== null) config.description = description;
-      continue;
     }
-    if (typeof value !== 'boolean') continue;
-    if (key === CONTROL_PANEL_ENABLED_KEY) {
-      config.enabled = value;
-      continue;
-    }
-    if (isControlPanelControl(key)) config.controls[key] = value;
   }
   return config;
 }
