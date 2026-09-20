@@ -43,6 +43,10 @@ describe('formatPlan', () => {
      * have to wait for it to. "Manage anytime" was true and useless.
      */
     expect(line).toContain('the first charge waits until the trial');
+    // A markdown link, not a bare URL. It lands in the embed DESCRIPTION,
+    // where markdown renders; plain message content would show it raw.
+    expect(line).toContain(`[Subscribe now](${LINK})`);
+    expect(line).not.toContain(`ends: ${LINK}`);
   });
 
   it('does not promise a deferred charge once the trial has lapsed', () => {
@@ -745,5 +749,46 @@ describe('formatPlan across every auth status', () => {
         }),
       ).toContain('Self-hosted');
     }
+  });
+});
+
+/**
+ * `/setup` is the surface an admin actually sits in front of, which makes it
+ * the one place worth asking for a review from. Added 2026-09-20.
+ */
+describe('setupPanel branding', () => {
+  const panelEmbed = (over: Partial<Parameters<typeof buildSetupPanel>[0]> = {}) =>
+    buildSetupPanel({
+      enabled: true,
+      isAdmin: true,
+      plan: '🆓 Free forever',
+      guildId: '462606582367125509',
+      missingPermissions: [],
+      primaries: [{ channelId: 'p1' }],
+      managed: [],
+      ...over,
+    } as Parameters<typeof buildSetupPanel>[0]).embeds![0]! as {
+      fields?: { name: string; value: string; inline?: boolean }[];
+      footer?: { text: string; icon_url?: string };
+    };
+
+  it('ends with the review links, after the note rather than before it', () => {
+    const fields = panelEmbed({ note: 'Saved.' }).fields!;
+    const last = fields[fields.length - 1]!;
+    expect(last.value).toContain('top.gg');
+    expect(last.value).toContain('support server');
+    expect(last.inline).toBe(false);
+    expect(fields[fields.length - 2]!.value).toBe('Saved.');
+  });
+
+  it('carries the brand footer', () => {
+    expect(panelEmbed().footer!.text).toBe(
+      'auto-voice.io  ·  Free and open source, dynamic voice channels.',
+    );
+  });
+
+  /** Discord caps an embed at 25 fields and refuses the message past it. */
+  it('stays inside the field cap', () => {
+    expect(panelEmbed({ note: 'x' }).fields!.length).toBeLessThanOrEqual(25);
   });
 });

@@ -115,3 +115,58 @@ describe('templatePanel', () => {
     expect(json).toContain('avc:adopt:cancel:99');
   });
 });
+
+/**
+ * The variables block became fields (2026-09-20). Eleven variables separated by
+ * middots read as one wall of punctuation; six fields read as six things.
+ */
+describe('templatePanel variables and branding', () => {
+  const embedOf = (opts: Parameters<typeof renderEditorPanel>[3] = {}) =>
+    renderEditorPanel('channel', '123', state, opts).embeds![0]! as {
+      fields?: { name: string; value: string; inline?: boolean }[];
+      footer?: { text: string; icon_url?: string };
+    };
+
+  it('gives each variable its own inline field', () => {
+    const fields = embedOf().fields!;
+    const names = fields.map((f) => f.name);
+    for (const v of ['`@@game_name@@`', '`@@owner@@`', '`@@num@@`', '`##`', '`@@nato@@`']) {
+      expect(names).toContain(v);
+    }
+    expect(fields.find((f) => f.name === '`@@game_name@@`')!.inline).toBe(true);
+    // A handful, not all 25 Discord allows: the rest are one click away.
+    expect(names).not.toContain('`@@slots@@`');
+  });
+
+  it('ends with the docs link and the review links, neither of them inline', () => {
+    const fields = embedOf().fields!;
+    const last = fields[fields.length - 1]!;
+    const secondLast = fields[fields.length - 2]!;
+    expect(secondLast.value).toContain('Full documentation');
+    expect(secondLast.value).toContain('Plain text works too');
+    expect(secondLast.inline).toBe(false);
+    expect(last.value).toContain('top.gg');
+    expect(last.value).toContain('support server');
+    expect(last.inline).toBe(false);
+  });
+
+  /** Discord caps an embed at 25 fields and refuses the message past it. */
+  it('stays inside the field cap with a note as well', () => {
+    expect(embedOf({ note: 'saved' }).fields!.length).toBeLessThanOrEqual(25);
+  });
+
+  /**
+   * The footer used to be spent entirely on "✅ Saved". Both now share it: the
+   * render right after a save is the one an admin is definitely looking at, so
+   * it is the wrong one to drop the branding from.
+   */
+  it('carries the brand footer, with the save confirmation in front of it', () => {
+    expect(embedOf().footer!.text).toBe(
+      'auto-voice.io  ·  Free and open source, dynamic voice channels.',
+    );
+    expect(embedOf().footer!.icon_url).toBe('https://auto-voice.io/logo-64.png');
+    const saved = embedOf({ updated: true }).footer!.text;
+    expect(saved).toContain('✅ Saved');
+    expect(saved).toContain('auto-voice.io');
+  });
+});

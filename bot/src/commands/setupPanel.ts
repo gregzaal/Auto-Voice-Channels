@@ -16,6 +16,7 @@ import {
   type InteractionReplyOptions,
   type InteractionUpdateOptions,
 } from 'discord.js';
+import { PANEL_FOOTER, PANEL_LINKS_FIELD } from '../features/panelBranding.js';
 import {
   priceSentence,
   tierById,
@@ -312,8 +313,8 @@ export function formatPlan(opts: PlanInput): string {
      */
     return (
       `🎟️ **Free trial**, ${days} day${days === 1 ? '' : 's'} left, then the ${tier.label} ` +
-      `tier (${priceLabel}). Subscribe now and the first charge waits until the trial ` +
-      `ends: ${link}`
+      `tier (${priceLabel}). [Subscribe now](${link}) and the first charge waits until the ` +
+      'trial ends.'
     );
   }
   if (days !== null) {
@@ -544,10 +545,15 @@ export function buildSetupPanel(input: SetupPanelInput): InteractionReplyOptions
   }
   // The outcome of whatever action refreshed this panel, in a nameless field so
   // it reads as a footnote to the new state rather than a section of its own.
-  if (input.note) fields.push({ name: '​', value: input.note.slice(0, 1024) });
+  if (input.note) fields.push({ name: '\u200b', value: input.note.slice(0, 1024) });
+  // Last, after the note, because it is a footnote to the whole panel rather
+  // than to whatever action just ran. `/setup` is the surface an admin actually
+  // sits in front of, which makes it the one place worth asking from.
+  fields.push(PANEL_LINKS_FIELD);
 
   const builder = new EmbedBuilder()
     .setTitle('Auto-Voice-Channels · Setup')
+    .setFooter(PANEL_FOOTER)
     .setColor(STATE_COLOR[state]);
   const description = headlineLines(input, state).join('\n');
   if (description) builder.setDescription(description);

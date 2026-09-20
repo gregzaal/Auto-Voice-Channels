@@ -7,9 +7,11 @@ import {
   TextInputBuilder,
   TextInputStyle,
   type APIEmbed,
+  type APIEmbedField,
   type InteractionReplyOptions,
 } from 'discord.js';
 import type { EditorField, EditorScope, EditorState } from '../features/voice/index.js';
+import { PANEL_FOOTER, PANEL_LINKS_FIELD, panelFooterWith } from '../features/panelBranding.js';
 
 /** Custom-id namespace for the `/name` and `/template` editor panel. */
 export const EDITOR_PREFIX = 'avc:tpl:';
@@ -86,11 +88,41 @@ export function buildAdoptPrompt(channelId: string, originalName: string): Inter
 /** Max length of a template in the edit modal (well above any rendered-output cap). */
 const TEMPLATE_INPUT_MAX = 1000;
 const DOCS_LINK = 'https://auto-voice.io/docs/commands/template';
-const VARIABLES_HELP =
-  '`##` number · `@@game_name@@` game · `@@owner@@` name · `@@num@@` members\n' +
-  '`@@nato@@` Alpha/Bravo… · `[[a/b]]` random · `<<one/many>>` plural · `{{cond ?? a // b}}` if\n' +
-  '`@@slots@@` free places · `{{FULL ?? …}}` room is full · `{{PRIVATE ?? …}}` room is locked\n' +
-  `_Plain text works too. **[Full documentation & variables ↗](${DOCS_LINK})**_`;
+
+/**
+ * The handful of variables worth putting on the panel, as fields.
+ *
+ * A field each, inline, rather than the three dense lines of backticks this
+ * used to be: eleven variables separated by middots read as one wall of
+ * punctuation, and an admin scanning for "how do I put the game in the name"
+ * had to parse the whole block to find it.
+ *
+ * **A handful, not all of them.** Discord allows 25 fields and filling them
+ * would be the same wall in a different shape. These six are the ones a first
+ * template is actually built from; everything else is one click away in the
+ * docs, which is what the last field is for. `@@slots@@`, `<<one/many>>`,
+ * `{{FULL}}` and `{{PRIVATE}}` all came off the panel and none came out of the
+ * engine.
+ *
+ * An EXAMPLE where an example is clearer than a description, which is most of
+ * them: `Halo` says what `@@game_name@@` does faster than "the game being
+ * played" does.
+ */
+const VARIABLE_FIELDS: APIEmbedField[] = [
+  { name: '`@@game_name@@`', value: 'The game being played, e.g. `Halo`', inline: true },
+  { name: '`@@owner@@`', value: 'Whoever made the room, e.g. `Kay`', inline: true },
+  { name: '`@@num@@`', value: 'How many are in it, e.g. `3`', inline: true },
+  { name: '`##`', value: 'Counts up per room: `1`, `2`, `3`', inline: true },
+  { name: '`@@nato@@`', value: 'Counts up as `Alpha`, `Bravo`, `Charlie`', inline: true },
+  { name: '`[[red/blue]]`', value: 'Picks one of them at random', inline: true },
+];
+
+/** The way out to everything the six above leave out. Never inline: it is a footnote. */
+const VARIABLES_MORE: APIEmbedField = {
+  name: '\u200b',
+  value: `_Plain text works too._ **[Full documentation & variables ↗](${DOCS_LINK})**`,
+  inline: false,
+};
 
 function fieldValue(template: string | undefined, fallbackHint: string): string {
   if (template === undefined) return fallbackHint;
@@ -136,11 +168,13 @@ export function renderEditorPanel(
           `${fieldValue(state.status.currentTemplate, '_(inheriting default)_')}\n` +
           `Preview: ${state.status.preview ? `\`${truncate(state.status.preview)}\`` : '_(none)_'}`,
       },
-      { name: 'Variables', value: VARIABLES_HELP },
+      ...VARIABLE_FIELDS,
     )
+    .setFooter(opts.updated ? panelFooterWith('✅ Saved') : PANEL_FOOTER)
     .toJSON();
-  if (opts.note) embed.fields!.push({ name: '​', value: opts.note });
-  if (opts.updated) embed.footer = { text: '✅ Saved' };
+  if (opts.note) embed.fields!.push({ name: '\u200b', value: opts.note });
+  // Last, after the note: both are footnotes and this is the outer one.
+  embed.fields!.push(VARIABLES_MORE, PANEL_LINKS_FIELD);
 
   const editRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
