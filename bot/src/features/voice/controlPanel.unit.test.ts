@@ -107,7 +107,8 @@ describe('buildControlPanel', () => {
   it('names the owner and the creator channel, as mentions', () => {
     const panel = buildControlPanel(ROOM, defaults(), view());
     expect(panel!.embeds[0]!.description).toBe(
-      `This room belongs to <@${OWNER}>. Make your own with <#${CREATOR}>`,
+      `This room belongs to <@${OWNER}>.
+Make your own with <#${CREATOR}>`,
     );
   });
 
@@ -118,10 +119,12 @@ describe('buildControlPanel', () => {
     expect(panel!.embeds[0]!.description).not.toContain('<@null>');
   });
 
-  it('carries the logo, the title and the footer', () => {
+  it('carries the title and the footer, and no thumbnail', () => {
     const embed = buildControlPanel(ROOM, defaults(), view())!.embeds[0]!;
     expect(embed.title).toBe('Control your room');
-    expect(embed.thumbnail?.url).toBe('https://auto-voice.io/logo.png');
+    // The footer icon is the only place the mark appears: a thumbnail repeated
+    // it a few lines above, which is decoration rather than information.
+    expect(embed.thumbnail).toBeUndefined();
     expect(embed.footer?.text).toBe(
       'auto-voice.io  ·  Free and open source, dynamic voice channels.',
     );

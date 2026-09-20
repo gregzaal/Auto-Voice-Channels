@@ -122,8 +122,12 @@ const NAME_INPUT_MAX = 100;
 /** AVC blurple, matching every other panel. */
 const BLURPLE = 0x5865f2;
 
-/** The logo, served from the site. Verified live before it was put here. */
-const LOGO_URL = `${SITE_URL}/logo.png`;
+/**
+ * The logo, served from the site and verified live before it was put here.
+ *
+ * The footer icon only. A thumbnail carried the same mark a second time, a few
+ * lines above it, which is decoration rather than information.
+ */
 const LOGO_ICON_URL = `${SITE_URL}/logo-64.png`;
 
 /** Where the Name field's "templates" link points. */
@@ -156,7 +160,7 @@ interface ControlFace {
  * control whose relevance is a fact about the room rather than about the reader.
  */
 const PRIVACY_FACES: Record<'lock' | 'unlock', ControlFace> = {
-  lock: { label: 'Private', emoji: '🔒', blurb: 'Lock the room, people must ask to enter' },
+  lock: { label: 'Private', emoji: '🔒', blurb: 'Lock the room, people ask to enter' },
   unlock: { label: 'Public', emoji: '🔓', blurb: 'Open the room up to everyone again' },
 };
 
@@ -176,7 +180,7 @@ export const CONTROL_PANEL_FACES: Record<Exclude<ControlPanelControl, 'privacy'>
   claim: { label: 'Claim', emoji: '👑', blurb: 'Take over a room with nobody in charge' },
   transfer: { label: 'Transfer', emoji: '🤝', blurb: 'Hand the room to someone else in it' },
   kick: { label: 'Kick', emoji: '🗳️', blurb: 'Start a vote to remove someone' },
-  info: { label: 'Info', emoji: 'ℹ️', blurb: 'See how this room is named and configured' },
+  info: { label: 'Info', emoji: 'ℹ️', blurb: 'See how this room is configured' },
 };
 
 /** How one control looks right now: its action id and its face. */
@@ -254,11 +258,10 @@ export function buildControlPanel(
   const embed: APIEmbed = new EmbedBuilder()
     .setColor(BLURPLE)
     .setTitle('Control your room')
-    .setThumbnail(LOGO_URL)
     .setDescription(
       (view.ownerId
         ? `This room belongs to <@${view.ownerId}>.`
-        : 'This room has no owner right now.') + ` Make your own with <#${view.primaryChannelId}>`,
+        : 'This room has no owner right now.') + `\nMake your own with <#${view.primaryChannelId}>`,
     )
     .addFields(fields)
     .setFooter({
