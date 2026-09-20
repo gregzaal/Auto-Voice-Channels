@@ -382,6 +382,20 @@ export type ControlPanelControl = (typeof CONTROL_PANEL_CONTROLS)[number];
  * **Only a departure from this map is ever stored**, so changing a default here
  * changes it for every server that has not said otherwise, which is the point.
  */
+/**
+ * Whether a server that has never run `/controlpanel` gets the panel at all.
+ *
+ * **Off while the feature is being proved on the beta fleet.** It is a message
+ * posted into every room of every server, which is not a change to make for a
+ * whole install base on the strength of a dev guild. A server that wants it
+ * turns it on with `/controlpanel`; beta does exactly that.
+ *
+ * Flip this to `true` to make it the default for everyone, and change the
+ * `/docs/commands` row and `feature-parity.md` §3.4 in the same commit - both
+ * state which way round this is.
+ */
+export const CONTROL_PANEL_DEFAULT_ENABLED = false;
+
 export const CONTROL_PANEL_DEFAULTS: Record<ControlPanelControl, boolean> = {
   privacy: true,
   limit: true,
@@ -440,7 +454,7 @@ export interface ControlPanelConfig {
  */
 export function readControlPanel(settings: Record<string, unknown>): ControlPanelConfig {
   const config: ControlPanelConfig = {
-    enabled: true,
+    enabled: CONTROL_PANEL_DEFAULT_ENABLED,
     controls: { ...CONTROL_PANEL_DEFAULTS },
   };
   const raw = settings[SETTINGS_KEYS.controlPanel];

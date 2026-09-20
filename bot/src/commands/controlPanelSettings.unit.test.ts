@@ -17,6 +17,13 @@ import {
 
 const GUILD = '460459401086763010';
 
+/**
+ * A server that has switched the panel on. The panel is off for one that has
+ * never configured it, which `buildControlSettingsPanel` renders as its own
+ * state and which has its own test below.
+ */
+const ON = { control_panel: { panel: true } };
+
 /** The service with a `mergeSettings` that reports what it would write. */
 function makeService(settings: Record<string, unknown> = {}) {
   const writes: { patch: Record<string, unknown>; remove: readonly string[] }[] = [];
@@ -85,7 +92,7 @@ describe('control settings custom ids', () => {
 
 describe('buildControlSettingsPanel', () => {
   it('describes every control in a field, with its state', () => {
-    const json = buildControlSettingsPanel(readControlPanel({}));
+    const json = buildControlSettingsPanel(readControlPanel(ON));
     const fields = json.embeds![0]! as { fields?: { name: string; value: string }[] };
     expect(fields.fields).toHaveLength(CONTROL_PANEL_CONTROLS.length);
     // Claim is off by default, Size is on, and the state is in the field name.
@@ -94,7 +101,7 @@ describe('buildControlSettingsPanel', () => {
   });
 
   it('gives every control a toggle button carrying its state', () => {
-    const json = JSON.stringify(buildControlSettingsPanel(readControlPanel({})));
+    const json = JSON.stringify(buildControlSettingsPanel(readControlPanel(ON)));
     for (const c of CONTROL_PANEL_CONTROLS) expect(json).toContain(controlToggleId(c));
     expect(json).toContain('✅');
     expect(json).toContain('❌');
@@ -119,7 +126,7 @@ describe('buildControlSettingsPanel', () => {
       buildControlSettingsPanel(readControlPanel({ control_panel: { panel: false } })),
     );
     expect([...off.matchAll(/"style":3/g)]).toHaveLength(1);
-    const on = JSON.stringify(buildControlSettingsPanel(readControlPanel({})));
+    const on = JSON.stringify(buildControlSettingsPanel(readControlPanel(ON)));
     expect(on).not.toMatch(/"style":(1|3|4)/);
     expect(on).not.toContain('"disabled":true');
   });
@@ -127,13 +134,20 @@ describe('buildControlSettingsPanel', () => {
   /** Every button off is a third state: the panel is on and yet nothing is posted. */
   it('says so when every button is off', () => {
     const none = Object.fromEntries(CONTROL_PANEL_CONTROLS.map((c) => [c, false]));
-    const json = buildControlSettingsPanel(readControlPanel({ control_panel: none }));
+    const json = buildControlSettingsPanel(
+      readControlPanel({ control_panel: { ...none, panel: true } }),
+    );
     expect(JSON.stringify(json.embeds![0])).toContain('no control panel at all');
   });
 
   it('follows the copy rules', () => {
     const none = Object.fromEntries(CONTROL_PANEL_CONTROLS.map((c) => [c, false]));
-    for (const settings of [{}, { control_panel: { panel: false } }, { control_panel: none }]) {
+    for (const settings of [
+      ON,
+      {},
+      { control_panel: { panel: false } },
+      { control_panel: { ...none, panel: true } },
+    ]) {
       const text = JSON.stringify(
         buildControlSettingsPanel(readControlPanel(settings), { note: 'a note' }),
       );
@@ -175,10 +189,15 @@ describe('setControlPanelEntry', () => {
     expect(writes[0]!.patch).toEqual({ control_panel: { claim: true } });
   });
 
+  /** The panel is off by default, so switching it ON is the departure stored. */
   it('switches the whole panel through the same key', async () => {
-    const { service, writes } = makeService({ control_panel: { kick: false } });
-    await service.setControlPanelEntry(GUILD, 'panel', false);
-    expect(writes[0]!.patch).toEqual({ control_panel: { kick: false, panel: false } });
+    const on = makeService({ control_panel: { kick: false } });
+    await on.service.setControlPanelEntry(GUILD, 'panel', true);
+    expect(on.writes[0]!.patch).toEqual({ control_panel: { kick: false, panel: true } });
+
+    const off = makeService({ control_panel: { kick: false, panel: true } });
+    await off.service.setControlPanelEntry(GUILD, 'panel', false);
+    expect(off.writes[0]!.patch).toEqual({ control_panel: { kick: false } });
   });
 
   /**

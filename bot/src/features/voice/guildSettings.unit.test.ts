@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_CHANNEL_NAME_TEMPLATE } from './nameTemplate.js';
 import {
   CONTROL_PANEL_CONTROLS,
+  CONTROL_PANEL_DEFAULT_ENABLED,
   CONTROL_PANEL_DEFAULTS,
   controlPanelConfirmation,
   readControlPanel,
@@ -134,9 +135,15 @@ describe('readContact', () => {
 });
 
 describe('readControlPanel', () => {
-  it('is the defaults for a server that has never configured it', () => {
+  /**
+   * The panel is OFF for a server that has never configured it, while the
+   * feature is proved on beta. The control defaults still apply underneath, so
+   * turning it on gives that server the intended set rather than everything.
+   */
+  it('is off for a server that has never configured it', () => {
     const config = readControlPanel({});
-    expect(config.enabled).toBe(true);
+    expect(config.enabled).toBe(false);
+    expect(CONTROL_PANEL_DEFAULT_ENABLED).toBe(false);
     expect(config.controls).toEqual(CONTROL_PANEL_DEFAULTS);
   });
 
@@ -153,7 +160,7 @@ describe('readControlPanel', () => {
   });
 
   it('applies exactly what the blob names, in either direction', () => {
-    const config = readControlPanel({ control_panel: { kick: false, claim: true } });
+    const config = readControlPanel({ control_panel: { panel: true, kick: false, claim: true } });
     expect(config.enabled).toBe(true);
     expect(config.controls.kick).toBe(false);
     expect(config.controls.claim).toBe(true);
@@ -185,7 +192,7 @@ describe('readControlPanel', () => {
   it('treats a corrupt key as never configured', () => {
     for (const raw of [null, 'off', 42, ['kick']]) {
       const config = readControlPanel({ control_panel: raw });
-      expect(config.enabled).toBe(true);
+      expect(config.enabled).toBe(CONTROL_PANEL_DEFAULT_ENABLED);
       expect(config.controls).toEqual(CONTROL_PANEL_DEFAULTS);
     }
   });

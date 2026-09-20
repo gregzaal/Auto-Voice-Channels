@@ -12,6 +12,7 @@ import {
 } from './controlPanel.js';
 import {
   CONTROL_PANEL_CONTROLS,
+  CONTROL_PANEL_DEFAULT_ENABLED,
   CONTROL_PANEL_DEFAULTS,
   readControlPanel,
   type ControlPanelConfig,
@@ -21,8 +22,14 @@ const ROOM = '123456789012345678';
 const OWNER = '223456789012345678';
 const CREATOR = '323456789012345678';
 
-/** The defaults, which is what an unconfigured guild reads as. */
-const defaults = (): ControlPanelConfig => readControlPanel({});
+/**
+ * The control defaults, with the panel itself switched on.
+ *
+ * The panel is OFF for a server that has never configured it, so every test
+ * about what a panel looks like has to turn it on first, exactly as a server
+ * does with `/controlpanel`. The off-by-default behaviour has its own test.
+ */
+const defaults = (): ControlPanelConfig => readControlPanel({ control_panel: { panel: true } });
 
 /** Everything on, for the tests about layout rather than about defaults. */
 function allOn(): ControlPanelConfig {
@@ -77,6 +84,16 @@ describe('control panel custom ids', () => {
 });
 
 describe('buildControlPanel', () => {
+  /**
+   * Off while the feature is proved on beta. A message posted into every room
+   * of every server is not a default to take on a dev guild's say-so.
+   */
+  it('is nothing at all for a server that has never configured it', () => {
+    expect(CONTROL_PANEL_DEFAULT_ENABLED).toBe(false);
+    expect(readControlPanel({}).enabled).toBe(false);
+    expect(buildControlPanel(ROOM, readControlPanel({}), view())).toBeNull();
+  });
+
   it('shows the defaults, which leave Claim and Transfer out', () => {
     const ids = buttonIds(buildControlPanel(ROOM, defaults(), view()));
     expect(ids).toContain(controlPanelId('lock', ROOM));

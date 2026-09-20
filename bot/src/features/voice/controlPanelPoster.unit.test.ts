@@ -26,6 +26,12 @@ const view = (over: Partial<RoomPanelView> = {}): RoomPanelView => ({
   ...over,
 });
 
+/**
+ * A server that has switched the panel on, which is what every test here needs:
+ * the panel is off for a server that has never configured it.
+ */
+const ON: Record<string, unknown> = { control_panel: { panel: true } };
+
 /** The fingerprint the panel would have for a given settings blob and view. */
 function fingerprintFor(settings: Record<string, unknown>, v: RoomPanelView): string {
   return controlPanelFingerprint(buildControlPanel(ROOM, readControlPanel(settings), v));
@@ -50,7 +56,7 @@ function setup(
   const poster = new ControlPanelPoster({
     send: send as never,
     edit: edit as never,
-    guilds: { ensure: vi.fn().mockResolvedValue({ settings: opts.settings ?? {} }) } as never,
+    guilds: { ensure: vi.fn().mockResolvedValue({ settings: opts.settings ?? ON }) } as never,
     secondaries: {
       get: vi
         .fn()
@@ -89,7 +95,7 @@ describe('ControlPanelPoster.postForRoom', () => {
       ROOM,
       MESSAGE,
       'companion-1',
-      fingerprintFor({}, view()),
+      fingerprintFor(ON, view()),
     );
     expect(count).toHaveBeenCalledWith('posted', GUILD);
   });
@@ -181,7 +187,7 @@ describe('ControlPanelPoster.refreshForRoom', () => {
    */
   it('issues no request at all when nothing about the room changed', async () => {
     const { poster, edit, setControlPanelMessage, count } = setup();
-    await poster.refreshForRoom(GUILD, ROOM, posted({}, view()), view());
+    await poster.refreshForRoom(GUILD, ROOM, posted(ON, view()), view());
     expect(edit).not.toHaveBeenCalled();
     expect(setControlPanelMessage).not.toHaveBeenCalled();
     expect(count).not.toHaveBeenCalled();
@@ -193,7 +199,7 @@ describe('ControlPanelPoster.refreshForRoom', () => {
     ['a size was set', view({ userLimit: 6 })],
   ])('edits the panel when %s', async (_what, changed) => {
     const { poster, edit, setControlPanelMessage, count } = setup();
-    await poster.refreshForRoom(GUILD, ROOM, posted({}, view()), changed);
+    await poster.refreshForRoom(GUILD, ROOM, posted(ON, view()), changed);
     expect(edit).toHaveBeenCalledTimes(1);
     expect(edit.mock.calls[0]![0]).toBe(ROOM);
     expect(edit.mock.calls[0]![1]).toBe(MESSAGE);
@@ -201,14 +207,14 @@ describe('ControlPanelPoster.refreshForRoom', () => {
       ROOM,
       MESSAGE,
       ROOM,
-      fingerprintFor({}, changed),
+      fingerprintFor(ON, changed),
     );
     expect(count).toHaveBeenCalledWith('updated', GUILD);
   });
 
   it('edits the panel when the server switches a button off', async () => {
-    const { poster, edit } = setup({ settings: { control_panel: { kick: false } } });
-    await poster.refreshForRoom(GUILD, ROOM, posted({}, view()), view());
+    const { poster, edit } = setup({ settings: { control_panel: { panel: true, kick: false } } });
+    await poster.refreshForRoom(GUILD, ROOM, posted(ON, view()), view());
     expect(edit).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(edit.mock.calls[0]![2])).not.toContain('kick');
   });
@@ -226,7 +232,7 @@ describe('ControlPanelPoster.refreshForRoom', () => {
    */
   it('edits the panel down to a line, not to nothing, when it is switched off', async () => {
     const { poster, edit } = setup({ settings: { control_panel: { panel: false } } });
-    await poster.refreshForRoom(GUILD, ROOM, posted({}, view()), view());
+    await poster.refreshForRoom(GUILD, ROOM, posted(ON, view()), view());
     expect(edit).toHaveBeenCalledTimes(1);
     const payload = edit.mock.calls[0]![2] as {
       content?: string;
@@ -256,7 +262,7 @@ describe('ControlPanelPoster.refreshForRoom', () => {
       .fn()
       .mockRejectedValue(new Error('db down'));
     await expect(
-      poster.refreshForRoom(GUILD, ROOM, posted({}, view()), view({ isPrivate: true })),
+      poster.refreshForRoom(GUILD, ROOM, posted(ON, view()), view({ isPrivate: true })),
     ).resolves.toBeUndefined();
     expect(edit).not.toHaveBeenCalled();
     expect(clearControlPanelMessage).not.toHaveBeenCalled();
@@ -275,7 +281,7 @@ describe('ControlPanelPoster.refreshForRoom', () => {
       .fn()
       .mockRejectedValue(new Error('connection reset'));
     await expect(
-      poster.refreshForRoom(GUILD, ROOM, posted({}, view()), view({ isPrivate: true })),
+      poster.refreshForRoom(GUILD, ROOM, posted(ON, view()), view({ isPrivate: true })),
     ).resolves.toBeUndefined();
     expect(edit).toHaveBeenCalledTimes(1);
     expect(clearControlPanelMessage).not.toHaveBeenCalled();
@@ -292,7 +298,7 @@ describe('ControlPanelPoster.refreshForRoom', () => {
       edit: () => Promise.reject(new Error('Unknown Message')),
     });
     await expect(
-      poster.refreshForRoom(GUILD, ROOM, posted({}, view()), view({ isPrivate: true })),
+      poster.refreshForRoom(GUILD, ROOM, posted(ON, view()), view({ isPrivate: true })),
     ).resolves.toBeUndefined();
     expect(clearControlPanelMessage).toHaveBeenCalledWith(ROOM);
     expect(problems.recent(GUILD)).toEqual([]);

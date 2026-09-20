@@ -20,6 +20,7 @@ import {
   SETTINGS_KEYS,
   isSnowflake,
   controlPanelConfirmation,
+  CONTROL_PANEL_DEFAULT_ENABLED,
   CONTROL_PANEL_DEFAULTS,
   CONTROL_PANEL_ENABLED_KEY,
   DEFAULT_TEXT_CHANNEL_NAME,
@@ -837,13 +838,16 @@ export class GuildSettingsService {
        * Stored only when it DIFFERS from the default, so a server that agrees
        * with us carries no opinion at all and moves when a default moves.
        *
-       * The panel itself defaults to on; each control has its own default in
-       * `CONTROL_PANEL_DEFAULTS`, and Claim and Transfer are off there. Storing
-       * "the default, written out" would pin a server to today's answer for a
-       * control they never touched.
+       * The panel itself defaults to `CONTROL_PANEL_DEFAULT_ENABLED`, and each
+       * control has its own default in `CONTROL_PANEL_DEFAULTS`. Both are read
+       * from those constants rather than assumed here, so the day the panel
+       * becomes the default for everyone is a one-line change there and this
+       * keeps storing only what a server actually chose.
        */
       const isDefault =
-        control === CONTROL_PANEL_ENABLED_KEY ? on : CONTROL_PANEL_DEFAULTS[control] === on;
+        control === CONTROL_PANEL_ENABLED_KEY
+          ? CONTROL_PANEL_DEFAULT_ENABLED === on
+          : CONTROL_PANEL_DEFAULTS[control] === on;
       if (isDefault) delete current[control];
       else current[control] = on;
       const result = ok(controlPanelConfirmation(control, on));

@@ -2092,6 +2092,9 @@ describe('VoiceFeature (integration)', () => {
       companions = new CompanionChannelRepository(env.handle.db);
       await env.handle.db.delete(db.schema.companionChannels);
       await autoChannels.upsert(GUILD, PRIMARY, { name: 'Room' });
+      // The panel is off for a server that has never configured it, so these
+      // switch it on exactly as an admin does with `/controlpanel`.
+      await guilds.updateSettings(GUILD, { control_panel: { panel: true } });
     });
 
     it("posts into the room's own chat and records where it went", async () => {
@@ -2234,7 +2237,7 @@ describe('VoiceFeature (integration)', () => {
     it('edits every open room when a button is switched off server-wide', async () => {
       build();
       const room = await makeRoom();
-      await guilds.updateSettings(GUILD, { control_panel: { kick: false } });
+      await guilds.updateSettings(GUILD, { control_panel: { panel: true, kick: false } });
 
       const summary = await feature.refreshGuildPanels(GUILD);
 
