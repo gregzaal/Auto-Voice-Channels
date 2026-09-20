@@ -140,11 +140,16 @@ describe('readControlPanel', () => {
    * feature is proved on beta. The control defaults still apply underneath, so
    * turning it on gives that server the intended set rather than everything.
    */
-  it('is off for a server that has never configured it', () => {
+  it('is on for a server that has never configured it', () => {
     const config = readControlPanel({});
-    expect(config.enabled).toBe(false);
-    expect(CONTROL_PANEL_DEFAULT_ENABLED).toBe(false);
+    expect(config.enabled).toBe(true);
+    expect(CONTROL_PANEL_DEFAULT_ENABLED).toBe(true);
     expect(config.controls).toEqual(CONTROL_PANEL_DEFAULTS);
+  });
+
+  /** Only a departure is stored, so a server that said no keeps its no. */
+  it('keeps a stored no when the default moved to yes', () => {
+    expect(readControlPanel({ control_panel: { panel: false } }).enabled).toBe(false);
   });
 
   /**
