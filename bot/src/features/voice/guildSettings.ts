@@ -489,8 +489,8 @@ export const CONTROL_PANEL_DESCRIPTION_MAX = 4000;
 /**
  * The panel's colour, title and description when a server has not changed them.
  *
- * The colour is the site's brand violet (`--violet`, `#c43bff` in
- * `web/src/app/globals.css`), not the Discord blurple every other panel uses:
+ * The colour is auto-voice.io's brand violet, `#c43bff`, not the Discord
+ * blurple every other panel uses:
  * the room panel is the one surface of ours a member sees without having run a
  * command, so it is the one that should look like us rather than like Discord.
  * Every other panel in the bot is an ephemeral reply to a command and stays
