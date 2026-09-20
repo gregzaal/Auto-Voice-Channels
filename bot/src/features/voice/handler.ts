@@ -185,17 +185,7 @@ export interface VoiceFeatureDeps {
       roomId: string,
       primaryChannelId: string,
       initialMemberIds: readonly string[],
-      opts?: { optedIn?: boolean },
     ): Promise<string | null>;
-    /**
-     * Whether this creator channel makes companions, asked without making one.
-     *
-     * The create path needs the answer BEFORE the room's panel is posted,
-     * because it decides where the panel goes and therefore whether it can go
-     * in ahead of the member's move. `createForRoom` takes the answer back as
-     * `optedIn` so the settings read happens once.
-     */
-    optedIn(guildId: string, primaryChannelId: string): Promise<boolean>;
     syncRoom(guildId: string, roomId: string): Promise<void>;
     handleChannelDeleted(guildId: string, channelId: string): Promise<boolean>;
     describeRoom(
@@ -564,26 +554,6 @@ export interface GuildDrift {
  * - deletion only acts on a tracked, empty secondary and tolerates a missing
  *   channel.
  */
-/**
- * How long to wait after posting a room's control panel before moving the
- * member into the room.
- *
- * **An experiment, not a considered value.** The send is already fully awaited:
- * `postForRoom` awaits `send`, which resolves only once Discord has returned a
- * message id, so the move already happens strictly after the message exists.
- * Ordering alone did not stop Discord raising a notification for it, so this
- * buys a little more room in case the client needs a moment to settle the
- * channel's read state before the member arrives.
- *
- * If it does not help either, the cause is not timing and this must come back
- * out rather than be tuned: it is latency a member feels as a pause in the
- * creator channel, on every single room they make.
- */
-const PANEL_SETTLE_MS = 100;
-
-/** Resolves after `ms`, for {@link PANEL_SETTLE_MS}. */
-const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
 export class VoiceFeature {
   constructor(private readonly deps: VoiceFeatureDeps) {}
 
@@ -912,64 +882,6 @@ export class VoiceFeature {
       }
     }
 
-    /**
-     * Is a companion text channel coming for this room?
-     *
-     * Asked HERE rather than inside `createForRoom` because the answer decides
-     * where the panel goes and therefore WHEN it can be posted. The answer is
-     * passed back down as `optedIn` so the settings read happens once, not
-     * twice, on a path a member is waiting on.
-     */
-    const companionComing =
-      !gate?.companionTextDisabled &&
-      ((await this.deps.companionText?.optedIn(guildId, channelId)) ?? false);
-
-    /**
-     * The panel goes in BEFORE the member is moved, when it is going into the
-     * room's own chat.
-     *
-     * Discord only raises a message notification for a voice channel's built-in
-     * chat while you are in that channel, so a panel posted after the move
-     * pings the very person who just made the room, every single time. Posted
-     * first, it is simply already there when they arrive.
-     *
-     * **This costs a message round trip before the move**, which is latency the
-     * member feels as a pause in the creator channel, so the elapsed time is
-     * logged for measurement rather than assumed to be free.
-     *
-     * A room whose panel lands in a COMPANION cannot do this: the companion has
-     * to exist first, and it is created after the move because both rollbacks
-     * below delete the room they just made. That path keeps the old order.
-     * Nothing in the panel's content depends on occupancy, so the two orders
-     * render exactly the same message.
-     */
-    if (!companionComing && !gate?.controlPanelDisabled && this.deps.controlPanel) {
-      const startedAt = Date.now();
-      await this.deps.controlPanel.postForRoom(
-        guildId,
-        newChannelId,
-        channelId,
-        newChannelId,
-        {
-          ownerId: member.id,
-          primaryChannelId: channelId,
-          isPrivate: primary?.template.defaultPrivate === true,
-          userLimit: primary?.template.limit ?? 0,
-        },
-        roomRow,
-      );
-      /**
-       * The send above is already confirmed - `postForRoom` awaits it and
-       * Discord has returned a message id by here - so this is not waiting for
-       * the message to exist. See {@link PANEL_SETTLE_MS}.
-       */
-      await wait(PANEL_SETTLE_MS);
-      this.deps.logger.debug(
-        { guildId, secondaryId: newChannelId, ms: Date.now() - startedAt },
-        'posted control panel before the move',
-      );
-    }
-
     try {
       await this.deps.actions.moveMember(guildId, member.id, newChannelId);
     } catch (err) {
@@ -1027,17 +939,11 @@ export class VoiceFeature {
      * the seeded `roster` above documents: their move into the room has not
      * reached the voice cache yet.
      */
-    const companionId = companionComing
-      ? ((await this.deps.companionText?.createForRoom(
-          guildId,
-          newChannelId,
-          channelId,
-          [member.id],
-          // Already asked, above the move. Asking again would be a second
-          // settings read for an answer that cannot have changed in between.
-          { optedIn: true },
-        )) ?? null)
-      : null;
+    const companionId = gate?.companionTextDisabled
+      ? null
+      : ((await this.deps.companionText?.createForRoom(guildId, newChannelId, channelId, [
+          member.id,
+        ])) ?? null);
 
     /**
      * The room control panel, in the room's own chat, or in its companion text
@@ -1053,7 +959,7 @@ export class VoiceFeature {
      * rename the debounced scheduler is about to queue for this same room. It
      * is cheap and it never throws.
      */
-    if (companionComing && !gate?.controlPanelDisabled) {
+    if (!gate?.controlPanelDisabled) {
       await this.deps.controlPanel?.postForRoom(
         guildId,
         newChannelId,
