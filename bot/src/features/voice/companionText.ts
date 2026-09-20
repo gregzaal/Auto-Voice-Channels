@@ -81,8 +81,15 @@ export class CompanionTextService {
     );
   }
 
-  /** Whether this room's creator channel asked for a companion. */
-  private async optedIn(guildId: string, primaryChannelId: string): Promise<boolean> {
+  /**
+   * Whether this room's creator channel asked for a companion.
+   *
+   * Public because the create path has to know BEFORE it makes the room's
+   * control panel: the answer decides whether the panel goes into the room's
+   * own chat, which can be done ahead of the member's move, or into a companion
+   * that does not exist yet. It reads settings and creates nothing.
+   */
+  async optedIn(guildId: string, primaryChannelId: string): Promise<boolean> {
     const primary = await this.deps.autoChannels.get(primaryChannelId);
     return !!primary && primary.guildId === guildId && primary.template.textChannel === true;
   }

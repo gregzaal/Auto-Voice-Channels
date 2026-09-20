@@ -2022,7 +2022,7 @@ describe('VoiceFeature (integration)', () => {
   describe('the room control panel', () => {
     let companions: CompanionChannelRepository;
     let problems: PermissionProblemTracker;
-    let sent: { channelId: string }[];
+    let sent: { channelId: string; movesBefore: number }[];
     let edited: { channelId: string; messageId: string; payload: unknown }[];
     let poster: ControlPanelPoster;
 
@@ -2033,7 +2033,13 @@ describe('VoiceFeature (integration)', () => {
       poster = new ControlPanelPoster({
         send: (channelId) => {
           if (opts.failSend) return Promise.reject(new Error('Missing Permissions'));
-          sent.push({ channelId });
+          // The move count AT SEND TIME, which is the only way to see the
+          // ordering from outside: both the send and the move are recorded, but
+          // neither records when the other happened.
+          sent.push({
+            channelId,
+            movesBefore: actions.actions.filter((a) => a.type === 'move').length,
+          });
           return Promise.resolve(`msg-${sent.length}`);
         },
         edit: (channelId, messageId, payload) => {
@@ -2097,10 +2103,44 @@ describe('VoiceFeature (integration)', () => {
       await guilds.updateSettings(GUILD, { control_panel: { panel: true } });
     });
 
+    /**
+     * The panel goes in BEFORE the member is moved (2026-09-20).
+     *
+     * Discord raises a message notification for a voice channel's built-in chat
+     * only while you are in that channel, so a panel posted after the move
+     * pings the person who just made the room, every time. Posted first, it is
+     * already there when they arrive.
+     *
+     * Asserted on the move count at SEND time rather than on the shape of the
+     * action log, because the log records the move and the send separately and
+     * neither carries the other's timing.
+     */
+    it('posts the panel before the member is moved into the room', async () => {
+      build();
+      await makeRoom();
+      expect(sent).toHaveLength(1);
+      expect(sent[0]!.movesBefore).toBe(0);
+      // And the move really did happen, so this is not passing by never moving.
+      expect(actions.actions.filter((a) => a.type === 'move')).toHaveLength(1);
+    });
+
+    /**
+     * The companion case CANNOT do it, and must not pretend to: the companion
+     * has to exist first, and it is created after the move because both create
+     * rollbacks delete the room they just made.
+     */
+    it('posts after the move when the panel is going into a companion', async () => {
+      build({ companionText: true });
+      await autoChannels.upsert(GUILD, PRIMARY, { name: 'Room', textChannel: true });
+      await makeRoom();
+      expect(sent).toHaveLength(1);
+      expect(sent[0]!.movesBefore).toBe(1);
+    });
+
     it("posts into the room's own chat and records where it went", async () => {
       build();
       const room = await makeRoom();
-      expect(sent).toEqual([{ channelId: room }]);
+      expect(sent.map((x) => x.channelId)).toEqual([room]);
       const row = await secondaries.get(room);
       expect(row!.state.controlPanelMessageId).toBe('msg-1');
       expect(row!.state.controlPanelChannelId).toBe(room);
@@ -2118,7 +2158,7 @@ describe('VoiceFeature (integration)', () => {
       const room = await makeRoom();
       const companion = await companions.getBySecondary(room);
       expect(companion).toBeDefined();
-      expect(sent).toEqual([{ channelId: companion!.channelId }]);
+      expect(sent.map((x) => x.channelId)).toEqual([companion!.channelId]);
       expect((await secondaries.get(room))!.state.controlPanelChannelId).toBe(companion!.channelId);
     });
 
@@ -2152,7 +2192,7 @@ describe('VoiceFeature (integration)', () => {
         },
       });
       const room = await makeRoom();
-      expect(sent).toEqual([{ channelId: room }]);
+      expect(sent.map((x) => x.channelId)).toEqual([room]);
       expect(await companions.getBySecondary(room)).toBeUndefined();
     });
 

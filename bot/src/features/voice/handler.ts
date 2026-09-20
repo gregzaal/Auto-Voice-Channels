@@ -185,7 +185,17 @@ export interface VoiceFeatureDeps {
       roomId: string,
       primaryChannelId: string,
       initialMemberIds: readonly string[],
+      opts?: { optedIn?: boolean },
     ): Promise<string | null>;
+    /**
+     * Whether this creator channel makes companions, asked without making one.
+     *
+     * The create path needs the answer BEFORE the room's panel is posted,
+     * because it decides where the panel goes and therefore whether it can go
+     * in ahead of the member's move. `createForRoom` takes the answer back as
+     * `optedIn` so the settings read happens once.
+     */
+    optedIn(guildId: string, primaryChannelId: string): Promise<boolean>;
     syncRoom(guildId: string, roomId: string): Promise<void>;
     handleChannelDeleted(guildId: string, channelId: string): Promise<boolean>;
     describeRoom(
@@ -882,6 +892,58 @@ export class VoiceFeature {
       }
     }
 
+    /**
+     * Is a companion text channel coming for this room?
+     *
+     * Asked HERE rather than inside `createForRoom` because the answer decides
+     * where the panel goes and therefore WHEN it can be posted. The answer is
+     * passed back down as `optedIn` so the settings read happens once, not
+     * twice, on a path a member is waiting on.
+     */
+    const companionComing =
+      !gate?.companionTextDisabled &&
+      ((await this.deps.companionText?.optedIn(guildId, channelId)) ?? false);
+
+    /**
+     * The panel goes in BEFORE the member is moved, when it is going into the
+     * room's own chat.
+     *
+     * Discord only raises a message notification for a voice channel's built-in
+     * chat while you are in that channel, so a panel posted after the move
+     * pings the very person who just made the room, every single time. Posted
+     * first, it is simply already there when they arrive.
+     *
+     * **This costs a message round trip before the move**, which is latency the
+     * member feels as a pause in the creator channel, so the elapsed time is
+     * logged for measurement rather than assumed to be free.
+     *
+     * A room whose panel lands in a COMPANION cannot do this: the companion has
+     * to exist first, and it is created after the move because both rollbacks
+     * below delete the room they just made. That path keeps the old order.
+     * Nothing in the panel's content depends on occupancy, so the two orders
+     * render exactly the same message.
+     */
+    if (!companionComing && !gate?.controlPanelDisabled && this.deps.controlPanel) {
+      const startedAt = Date.now();
+      await this.deps.controlPanel.postForRoom(
+        guildId,
+        newChannelId,
+        channelId,
+        newChannelId,
+        {
+          ownerId: member.id,
+          primaryChannelId: channelId,
+          isPrivate: primary?.template.defaultPrivate === true,
+          userLimit: primary?.template.limit ?? 0,
+        },
+        roomRow,
+      );
+      this.deps.logger.debug(
+        { guildId, secondaryId: newChannelId, ms: Date.now() - startedAt },
+        'posted control panel before the move',
+      );
+    }
+
     try {
       await this.deps.actions.moveMember(guildId, member.id, newChannelId);
     } catch (err) {
@@ -939,11 +1001,17 @@ export class VoiceFeature {
      * the seeded `roster` above documents: their move into the room has not
      * reached the voice cache yet.
      */
-    const companionId = gate?.companionTextDisabled
-      ? null
-      : ((await this.deps.companionText?.createForRoom(guildId, newChannelId, channelId, [
-          member.id,
-        ])) ?? null);
+    const companionId = companionComing
+      ? ((await this.deps.companionText?.createForRoom(
+          guildId,
+          newChannelId,
+          channelId,
+          [member.id],
+          // Already asked, above the move. Asking again would be a second
+          // settings read for an answer that cannot have changed in between.
+          { optedIn: true },
+        )) ?? null)
+      : null;
 
     /**
      * The room control panel, in the room's own chat, or in its companion text
@@ -959,7 +1027,7 @@ export class VoiceFeature {
      * rename the debounced scheduler is about to queue for this same room. It
      * is cheap and it never throws.
      */
-    if (!gate?.controlPanelDisabled) {
+    if (companionComing && !gate?.controlPanelDisabled) {
       await this.deps.controlPanel?.postForRoom(
         guildId,
         newChannelId,
