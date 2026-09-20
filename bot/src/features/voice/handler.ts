@@ -564,6 +564,26 @@ export interface GuildDrift {
  * - deletion only acts on a tracked, empty secondary and tolerates a missing
  *   channel.
  */
+/**
+ * How long to wait after posting a room's control panel before moving the
+ * member into the room.
+ *
+ * **An experiment, not a considered value.** The send is already fully awaited:
+ * `postForRoom` awaits `send`, which resolves only once Discord has returned a
+ * message id, so the move already happens strictly after the message exists.
+ * Ordering alone did not stop Discord raising a notification for it, so this
+ * buys a little more room in case the client needs a moment to settle the
+ * channel's read state before the member arrives.
+ *
+ * If it does not help either, the cause is not timing and this must come back
+ * out rather than be tuned: it is latency a member feels as a pause in the
+ * creator channel, on every single room they make.
+ */
+const PANEL_SETTLE_MS = 100;
+
+/** Resolves after `ms`, for {@link PANEL_SETTLE_MS}. */
+const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 export class VoiceFeature {
   constructor(private readonly deps: VoiceFeatureDeps) {}
 
@@ -938,6 +958,12 @@ export class VoiceFeature {
         },
         roomRow,
       );
+      /**
+       * The send above is already confirmed - `postForRoom` awaits it and
+       * Discord has returned a message id by here - so this is not waiting for
+       * the message to exist. See {@link PANEL_SETTLE_MS}.
+       */
+      await wait(PANEL_SETTLE_MS);
       this.deps.logger.debug(
         { guildId, secondaryId: newChannelId, ms: Date.now() - startedAt },
         'posted control panel before the move',
