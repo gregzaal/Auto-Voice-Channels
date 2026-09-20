@@ -2,15 +2,21 @@ import { describe, expect, it, vi } from 'vitest';
 import { fakeLogger } from '../runtime/testUtils.js';
 import { GuildSettingsService } from '../features/voice/settings.js';
 import {
+  CONTROL_PANEL_APPEARANCE_KEYS,
   CONTROL_PANEL_CONTROLS,
+  CONTROL_PANEL_DEFAULT_COLOR,
+  CONTROL_PANEL_DESCRIPTION_MAX,
   CONTROL_PANEL_DEFAULTS,
   readControlPanel,
 } from '../features/voice/guildSettings.js';
 import {
+  buildAppearanceModal,
   buildControlSettingsPanel,
   CONTROL_SETTINGS_PREFIX,
+  controlAppearanceId,
   controlSettingsId,
   controlToggleId,
+  parseControlAppearanceId,
   parseControlSettingsId,
   parseControlToggleId,
 } from './controlPanelSettings.js';
@@ -94,10 +100,112 @@ describe('buildControlSettingsPanel', () => {
   it('describes every control in a field, with its state', () => {
     const json = buildControlSettingsPanel(readControlPanel(ON));
     const fields = json.embeds![0]! as { fields?: { name: string; value: string }[] };
-    expect(fields.fields).toHaveLength(CONTROL_PANEL_CONTROLS.length);
+    // One per control, plus the Appearance summary.
+    expect(fields.fields).toHaveLength(CONTROL_PANEL_CONTROLS.length + 1);
     // Claim is off by default, Size is on, and the state is in the field name.
     expect(fields.fields!.map((f) => f.name)).toContain('❌ 👑 Claim');
     expect(fields.fields!.map((f) => f.name)).toContain('✅ 👥 Size');
+  });
+
+  /**
+   * The appearance half. The values are shown raw, tokens and all, because that
+   * is what the modal hands back and what an admin edits.
+   */
+  it('summarises the colour, title and description as one field', () => {
+    const json = buildControlSettingsPanel(readControlPanel(ON));
+    const embed = json.embeds![0]! as {
+      color?: number;
+      fields?: { name: string; value: string }[];
+    };
+    const appearance = embed.fields!.find((f) => f.name === '🎨 Appearance')!;
+    expect(appearance.value).toContain('Control your room');
+    expect(appearance.value).toContain('@@owner@@');
+    expect(appearance.value).toContain('#c43bff');
+    // The description is shown on one line: a stored newline would otherwise
+    // break the three labels apart.
+    expect(appearance.value.split('\n')).toHaveLength(3);
+    // The panel wears the colour it configures, so a change is visible at once.
+    expect(embed.color).toBe(CONTROL_PANEL_DEFAULT_COLOR);
+    expect(
+      (
+        buildControlSettingsPanel(
+          readControlPanel({ control_panel: { panel: true, color: 0x00ff00 } }),
+        ).embeds![0]! as { color?: number }
+      ).color,
+    ).toBe(0x00ff00);
+  });
+
+  it('offers a button per appearance entry, and only while the panel is on', () => {
+    const on = JSON.stringify(buildControlSettingsPanel(readControlPanel(ON)));
+    for (const key of CONTROL_PANEL_APPEARANCE_KEYS) {
+      expect(on).toContain(controlAppearanceId(key));
+    }
+    const off = JSON.stringify(
+      buildControlSettingsPanel(readControlPanel({ control_panel: { panel: false } })),
+    );
+    expect(off).not.toContain(controlAppearanceId('title'));
+  });
+
+  /**
+   * Five rows is Discord's ceiling and a sixth is refused outright, which would
+   * take the whole configuration surface down rather than drop a button.
+   */
+  it('never renders more rows than Discord accepts', () => {
+    for (const settings of [ON, { control_panel: { panel: false } }]) {
+      expect(
+        buildControlSettingsPanel(readControlPanel(settings)).components!.length,
+      ).toBeLessThanOrEqual(5);
+    }
+  });
+});
+
+describe('parseControlAppearanceId', () => {
+  it('reads back every key it writes', () => {
+    for (const key of CONTROL_PANEL_APPEARANCE_KEYS) {
+      expect(parseControlAppearanceId(controlAppearanceId(key))).toBe(key);
+    }
+  });
+
+  /** Same reasoning as the toggle id: it still names a settings key. */
+  it('refuses anything that is not a known key', () => {
+    expect(parseControlAppearanceId(`${CONTROL_SETTINGS_PREFIX}a:panel`)).toBeNull();
+    expect(parseControlAppearanceId(`${CONTROL_SETTINGS_PREFIX}a:__proto__`)).toBeNull();
+    expect(parseControlAppearanceId(`${CONTROL_SETTINGS_PREFIX}a:`)).toBeNull();
+    expect(parseControlAppearanceId(`${CONTROL_SETTINGS_PREFIX}t:kick`)).toBeNull();
+    expect(parseControlAppearanceId('avc:other:a:title')).toBeNull();
+  });
+});
+
+describe('buildAppearanceModal', () => {
+  const config = readControlPanel(ON);
+
+  /** Blank submits back to the default, so the input cannot be required. */
+  it('prefills what is set now and never requires a value', () => {
+    for (const key of CONTROL_PANEL_APPEARANCE_KEYS) {
+      const json = buildAppearanceModal(key, config).toJSON();
+      const input = (
+        json.components[0]!.components as unknown as {
+          required?: boolean;
+          value?: string;
+          max_length?: number;
+        }[]
+      )[0]!;
+      expect(json.custom_id).toBe(controlAppearanceId(key));
+      expect(input.required).toBe(false);
+      expect(input.value).toBeTruthy();
+    }
+  });
+
+  it('shows the colour as hex, and the text raw', () => {
+    const value = (key: Parameters<typeof buildAppearanceModal>[0]): string =>
+      (
+        buildAppearanceModal(key, config).toJSON().components[0]!.components as unknown as {
+          value?: string;
+        }[]
+      )[0]!.value!;
+    expect(value('color')).toBe('#c43bff');
+    expect(value('title')).toBe('Control your room');
+    expect(value('description')).toContain('@@owner@@');
   });
 
   it('gives every control a toggle button carrying its state', () => {
@@ -137,7 +245,10 @@ describe('buildControlSettingsPanel', () => {
     const json = buildControlSettingsPanel(
       readControlPanel({ control_panel: { ...none, panel: true } }),
     );
-    expect(JSON.stringify(json.embeds![0])).toContain('no control panel at all');
+    // The title still says enabled, so the description is the only place that
+    // can tell an admin nothing is actually being posted.
+    expect(JSON.stringify(json.embeds![0])).toContain('Control panels are enabled');
+    expect(JSON.stringify(json.embeds![0])).toContain('nothing is being posted at all');
   });
 
   it('follows the copy rules', () => {
@@ -191,13 +302,26 @@ describe('setControlPanelEntry', () => {
 
   /** The panel is off by default, so switching it ON is the departure stored. */
   it('switches the whole panel through the same key', async () => {
-    const on = makeService({ control_panel: { kick: false } });
-    await on.service.setControlPanelEntry(GUILD, 'panel', true);
-    expect(on.writes[0]!.patch).toEqual({ control_panel: { kick: false, panel: true } });
-
-    const off = makeService({ control_panel: { kick: false, panel: true } });
+    // On is the default, so OFF is the departure that gets stored.
+    const off = makeService({ control_panel: { kick: false } });
     await off.service.setControlPanelEntry(GUILD, 'panel', false);
-    expect(off.writes[0]!.patch).toEqual({ control_panel: { kick: false } });
+    expect(off.writes[0]!.patch).toEqual({ control_panel: { kick: false, panel: false } });
+
+    const on = makeService({ control_panel: { kick: false, panel: false } });
+    await on.service.setControlPanelEntry(GUILD, 'panel', true);
+    expect(on.writes[0]!.patch).toEqual({ control_panel: { kick: false } });
+  });
+
+  /**
+   * Switching the panel back on is agreeing with the default, so it stores
+   * nothing and the key removes itself. That is what keeps "deliberately on"
+   * and "never configured" the same state through an export round trip.
+   */
+  it('removes the key entirely when the panel goes back to the default', async () => {
+    const { service, writes } = makeService({ control_panel: { panel: false } });
+    await service.setControlPanelEntry(GUILD, 'panel', true);
+    expect(writes[0]!.patch).toEqual({});
+    expect(writes[0]!.remove).toEqual(['control_panel']);
   });
 
   /**
@@ -220,5 +344,81 @@ describe('setControlPanelEntry', () => {
     await service.setControlPanelEntry(GUILD, 'claim', false);
     expect(writes[0]!.remove).toEqual([]);
     expect(writes[0]!.patch).toEqual({ control_panel: { kick: ['role-1'] } });
+  });
+});
+
+/**
+ * The storage rule for the appearance half, which is the same one the toggles
+ * follow: only a DEPARTURE from the default is kept, and the key removes itself
+ * once nothing is left in it. That is what keeps "deliberately the default" and
+ * "never configured" the same state through an export round trip.
+ */
+describe('setControlPanelAppearance', () => {
+  it('stores a title that differs, and drops one that matches the default', async () => {
+    const { service, writes } = makeService({ control_panel: { panel: true } });
+    await service.setControlPanelAppearance(GUILD, 'title', 'Your room');
+    expect(writes[0]!.patch.control_panel).toEqual({ panel: true, title: 'Your room' });
+
+    const back = makeService({ control_panel: { panel: true, title: 'Your room' } });
+    await back.service.setControlPanelAppearance(GUILD, 'title', 'Control your room');
+    expect(back.writes[0]!.patch.control_panel).toEqual({ panel: true });
+  });
+
+  it('removes the whole key when the reset leaves nothing behind', async () => {
+    const { service, writes } = makeService({ control_panel: { color: 0x00ff00 } });
+    await service.setControlPanelAppearance(GUILD, 'color', null);
+    expect(writes[0]!.patch).toEqual({});
+    expect(writes[0]!.remove).toEqual(['control_panel']);
+  });
+
+  it('stores a colour as the integer, not the string somebody typed', async () => {
+    const { service, writes } = makeService({ control_panel: { panel: true } });
+    await service.setControlPanelAppearance(GUILD, 'color', 0xc43bfe);
+    expect((writes[0]!.patch.control_panel as Record<string, unknown>).color).toBe(0xc43bfe);
+  });
+
+  /**
+   * Validated at the writer as well as at the command layer. This is the only
+   * writer, and a colour outside Discord's range does not fail one write, it
+   * fails every panel render in the guild afterwards.
+   */
+  it('refuses a colour outside the range Discord accepts, and writes nothing', async () => {
+    for (const bad of [-1, 0x1000000, 1.5]) {
+      const { service, writes } = makeService({ control_panel: { panel: true } });
+      const res = await service.setControlPanelAppearance(GUILD, 'color', bad);
+      expect(res.ok).toBe(false);
+      expect(writes).toHaveLength(0);
+    }
+  });
+
+  it('refuses a title that is empty once the spaces come off', async () => {
+    const { service, writes } = makeService({ control_panel: { panel: true } });
+    const res = await service.setControlPanelAppearance(GUILD, 'title', '   ');
+    expect(res.ok).toBe(false);
+    expect(writes).toHaveLength(0);
+  });
+
+  /**
+   * Golden rule 3, the same trap `setControlPanelEntry` documents: an entry a
+   * newer build wrote has to survive an older one saving an unrelated setting.
+   */
+  it('preserves entries it does not understand', async () => {
+    const { service, writes } = makeService({
+      control_panel: { panel: true, kick: ['role1'], somethingNew: 7 },
+    });
+    await service.setControlPanelAppearance(GUILD, 'title', 'Yours');
+    expect(writes[0]!.patch.control_panel).toEqual({
+      panel: true,
+      kick: ['role1'],
+      somethingNew: 7,
+      title: 'Yours',
+    });
+  });
+
+  it('caps a stored description rather than letting Discord refuse the render', async () => {
+    const { service, writes } = makeService({ control_panel: { panel: true } });
+    await service.setControlPanelAppearance(GUILD, 'description', 'x'.repeat(9000));
+    const stored = (writes[0]!.patch.control_panel as Record<string, string>).description;
+    expect(stored.length).toBe(CONTROL_PANEL_DESCRIPTION_MAX);
   });
 });

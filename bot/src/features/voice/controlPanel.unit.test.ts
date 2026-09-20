@@ -12,8 +12,13 @@ import {
 } from './controlPanel.js';
 import {
   CONTROL_PANEL_CONTROLS,
+  CONTROL_PANEL_DEFAULT_COLOR,
   CONTROL_PANEL_DEFAULT_ENABLED,
   CONTROL_PANEL_DEFAULTS,
+  CONTROL_PANEL_DESCRIPTION_MAX,
+  CONTROL_PANEL_TITLE_MAX,
+  formatPanelColor,
+  parsePanelColor,
   readControlPanel,
   type ControlPanelConfig,
 } from './guildSettings.js';
@@ -23,13 +28,12 @@ const OWNER = '223456789012345678';
 const CREATOR = '323456789012345678';
 
 /**
- * The control defaults, with the panel itself switched on.
+ * Exactly what a server that has never run `/controlpanel` gets.
  *
- * The panel is OFF for a server that has never configured it, so every test
- * about what a panel looks like has to turn it on first, exactly as a server
- * does with `/controlpanel`. The off-by-default behaviour has its own test.
+ * Read through `readControlPanel` rather than built by hand, so these tests
+ * move with the defaults instead of pinning a copy of them.
  */
-const defaults = (): ControlPanelConfig => readControlPanel({ control_panel: { panel: true } });
+const defaults = (): ControlPanelConfig => readControlPanel({});
 
 /** Everything on, for the tests about layout rather than about defaults. */
 function allOn(): ControlPanelConfig {
@@ -85,13 +89,21 @@ describe('control panel custom ids', () => {
 
 describe('buildControlPanel', () => {
   /**
-   * Off while the feature is proved on beta. A message posted into every room
-   * of every server is not a default to take on a dev guild's say-so.
+   * On out of the box, since 2026-09-20. It shipped off for one release while
+   * the feature was proved on beta, because a message posted into every room of
+   * every server is not a default to take on a dev guild's say-so.
    */
-  it('is nothing at all for a server that has never configured it', () => {
-    expect(CONTROL_PANEL_DEFAULT_ENABLED).toBe(false);
-    expect(readControlPanel({}).enabled).toBe(false);
-    expect(buildControlPanel(ROOM, readControlPanel({}), view())).toBeNull();
+  it('is posted for a server that has never configured it', () => {
+    expect(CONTROL_PANEL_DEFAULT_ENABLED).toBe(true);
+    expect(readControlPanel({}).enabled).toBe(true);
+    expect(buildControlPanel(ROOM, readControlPanel({}), view())).not.toBeNull();
+  });
+
+  /** A server that switched it off stores `false`, and still gets nothing. */
+  it('is nothing at all for a server that switched it off', () => {
+    const off = readControlPanel({ control_panel: { panel: false } });
+    expect(off.enabled).toBe(false);
+    expect(buildControlPanel(ROOM, off, view())).toBeNull();
   });
 
   it('shows the defaults, which leave Claim and Transfer out', () => {
@@ -132,8 +144,9 @@ Make your own with <#${CREATOR}>`,
   /** A broken mention would be worse than saying it plainly, and Claim's case. */
   it('says so plainly when the room has no owner', () => {
     const panel = buildControlPanel(ROOM, defaults(), view({ ownerId: null }));
-    expect(panel!.embeds[0]!.description).toContain('no owner right now');
+    expect(panel!.embeds[0]!.description).toContain('belongs to nobody');
     expect(panel!.embeds[0]!.description).not.toContain('<@null>');
+    expect(panel!.embeds[0]!.description).not.toContain('@@owner@@');
   });
 
   it('carries the title and the footer, and no thumbnail', () => {
@@ -150,7 +163,9 @@ Make your own with <#${CREATOR}>`,
 
   it('describes every shown button in an inline field', () => {
     const panel = buildControlPanel(ROOM, allOn(), view());
-    const fields = panel!.embeds[0]!.fields!;
+    // Every field but the last, which is the links footer field: it is not a
+    // control, is never inline, and is there whatever else is switched off.
+    const fields = panel!.embeds[0]!.fields!.slice(0, -1);
     expect(fields).toHaveLength(buttonIds(panel).length);
     expect(fields.every((f) => f.inline === true)).toBe(true);
     expect(fieldsOf(panel)).toContainEqual({
@@ -316,5 +331,121 @@ describe('copy rules', () => {
     const text = rendered().toLowerCase();
     expect(text).not.toContain('secondary');
     expect(text).not.toContain('primary');
+  });
+});
+
+/**
+ * The appearance half: colour, title and description, and the two variables.
+ *
+ * All of it goes through `readControlPanel` rather than a hand-built config,
+ * because the storage rule (only a departure is kept) is half the behaviour and
+ * a literal object would test the renderer against a state the writer never
+ * produces.
+ */
+describe('buildControlPanel appearance', () => {
+  const withSettings = (over: Record<string, unknown>): ControlPanelConfig =>
+    readControlPanel({ control_panel: { panel: true, ...over } });
+
+  it('paints the brand violet by default, and whatever is stored otherwise', () => {
+    expect(buildControlPanel(ROOM, defaults(), view())!.embeds[0]!.color).toBe(
+      CONTROL_PANEL_DEFAULT_COLOR,
+    );
+    expect(formatPanelColor(CONTROL_PANEL_DEFAULT_COLOR)).toBe('#c43bff');
+    const red = withSettings({ color: 0xff0000 });
+    expect(buildControlPanel(ROOM, red, view())!.embeds[0]!.color).toBe(0xff0000);
+  });
+
+  it('refuses a stored colour Discord would reject, rather than passing it on', () => {
+    // A 400 here does not fail one write, it fails every panel render in the
+    // guild afterwards, on a message nobody is looking at.
+    for (const bad of [-1, 0x1000000, 1.5, '#c43bff', null]) {
+      expect(withSettings({ color: bad }).color).toBe(CONTROL_PANEL_DEFAULT_COLOR);
+    }
+  });
+
+  it('resolves the two variables, and leaves anything else standing', () => {
+    const config = withSettings({
+      title: 'Hi @@owner@@',
+      description: 'Yours: @@owner@@, ours: @@creator_channel@@, mystery: @@game@@',
+    });
+    const embed = buildControlPanel(ROOM, config, view())!.embeds[0]!;
+    expect(embed.title).toBe(`Hi <@${OWNER}>`);
+    expect(embed.description).toBe(`Yours: <@${OWNER}>, ours: <#${CREATOR}>, mystery: @@game@@`);
+  });
+
+  it('renders an ownerless room as nobody, in a custom description too', () => {
+    const config = withSettings({ description: '@@owner@@ runs this' });
+    const embed = buildControlPanel(ROOM, config, view({ ownerId: null }))!.embeds[0]!;
+    expect(embed.description).toBe('nobody runs this');
+  });
+
+  it('stays inside Discord caps once a mention is longer than its token', () => {
+    // The stored text is within the cap; a mention is longer than `@@owner@@`,
+    // so a title sitting just under it grows past the cap on substitution.
+    const config = withSettings({
+      title: '@@owner@@'.repeat(28),
+      description: '@@owner@@'.repeat(500),
+    });
+    const embed = buildControlPanel(ROOM, config, view())!.embeds[0]!;
+    expect(embed.title!.length).toBeLessThanOrEqual(CONTROL_PANEL_TITLE_MAX);
+    expect(embed.description!.length).toBeLessThanOrEqual(CONTROL_PANEL_DESCRIPTION_MAX);
+  });
+
+  it('falls back to the default for an empty or non-string title', () => {
+    for (const bad of ['', '   ', 42, null]) {
+      expect(withSettings({ title: bad }).title).toBe('Control your room');
+    }
+  });
+
+  it('carries the links field last, always, and never inline', () => {
+    // Switched on or off, the links field is there: it is not a control.
+    for (const config of [defaults(), allOn()]) {
+      const fields = buildControlPanel(ROOM, config, view())!.embeds[0]!.fields!;
+      const last = fields[fields.length - 1]!;
+      expect(last.inline).toBe(false);
+      // A literal space is trimmed away and Discord then refuses the message.
+      expect(last.name).toBe('\u200b');
+      expect(last.value).toContain('https://top.gg/bot/479393422705426432#reviews');
+      expect(last.value).toContain('https://discord.gg/HT6GNhJ');
+      expect(fields.filter((f) => f.name === '\u200b')).toHaveLength(1);
+    }
+  });
+
+  it('kicks with a boot', () => {
+    expect(fieldsOf(buildControlPanel(ROOM, allOn(), view()))).toContainEqual({
+      name: '\u{1f97e} Kick',
+      value: 'Start a vote to remove someone',
+    });
+  });
+
+  it('changes the fingerprint when the appearance changes', () => {
+    // The fingerprint hashes the rendered payload rather than a list of inputs,
+    // which is the whole reason these three needed no wiring into it.
+    const base = controlPanelFingerprint(buildControlPanel(ROOM, defaults(), view()));
+    for (const over of [{ color: 0x00ff00 }, { title: 'Other' }, { description: 'Other' }]) {
+      expect(controlPanelFingerprint(buildControlPanel(ROOM, withSettings(over), view()))).not.toBe(
+        base,
+      );
+    }
+  });
+});
+
+describe('parsePanelColor', () => {
+  it('takes the three shapes somebody pastes out of a colour picker', () => {
+    expect(parsePanelColor('#c43bff')).toBe(0xc43bff);
+    expect(parsePanelColor('c43bff')).toBe(0xc43bff);
+    expect(parsePanelColor('  #C43BFF  ')).toBe(0xc43bff);
+    expect(parsePanelColor('#c3f')).toBe(0xcc33ff);
+  });
+
+  it('refuses anything else rather than guessing', () => {
+    for (const bad of ['purple', '', '#', '#ggg', '#c43bf', '#c43bfff', '0xc43bff']) {
+      expect(parsePanelColor(bad)).toBeNull();
+    }
+  });
+
+  it('round trips through the formatter, zero padded', () => {
+    expect(formatPanelColor(parsePanelColor('#000001')!)).toBe('#000001');
+    expect(formatPanelColor(0)).toBe('#000000');
   });
 });

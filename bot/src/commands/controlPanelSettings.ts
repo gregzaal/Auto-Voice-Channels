@@ -3,13 +3,26 @@ import {
   ButtonBuilder,
   ButtonStyle,
   EmbedBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
   type APIEmbed,
   type APIEmbedField,
   type InteractionReplyOptions,
 } from 'discord.js';
 import {
+  CONTROL_PANEL_COLOR_KEY,
   CONTROL_PANEL_CONTROLS,
+  CONTROL_PANEL_CREATOR_TOKEN,
+  CONTROL_PANEL_DESCRIPTION_KEY,
+  CONTROL_PANEL_DESCRIPTION_MAX,
+  CONTROL_PANEL_OWNER_TOKEN,
+  CONTROL_PANEL_TITLE_KEY,
+  CONTROL_PANEL_TITLE_MAX,
+  formatPanelColor,
+  isControlPanelAppearanceKey,
   isControlPanelControl,
+  type ControlPanelAppearanceKey,
   type ControlPanelConfig,
   type ControlPanelControl,
 } from '../features/voice/guildSettings.js';
@@ -75,38 +88,114 @@ export function parseControlToggleId(customId: string): ControlPanelControl | nu
   return isControlPanelControl(control) ? control : null;
 }
 
-/** How the rooms that exist right now are affected, said the same way everywhere. */
-const EXISTING_ROOMS = 'Panels already posted are updated too.';
+/** Builds `avc:cp:a:<key>`, shared by an appearance button and its modal. */
+export const controlAppearanceId = (key: ControlPanelAppearanceKey): string =>
+  `${CONTROL_SETTINGS_PREFIX}a:${key}`;
+
+/**
+ * Parses an appearance id back into a key, or null.
+ *
+ * Validated against the known list for the same reason the toggle id is: it
+ * comes back from a message we posted and it still names a settings key.
+ */
+export function parseControlAppearanceId(customId: string): ControlPanelAppearanceKey | null {
+  const prefix = `${CONTROL_SETTINGS_PREFIX}a:`;
+  if (!customId.startsWith(prefix)) return null;
+  const key = customId.slice(prefix.length);
+  return isControlPanelAppearanceKey(key) ? key : null;
+}
+
+/** The text input id inside all three appearance modals. */
+export const CONTROL_APPEARANCE_INPUT_ID = 'value';
+
+/** Label, button text and modal title for one appearance entry. */
+const APPEARANCE_FACES: Record<
+  ControlPanelAppearanceKey,
+  { label: string; emoji: string; modalTitle: string }
+> = {
+  [CONTROL_PANEL_TITLE_KEY]: { label: 'Title', emoji: '✏️', modalTitle: 'Panel title' },
+  [CONTROL_PANEL_DESCRIPTION_KEY]: {
+    label: 'Description',
+    emoji: '📝',
+    modalTitle: 'Panel description',
+  },
+  [CONTROL_PANEL_COLOR_KEY]: { label: 'Colour', emoji: '🎨', modalTitle: 'Panel colour' },
+};
+
+/**
+ * The modal behind one appearance button.
+ *
+ * Prefilled with what is set right now, so an admin editing a word does not
+ * retype the sentence, and blank-submits back to the default, which is the same
+ * contract the room panel's own Name modal uses. Not required, for that reason:
+ * Discord refuses to submit a required field left blank, which would make the
+ * placeholder a lie.
+ */
+export function buildAppearanceModal(
+  key: ControlPanelAppearanceKey,
+  config: ControlPanelConfig,
+): ModalBuilder {
+  const face = APPEARANCE_FACES[key];
+  const isDescription = key === CONTROL_PANEL_DESCRIPTION_KEY;
+  const current =
+    key === CONTROL_PANEL_COLOR_KEY
+      ? formatPanelColor(config.color)
+      : isDescription
+        ? config.description
+        : config.title;
+  const input = new TextInputBuilder()
+    .setCustomId(CONTROL_APPEARANCE_INPUT_ID)
+    .setLabel(face.modalTitle)
+    .setStyle(isDescription ? TextInputStyle.Paragraph : TextInputStyle.Short)
+    .setRequired(false)
+    .setValue(current)
+    .setPlaceholder(
+      key === CONTROL_PANEL_COLOR_KEY
+        ? 'A hex code like #c43bff. Blank for the default'
+        : `Blank for the default. ${CONTROL_PANEL_OWNER_TOKEN} and ${CONTROL_PANEL_CREATOR_TOKEN} work here`,
+    );
+  if (key === CONTROL_PANEL_COLOR_KEY) input.setMaxLength(7);
+  else if (isDescription) input.setMaxLength(CONTROL_PANEL_DESCRIPTION_MAX);
+  else input.setMaxLength(CONTROL_PANEL_TITLE_MAX);
+  return new ModalBuilder()
+    .setCustomId(controlAppearanceId(key))
+    .setTitle(face.modalTitle)
+    .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
+}
+
+/**
+ * What the feature IS, said to somebody who has not met it yet.
+ *
+ * One sentence about the thing, not three about the mechanics of this screen.
+ * The older copy narrated its own state ("rooms are not getting a control
+ * panel", "panels already posted are updated too") in a panel whose state is
+ * visible in the title and in seven ticks and crosses below it, which is the
+ * self-referential copy AGENTS.md rules out.
+ */
+const WHAT_IT_IS =
+  'The control panel is a message sent to every voice chat so that members can see, and easily ' +
+  'reach, the things they can do with their room. Choose which buttons it shows below.';
 
 /**
  * What this server's rooms actually get, in three states rather than two.
  *
  * Switching every button off leaves the panel "on" but produces no message at
  * all, because a panel with no buttons is an embed nobody can act on. Read as
- * two states, that server was told "every new room gets these buttons" while
- * nothing was being posted anywhere.
+ * two states, that server would see "enabled" in the title while nothing was
+ * being posted anywhere, so that one state still says so.
  */
 function describeControlState(config: ControlPanelConfig, offCount: number): string {
-  if (!config.enabled) {
+  if (config.enabled && offCount === CONTROL_PANEL_CONTROLS.length) {
     return (
-      'Rooms are not getting a control panel. ' +
-      EXISTING_ROOMS +
-      ' Every button has a command that still works, so nothing is lost except the shortcut.'
+      WHAT_IT_IS + '\n\nEvery button is switched off right now, so nothing is being posted at all.'
     );
   }
-  if (offCount === CONTROL_PANEL_CONTROLS.length) {
-    return (
-      'Every button is switched off, so rooms are getting no control panel at all. ' +
-      'Switch one back on below, or leave it: every button has a command that still works. ' +
-      EXISTING_ROOMS
-    );
-  }
-  return (
-    'Rooms get these buttons posted in their chat, so members never have to learn a command ' +
-    'name. Press one below to switch it on or off. ' +
-    EXISTING_ROOMS
-  );
+  return WHAT_IT_IS;
 }
+
+/** The title carries the state, which is the first thing an admin looks for. */
+const controlStateTitle = (enabled: boolean): string =>
+  enabled ? 'Control panels are enabled ✅' : 'Control panels are disabled ❌';
 
 /**
  * The configuration panel.
@@ -131,9 +220,29 @@ export function buildControlSettingsPanel(
     };
   });
 
+  /**
+   * What the panel looks like, as one field rather than three.
+   *
+   * The values are shown raw, tokens and all, because that is what the modal
+   * will hand back and what an admin has to edit. The description is truncated
+   * here and nowhere else: a 4000-character one would push this embed past
+   * Discord's 6000-character total and take the whole configuration surface
+   * down over a setting.
+   */
+  fields.push({
+    name: '🎨 Appearance',
+    value:
+      `Title: ${config.title}\n` +
+      `Description: ${config.description.replaceAll('\n', ' ').slice(0, 300)}\n` +
+      `Colour: \`${formatPanelColor(config.color)}\``,
+    inline: false,
+  });
+
   const embed = new EmbedBuilder()
-    .setTitle('Control panel')
-    .setColor(0x5865f2)
+    .setTitle(controlStateTitle(config.enabled))
+    // The colour this server's rooms actually get, so changing it shows here
+    // immediately. Every other panel in the bot stays Discord blurple.
+    .setColor(config.color)
     .setDescription(describeControlState(config, offCount))
     .addFields(fields);
   const json: APIEmbed = embed.toJSON();
@@ -157,6 +266,21 @@ export function buildControlSettingsPanel(
         ),
       );
     }
+    // Three more, in their own row: they change what the panel says rather than
+    // what it carries, so mixing them in with the toggles would read as four
+    // more buttons to switch off. Four rows of five is Discord's ceiling and
+    // this is the fourth.
+    rows.push(
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        (Object.keys(APPEARANCE_FACES) as ControlPanelAppearanceKey[]).map((key) =>
+          new ButtonBuilder()
+            .setCustomId(controlAppearanceId(key))
+            .setLabel(APPEARANCE_FACES[key].label)
+            .setEmoji(APPEARANCE_FACES[key].emoji)
+            .setStyle(ButtonStyle.Secondary),
+        ),
+      ),
+    );
   }
   rows.push(
     new ActionRowBuilder<ButtonBuilder>().addComponents(

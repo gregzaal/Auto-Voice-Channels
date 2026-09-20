@@ -168,9 +168,12 @@ import {
   parseGroupId,
 } from './groupPanel.js';
 import {
+  CONTROL_PANEL_COLOR_KEY,
   CONTROL_PANEL_ENABLED_KEY,
+  parsePanelColor,
   groupKeyFor,
   ROOT_GROUP_KEY,
+  type ControlPanelAppearanceKey,
   type ControlPanelEntry,
 } from '../features/voice/guildSettings.js';
 import {
@@ -182,8 +185,11 @@ import {
   parseControlPanelId,
 } from '../features/voice/controlPanel.js';
 import {
+  buildAppearanceModal,
   buildControlSettingsPanel,
+  CONTROL_APPEARANCE_INPUT_ID,
   CONTROL_SETTINGS_PREFIX,
+  parseControlAppearanceId,
   parseControlSettingsId,
   parseControlToggleId,
 } from './controlPanelSettings.js';
@@ -3309,6 +3315,18 @@ Already subscribed? Add the new server ` +
       await refreshControlSettings(interaction, control, !config.controls[control]);
       return;
     }
+    /**
+     * The three appearance buttons open a modal, so they are answered BEFORE
+     * anything is deferred: `showModal` has to be the first response to the
+     * interaction, and a `deferUpdate` above it makes the modal unopenable.
+     */
+    const appearance = parseControlAppearanceId(interaction.customId);
+    if (appearance) {
+      if (!(await requireManageChannels(interaction))) return;
+      const config = await deps.settings.getControlPanel(interaction.guildId!);
+      await interaction.showModal(buildAppearanceModal(appearance, config));
+      return;
+    }
     const action = parseControlSettingsId(interaction.customId);
     if (!action) {
       await safeReply(interaction, 'That button is out of date. Run `/controlpanel` again.');
@@ -3321,6 +3339,95 @@ Already subscribed? Add the new server ` +
     }
     await interaction.deferUpdate();
     await refreshControlSettings(interaction, CONTROL_PANEL_ENABLED_KEY, action === 'on');
+  }
+
+  /**
+   * A submitted title, description or colour.
+   *
+   * A blank submit is the reset, which is why the modal's input is not
+   * required. The colour is parsed here rather than in the writer so a typo
+   * gets a sentence about hex codes instead of a generic refusal, and the
+   * writer validates the parsed number again anyway: it is the only seam that
+   * also covers `/import` and any future caller.
+   */
+  async function handleControlAppearanceModal(interaction: ModalSubmitInteraction): Promise<void> {
+    const key = parseControlAppearanceId(interaction.customId);
+    if (!key) {
+      await safeReply(interaction, 'That panel is out of date. Run `/controlpanel` again.');
+      return;
+    }
+    if (!(await requireManageChannels(interaction))) return;
+    const raw = interaction.fields.getTextInputValue(CONTROL_APPEARANCE_INPUT_ID).trim();
+    let value: string | number | null = raw === '' ? null : raw;
+    if (key === CONTROL_PANEL_COLOR_KEY && raw !== '') {
+      const parsed = parsePanelColor(raw);
+      if (parsed === null) {
+        await safeReply(
+          interaction,
+          'That is not a colour I can use. Give me a hex code like `#c43bff`, or submit it blank to go back to the default.',
+        );
+        return;
+      }
+      value = parsed;
+    }
+    // Always opened from the configuration panel, so the update branch is the
+    // real one. The plain-reply fallback is the same defence every other modal
+    // here keeps: a modal with no message behind it cannot be answered with an
+    // update, and answering nothing leaves the admin on a dead spinner.
+    if (!interaction.isFromMessage()) {
+      const guildId = interaction.guildId!;
+      const res = await run(guildId, 'cmd:controlpanel', () =>
+        deps.settings.setControlPanelAppearance(guildId, key, value),
+      );
+      await interaction.reply({ content: formatResult(res), ephemeral: true });
+      if (res.ok) refreshPanelsSoon(guildId);
+      return;
+    }
+    await interaction.deferUpdate();
+    await refreshControlAppearance(interaction, key, value);
+  }
+
+  /**
+   * Applies one appearance change and re-renders the configuration panel.
+   *
+   * Its own function rather than a branch inside {@link refreshControlSettings}
+   * because that one's whole signature is `(entry, on: boolean)`, and widening
+   * it to carry a string or a number would make every existing caller pass a
+   * value it has no opinion about.
+   *
+   * The rejection is caught here for the reason that one documents: the
+   * interaction is already deferred, so `route`'s catch would follow up on it
+   * and leave a spinner that never resolves.
+   */
+  async function refreshControlAppearance(
+    interaction: ModalSubmitInteraction,
+    key: ControlPanelAppearanceKey,
+    value: string | number | null,
+  ): Promise<void> {
+    const guildId = interaction.guildId!;
+    try {
+      const res = await run(guildId, 'cmd:controlpanel', () =>
+        deps.settings.setControlPanelAppearance(guildId, key, value),
+      );
+      const config = await deps.settings.getControlPanel(guildId);
+      await interaction.editReply(
+        toUpdate(buildControlSettingsPanel(config, { note: formatResult(res) })),
+      );
+      // Only on success: a refused value changed nothing, and re-rendering
+      // every panel in the guild to prove it is traffic for no reason.
+      if (res.ok) refreshPanelsSoon(guildId);
+    } catch (err) {
+      deps.logger.warn({ err, guildId, entry: key }, 'control panel setting could not be saved');
+      deps.reportError?.('Control panel setting failed', {
+        guildId,
+        entry: key,
+        error: String(err),
+      });
+      await interaction.followUp({
+        content: `⚠️ I couldn't save that: ${describeError(err)}.`,
+        ephemeral: true,
+      });
+    }
   }
 
   /**
@@ -3438,6 +3545,8 @@ Already subscribed? Add the new server ` +
       return handleTextChannelsSubmit(interaction);
     if (interaction.customId.startsWith(CONTROL_PANEL_PREFIX))
       return handleControlPanelModal(interaction);
+    if (interaction.customId.startsWith(CONTROL_SETTINGS_PREFIX))
+      return handleControlAppearanceModal(interaction);
     if (interaction.customId.startsWith(LISTS_PREFIX)) return handleListSaveSubmit(interaction);
     // `avc:alias` is the pre-panel id of the Add modal, still accepted so a
     // modal opened on an old instance mid-deploy can submit against a new one.

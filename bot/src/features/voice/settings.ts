@@ -23,6 +23,17 @@ import {
   CONTROL_PANEL_DEFAULT_ENABLED,
   CONTROL_PANEL_DEFAULTS,
   CONTROL_PANEL_ENABLED_KEY,
+  CONTROL_PANEL_COLOR_KEY,
+  CONTROL_PANEL_DEFAULT_COLOR,
+  CONTROL_PANEL_DEFAULT_DESCRIPTION,
+  CONTROL_PANEL_DEFAULT_TITLE,
+  CONTROL_PANEL_DESCRIPTION_KEY,
+  CONTROL_PANEL_DESCRIPTION_MAX,
+  CONTROL_PANEL_TITLE_KEY,
+  CONTROL_PANEL_TITLE_MAX,
+  controlPanelAppearanceConfirmation,
+  readPanelColor,
+  readPanelText,
   DEFAULT_TEXT_CHANNEL_NAME,
   isStringMap,
   parseVoiceSettings,
@@ -37,6 +48,7 @@ import {
   timeZoneConfirmation,
 } from './guildSettings.js';
 import type {
+  ControlPanelAppearanceKey,
   ControlPanelConfig,
   ControlPanelEntry,
   GroupConfig,
@@ -851,6 +863,70 @@ export class GuildSettingsService {
       if (isDefault) delete current[control];
       else current[control] = on;
       const result = ok(controlPanelConfirmation(control, on));
+      if (Object.keys(current).length === 0) {
+        return { patch: {}, remove: [SETTINGS_KEYS.controlPanel], result };
+      }
+      return { patch: { [SETTINGS_KEYS.controlPanel]: current }, result };
+    });
+  }
+
+  /**
+   * Rewrites the panel's colour, title or description, or puts one back.
+   *
+   * The same map, the same merge and the same "store only a departure" rule as
+   * {@link setControlPanelEntry}, so a server that types the default text back
+   * in by hand ends up carrying no opinion, exactly as if it had reset. Passing
+   * `null` is the reset.
+   *
+   * **Validated here as well as at the command layer.** This is the only writer,
+   * and a colour outside Discord's range or a title past its cap does not fail
+   * the write, it fails every panel render in the guild afterwards with a 400
+   * on a message nobody is looking at. Rejecting at the seam that stores it is
+   * the only place that catches an `/import` or a future caller too.
+   */
+  setControlPanelAppearance(
+    guildId: string,
+    key: ControlPanelAppearanceKey,
+    value: string | number | null,
+  ): Promise<CommandResult> {
+    const cleaned =
+      value === null
+        ? null
+        : key === CONTROL_PANEL_COLOR_KEY
+          ? readPanelColor(value)
+          : readPanelText(
+              value,
+              key === CONTROL_PANEL_TITLE_KEY
+                ? CONTROL_PANEL_TITLE_MAX
+                : CONTROL_PANEL_DESCRIPTION_MAX,
+            );
+    if (value !== null && cleaned === null) {
+      return Promise.resolve(
+        fail(
+          key === CONTROL_PANEL_COLOR_KEY
+            ? 'That is not a colour I can use. Give me a hex code like `#c43bff`, or leave it blank to go back to the default.'
+            : 'That is empty once the spaces come off. Leave it blank to go back to the default.',
+        ),
+      );
+    }
+    return this.deps.guilds.mergeSettings(guildId, (existing) => {
+      const stored = existing?.settings?.[SETTINGS_KEYS.controlPanel];
+      // Copied whole, for the reason `setControlPanelEntry` documents at
+      // length: golden rule 3, and `Object.fromEntries` so a stored
+      // `__proto__` survives rather than invoking the prototype setter.
+      const current: Record<string, unknown> =
+        typeof stored === 'object' && stored !== null && !Array.isArray(stored)
+          ? Object.fromEntries(Object.entries(stored as Record<string, unknown>))
+          : {};
+      const defaults: Record<ControlPanelAppearanceKey, string | number> = {
+        [CONTROL_PANEL_COLOR_KEY]: CONTROL_PANEL_DEFAULT_COLOR,
+        [CONTROL_PANEL_TITLE_KEY]: CONTROL_PANEL_DEFAULT_TITLE,
+        [CONTROL_PANEL_DESCRIPTION_KEY]: CONTROL_PANEL_DEFAULT_DESCRIPTION,
+      };
+      const reset = cleaned === null || cleaned === defaults[key];
+      if (reset) delete current[key];
+      else current[key] = cleaned;
+      const result = ok(controlPanelAppearanceConfirmation(key, reset));
       if (Object.keys(current).length === 0) {
         return { patch: {}, remove: [SETTINGS_KEYS.controlPanel], result };
       }

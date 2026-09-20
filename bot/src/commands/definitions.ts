@@ -200,7 +200,7 @@ export function buildCommandDefinitions(
     adminOnly(
       new SlashCommandBuilder()
         .setName('controlpanel')
-        .setDescription('Choose which buttons new rooms get in their chat, or turn them off.'),
+        .setDescription('Set up the buttons new rooms get in their chat, or turn them off.'),
     ),
     adminOnly(
       new SlashCommandBuilder()

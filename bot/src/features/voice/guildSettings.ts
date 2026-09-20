@@ -385,16 +385,17 @@ export type ControlPanelControl = (typeof CONTROL_PANEL_CONTROLS)[number];
 /**
  * Whether a server that has never run `/controlpanel` gets the panel at all.
  *
- * **Off while the feature is being proved on the beta fleet.** It is a message
- * posted into every room of every server, which is not a change to make for a
- * whole install base on the strength of a dev guild. A server that wants it
- * turns it on with `/controlpanel`; beta does exactly that.
+ * **On.** It was off for one release while the feature was proved on beta,
+ * because it is a message posted into every room of every server and that is
+ * not a change to make for a whole install base on the strength of a dev guild.
  *
- * Flip this to `true` to make it the default for everyone, and change the
- * `/docs/commands` row and `feature-parity.md` §3.4 in the same commit - both
- * state which way round this is.
+ * Moving this moves every server that has not said otherwise, which is the
+ * point of storing only a DEPARTURE from it: a server that switched the panel
+ * off keeps it off, because `false` differs from this and is stored. Change the
+ * `/docs/commands` row and `feature-parity.md` §3.4 in the same commit as any
+ * future flip - both state which way round this is.
  */
-export const CONTROL_PANEL_DEFAULT_ENABLED = false;
+export const CONTROL_PANEL_DEFAULT_ENABLED = true;
 
 export const CONTROL_PANEL_DEFAULTS: Record<ControlPanelControl, boolean> = {
   privacy: true,
@@ -420,6 +421,74 @@ export const CONTROL_PANEL_ENABLED_KEY = 'panel';
 /** Anything `/controlpanel` can switch: one control, or the panel itself. */
 export type ControlPanelEntry = ControlPanelControl | typeof CONTROL_PANEL_ENABLED_KEY;
 
+/**
+ * The three appearance entries, which share the same map as the switches.
+ *
+ * They hold a string or a number rather than a boolean, which is why
+ * {@link readControlPanel} checks the key before the value type. None of them
+ * can collide with a control id: {@link isControlPanelControl} answers against
+ * the fixed list, and none of `color`, `title` or `description` is on it.
+ */
+export const CONTROL_PANEL_COLOR_KEY = 'color';
+export const CONTROL_PANEL_TITLE_KEY = 'title';
+export const CONTROL_PANEL_DESCRIPTION_KEY = 'description';
+
+/** Anything `/controlpanel` can rewrite rather than switch. */
+export type ControlPanelAppearanceKey =
+  | typeof CONTROL_PANEL_COLOR_KEY
+  | typeof CONTROL_PANEL_TITLE_KEY
+  | typeof CONTROL_PANEL_DESCRIPTION_KEY;
+
+export const CONTROL_PANEL_APPEARANCE_KEYS = [
+  CONTROL_PANEL_COLOR_KEY,
+  CONTROL_PANEL_TITLE_KEY,
+  CONTROL_PANEL_DESCRIPTION_KEY,
+] as const;
+
+/** True only for a string this build recognises as an appearance key. */
+export function isControlPanelAppearanceKey(value: unknown): value is ControlPanelAppearanceKey {
+  return (
+    typeof value === 'string' &&
+    (CONTROL_PANEL_APPEARANCE_KEYS as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * The two variables an admin may write into the panel's title or description.
+ *
+ * **Only these two**, and deliberately not the name-template engine. That
+ * engine resolves game presence, member counts and conditionals against a
+ * channel's live state, which is a per-render cost and a vocabulary that means
+ * nothing in a sentence like "this room belongs to". These two are the two
+ * facts the panel already stated before it was configurable.
+ *
+ * An unknown `@@thing@@` is left standing as literal text rather than refused.
+ * An admin who mistypes one gets a panel that says `@@onwer@@`, sees it, and
+ * fixes it; refusing the save would be a worse trade than that.
+ */
+export const CONTROL_PANEL_OWNER_TOKEN = '@@owner@@';
+export const CONTROL_PANEL_CREATOR_TOKEN = '@@creator_channel@@';
+
+/** Discord's own caps on an embed title and description. */
+export const CONTROL_PANEL_TITLE_MAX = 256;
+export const CONTROL_PANEL_DESCRIPTION_MAX = 4000;
+
+/**
+ * The panel's colour, title and description when a server has not changed them.
+ *
+ * The colour is the site's brand violet (`--violet`, `#c43bff` in
+ * `web/src/app/globals.css`), not the Discord blurple every other panel uses:
+ * the room panel is the one surface of ours a member sees without having run a
+ * command, so it is the one that should look like us rather than like Discord.
+ * Every other panel in the bot is an ephemeral reply to a command and stays
+ * blurple.
+ */
+export const CONTROL_PANEL_DEFAULT_COLOR = 0xc43bff;
+export const CONTROL_PANEL_DEFAULT_TITLE = 'Control your room';
+export const CONTROL_PANEL_DEFAULT_DESCRIPTION =
+  `This room belongs to ${CONTROL_PANEL_OWNER_TOKEN}.\n` +
+  `Make your own with ${CONTROL_PANEL_CREATOR_TOKEN}`;
+
 /** True only for a string this build recognises as a control id. */
 export function isControlPanelControl(value: unknown): value is ControlPanelControl {
   return typeof value === 'string' && (CONTROL_PANEL_CONTROLS as readonly string[]).includes(value);
@@ -428,13 +497,20 @@ export function isControlPanelControl(value: unknown): value is ControlPanelCont
 /**
  * One server's room control panel configuration.
  *
- * `enabled` is the panel itself; `controls` is which buttons it carries. Both
- * default to on, because the panel ships on by default and a server that has
- * never run `/controlpanel` has no stored key at all.
+ * `enabled` is the panel itself, `controls` is which buttons it carries, and
+ * the last three are what it looks like. A server that has never run
+ * `/controlpanel` has no stored key at all and gets every default above.
+ *
+ * `title` and `description` are raw, tokens and all. Substitution happens at
+ * render time in `controlPanel.ts`, because the two variables resolve against
+ * a room and this object is per guild.
  */
 export interface ControlPanelConfig {
   enabled: boolean;
   controls: Record<ControlPanelControl, boolean>;
+  color: number;
+  title: string;
+  description: string;
 }
 
 /**
@@ -456,10 +532,32 @@ export function readControlPanel(settings: Record<string, unknown>): ControlPane
   const config: ControlPanelConfig = {
     enabled: CONTROL_PANEL_DEFAULT_ENABLED,
     controls: { ...CONTROL_PANEL_DEFAULTS },
+    color: CONTROL_PANEL_DEFAULT_COLOR,
+    title: CONTROL_PANEL_DEFAULT_TITLE,
+    description: CONTROL_PANEL_DEFAULT_DESCRIPTION,
   };
   const raw = settings[SETTINGS_KEYS.controlPanel];
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return config;
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    // The key decides which shape is expected, and a value of the wrong shape
+    // falls through to the default rather than being coerced. `/import` can
+    // hand us anything, including a colour somebody wrote as a `"#c43bff"`
+    // string, and a half-parsed one would be worse than the brand colour.
+    if (key === CONTROL_PANEL_COLOR_KEY) {
+      const color = readPanelColor(value);
+      if (color !== null) config.color = color;
+      continue;
+    }
+    if (key === CONTROL_PANEL_TITLE_KEY) {
+      const title = readPanelText(value, CONTROL_PANEL_TITLE_MAX);
+      if (title !== null) config.title = title;
+      continue;
+    }
+    if (key === CONTROL_PANEL_DESCRIPTION_KEY) {
+      const description = readPanelText(value, CONTROL_PANEL_DESCRIPTION_MAX);
+      if (description !== null) config.description = description;
+      continue;
+    }
     if (typeof value !== 'boolean') continue;
     if (key === CONTROL_PANEL_ENABLED_KEY) {
       config.enabled = value;
@@ -468,6 +566,53 @@ export function readControlPanel(settings: Record<string, unknown>): ControlPane
     if (isControlPanelControl(key)) config.controls[key] = value;
   }
   return config;
+}
+
+/**
+ * A stored colour as a Discord integer, or null when it is not usable.
+ *
+ * Discord refuses a colour outside 0..0xffffff with a 400 on the whole message,
+ * which for this feature means every panel in the guild stops rendering. So the
+ * range is checked here rather than trusted, and a stored value that fails it
+ * reads as "not configured".
+ */
+export function readPanelColor(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return null;
+  if (value < 0 || value > 0xffffff) return null;
+  return value;
+}
+
+/** A stored title or description, trimmed and capped, or null when unusable. */
+export function readPanelText(value: unknown, max: number): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.slice(0, max);
+}
+
+/**
+ * Parses what an admin typed into the colour modal.
+ *
+ * `#c43bff`, `c43bff` and `#c3f` all work, because all three are what somebody
+ * pastes out of a colour picker. Returns null for anything else, which the
+ * caller turns into a refusal rather than a silent default: an admin who typed
+ * `purple` and got the brand colour back would reasonably read that as success.
+ */
+export function parsePanelColor(input: string): number | null {
+  const raw = input.trim().replace(/^#/, '');
+  const hex = /^[0-9a-fA-F]{3}$/.test(raw)
+    ? raw
+        .split('')
+        .map((c) => c + c)
+        .join('')
+    : raw;
+  if (!/^[0-9a-fA-F]{6}$/.test(hex)) return null;
+  return Number.parseInt(hex, 16);
+}
+
+/** A colour as an admin reads it back, always six digits. */
+export function formatPanelColor(color: number): string {
+  return `#${color.toString(16).padStart(6, '0')}`;
 }
 
 /** How each control reads in a `/controlpanel` confirmation. */
@@ -503,6 +648,30 @@ export function controlPanelConfirmation(control: ControlPanelEntry, on: boolean
   return on
     ? `Rooms will show the **${name}** button.` + rooms
     : `Rooms will not show the **${name}** button.` + rooms + ' The command behind it still works.';
+}
+
+/** How each appearance entry reads in a `/controlpanel` confirmation. */
+const CONTROL_PANEL_APPEARANCE_NAMES: Record<ControlPanelAppearanceKey, string> = {
+  [CONTROL_PANEL_COLOR_KEY]: 'colour',
+  [CONTROL_PANEL_TITLE_KEY]: 'title',
+  [CONTROL_PANEL_DESCRIPTION_KEY]: 'description',
+};
+
+/**
+ * What `/controlpanel` says after a title, description or colour change.
+ *
+ * Says "back to the default" rather than naming the default text, because the
+ * panel rendered right below the confirmation is already showing it.
+ */
+export function controlPanelAppearanceConfirmation(
+  key: ControlPanelAppearanceKey,
+  reset: boolean,
+): string {
+  const name = CONTROL_PANEL_APPEARANCE_NAMES[key];
+  const rooms = ' Panels already posted are updated too.';
+  return reset
+    ? `The panel ${name} is back to the default.` + rooms
+    : `The panel ${name} is updated.` + rooms;
 }
 
 /** One category's grouping config, or `undefined` when that category isn't grouped. */

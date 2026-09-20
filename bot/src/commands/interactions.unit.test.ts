@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { DiscordAPIError, PermissionFlagsBits } from 'discord.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fakeLogger } from '../runtime/testUtils.js';
+import { readControlPanel } from '../features/voice/guildSettings.js';
 import { registerInteractionHandler, type InteractionDeps } from './interactions.js';
 import { LOGGING_MODAL_ID } from './loggingModal.js';
 import { CREATE_FROM_SETUP_MODAL_ID, CREATE_MODAL_ID } from './createModal.js';
@@ -15,7 +16,7 @@ import { editorId } from './templatePanel.js';
 import { ALIAS_MODAL_ID } from './aliasModal.js';
 import { ALIAS_SELECT_ID, aliasHash, aliasId } from './aliasPanel.js';
 import { controlPanelId } from '../features/voice/controlPanel.js';
-import { controlSettingsId, controlToggleId } from './controlPanelSettings.js';
+import { controlAppearanceId, controlSettingsId, controlToggleId } from './controlPanelSettings.js';
 
 /** A Discord "Missing Permissions" (50013) rejection, as thrown by a failed create. */
 function missingPermissions(): DiscordAPIError {
@@ -205,19 +206,18 @@ function setup(overrides: Partial<InteractionDeps> = {}) {
     setTextChannelName: vi.fn().mockResolvedValue({ ok: true, message: 'named' }),
     setTextChannelRole: vi.fn().mockResolvedValue({ ok: true, message: 'role set' }),
     toggleTextChannel: vi.fn().mockResolvedValue({ ok: true, message: 'toggled' }),
-    getControlPanel: vi.fn().mockResolvedValue({
-      enabled: true,
-      controls: {
-        privacy: true,
-        limit: true,
-        rename: true,
-        claim: false,
-        transfer: false,
-        kick: true,
-        info: true,
-      },
-    }),
+    /**
+     * Built by the real reader rather than by hand.
+     *
+     * A literal here drifts the moment the config grows a field, and the
+     * symptom is not an obviously wrong fixture: the panel builder throws deep
+     * inside a render and the handler answers "something went wrong".
+     */
+    getControlPanel: vi
+      .fn()
+      .mockResolvedValue(readControlPanel({ control_panel: { panel: true } })),
     setControlPanelEntry: vi.fn().mockResolvedValue({ ok: true, message: 'switched' }),
+    setControlPanelAppearance: vi.fn().mockResolvedValue({ ok: true, message: 'saved' }),
   };
   const guilds = {
     get: vi.fn().mockResolvedValue({ authStatus: 'active' }),
@@ -2814,6 +2814,131 @@ describe('registerInteractionHandler (/controlpanel)', () => {
       kind: 'button',
       customId: controlToggleId('kick'),
       manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(refreshGuildPanels).toHaveBeenCalledWith('g1');
+  });
+
+  /**
+   * The appearance buttons open a modal, which has to be the FIRST response to
+   * the interaction: a `deferUpdate` above it makes the modal unopenable and
+   * the admin gets a spinner that resolves into nothing.
+   */
+  it('opens a prefilled modal rather than deferring, for an appearance button', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'button',
+      customId: controlAppearanceId('title'),
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(interaction.showModal).toHaveBeenCalled();
+    expect(interaction.deferUpdate).not.toHaveBeenCalled();
+    expect(JSON.stringify(interaction.showModal.mock.calls[0]?.[0])).toContain('Control your room');
+  });
+
+  it('refuses an appearance button without Manage Channels, and opens nothing', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'button',
+      customId: controlAppearanceId('color'),
+      manageChannels: false,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'You need the Manage Channels permission.' }),
+    );
+    expect(interaction.showModal).not.toHaveBeenCalled();
+  });
+
+  it('saves a submitted title and re-renders the panel in place', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'modal',
+      customId: controlAppearanceId('title'),
+      manageChannels: true,
+      fromMessage: true,
+      textInputs: { value: 'Your room, your rules' },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(env.settings.setControlPanelAppearance).toHaveBeenCalledWith(
+      'g1',
+      'title',
+      'Your room, your rules',
+    );
+    expect(editReply).toHaveBeenCalled();
+  });
+
+  /** Blank is the reset, which is why the modal input is not required. */
+  it('reads a blank submit as a reset rather than as an empty title', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'modal',
+      customId: controlAppearanceId('description'),
+      manageChannels: true,
+      fromMessage: true,
+      textInputs: { value: '   ' },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(env.settings.setControlPanelAppearance).toHaveBeenCalledWith('g1', 'description', null);
+  });
+
+  it('parses a hex colour into the integer Discord wants', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'modal',
+      customId: controlAppearanceId('color'),
+      manageChannels: true,
+      fromMessage: true,
+      textInputs: { value: '#00ff00' },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(env.settings.setControlPanelAppearance).toHaveBeenCalledWith('g1', 'color', 0x00ff00);
+  });
+
+  /**
+   * A typo gets a sentence about hex codes and changes nothing. Re-rendering
+   * every panel in the guild to prove a refusal would be traffic for nothing.
+   */
+  it('refuses a colour it cannot parse, writes nothing and refreshes nothing', async () => {
+    const refreshGuildPanels = vi.fn().mockResolvedValue({ considered: 0 });
+    const env = setup({ feature: { refreshGuildPanels } as never });
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'modal',
+      customId: controlAppearanceId('color'),
+      manageChannels: true,
+      fromMessage: true,
+      textInputs: { value: 'purple' },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(env.settings.setControlPanelAppearance).not.toHaveBeenCalled();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('hex code');
+    expect(refreshGuildPanels).not.toHaveBeenCalled();
+  });
+
+  it('refreshes the panels already posted after an appearance change', async () => {
+    const refreshGuildPanels = vi.fn().mockResolvedValue({ considered: 3 });
+    const env = setup({ feature: { refreshGuildPanels } as never });
+    dispose = env.dispose;
+    const { interaction } = fakeInteraction({
+      kind: 'modal',
+      customId: controlAppearanceId('title'),
+      manageChannels: true,
+      fromMessage: true,
+      textInputs: { value: 'Yours' },
     });
     env.client.emit('interactionCreate', interaction);
     await flush();

@@ -14,11 +14,16 @@ import {
 } from 'discord.js';
 import {
   CONTROL_PANEL_CONTROLS,
+  CONTROL_PANEL_CREATOR_TOKEN,
+  CONTROL_PANEL_DESCRIPTION_MAX,
+  CONTROL_PANEL_OWNER_TOKEN,
+  CONTROL_PANEL_TITLE_MAX,
   type ControlPanelConfig,
   type ControlPanelControl,
 } from './guildSettings.js';
 import { MAX_USER_LIMIT } from './commands.js';
 import { SITE_URL } from '../billing/messages.js';
+import { PANEL_FOOTER, PANEL_LINKS_FIELD } from '../panelBranding.js';
 
 /**
  * The room control panel: the buttons posted into a new room's chat so a member
@@ -119,19 +124,26 @@ export const CONTROL_PANEL_INPUT_ID = 'input';
 /** Discord's own cap on a voice channel name. */
 const NAME_INPUT_MAX = 100;
 
-/** AVC blurple, matching every other panel. */
-const BLURPLE = 0x5865f2;
-
-/**
- * The logo, served from the site and verified live before it was put here.
- *
- * The footer icon only. A thumbnail carried the same mark a second time, a few
- * lines above it, which is decoration rather than information.
- */
-const LOGO_ICON_URL = `${SITE_URL}/logo-64.png`;
-
 /** Where the Name field's "templates" link points. */
 const TEMPLATES_DOC_URL = `${SITE_URL}/docs/name-templates`;
+
+/**
+ * Resolves the two variables an admin may write into the title or description.
+ *
+ * A function replacement rather than a string one: `String.replaceAll` reads
+ * `$&` and friends in a replacement string, and while a mention never contains
+ * one, the function form cannot be surprised by a future replacement that does.
+ *
+ * A room with no owner renders `nobody` rather than a broken mention. That is
+ * not the same condition as the name engine's `@@owner@@`, which renders
+ * `Unknown` when the owner is merely not in the room; here the room genuinely
+ * has nobody in charge, which is exactly when Claim is the button that matters.
+ */
+export function renderPanelText(text: string, view: RoomPanelView): string {
+  return text
+    .replaceAll(CONTROL_PANEL_OWNER_TOKEN, () => (view.ownerId ? `<@${view.ownerId}>` : 'nobody'))
+    .replaceAll(CONTROL_PANEL_CREATOR_TOKEN, () => `<#${view.primaryChannelId}>`);
+}
 
 /** What the room's current state does to the panel. */
 export interface RoomPanelView {
@@ -179,7 +191,7 @@ export const CONTROL_PANEL_FACES: Record<Exclude<ControlPanelControl, 'privacy'>
   },
   claim: { label: 'Claim', emoji: '👑', blurb: 'Take over a room with nobody in charge' },
   transfer: { label: 'Transfer', emoji: '🤝', blurb: 'Hand the room to someone else in it' },
-  kick: { label: 'Kick', emoji: '🗳️', blurb: 'Start a vote to remove someone' },
+  kick: { label: 'Kick', emoji: '🥾', blurb: 'Start a vote to remove someone' },
   info: { label: 'Info', emoji: 'ℹ️', blurb: 'See how this room is configured' },
 };
 
@@ -243,31 +255,30 @@ export function buildControlPanel(
 
   const faces = shown.map((c) => faceOf(c, view));
 
-  /**
-   * Mentions render inside an embed and never notify, so the owner is named
-   * without being pinged on every re-render. A room with no owner says so
-   * rather than rendering a broken mention, and that is exactly when Claim is
-   * the button that matters.
-   */
   const fields: APIEmbedField[] = faces.map(({ face }) => ({
     name: `${face.emoji} ${face.label}`,
     value: face.blurb,
     inline: true,
   }));
+  fields.push(PANEL_LINKS_FIELD);
 
+  /**
+   * Mentions render inside an embed and never notify, so the owner is named
+   * without being pinged on every re-render.
+   *
+   * Sliced to Discord's caps AFTER substitution, not before: the stored text is
+   * within them, and a mention is longer than the token it replaces, so a
+   * description sitting just under the limit would otherwise grow past it and
+   * 400 the message.
+   */
   const embed: APIEmbed = new EmbedBuilder()
-    .setColor(BLURPLE)
-    .setTitle('Control your room')
+    .setColor(config.color)
+    .setTitle(renderPanelText(config.title, view).slice(0, CONTROL_PANEL_TITLE_MAX))
     .setDescription(
-      (view.ownerId
-        ? `This room belongs to <@${view.ownerId}>.`
-        : 'This room has no owner right now.') + `\nMake your own with <#${view.primaryChannelId}>`,
+      renderPanelText(config.description, view).slice(0, CONTROL_PANEL_DESCRIPTION_MAX),
     )
     .addFields(fields)
-    .setFooter({
-      text: 'auto-voice.io  ·  Free and open source, dynamic voice channels.',
-      iconURL: LOGO_ICON_URL,
-    })
+    .setFooter(PANEL_FOOTER)
     .toJSON();
 
   // Five per row is Discord's ceiling. Chunking rather than a fixed layout so a
