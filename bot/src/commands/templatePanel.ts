@@ -87,7 +87,7 @@ export function buildAdoptPrompt(channelId: string, originalName: string): Inter
 
 /** Max length of a template in the edit modal (well above any rendered-output cap). */
 const TEMPLATE_INPUT_MAX = 1000;
-const DOCS_LINK = 'https://auto-voice.io/docs/commands/template';
+const DOCS_LINK = 'https://auto-voice.io/docs/name-templates';
 
 /**
  * The handful of variables worth putting on the panel, as fields.
