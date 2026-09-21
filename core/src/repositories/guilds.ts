@@ -1,4 +1,4 @@
-import { and, asc, eq, gt, isNotNull, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, gte, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Database } from '../db/client.js';
 import { guildAuthEvents, guilds, opsAudit } from '../db/schema.js';
@@ -259,6 +259,56 @@ export class GuildRepository {
     }
     const last = rows[rows.length - 1];
     return { rows: parsed, lastGuildId: last ? (last.guildId as string) : undefined };
+  }
+
+  /**
+   * Guilds whose trial ended and whose ladder never moved.
+   *
+   * The outcome check, deliberately blind to the mechanism. Every other signal
+   * around the leniency ladder reports something the job NOTICED — a deferred
+   * transition, a failed delivery, a queue depth — and each one is silent
+   * about the ways the ladder can fail to run at all: a reservation nobody
+   * claims, a kill switch left set after an incident, a sweep that throws on
+   * page one, a guild skipped by a filter that was wrong about it. Every one
+   * of those has happened here, and each looked healthy from the inside. This
+   * asks the only question a customer would: is anybody sitting past the end
+   * of their trial with nothing having happened?
+   *
+   * Excluded, because they are each a deliberate state rather than a fault:
+   * guilds under the free ceiling (the trial clock runs but is dormant, so the
+   * date passing means nothing), and pooled guilds (the pool's own ladder
+   * governs them). Guilds held in `grace` past `grace_until` are not counted
+   * either — that is what `billing.hard_gate_disabled` is for.
+   *
+   * One indexed count per advance pass, on one fleet, once an hour.
+   */
+  async countTrialsPastDue(input: {
+    /** Anything that expired before this is overdue. Usually now − a tolerance. */
+    before: Date;
+    /** The free-forever ceiling, from the tier table rather than a literal. */
+    minMemberCount: number;
+  }): Promise<{ count: number; examples: string[] }> {
+    const [row] = await this.db
+      .select({
+        count: sql<number>`count(*)::int`,
+        // The five longest-overdue ids, enough to start an investigation from.
+        // A literal slice, because an alert does not need a page size and a
+        // computed one would be the only interpolation in this statement.
+        examples: sql<
+          string[] | null
+        >`(array_agg(${guilds.guildId} ORDER BY ${guilds.authExpiresAt}))[1:5]`,
+      })
+      .from(guilds)
+      .where(
+        and(
+          eq(guilds.authStatus, 'trial'),
+          isNotNull(guilds.authExpiresAt),
+          lt(guilds.authExpiresAt, input.before),
+          isNull(guilds.poolId),
+          gte(guilds.memberCount, input.minMemberCount),
+        ),
+      );
+    return { count: row?.count ?? 0, examples: row?.examples ?? [] };
   }
 
   /**

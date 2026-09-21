@@ -170,4 +170,77 @@ describe('GuildRepository (integration)', () => {
       expect(meta.announcements?.rewrite_2026_08).toBeTruthy();
     });
   });
+  /**
+   * The outcome check behind the `billing.trials_past_due` alert. Asserted as
+   * DELTAS rather than absolute counts: every test in this file shares one
+   * database, and several leave a guild parked in some state on purpose.
+   */
+  describe('countTrialsPastDue', () => {
+    const before = new Date('2026-07-04T12:00:00.000Z');
+    const lapsed = new Date('2026-07-01T12:00:00.000Z');
+
+    async function overdue(): Promise<number> {
+      const { count } = await repo.countTrialsPastDue({ before, minMemberCount: 100 });
+      return count;
+    }
+
+    it('counts a billable guild whose trial ended and whose ladder never moved', async () => {
+      const start = await overdue();
+      await repo.ensure('past-due-1');
+      await repo.recordMemberCountSample('past-due-1', 15_825, { at: lapsed });
+      await repo.transitionAuth({
+        guildId: 'past-due-1',
+        toStatus: 'trial',
+        expiresAt: lapsed,
+      });
+      expect(await overdue()).toBe(start + 1);
+      const { examples } = await repo.countTrialsPastDue({ before, minMemberCount: 100 });
+      expect(examples).toContain('past-due-1');
+
+      // Moving it is what clears the alarm, not time passing.
+      await repo.transitionAuth({ guildId: 'past-due-1', toStatus: 'grace' });
+      expect(await overdue()).toBe(start);
+    });
+
+    it('ignores a dormant small guild, whose trial date means nothing', async () => {
+      const start = await overdue();
+      await repo.ensure('past-due-free');
+      await repo.recordMemberCountSample('past-due-free', 40, { at: lapsed });
+      await repo.transitionAuth({
+        guildId: 'past-due-free',
+        toStatus: 'trial',
+        expiresAt: lapsed,
+      });
+      expect(await overdue()).toBe(start);
+    });
+
+    it('ignores a guild whose ladder belongs to a pool', async () => {
+      const start = await overdue();
+      await repo.ensure('past-due-pooled');
+      await repo.recordMemberCountSample('past-due-pooled', 15_825, { at: lapsed });
+      await repo.transitionAuth({
+        guildId: 'past-due-pooled',
+        toStatus: 'trial',
+        expiresAt: lapsed,
+      });
+      expect(await overdue()).toBe(start + 1);
+      await env.handle.pool.query('UPDATE guilds SET pool_id = $1 WHERE guild_id = $2', [
+        'pool-past-due',
+        'past-due-pooled',
+      ]);
+      expect(await overdue()).toBe(start);
+    });
+
+    it('ignores a guild still inside its trial', async () => {
+      const start = await overdue();
+      await repo.ensure('past-due-current');
+      await repo.recordMemberCountSample('past-due-current', 15_825, { at: lapsed });
+      await repo.transitionAuth({
+        guildId: 'past-due-current',
+        toStatus: 'trial',
+        expiresAt: new Date('2027-07-04T12:00:00.000Z'),
+      });
+      expect(await overdue()).toBe(start);
+    });
+  });
 });

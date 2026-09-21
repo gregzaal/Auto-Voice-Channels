@@ -13,6 +13,7 @@ import {
   subscriptionInGoodStanding,
   subscriptionNeverCharged,
   tierFor,
+  TIERS,
   trialDurationMs,
   trialPolicyFor,
   utcDayKey,
@@ -80,6 +81,30 @@ interface PoolLanding {
 
 /** Leniency transition reasons that make things WORSE for the customer if the count is wrong. */
 const POOL_UPGRADE_REASONS: ReadonlySet<string> = new Set(['over_limit', 'grace_elapsed']);
+
+/**
+ * How old a recorded member count may be and still stand in for a fresh REST
+ * read that this fleet cannot perform. See {@link
+ * BillingReconciler.standInCountIsTrustworthy}.
+ *
+ * 36 hours: the sample phase records once per UTC day per guild, so a healthy
+ * fleet refreshes every count inside 24, and the extra half-day absorbs one
+ * missed pass, a restart, or a guild sampled late yesterday and early today.
+ * Past that the silence is the signal — the fleet holding the guild is not
+ * sampling it — and the ladder should stop rather than bill on a stale number.
+ */
+const STAND_IN_COUNT_MAX_AGE_MS = 36 * 3_600_000;
+
+/**
+ * How far past its trial end a guild may sit before the outcome check calls it
+ * a fault. See {@link BillingReconciler.reportOverdueTrials}.
+ *
+ * Twelve hours: the pass runs hourly, so a healthy ladder moves a guild within
+ * one, and twelve is a dozen consecutive failures rather than one unlucky
+ * restart or a guild that crossed the free ceiling minutes ago. The cohort
+ * this check exists for sat for three days.
+ */
+const OVERDUE_TRIAL_TOLERANCE_MS = 12 * 3_600_000;
 
 export interface BillingReconcilerDeps {
   guilds: GuildRepository;
@@ -149,6 +174,16 @@ export interface BillingRunStats {
   transitions: number;
   /** Newly queued by the advance pass (re-derived duplicates are not counted). */
   notificationsQueued: number;
+  /**
+   * Transitions this pass decided on and then could not apply, because the
+   * member count behind them could not be validated.
+   *
+   * On `/diagnostics` because the alternative was a warn line an hour: a
+   * number here that does not fall is a customer whose trial ended on paper
+   * and nowhere else. Cumulative for the life of the process, like every other
+   * counter in this block.
+   */
+  transitionsDeferred: number;
   /** Delivered by THIS fleet. Not the same number as queued, by design. */
   notificationsSent: number;
   /** Given up on: nobody could reach the guild before the notice went stale. */
@@ -213,6 +248,7 @@ export class BillingReconciler {
     advanced: 0,
     transitions: 0,
     notificationsQueued: 0,
+    transitionsDeferred: 0,
     notificationsSent: 0,
     notificationsExpired: 0,
     notificationQueueDepth: null,
@@ -387,6 +423,48 @@ export class BillingReconciler {
     } catch (err) {
       this.deps.logger.warn({ err }, 'billing notification prune failed');
     }
+
+    await this.reportOverdueTrials();
+  }
+
+  /**
+   * Asks, at the end of every pass, the question a customer would: is anybody
+   * still sitting past the end of their trial?
+   *
+   * Every other signal this job emits reports something it NOTICED, and each
+   * of them is blind to the ladder simply not running: a reservation nobody
+   * claims, `billing.reconcile_disabled` left set after an incident, a sweep
+   * that throws on its first page, a guild a filter wrongly skipped. The 16
+   * guilds stranded in September were caught by none of the above, because
+   * from the inside every pass looked like a success. This one measures the
+   * outcome instead, so the next cause does not need to be predicted.
+   *
+   * One indexed count, once an hour, on the advancing fleet alone. It runs
+   * after the walk rather than before it, so a pass that fixes the backlog
+   * reports nothing.
+   */
+  private async reportOverdueTrials(): Promise<void> {
+    try {
+      const { count, examples } = await this.deps.guilds.countTrialsPastDue({
+        before: new Date(this.now().getTime() - OVERDUE_TRIAL_TOLERANCE_MS),
+        // From the tier table, never a literal: the free ceiling has moved
+        // before, and a stale copy of it here would alarm about every dormant
+        // small guild or quietly excuse a band of real ones.
+        minMemberCount: TIERS[0]?.maxExclusive ?? 100,
+      });
+      if (count === 0) return;
+      this.deps.logger.warn({ count, examples }, 'guilds are past their trial end and still trial');
+      this.deps.report?.(
+        'billing.trials_past_due',
+        `${count} guild${count === 1 ? '' : 's'} sat past the end of ${count === 1 ? 'its' : 'their'} trial without the ladder moving`,
+        { count, examples, fleet: this.deps.fleet },
+      );
+    } catch (err) {
+      // Contained like every other telemetry path here: a check that cannot
+      // run must not cost the pass that just did the work.
+      this.stats.errors += 1;
+      this.deps.logger.warn({ err }, 'overdue-trial check failed');
+    }
   }
 
   /**
@@ -477,21 +555,39 @@ export class BillingReconciler {
     if (decision.transition?.requiresCountValidation) {
       /**
        * The asymmetric resolution: capping the reads breaks the
-       * upgrade invariant, so an upgrade needs a fresh read for EVERY live
-       * member and defers the whole pool if any is unavailable. A downgrade
+       * upgrade invariant, so an upgrade needs a current count for EVERY live
+       * member and defers the whole pool if any is missing. A downgrade
        * or reactivation proceeds on the samples alone — it fails in the
        * customer's favour either way.
+       *
+       * "Current" and "freshly read" stopped being the same thing when the
+       * stand-in below arrived. A pool spans fleets by design, so demanding a
+       * REST read this fleet cannot make for a member another fleet holds
+       * meant such a pool could never be upgraded or gated at all. A member
+       * this fleet cannot read contributes the count its own fleet sampled
+       * today, under the same rules and the same audit as the per-guild path;
+       * a member nobody has counted lately still stops the pool.
        */
       if (POOL_UPGRADE_REASONS.has(decision.transition.reason)) {
         let freshSum = 0;
         for (const guild of billableGuilds) {
           const authoritative = await this.deps.fetchAuthoritativeCount(guild.guildId);
           if (authoritative === null) {
-            this.deps.logger.warn(
-              { poolId: pool.id, guildId: guild.guildId, transition: decision.transition.reason },
-              'authoritative member count unavailable for a pool member; deferring pool transition',
-            );
-            return;
+            /**
+             * A pool spans fleets by design — one purchaser, servers wherever
+             * they are — so "this fleet cannot read that member" is the normal
+             * case here rather than the exception, and deferring on it stalls
+             * the whole pool forever. Same stand-in, same rules, per member.
+             */
+            if (!(await this.standInCountIsTrustworthy(guild, decision.transition.reason, now))) {
+              this.deps.logger.warn(
+                { poolId: pool.id, guildId: guild.guildId, transition: decision.transition.reason },
+                'member count unavailable for a pool member; deferring pool transition',
+              );
+              return;
+            }
+            freshSum += guild.memberCount ?? 0;
+            continue;
           }
           freshSum += authoritative;
           // Keep the guild's own recorded count current while we are here —
@@ -960,31 +1056,33 @@ export class BillingReconciler {
       // The fresh authoritative read is THE tie-breaker before
       // any billing-affecting transition — always adopted and re-evaluated,
       // even inside the discrepancy threshold (a small disagreement can still
-      // straddle a tier boundary). Unavailable → wait for the next run.
+      // straddle a tier boundary).
       const authoritative = await this.deps.fetchAuthoritativeCount(current.guildId);
       if (authoritative === null) {
-        this.deps.logger.warn(
-          { guildId: current.guildId, transition: decision.transition.reason },
-          'authoritative member count unavailable; deferring transition',
+        // Unavailable is not one condition. A guild THIS fleet is in should
+        // answer, so silence is transient and waiting is right; a guild it is
+        // not in will never answer, and waiting is forever.
+        if (!(await this.standInCountIsTrustworthy(current, decision.transition.reason, now))) {
+          return;
+        }
+      } else {
+        const cached = current.memberCount ?? 0;
+        const { row: corrected } = await this.deps.guilds.recordMemberCountSample(
+          current.guildId,
+          authoritative,
+          { at: now, authoritative: true },
         );
-        return;
+        if (isCountDiscrepant(cached, authoritative)) {
+          await this.deps.opsAudit.record({
+            actor: 'billing-reconciler',
+            action: 'member_count.discrepancy',
+            target: current.guildId,
+            details: { cached, authoritative },
+          });
+        }
+        current = corrected;
+        decision = await this.evaluate(current, now, config);
       }
-      const cached = current.memberCount ?? 0;
-      const { row: corrected } = await this.deps.guilds.recordMemberCountSample(
-        current.guildId,
-        authoritative,
-        { at: now, authoritative: true },
-      );
-      if (isCountDiscrepant(cached, authoritative)) {
-        await this.deps.opsAudit.record({
-          actor: 'billing-reconciler',
-          action: 'member_count.discrepancy',
-          target: current.guildId,
-          details: { cached, authoritative },
-        });
-      }
-      current = corrected;
-      decision = await this.evaluate(current, now, config);
     }
 
     if (decision.transition) {
@@ -1015,6 +1113,198 @@ export class BillingReconciler {
       );
       if (queued) this.stats.notificationsQueued += 1;
     }
+  }
+
+  /**
+   * May a billing transition proceed on the count already recorded, now that
+   * the fresh REST read has come back empty?
+   *
+   * `fetchAuthoritativeCount` can only answer for guilds THIS fleet is in, and
+   * the advance pass is a cluster singleton running on one fleet for guilds
+   * that belong to all of them. For every beta and gold guild the read is a
+   * 404 by construction, so treating it as "try again next hour" deferred
+   * those transitions forever: on 2026-09-21 sixteen migrated servers sat
+   * three days past the end of their trial, still `trial`, with no grace
+   * clock, no "your trial has ended" notice, and one warn line an hour as the
+   * only trace.
+   *
+   * The stand-in is `guilds.member_count`, refreshed daily by the sample phase
+   * of whichever fleet IS in the guild and already guarded by the anomaly
+   * clamps. It is also the exact number this decision was derived from, so
+   * accepting it changes no outcome — it only stops a double-check this fleet
+   * is structurally unable to perform from blocking the ladder for good.
+   *
+   * False means defer, and every false says so somewhere a human will see it.
+   */
+  private async standInCountIsTrustworthy(
+    row: GuildRow,
+    reason: string,
+    now: Date,
+  ): Promise<boolean> {
+    // Nothing recorded to stand in for the read. Deferring is all that is left,
+    // and it is also harmless: an unsampled guild has no count to bill on.
+    if (row.memberCount === null) {
+      this.deps.logger.warn(
+        { guildId: row.guildId, transition: reason },
+        'no member count at all; deferring transition',
+      );
+      this.stats.transitionsDeferred += 1;
+      return false;
+    }
+
+    let fleets: Fleet[];
+    try {
+      fleets = await this.deps.presence.presentFleets(row.guildId);
+    } catch (err) {
+      // Presence unknown means the branch below cannot be chosen honestly.
+      // Defer rather than guess: the next tick reads it again.
+      this.deps.logger.warn(
+        { err, guildId: row.guildId, transition: reason },
+        'presence read failed; deferring transition',
+      );
+      this.stats.transitionsDeferred += 1;
+      return false;
+    }
+
+    const sampleAgeMs = row.memberCountUpdatedAt
+      ? now.getTime() - row.memberCountUpdatedAt.getTime()
+      : null;
+
+    if (fleets.includes(this.deps.fleet)) {
+      /**
+       * Presence says we ARE in this guild, so the read should have worked: a
+       * rate limit, a Discord outage, or a kick presence has not caught up
+       * with. Waiting is right, and so is saying so — this is the one place
+       * that can tell a transient failure from a permanent one, and a
+       * "transient" failure repeating every hour is neither.
+       */
+      await this.reportStuckTransition(row, reason, 'read_failed', fleets, sampleAgeMs);
+      this.stats.transitionsDeferred += 1;
+      return false;
+    }
+
+    if (fleets.length === 0) {
+      /**
+       * No bot anywhere: nothing to validate against, and nothing being served
+       * either. The bookkeeping still has to move, or a departed guild's trial
+       * stays open forever and it comes back entitled years later. Any age of
+       * count will do, because it stopped changing when the bot left.
+       */
+      await this.recordStandIn(row, reason, fleets, sampleAgeMs);
+      return true;
+    }
+
+    if (sampleAgeMs === null || sampleAgeMs > STAND_IN_COUNT_MAX_AGE_MS) {
+      /**
+       * Another fleet holds this guild but has not sampled it lately, so the
+       * recorded count is not standing in for anything. That is a broken
+       * sampler rather than a quiet cross-fleet fact, and it is worth waking
+       * somebody for on its own.
+       */
+      await this.reportStuckTransition(row, reason, 'stale_sample', fleets, sampleAgeMs);
+      this.stats.transitionsDeferred += 1;
+      return false;
+    }
+
+    await this.recordStandIn(row, reason, fleets, sampleAgeMs);
+    return true;
+  }
+
+  /**
+   * Notes that a transition was applied on a sampled count rather than a fresh
+   * read.
+   *
+   * Sits beside the `guild.auth.*` row it precedes, so "why did this guild
+   * move on a number nobody re-read" is answerable a month later without the
+   * logs, which is the whole reason the validation step exists.
+   *
+   * Once a day per guild, like every other state-shaped row this job writes.
+   * A transition is normally a one-off, but the POOL path stands in per member
+   * and can still defer on a later one, so an unguarded row there would be one
+   * per member per hour for as long as the pool stayed stuck.
+   */
+  private async recordStandIn(
+    row: GuildRow,
+    reason: string,
+    fleets: readonly Fleet[],
+    sampleAgeMs: number | null,
+  ): Promise<void> {
+    const alreadyToday = await this.deps.opsAudit
+      .hasActionSince(
+        'billing.count_stand_in',
+        row.guildId,
+        new Date(this.now().getTime() - 86_400_000),
+      )
+      .catch(() => true); // a failed read must not turn into a write storm
+    if (alreadyToday) return;
+    await this.deps.opsAudit
+      .record({
+        actor: 'billing-reconciler',
+        action: 'billing.count_stand_in',
+        target: row.guildId,
+        details: {
+          fleet: this.deps.fleet,
+          presentFleets: fleets,
+          transition: reason,
+          memberCount: row.memberCount,
+          sampleAgeMs,
+        },
+      })
+      .catch(() => undefined); // an audit write must not cost the transition
+  }
+
+  /**
+   * A transition that cannot be validated and therefore is not happening.
+   *
+   * Loud, because the quiet version of this is what let a whole cohort's trial
+   * expiry do nothing for three days. Bounded to one audit row and one alert
+   * per guild per day, the same shape `billing.hard_gate_unplaceable` uses: the
+   * condition is a STATE that persists until somebody fixes it, and an hourly
+   * row would bury every other operator action in the same feeds.
+   */
+  private async reportStuckTransition(
+    row: GuildRow,
+    reason: string,
+    cause: 'read_failed' | 'stale_sample',
+    fleets: readonly Fleet[],
+    sampleAgeMs: number | null,
+  ): Promise<void> {
+    this.deps.logger.warn(
+      { guildId: row.guildId, transition: reason, cause, presentFleets: fleets },
+      'member count could not be validated; deferring transition',
+    );
+    const alreadyToday = await this.deps.opsAudit
+      .hasActionSince(
+        'billing.transition_stuck',
+        row.guildId,
+        new Date(this.now().getTime() - 86_400_000),
+      )
+      .catch(() => true); // a failed read must not turn into a write storm
+    if (alreadyToday) return;
+
+    const details = {
+      fleet: this.deps.fleet,
+      presentFleets: fleets,
+      transition: reason,
+      cause,
+      memberCount: row.memberCount,
+      sampleAgeMs,
+    };
+    await this.deps.opsAudit
+      .record({
+        actor: 'billing-reconciler',
+        action: 'billing.transition_stuck',
+        target: row.guildId,
+        details,
+      })
+      .catch(() => undefined);
+    // After the audit, never gated on it: the row is the record and this is
+    // the part that reaches a person.
+    this.deps.report?.(
+      'billing.transition_stuck',
+      `Billing transition "${reason}" is stuck on ${row.name ?? row.guildId}: its member count cannot be validated`,
+      { guildId: row.guildId, ...details },
+    );
   }
 
   /**
@@ -1071,6 +1361,26 @@ export class BillingReconciler {
           .catch((err: unknown) => {
             this.deps.logger.warn({ err, guildId: row.guildId }, 'expiry audit failed');
           });
+        /**
+         * And tell somebody. A customer who was tried and never reached is the
+         * failure this queue exists to prevent, and the audit row alone has
+         * never once been read at the time it mattered: two servers burned
+         * through 70+ attempts each across three notices before anyone noticed,
+         * by which time one of their trials had already ended. The channel
+         * reporter throttles per kind, so a bad hour is one message plus a
+         * count, while every row is still persisted individually.
+         */
+        this.deps.report?.(
+          'billing.notification.expired',
+          `Gave up delivering a billing notice (${row.key}) after ${row.attempts} attempts`,
+          {
+            ...(row.guildId ? { guildId: row.guildId } : {}),
+            ...(row.poolId ? { poolId: row.poolId } : {}),
+            key: row.key,
+            attempts: row.attempts,
+            fleet: this.deps.fleet,
+          },
+        );
       }
     } catch (err) {
       this.stats.errors += 1;

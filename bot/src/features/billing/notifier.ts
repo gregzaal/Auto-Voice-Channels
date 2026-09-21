@@ -150,7 +150,15 @@ export class DiscordBillingNotifier implements BillingNotifier {
       await owner.send({ content: `**${guild.name}**\n\n${content}` });
       return true;
     } catch (err) {
-      this.opts.logger.debug({ err, guildId }, 'billing notification delivery failed');
+      /**
+       * Warn, not debug. Every rung of this ladder failing is a customer who
+       * will never hear that their trial is ending, and at `debug` the reason
+       * was absent from production logs entirely: two servers spent three
+       * notices and 70+ attempts each being unreachable for a reason nobody
+       * could name. Billing notices are rare enough that a per-attempt line
+       * costs nothing.
+       */
+      this.opts.logger.warn({ err, guildId }, 'billing notification delivery failed');
       return false;
     }
   }
