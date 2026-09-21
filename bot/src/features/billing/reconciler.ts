@@ -13,6 +13,8 @@ import {
   subscriptionInGoodStanding,
   subscriptionNeverCharged,
   tierFor,
+  FLEETS,
+  TIERS,
   trialDurationMs,
   trialPolicyFor,
   utcDayKey,
@@ -80,6 +82,36 @@ interface PoolLanding {
 
 /** Leniency transition reasons that make things WORSE for the customer if the count is wrong. */
 const POOL_UPGRADE_REASONS: ReadonlySet<string> = new Set(['over_limit', 'grace_elapsed']);
+
+/**
+ * How old a recorded member count may be and still stand in for a fresh REST
+ * read that this fleet cannot perform. See {@link
+ * BillingReconciler.standInCountIsTrustworthy}.
+ *
+ * 36 hours: the sample phase records once per UTC day per guild, so a healthy
+ * fleet refreshes every count inside 24, and the extra half-day absorbs a guild
+ * sampled early one day and late the next. A wholly missed day is about 48 and
+ * deliberately does NOT fit: at that point either the fleet holding the guild
+ * stopped sampling, or the anomaly clamps are holding its samples back
+ * (`member_count_updated_at` only moves when a sample is ACCEPTED). Both are
+ * reasons to stop rather than bill on a number nobody stands behind.
+ */
+const STAND_IN_COUNT_MAX_AGE_MS = 36 * 3_600_000;
+
+/**
+ * How far past its trial end a guild may sit before the outcome check calls it
+ * a fault. See {@link BillingReconciler.reportOverdueTrials}.
+ *
+ * Twelve hours: the pass runs hourly, so a healthy ladder moves a guild within
+ * one, and twelve consecutive failures is a fault rather than one unlucky
+ * restart. The cohort this check exists for sat for three days.
+ *
+ * It is measured from the trial's END, which is the wrong clock for a guild
+ * that spent years dormant under the free ceiling and became billable this
+ * morning — its window expired long ago and it is not stuck at all. The query
+ * excludes those on their count's age instead; see `countTrialsPastDue`.
+ */
+const OVERDUE_TRIAL_TOLERANCE_MS = 12 * 3_600_000;
 
 export interface BillingReconcilerDeps {
   guilds: GuildRepository;
@@ -149,6 +181,16 @@ export interface BillingRunStats {
   transitions: number;
   /** Newly queued by the advance pass (re-derived duplicates are not counted). */
   notificationsQueued: number;
+  /**
+   * Transitions this pass decided on and then could not apply, because the
+   * member count behind them could not be validated.
+   *
+   * On `/diagnostics` because the alternative was a warn line an hour. It is
+   * cumulative for the life of the process, like every other counter in this
+   * block, so read it as a RATE: one that keeps climbing between reads is a
+   * customer whose trial ended on paper and nowhere else.
+   */
+  transitionsDeferred: number;
   /** Delivered by THIS fleet. Not the same number as queued, by design. */
   notificationsSent: number;
   /** Given up on: nobody could reach the guild before the notice went stale. */
@@ -164,6 +206,26 @@ export interface BillingRunStats {
 }
 
 const JOB_KEY = 'billing.advance';
+
+/**
+ * The outcome check's own reservation, on its own lock slot.
+ *
+ * Separate from {@link JOB_KEY} because it must run when the advance pass does
+ * NOT — that is the entire point of it — and on its own slot so a slow advance
+ * reservation cannot delay it.
+ */
+const OVERDUE_JOB_KEY = 'billing.overdue_check';
+const OVERDUE_LOCK_SLOT = 1;
+
+/**
+ * How often the overdue-trial condition is restated to a person while it lasts.
+ *
+ * Six hours, not the hourly cadence it is measured at. The condition persists
+ * until somebody acts, and an alarm that repeats every hour for three days is
+ * one that gets muted before the third — which is the same failure as never
+ * alerting, arrived at more slowly.
+ */
+const OVERDUE_REPORT_EVERY_MS = 6 * 3_600_000;
 
 /**
  * The trial/billing reconcile job applies time-based transitions.
@@ -206,6 +268,19 @@ export class BillingReconciler {
   private readonly clearIntervalFn: typeof clearInterval;
   /** Per-guild UTC day of the last recorded sample (skip re-sampling all day). */
   private readonly sampledDay = new Map<string, string>();
+  /**
+   * Transitions this pass could not validate, collected for ONE alert.
+   *
+   * Per-guild alerting looked right and is a fan-out: the pass walks every
+   * guild in a shared database, so a fleet-wide cause (a sampler down, a REST
+   * rate-limit storm) raises one `alerts` row per guild, of which the channel
+   * throttle posts one and marks the rest suppressed-and-undelivered. That
+   * pushes `/api/watch`'s alert-queue depth past its threshold and leaves the
+   * retry loop dripping the backlog out for hours — an alert about billing
+   * taking down the health check that watches everything else. The `ops_audit`
+   * row stays per guild, bounded to one a day, because that one is the record.
+   */
+  private stuckTransitions: { guildId: string; cause: string }[] = [];
   readonly stats: BillingRunStats = {
     lastRunAt: null,
     lastAdvanceAt: null,
@@ -213,6 +288,7 @@ export class BillingReconciler {
     advanced: 0,
     transitions: 0,
     notificationsQueued: 0,
+    transitionsDeferred: 0,
     notificationsSent: 0,
     notificationsExpired: 0,
     notificationQueueDepth: null,
@@ -267,9 +343,12 @@ export class BillingReconciler {
 
   private async runGuarded(): Promise<void> {
     this.running = true; // a slow pass must never overlap itself
+    let paused = true; // a flag read that throws must not run the tick
     try {
+      paused = await this.deps.flags.getBool(RUNTIME_FLAGS.GLOBAL_PAUSE);
+      if (paused) return;
+
       if (await this.deps.flags.getBool(RUNTIME_FLAGS.BILLING_RECONCILE_DISABLED)) return;
-      if (await this.deps.flags.getBool(RUNTIME_FLAGS.GLOBAL_PAUSE)) return;
       this.stats.lastRunAt = this.now().toISOString();
 
       await this.samplePhase();
@@ -305,6 +384,27 @@ export class BillingReconciler {
        */
       await this.deliverPhase();
     } finally {
+      /**
+       * LAST, and in a `finally`, and outside every switch above except the
+       * pause.
+       *
+       * Last, so a tick that just cleared the backlog reports nothing: run
+       * before the walk and a guild that crossed the free ceiling minutes ago
+       * is "overdue" until the same tick fixes it, which is a recurring false
+       * alarm for the most ordinary event in the install base.
+       *
+       * In a `finally` and after the `return`s, because the point of it is to
+       * survive the job failing: a `billing.reconcile_disabled` left `true`
+       * after an incident (which happened here, for weeks), an advance
+       * reservation nobody claims, a sweep that throws on its first page. Ride
+       * it on the advance phase, as the first draft did, and it cannot fire
+       * for any of the three — an adversarial review caught that.
+       *
+       * `global.pause` is the one thing that does stop it: a deliberate,
+       * fleet-wide halt that already silences the watcher, and alarming
+       * through a planned stop is how an alarm gets muted for good.
+       */
+      if (!paused) await this.reportOverdueTrials();
       this.running = false;
       this.inflight = undefined;
     }
@@ -333,6 +433,7 @@ export class BillingReconciler {
   private async advancePhase(): Promise<void> {
     const config = await this.readConfig();
     this.stats.lastAdvanceAt = this.now().toISOString();
+    this.stuckTransitions = [];
 
     /**
      * Pools first: pool aggregation is a prerequisite computation for the same
@@ -386,6 +487,90 @@ export class BillingReconciler {
       await this.deps.notifications.pruneDelivered(cutoff);
     } catch (err) {
       this.deps.logger.warn({ err }, 'billing notification prune failed');
+    }
+
+    this.flushStuckTransitions();
+  }
+
+  /**
+   * Asks the question a customer would: is anybody still sitting past the end
+   * of their trial?
+   *
+   * Every other signal this job emits reports something it NOTICED, and all of
+   * them are blind to the ladder not running at all. This one measures the
+   * outcome instead, so the next cause does not have to be predicted. Where it
+   * sits in the tick, and why, is documented at the call site.
+   *
+   * **Raised by the primary fleet alone**, not by whoever ticks first. The
+   * condition is a statement about the whole install base, and `alerts` rows
+   * are keyed by the raising fleet: a rotating raiser opens a new row under a
+   * new fleet each hour, each fleet's stale sweep resolves its own, and
+   * "broken for nine days" degrades into "flapped nine times". The cluster
+   * reservation still bounds it to one of prod's instances per window.
+   *
+   * **And it backs off.** The first report goes out at once; after that the
+   * condition is restated every {@link OVERDUE_REPORT_EVERY_MS}, bounded
+   * durably through `ops_audit` rather than in memory, because the instance
+   * that reported last hour may not be the one reporting now. An alarm
+   * repeated hourly for three days is an alarm that gets muted. The hourly
+   * `logger.warn` is unconditional, so the fleet's own logs keep the full
+   * picture.
+   */
+  private async reportOverdueTrials(): Promise<void> {
+    // Not a per-fleet condition, so not every fleet's business to raise.
+    if (this.deps.fleet !== FLEETS[0]) return;
+    try {
+      const reserved = await this.deps.runs.reserveRun(
+        OVERDUE_JOB_KEY,
+        this.advanceSpacingMs,
+        this.deps.instanceId,
+        OVERDUE_LOCK_SLOT,
+      );
+      if (!reserved.ok) return;
+      const now = this.now();
+      const { count, examples } = await this.deps.guilds.countTrialsPastDue({
+        before: new Date(now.getTime() - OVERDUE_TRIAL_TOLERANCE_MS),
+        // From the tier table, never a literal: the free ceiling has moved
+        // before, and a stale copy of it here would alarm about every dormant
+        // small guild or quietly excuse a band of real ones.
+        minMemberCount: TIERS[0]?.maxExclusive ?? 100,
+      });
+      if (count === 0) return;
+      this.deps.logger.warn({ count, examples }, 'guilds are past their trial end and still trial');
+
+      const restatedRecently = await this.deps.opsAudit
+        .hasActionSince(
+          'billing.trials_past_due',
+          '',
+          new Date(now.getTime() - OVERDUE_REPORT_EVERY_MS),
+        )
+        // Fails OPEN, unlike the write guards elsewhere in this file: a
+        // database that cannot answer is not a reason to swallow the one
+        // alarm that says customers are stuck.
+        .catch(() => false);
+      if (restatedRecently) return;
+
+      await this.deps.opsAudit
+        .record({
+          actor: 'billing-reconciler',
+          action: 'billing.trials_past_due',
+          target: '',
+          details: { count, examples, observedBy: this.deps.fleet },
+        })
+        .catch(() => undefined);
+      this.deps.report?.(
+        'billing.trials_past_due',
+        `${count} guild${count === 1 ? '' : 's'} sat past the end of ${count === 1 ? 'its' : 'their'} trial without the ladder moving`,
+        { count, examples, observedBy: this.deps.fleet },
+      );
+    } catch (err) {
+      /**
+       * Contained, and deliberately NOT counted in `stats.errors`: the
+       * operator is sent to `billing.errors` when this alert fires, and a
+       * check that inflates the number it is read against is worse than one
+       * that stays quiet about itself.
+       */
+      this.deps.logger.warn({ err }, 'overdue-trial check failed');
     }
   }
 
@@ -481,16 +666,37 @@ export class BillingReconciler {
        * member and defers the whole pool if any is unavailable. A downgrade
        * or reactivation proceeds on the samples alone — it fails in the
        * customer's favour either way.
+       *
+       * **The per-guild stand-in deliberately does not apply here**, although
+       * a pool spans fleets by design and this is therefore the one place it
+       * would help most. A single guild's stand-in changes no outcome: the
+       * count it accepts is the same one the decision was already derived
+       * from. A pool's does, because the decision came from the SUM, and
+       * mixing one member's fresh read with another's day-old sample builds a
+       * number that was never true at any instant — on the upgrade side, where
+       * being wrong charges somebody. So an unreadable member stops the pool
+       * and says so, and somebody decides; the alternative is the bot quietly
+       * inventing a bill. `plans/fleets.md` §4 owns this split.
        */
       if (POOL_UPGRADE_REASONS.has(decision.transition.reason)) {
         let freshSum = 0;
         for (const guild of billableGuilds) {
           const authoritative = await this.deps.fetchAuthoritativeCount(guild.guildId);
           if (authoritative === null) {
-            this.deps.logger.warn(
-              { poolId: pool.id, guildId: guild.guildId, transition: decision.transition.reason },
-              'authoritative member count unavailable for a pool member; deferring pool transition',
+            const fleets = await this.deps.presence
+              .presentFleets(guild.guildId)
+              .catch((): Fleet[] => []);
+            await this.noteStuckTransition(
+              guild,
+              decision.transition.reason,
+              'needs_fresh_read',
+              fleets,
+              guild.memberCountUpdatedAt
+                ? now.getTime() - guild.memberCountUpdatedAt.getTime()
+                : null,
+              { poolId: pool.id },
             );
+            this.stats.transitionsDeferred += 1;
             return;
           }
           freshSum += authoritative;
@@ -960,31 +1166,33 @@ export class BillingReconciler {
       // The fresh authoritative read is THE tie-breaker before
       // any billing-affecting transition — always adopted and re-evaluated,
       // even inside the discrepancy threshold (a small disagreement can still
-      // straddle a tier boundary). Unavailable → wait for the next run.
+      // straddle a tier boundary).
       const authoritative = await this.deps.fetchAuthoritativeCount(current.guildId);
       if (authoritative === null) {
-        this.deps.logger.warn(
-          { guildId: current.guildId, transition: decision.transition.reason },
-          'authoritative member count unavailable; deferring transition',
+        // Unavailable is not one condition. A guild THIS fleet is in should
+        // answer, so silence is transient and waiting is right; a guild it is
+        // not in will never answer, and waiting is forever.
+        if (!(await this.standInCountIsTrustworthy(current, decision.transition.reason, now))) {
+          return;
+        }
+      } else {
+        const cached = current.memberCount ?? 0;
+        const { row: corrected } = await this.deps.guilds.recordMemberCountSample(
+          current.guildId,
+          authoritative,
+          { at: now, authoritative: true },
         );
-        return;
+        if (isCountDiscrepant(cached, authoritative)) {
+          await this.deps.opsAudit.record({
+            actor: 'billing-reconciler',
+            action: 'member_count.discrepancy',
+            target: current.guildId,
+            details: { cached, authoritative },
+          });
+        }
+        current = corrected;
+        decision = await this.evaluate(current, now, config);
       }
-      const cached = current.memberCount ?? 0;
-      const { row: corrected } = await this.deps.guilds.recordMemberCountSample(
-        current.guildId,
-        authoritative,
-        { at: now, authoritative: true },
-      );
-      if (isCountDiscrepant(cached, authoritative)) {
-        await this.deps.opsAudit.record({
-          actor: 'billing-reconciler',
-          action: 'member_count.discrepancy',
-          target: current.guildId,
-          details: { cached, authoritative },
-        });
-      }
-      current = corrected;
-      decision = await this.evaluate(current, now, config);
     }
 
     if (decision.transition) {
@@ -1018,6 +1226,231 @@ export class BillingReconciler {
   }
 
   /**
+   * May a billing transition proceed on the count already recorded, now that
+   * the fresh REST read has come back empty?
+   *
+   * `fetchAuthoritativeCount` can only answer for guilds THIS fleet is in, and
+   * the advance pass is a cluster singleton running on one fleet for guilds
+   * that belong to all of them. For every beta and gold guild the read is a
+   * 404 by construction, so treating it as "try again next hour" deferred
+   * those transitions forever: on 2026-09-21 sixteen migrated servers sat
+   * three days past the end of their trial, still `trial`, with no grace
+   * clock, no "your trial has ended" notice, and one warn line an hour as the
+   * only trace.
+   *
+   * The stand-in is `guilds.member_count`, refreshed daily by the sample phase
+   * of whichever fleet IS in the guild and already guarded by the anomaly
+   * clamps. It is also the exact number this decision was derived from, so
+   * accepting it changes no outcome — it only stops a double-check this fleet
+   * is structurally unable to perform from blocking the ladder for good.
+   *
+   * False means defer, and every false says so somewhere a human will see it.
+   */
+  private async standInCountIsTrustworthy(
+    row: GuildRow,
+    reason: string,
+    now: Date,
+  ): Promise<boolean> {
+    // Nothing recorded to stand in for the read. Deferring is all that is left,
+    // and it is also harmless: an unsampled guild has no count to bill on.
+    if (row.memberCount === null) {
+      this.deps.logger.warn(
+        { guildId: row.guildId, transition: reason },
+        'no member count at all; deferring transition',
+      );
+      this.stats.transitionsDeferred += 1;
+      return false;
+    }
+
+    let fleets: Fleet[];
+    try {
+      fleets = await this.deps.presence.presentFleets(row.guildId);
+    } catch (err) {
+      // Presence unknown means the branch below cannot be chosen honestly.
+      // Defer rather than guess: the next tick reads it again.
+      this.deps.logger.warn(
+        { err, guildId: row.guildId, transition: reason },
+        'presence read failed; deferring transition',
+      );
+      this.stats.transitionsDeferred += 1;
+      return false;
+    }
+
+    const sampleAgeMs = row.memberCountUpdatedAt
+      ? now.getTime() - row.memberCountUpdatedAt.getTime()
+      : null;
+
+    if (fleets.includes(this.deps.fleet)) {
+      /**
+       * Presence says we ARE in this guild, so the read should have worked: a
+       * rate limit, a Discord outage, or a kick presence has not caught up
+       * with. Waiting is right, and so is saying so — this is the one place
+       * that can tell a transient failure from a permanent one, and a
+       * "transient" failure repeating every hour is neither.
+       */
+      await this.noteStuckTransition(row, reason, 'read_failed', fleets, sampleAgeMs);
+      this.stats.transitionsDeferred += 1;
+      return false;
+    }
+
+    if (fleets.length === 0) {
+      /**
+       * No bot anywhere: nothing to validate against, and nothing being served
+       * either. The bookkeeping still has to move, or a departed guild's trial
+       * stays open forever and it comes back entitled years later.
+       *
+       * Age is not a criterion here, and not because the count stopped
+       * changing — the server's did, ours did not. It is that no fresher
+       * number exists or can exist, and the one we hold gates nothing while
+       * the bot is gone. A guild we have never been in has no count at all and
+       * left through the first branch. Note this acts the moment presence hits
+       * zero, unlike `evictIfDeparted`, which waits `guildDepartedLongEnough`
+       * because a bot swap empties presence for days: converging a status is
+       * reversible on the next pass, and evicting a pool member is not.
+       */
+      await this.recordStandIn(row, reason, fleets, sampleAgeMs);
+      return true;
+    }
+
+    if (sampleAgeMs === null || sampleAgeMs > STAND_IN_COUNT_MAX_AGE_MS) {
+      /**
+       * Another fleet holds this guild but has not sampled it lately, so the
+       * recorded count is not standing in for anything. That is a broken
+       * sampler rather than a quiet cross-fleet fact, and it is worth waking
+       * somebody for on its own.
+       */
+      await this.noteStuckTransition(row, reason, 'stale_sample', fleets, sampleAgeMs);
+      this.stats.transitionsDeferred += 1;
+      return false;
+    }
+
+    await this.recordStandIn(row, reason, fleets, sampleAgeMs);
+    return true;
+  }
+
+  /**
+   * Notes that a transition was applied on a sampled count rather than a fresh
+   * read.
+   *
+   * Sits beside the `guild.auth.*` row it precedes, so "why did this guild
+   * move on a number nobody re-read" is answerable a month later without the
+   * logs, which is the whole reason the validation step exists.
+   *
+   * Once a day per guild, like every other state-shaped row this job writes.
+   * A transition is normally a one-off, but the POOL path stands in per member
+   * and can still defer on a later one, so an unguarded row there would be one
+   * per member per hour for as long as the pool stayed stuck.
+   */
+  private async recordStandIn(
+    row: GuildRow,
+    reason: string,
+    fleets: readonly Fleet[],
+    sampleAgeMs: number | null,
+  ): Promise<void> {
+    const alreadyToday = await this.deps.opsAudit
+      .hasActionSince(
+        'billing.count_stand_in',
+        row.guildId,
+        new Date(this.now().getTime() - 86_400_000),
+      )
+      .catch(() => true); // a failed read must not turn into a write storm
+    if (alreadyToday) return;
+    await this.deps.opsAudit
+      .record({
+        actor: 'billing-reconciler',
+        action: 'billing.count_stand_in',
+        target: row.guildId,
+        details: {
+          fleet: this.deps.fleet,
+          presentFleets: fleets,
+          transition: reason,
+          memberCount: row.memberCount,
+          sampleAgeMs,
+        },
+      })
+      .catch(() => undefined); // an audit write must not cost the transition
+  }
+
+  /**
+   * A transition that cannot be validated and therefore is not happening.
+   *
+   * Two records, on purpose and at different grains. The `ops_audit` row is
+   * per guild and bounded to one a day, the same shape
+   * `billing.hard_gate_unplaceable` uses, because the condition is a STATE
+   * that lasts until somebody fixes it and an hourly row would bury every
+   * other operator action in `v_recent_ops` and the admin feed. The ALERT is
+   * per pass, not per guild: see {@link stuckTransitions}.
+   */
+  private async noteStuckTransition(
+    row: GuildRow,
+    reason: string,
+    cause: 'read_failed' | 'stale_sample' | 'needs_fresh_read',
+    fleets: readonly Fleet[],
+    sampleAgeMs: number | null,
+    extra: Record<string, unknown> = {},
+  ): Promise<void> {
+    this.deps.logger.warn(
+      { guildId: row.guildId, transition: reason, cause, presentFleets: fleets, ...extra },
+      'member count could not be validated; deferring transition',
+    );
+    /**
+     * Queued for the alert FIRST, and never gated on a database read. The
+     * guard below fails closed (`catch(() => true)`), which is right for a
+     * write and catastrophic for the alert: a database incident is exactly
+     * when a stuck ladder is most likely, and it would have silenced the one
+     * signal that says so.
+     */
+    this.stuckTransitions.push({ guildId: row.guildId, cause });
+
+    const alreadyToday = await this.deps.opsAudit
+      .hasActionSince(
+        'billing.transition_stuck',
+        row.guildId,
+        new Date(this.now().getTime() - 86_400_000),
+      )
+      .catch(() => true); // a failed read must not turn into a write storm
+    if (alreadyToday) return;
+
+    await this.deps.opsAudit
+      .record({
+        actor: 'billing-reconciler',
+        action: 'billing.transition_stuck',
+        target: row.guildId,
+        details: {
+          fleet: this.deps.fleet,
+          presentFleets: fleets,
+          transition: reason,
+          cause,
+          memberCount: row.memberCount,
+          sampleAgeMs,
+          // Whether the clamps are holding this guild's samples back, which is
+          // the other way a count goes stale while its fleet samples happily.
+          pendingAnomaly: parseBillingMeta(row.metadata).pendingAnomaly ?? null,
+          ...extra,
+        },
+      })
+      .catch(() => undefined);
+  }
+
+  /** One alert for everything this pass could not validate. */
+  private flushStuckTransitions(): void {
+    const stuck = this.stuckTransitions;
+    this.stuckTransitions = [];
+    if (stuck.length === 0) return;
+    const causes = [...new Set(stuck.map((s) => s.cause))].sort().join(', ');
+    this.deps.report?.(
+      'billing.transition_stuck',
+      `${stuck.length} billing transition${stuck.length === 1 ? '' : 's'} could not be validated this pass (${causes})`,
+      {
+        count: stuck.length,
+        causes,
+        examples: stuck.slice(0, 5),
+        fleet: this.deps.fleet,
+      },
+    );
+  }
+
+  /**
    * Phase 3 — deliver what this fleet can reach.
    *
    * Runs on every instance every tick. The claim is fleet-scoped in SQL (a join
@@ -1036,6 +1469,14 @@ export class BillingReconciler {
      * hard-gate message too. Dropping them first also keeps a permanently
      * unreachable guild from occupying the head of the queue.
      */
+    /**
+     * Collected, not reported one by one. `expire` returns up to 500 rows in a
+     * single call, so a fleet that was down longer than the queue's TTL would
+     * otherwise raise 500 alert rows in one tick, of which the channel posts
+     * one and leaves 499 undelivered for the retry loop to drip out for hours.
+     * One message with a count and examples says the same thing.
+     */
+    const gaveUp: { target: string; key: string; attempts: number }[] = [];
     try {
       const expired = await this.deps.notifications.expire(now);
       for (const row of expired) {
@@ -1061,6 +1502,11 @@ export class BillingReconciler {
          * still fires.
          */
         if (row.attempts === 0) continue;
+        gaveUp.push({
+          target: row.guildId ?? row.poolId ?? '',
+          key: row.key,
+          attempts: row.attempts,
+        });
         await this.deps.opsAudit
           .record({
             actor: 'billing-reconciler',
@@ -1075,6 +1521,25 @@ export class BillingReconciler {
     } catch (err) {
       this.stats.errors += 1;
       this.deps.logger.error({ err }, 'billing notification expiry failed');
+    }
+
+    /**
+     * Outside the try, so a throw part-way through the loop still reports what
+     * it already collected: `expire` is a `DELETE ... RETURNING`, so those rows
+     * are gone from the queue and nothing will ever re-derive this news.
+     *
+     * A customer who was tried and never reached is the failure this queue
+     * exists to prevent, and the audit row alone has never once been read at
+     * the time it mattered: two servers burned through 70+ attempts each,
+     * across three notices, before anyone noticed — by which time one of their
+     * trials had already ended.
+     */
+    if (gaveUp.length > 0) {
+      this.deps.report?.(
+        'billing.notification.expired',
+        `Gave up delivering ${gaveUp.length} billing notice${gaveUp.length === 1 ? '' : 's'} after repeated attempts`,
+        { count: gaveUp.length, examples: gaveUp.slice(0, 5), fleet: this.deps.fleet },
+      );
     }
 
     let claimed;

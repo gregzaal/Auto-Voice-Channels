@@ -116,6 +116,12 @@ describe('BillingReconciler (integration)', () => {
     fleet?: Fleet;
   }) {
     const notifier = opts.notifier ?? new RecordingNotifier();
+    /**
+     * What the admin channel would have been told. The operational half of
+     * this job is not decoration: a deferral nobody is told about is how a
+     * whole cohort's trial expiry did nothing for three days.
+     */
+    const alerts: { kind: string; message: string; context: Record<string, unknown> }[] = [];
     const reconciler = new BillingReconciler({
       guilds,
       store: guilds, // raw repo satisfies GuildSettingsStore structurally
@@ -135,10 +141,20 @@ describe('BillingReconciler (integration)', () => {
       logger: fakeLogger(),
       instanceId: 'test-instance',
       fleet: opts.fleet ?? 'prod',
+      report: (kind, message, context) => alerts.push({ kind, message, context: context ?? {} }),
       advanceSpacingMs: 0, // every runOnce advances (tests drive time explicitly)
       now: opts.now,
     });
-    return { reconciler, notifier };
+    return { reconciler, notifier, alerts };
+  }
+
+  /** Audit rows of one action for one guild. Scoped, because the DB is shared. */
+  async function auditsFor(action: string, guildId: string): Promise<Record<string, unknown>[]> {
+    const result = await env.handle.pool.query<{ details: Record<string, unknown> }>(
+      'SELECT details FROM ops_audit WHERE action = $1 AND target = $2 ORDER BY created_at',
+      [action, guildId],
+    );
+    return result.rows.map((r) => r.details);
   }
 
   it('walks the full ladder: backfill → warning → grace → expired → reactivation', async () => {
@@ -213,7 +229,7 @@ describe('BillingReconciler (integration)', () => {
     const guildId = 'validate-1';
     const now = new Date('2026-07-04T12:00:00.000Z');
     const counts = new Map<string, number>();
-    const { reconciler, notifier } = makeReconciler({ now: () => now, counts });
+    const { reconciler, notifier, alerts } = makeReconciler({ now: () => now, counts });
 
     await ensureGuild(guildId);
     await guilds.recordMemberCountSample(guildId, 500, { at: now });
@@ -227,6 +243,18 @@ describe('BillingReconciler (integration)', () => {
     await reconciler.runOnce();
     expect((await guilds.getOrThrow(guildId)).authStatus).toBe('trial');
     expect(notifier.ofKind('grace_started')).toHaveLength(0);
+    /**
+     * And waiting is not the same as saying nothing. Presence says this fleet
+     * IS in the guild, so a read that will not answer is a fault, not the
+     * ordinary cross-fleet 404 — it gets an audit row and an alert, once.
+     */
+    const stuck = await auditsFor('billing.transition_stuck', guildId);
+    expect(stuck).toHaveLength(1);
+    expect(stuck[0]?.cause).toBe('read_failed');
+    // One alert for the pass, naming the guilds: per-guild alerting on a walk
+    // over every guild in the database is a fan-out, not a notification.
+    const alerted = alerts.find((a) => a.kind === 'billing.transition_stuck');
+    expect(alerted?.context.examples).toContainEqual({ guildId, cause: 'read_failed' });
 
     // Authoritative says the guild is actually tiny → discrepancy logged,
     // corrected sample recorded, and the guild goes dormant instead of grace.
@@ -447,6 +475,103 @@ describe('BillingReconciler (integration)', () => {
     });
 
     /**
+     * A lapsed trial in a guild the advancing fleet is not in, with no
+     * authoritative count available — the shape of the real thing, where
+     * `fetchAuthoritativeCount` 404s because prod's bot is a different Discord
+     * application from beta's.
+     *
+     * Every test above hands prod a count for a guild only beta is in, which
+     * is why this went unnoticed until sixteen migrated servers sat three days
+     * past the end of their trial, still `trial`, still un-notified.
+     */
+    it('advances a guild it cannot read, on the count the fleet that holds it sampled', async () => {
+      const guildId = 'split-stand-in';
+      const now = new Date('2026-07-04T12:00:00.000Z');
+      await guilds.ensure(guildId);
+      await new GuildFleetPresenceRepository(env.handle.db, 'beta').markPresent(guildId);
+      // Beta's sample phase recorded this seven hours ago; prod has no way to
+      // read it fresh and never will.
+      await guilds.recordMemberCountSample(guildId, 15_825, {
+        at: new Date(now.getTime() - 7 * 3_600_000),
+      });
+      await guilds.transitionAuth({
+        guildId,
+        toStatus: 'trial',
+        expiresAt: new Date(now.getTime() - 3 * DAY_MS),
+      });
+
+      const prod = makeReconciler({ now: () => now, fleet: 'prod' });
+      await prod.reconciler.runOnce();
+
+      const row = await guilds.getOrThrow(guildId);
+      expect(row.authStatus).toBe('grace');
+      expect(row.graceUntil).not.toBeNull();
+      // Recorded, because a transition taken without a fresh read has to be
+      // answerable later.
+      const stood = await auditsFor('billing.count_stand_in', guildId);
+      expect(stood).toHaveLength(1);
+      expect(stood[0]?.presentFleets).toEqual(['beta']);
+      // Nothing is broken here, so nobody is woken.
+      expect(prod.alerts.filter((a) => a.context.guildId === guildId)).toHaveLength(0);
+
+      // And the fleet that IS there tells them their trial has ended.
+      const beta = makeReconciler({ now: () => now, fleet: 'beta' });
+      await beta.reconciler.runOnce();
+      expect(beta.notifier.forGuild(guildId, 'grace_started')).toHaveLength(1);
+    });
+
+    /**
+     * The stand-in is the OTHER fleet's daily sample, so it is only worth
+     * anything while that fleet is still sampling. A stale one means somebody
+     * is broken, and billing on it would be guessing.
+     */
+    it('refuses a count nobody has refreshed, and says so once a day', async () => {
+      const guildId = 'split-stale-sample';
+      const now = new Date('2026-07-04T12:00:00.000Z');
+      await guilds.ensure(guildId);
+      await new GuildFleetPresenceRepository(env.handle.db, 'beta').markPresent(guildId);
+      await guilds.recordMemberCountSample(guildId, 15_825, {
+        at: new Date(now.getTime() - 4 * DAY_MS),
+      });
+      await guilds.transitionAuth({
+        guildId,
+        toStatus: 'trial',
+        expiresAt: new Date(now.getTime() - 3 * DAY_MS),
+      });
+
+      const prod = makeReconciler({ now: () => now, fleet: 'prod' });
+      const deferredBefore = prod.reconciler.stats.transitionsDeferred;
+      await prod.reconciler.runOnce();
+
+      expect((await guilds.getOrThrow(guildId)).authStatus).toBe('trial');
+      const stuck = await auditsFor('billing.transition_stuck', guildId);
+      expect(stuck).toHaveLength(1);
+      expect(stuck[0]?.cause).toBe('stale_sample');
+      expect(
+        prod.alerts.find((a) => a.kind === 'billing.transition_stuck')?.context.examples,
+      ).toContainEqual({ guildId, cause: 'stale_sample' });
+      // Countable without the database too: `/diagnostics` answers "is anything
+      // stuck" from this, which is the question nobody could ask for three days.
+      // As a delta, because the counter is cumulative and this database is
+      // shared: an absolute `> 0` would pass on some other test's parked guild.
+      expect(prod.reconciler.stats.transitionsDeferred).toBeGreaterThan(deferredBefore);
+      /**
+       * And the outcome check fires whatever the cause: this guild is three
+       * days past its trial end and still `trial`, which is the only fact a
+       * customer would recognise. The alert is about the population, so it is
+       * named by this guild rather than counted.
+       */
+      const pastDue = prod.alerts.find((a) => a.kind === 'billing.trials_past_due');
+      expect(pastDue?.context.examples).toContain(guildId);
+
+      // Still stuck an hour later, and still ONE audit row: the row is the
+      // per-guild record of a state that lasts until somebody fixes it, and an
+      // hourly one would bury every other operator action in the same feeds.
+      await prod.reconciler.runOnce();
+      expect(await auditsFor('billing.transition_stuck', guildId)).toHaveLength(1);
+    });
+
+    /**
      * Two instances of one fleet, ticking one after the other.
      *
      * Deliberately NOT the concurrency test: this runs them sequentially, so
@@ -538,6 +663,14 @@ describe('BillingReconciler (integration)', () => {
       );
       expect(audit.rows).toHaveLength(1);
       expect(audit.rows[0]?.details.attempts).toBeGreaterThan(0);
+      // And it reaches a person. The audit row on its own went unread for ten
+      // days while two servers heard nothing at all. One alert per drain,
+      // naming what it gave up on: `expire` returns up to 500 rows at a time.
+      const alerted = prod.alerts.find((a) => a.kind === 'billing.notification.expired');
+      expect(alerted?.context.count).toBeGreaterThan(0);
+      expect(
+        (alerted?.context.examples as { target: string }[]).some((e) => e.target === guildId),
+      ).toBe(true);
     });
 
     /**

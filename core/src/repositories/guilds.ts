@@ -1,4 +1,4 @@
-import { and, asc, eq, gt, isNotNull, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, gte, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Database } from '../db/client.js';
 import { guildAuthEvents, guilds, opsAudit } from '../db/schema.js';
@@ -259,6 +259,73 @@ export class GuildRepository {
     }
     const last = rows[rows.length - 1];
     return { rows: parsed, lastGuildId: last ? (last.guildId as string) : undefined };
+  }
+
+  /**
+   * Guilds whose trial ended and whose ladder never moved.
+   *
+   * The outcome check, deliberately blind to the mechanism. Every other signal
+   * around the leniency ladder reports something the job NOTICED — a deferred
+   * transition, a failed delivery, a queue depth — and each one is silent
+   * about the ways the ladder can fail to run at all: a reservation nobody
+   * claims, a kill switch left set after an incident, a sweep that throws on
+   * page one, a guild skipped by a filter that was wrong about it. Every one
+   * of those has happened here, and each looked healthy from the inside. This
+   * asks the only question a customer would: is anybody sitting past the end
+   * of their trial with nothing having happened?
+   *
+   * Excluded, because they are each a deliberate state rather than a fault:
+   * guilds under the free ceiling (the trial clock runs but is dormant, so the
+   * date passing means nothing), guilds with no count at all (nothing has ever
+   * sampled them, so there is nothing to bill or to judge), and pooled guilds
+   * (the pool's own ladder governs them; a pool-side check of the same shape
+   * is still owed). Guilds held in `grace` past `grace_until` are not counted
+   * either — that is what `billing.hard_gate_disabled` is for, and counting
+   * them would alarm about a deliberate hold.
+   *
+   * **`member_count_updated_at` must be older than `before` as well, and that
+   * is the subtle one.** A small guild's trial expires quietly while it is
+   * free forever, so the whole dormant population carries a years-old
+   * `auth_expires_at`. The hour one of them crosses 100 members it matches
+   * every other predicate here instantly, and it is not stuck at all — the
+   * ladder moves it on the very next walk. Without this clause, the most
+   * ordinary event in the install base raises an alarm. With it, a guild only
+   * counts once the evidence that it is billable has itself outlived the
+   * tolerance, which is what the tolerance was always meant to mean.
+   *
+   * One count per reservation window, on one fleet. It is a sequential scan:
+   * `guilds` carries no index but its primary key, which is affordable at this
+   * size and once an hour, and is the thing to revisit before it is called
+   * more often or the install base grows an order of magnitude.
+   */
+  async countTrialsPastDue(input: {
+    /** Anything that expired before this is overdue. Usually now − a tolerance. */
+    before: Date;
+    /** The free-forever ceiling, from the tier table rather than a literal. */
+    minMemberCount: number;
+  }): Promise<{ count: number; examples: string[] }> {
+    const [row] = await this.db
+      .select({
+        count: sql<number>`count(*)::int`,
+        // The five longest-overdue ids, enough to start an investigation from.
+        // A literal slice, because an alert does not need a page size and a
+        // computed one would be the only interpolation in this statement.
+        examples: sql<
+          string[] | null
+        >`(array_agg(${guilds.guildId} ORDER BY ${guilds.authExpiresAt}))[1:5]`,
+      })
+      .from(guilds)
+      .where(
+        and(
+          eq(guilds.authStatus, 'trial'),
+          isNotNull(guilds.authExpiresAt),
+          lt(guilds.authExpiresAt, input.before),
+          isNull(guilds.poolId),
+          gte(guilds.memberCount, input.minMemberCount),
+          lt(guilds.memberCountUpdatedAt, input.before),
+        ),
+      );
+    return { count: row?.count ?? 0, examples: row?.examples ?? [] };
   }
 
   /**
