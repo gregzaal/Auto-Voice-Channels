@@ -276,11 +276,27 @@ export class GuildRepository {
    *
    * Excluded, because they are each a deliberate state rather than a fault:
    * guilds under the free ceiling (the trial clock runs but is dormant, so the
-   * date passing means nothing), and pooled guilds (the pool's own ladder
-   * governs them). Guilds held in `grace` past `grace_until` are not counted
-   * either — that is what `billing.hard_gate_disabled` is for.
+   * date passing means nothing), guilds with no count at all (nothing has ever
+   * sampled them, so there is nothing to bill or to judge), and pooled guilds
+   * (the pool's own ladder governs them; a pool-side check of the same shape
+   * is still owed). Guilds held in `grace` past `grace_until` are not counted
+   * either — that is what `billing.hard_gate_disabled` is for, and counting
+   * them would alarm about a deliberate hold.
    *
-   * One indexed count per advance pass, on one fleet, once an hour.
+   * **`member_count_updated_at` must be older than `before` as well, and that
+   * is the subtle one.** A small guild's trial expires quietly while it is
+   * free forever, so the whole dormant population carries a years-old
+   * `auth_expires_at`. The hour one of them crosses 100 members it matches
+   * every other predicate here instantly, and it is not stuck at all — the
+   * ladder moves it on the very next walk. Without this clause, the most
+   * ordinary event in the install base raises an alarm. With it, a guild only
+   * counts once the evidence that it is billable has itself outlived the
+   * tolerance, which is what the tolerance was always meant to mean.
+   *
+   * One count per reservation window, on one fleet. It is a sequential scan:
+   * `guilds` carries no index but its primary key, which is affordable at this
+   * size and once an hour, and is the thing to revisit before it is called
+   * more often or the install base grows an order of magnitude.
    */
   async countTrialsPastDue(input: {
     /** Anything that expired before this is overdue. Usually now − a tolerance. */
@@ -306,6 +322,7 @@ export class GuildRepository {
           lt(guilds.authExpiresAt, input.before),
           isNull(guilds.poolId),
           gte(guilds.memberCount, input.minMemberCount),
+          lt(guilds.memberCountUpdatedAt, input.before),
         ),
       );
     return { count: row?.count ?? 0, examples: row?.examples ?? [] };

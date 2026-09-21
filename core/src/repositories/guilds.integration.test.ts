@@ -176,6 +176,7 @@ describe('GuildRepository (integration)', () => {
    * database, and several leave a guild parked in some state on purpose.
    */
   describe('countTrialsPastDue', () => {
+    const DAY_MS = 86_400_000;
     const before = new Date('2026-07-04T12:00:00.000Z');
     const lapsed = new Date('2026-07-01T12:00:00.000Z');
 
@@ -211,7 +212,76 @@ describe('GuildRepository (integration)', () => {
         toStatus: 'trial',
         expiresAt: lapsed,
       });
+      // Asserted, because a guild excluded by a NULL count would pass this
+      // test while proving nothing about the threshold.
+      expect((await repo.getOrThrow('past-due-free')).memberCount).toBe(40);
       expect(await overdue()).toBe(start);
+    });
+
+    /**
+     * The one that keeps the alarm believable. A small guild's trial expires
+     * quietly years before it ever becomes billable, so the hour it crosses
+     * 100 members it looks exactly like a guild the ladder abandoned — until
+     * the very next walk moves it, seconds later.
+     */
+    it('ignores a guild that only just became billable, however old its window', async () => {
+      const start = await overdue();
+      const laterWindow = new Date(before.getTime() + DAY_MS);
+      const startLater = (
+        await repo.countTrialsPastDue({ before: laterWindow, minMemberCount: 100 })
+      ).count;
+      await repo.ensure('past-due-grown');
+      await repo.transitionAuth({
+        guildId: 'past-due-grown',
+        toStatus: 'trial',
+        expiresAt: new Date('2025-01-01T00:00:00.000Z'), // dormant for a year
+      });
+      // Just under the ceiling. A bigger jump to cross it would be held back
+      // by the anomaly clamps instead, which is a different story entirely.
+      await repo.recordMemberCountSample('past-due-grown', 95, { at: lapsed });
+      expect(await overdue()).toBe(start);
+
+      // Crosses an hour before the check runs: billable, ancient window, and
+      // not stuck at all — the ladder moves it on the very next walk.
+      await repo.recordMemberCountSample('past-due-grown', 101, {
+        at: new Date(before.getTime() + 6 * 3_600_000),
+      });
+      expect((await repo.getOrThrow('past-due-grown')).memberCount).toBe(101);
+      expect(await overdue()).toBe(start);
+
+      // A day on, nobody has moved it, and the same guild now counts.
+      const { count } = await repo.countTrialsPastDue({
+        before: laterWindow,
+        minMemberCount: 100,
+      });
+      expect(count).toBe(startLater + 1);
+    });
+
+    /**
+     * The examples are what an operator actually acts on, so the cap and the
+     * order are behaviour, not decoration.
+     */
+    it('names the five longest-overdue guilds, oldest first', async () => {
+      // Expiries well before anything else this file parks, so these six own
+      // every slot and the assertion is about the query rather than the order
+      // the tests happened to run in.
+      const ancient = new Date('2020-01-01T00:00:00.000Z');
+      for (let i = 0; i < 6; i += 1) {
+        const guildId = `past-due-many-${i}`;
+        await repo.ensure(guildId);
+        await repo.recordMemberCountSample(guildId, 5_000, { at: lapsed });
+        await repo.transitionAuth({
+          guildId,
+          toStatus: 'trial',
+          // Descending age, so the loop order is the opposite of the expected
+          // order and a query that simply kept insertion order would fail.
+          expiresAt: new Date(ancient.getTime() - (6 - i) * DAY_MS),
+        });
+      }
+      const { examples } = await repo.countTrialsPastDue({ before, minMemberCount: 100 });
+      expect(examples).toHaveLength(5);
+      expect(examples[0]).toBe('past-due-many-0');
+      expect(examples).not.toContain('past-due-many-5');
     });
 
     it('ignores a guild whose ladder belongs to a pool', async () => {

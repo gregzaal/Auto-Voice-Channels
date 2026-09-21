@@ -101,7 +101,9 @@ export class DiscordBillingNotifier implements BillingNotifier {
       await user.send({ content });
       return true;
     } catch (err) {
-      this.opts.logger.debug({ err, discordUserId }, 'pool purchaser notification delivery failed');
+      // Warn, for the same reason as `deliver` below: a purchaser who never
+      // hears that their subscription lapsed is a customer lost silently.
+      this.opts.logger.warn({ err, discordUserId }, 'pool purchaser notification delivery failed');
       return false;
     }
   }

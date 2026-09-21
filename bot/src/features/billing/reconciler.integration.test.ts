@@ -251,7 +251,10 @@ describe('BillingReconciler (integration)', () => {
     const stuck = await auditsFor('billing.transition_stuck', guildId);
     expect(stuck).toHaveLength(1);
     expect(stuck[0]?.cause).toBe('read_failed');
-    expect(alerts.filter((a) => a.context.guildId === guildId)).toHaveLength(1);
+    // One alert for the pass, naming the guilds: per-guild alerting on a walk
+    // over every guild in the database is a fan-out, not a notification.
+    const alerted = alerts.find((a) => a.kind === 'billing.transition_stuck');
+    expect(alerted?.context.examples).toContainEqual({ guildId, cause: 'read_failed' });
 
     // Authoritative says the guild is actually tiny → discrepancy logged,
     // corrected sample recorded, and the guild goes dormant instead of grace.
@@ -537,30 +540,35 @@ describe('BillingReconciler (integration)', () => {
       });
 
       const prod = makeReconciler({ now: () => now, fleet: 'prod' });
+      const deferredBefore = prod.reconciler.stats.transitionsDeferred;
       await prod.reconciler.runOnce();
 
       expect((await guilds.getOrThrow(guildId)).authStatus).toBe('trial');
       const stuck = await auditsFor('billing.transition_stuck', guildId);
       expect(stuck).toHaveLength(1);
       expect(stuck[0]?.cause).toBe('stale_sample');
-      expect(prod.alerts.filter((a) => a.context.guildId === guildId)).toHaveLength(1);
+      expect(
+        prod.alerts.find((a) => a.kind === 'billing.transition_stuck')?.context.examples,
+      ).toContainEqual({ guildId, cause: 'stale_sample' });
       // Countable without the database too: `/diagnostics` answers "is anything
       // stuck" from this, which is the question nobody could ask for three days.
-      expect(prod.reconciler.stats.transitionsDeferred).toBeGreaterThan(0);
+      // As a delta, because the counter is cumulative and this database is
+      // shared: an absolute `> 0` would pass on some other test's parked guild.
+      expect(prod.reconciler.stats.transitionsDeferred).toBeGreaterThan(deferredBefore);
       /**
        * And the outcome check fires whatever the cause: this guild is three
        * days past its trial end and still `trial`, which is the only fact a
-       * customer would recognise. (Scoped to the kind, not the guild: the
-       * alert is about the population, and this shared database has other
-       * parked rows in it.)
+       * customer would recognise. The alert is about the population, so it is
+       * named by this guild rather than counted.
        */
-      expect(prod.alerts.some((a) => a.kind === 'billing.trials_past_due')).toBe(true);
+      const pastDue = prod.alerts.find((a) => a.kind === 'billing.trials_past_due');
+      expect(pastDue?.context.examples).toContain(guildId);
 
-      // Still stuck an hour later, and still one row and one alert: this is a
-      // state that lasts until somebody fixes it, not an hourly event.
+      // Still stuck an hour later, and still ONE audit row: the row is the
+      // per-guild record of a state that lasts until somebody fixes it, and an
+      // hourly one would bury every other operator action in the same feeds.
       await prod.reconciler.runOnce();
       expect(await auditsFor('billing.transition_stuck', guildId)).toHaveLength(1);
-      expect(prod.alerts.filter((a) => a.context.guildId === guildId)).toHaveLength(1);
     });
 
     /**
@@ -656,10 +664,13 @@ describe('BillingReconciler (integration)', () => {
       expect(audit.rows).toHaveLength(1);
       expect(audit.rows[0]?.details.attempts).toBeGreaterThan(0);
       // And it reaches a person. The audit row on its own went unread for ten
-      // days while two servers heard nothing at all.
-      const alerted = prod.alerts.filter((a) => a.context.guildId === guildId);
-      expect(alerted).toHaveLength(1);
-      expect(alerted[0]?.kind).toBe('billing.notification.expired');
+      // days while two servers heard nothing at all. One alert per drain,
+      // naming what it gave up on: `expire` returns up to 500 rows at a time.
+      const alerted = prod.alerts.find((a) => a.kind === 'billing.notification.expired');
+      expect(alerted?.context.count).toBeGreaterThan(0);
+      expect(
+        (alerted?.context.examples as { target: string }[]).some((e) => e.target === guildId),
+      ).toBe(true);
     });
 
     /**
