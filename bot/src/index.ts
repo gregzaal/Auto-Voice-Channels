@@ -729,7 +729,17 @@ async function main(): Promise<void> {
   // advisory-locked trial/billing reconcile job (samples member counts,
   // advances the leniency ladder, sends billing notifications).
   const subscriptionsRepo = new SubscriptionRepository(db);
-  const billingNotifier = new DiscordBillingNotifier({ client, logger });
+  const billingNotifier = new DiscordBillingNotifier({
+    client,
+    logger,
+    // The two extra rungs: the guild's recorded contact ahead of its owner,
+    // and this fleet's creator channels as a last resort. Both are always
+    // wired here — they read through optional seams so the notifier can be
+    // constructed without a database in tests, not because any deployment
+    // runs without them.
+    guilds: settingsCache,
+    creatorChannels: autoChannels,
+  });
   const disposeOnboarding = config.selfHosted
     ? (): void => undefined
     : registerGuildOnboarding({

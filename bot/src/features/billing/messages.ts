@@ -303,6 +303,30 @@ export function expiredInteractionMessage(guildId: string, shared = false): stri
 }
 
 /**
+ * What a billing notice says when the only surface left is a public one.
+ *
+ * The ladder's last rung is a creator channel's text chat, which every member
+ * of the server can read. The notices themselves are written for an admin in
+ * private and several of them say things no customer should have broadcast:
+ * that their payment failed, that their subscription was cancelled, how many
+ * unpaid days are left. So the public rung does not carry them. It says only
+ * that a decision is waiting and where to see it, and whoever manages AVC here
+ * reads the real thing on the dashboard.
+ *
+ * Deliberately one message for every kind, rather than a public variant per
+ * kind. A second copy of the ladder's vocabulary is a second thing to keep
+ * true, and the distinction this one has to make — "something needs you" and
+ * nothing more — does not vary by kind.
+ */
+export function publicNoticeMessage(guildId: string): string {
+  return (
+    `👋 **AVC needs an admin's attention.** There's a decision waiting about this server's AVC ` +
+    `plan, and we couldn't reach an admin privately. Whoever manages AVC here can see it at ` +
+    `${subscribeUrl(guildId)}`
+  );
+}
+
+/**
  * Posted (throttled) into a creator channel someone joined while hard-gated.
  *
  * This one is **public**, in the channel's own text chat, so it is read by
