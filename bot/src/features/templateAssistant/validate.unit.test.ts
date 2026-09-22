@@ -52,6 +52,21 @@ describe('lintTemplate', () => {
     expect(issues[0]!.message).toContain('$#');
   });
 
+  /**
+   * The remedy is per token, and a WRONG one is worse than none: `GAME` is the
+   * room's game, so offering it for `@@stream_game@@` would hand the author a
+   * condition that fires with nobody streaming.
+   */
+  it('names the right escape hatch for each late token', () => {
+    const remedy = (tpl: string): string => lintTemplate(tpl, 'name')[0]!.message;
+    expect(remedy('{{@@game_name@@ = Halo ?? y}}')).toContain('`GAME`');
+    const stream = remedy('{{@@stream_game@@ = Halo ?? y}}');
+    expect(stream).toContain('ANY_LIVE');
+    expect(stream).not.toContain('`GAME`');
+    expect(remedy('{{@@stream_name@@ = x ?? y}}')).toContain('LIVE');
+    expect(remedy('{{@@owner@@ = Sam ?? y}}')).toContain('OWNER:id');
+  });
+
   it('rejects an invented conditional variable', () => {
     const issues = lintTemplate('{{MEMBERS >= 5 ?? busy // quiet}}', 'name');
     expect(codes(issues)).toContain('unknown-variable');
@@ -170,7 +185,15 @@ describe('preview scenarios', () => {
         gameNameMode: 'top',
       }).rendered,
     ).toBe('Halo');
-    expect(rendered[3]).toBe('Deep Rock Galactic');
+    // The streaming scenario: two Halo players and a streamer on Deep Rock
+    // Galactic, so the ROOM's game is Halo while the STREAM's is not. Nothing
+    // else in the fixture set pulls the two apart.
+    expect(rendered[3]).toBe('Halo');
+    expect(renderPair('@@stream_game@@', 'name', scenarios[3]!.ctx).rendered).toBe(
+      'Deep Rock Galactic',
+    );
+    // Empty everywhere nobody is live, which is what the ANY_LIVE guard is for.
+    expect(renderPair('x@@stream_game@@y', 'name', scenarios[1]!.ctx).rendered).toBe('xy');
   });
 
   it('shows `?` for numbering tokens on a standalone channel', () => {

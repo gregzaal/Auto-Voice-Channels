@@ -719,6 +719,7 @@ export const AT_TOKENS: readonly string[] = [
   '@@owner@@',
   '@@creator@@',
   '@@stream_name@@',
+  '@@stream_game@@',
   '@@random_emoji@@',
   '@@limit@@',
   '@@slots@@',
@@ -749,6 +750,7 @@ export const LATE_TOKENS: readonly string[] = [
   '@@creator@@',
   '@@original_creator@@',
   '@@stream_name@@',
+  '@@stream_game@@',
 ];
 
 /**
@@ -1196,6 +1198,85 @@ function streamName(ctx: RenderContext): string {
   return (ctx.creator?.activities ?? []).find((a) => a.kind === 'streaming')?.name ?? '';
 }
 
+/**
+ * The room's live members, with a streaming activity's `state` promoted to a
+ * playing activity when the member has no playing one of their own.
+ *
+ * Discord's stream activity carries the game in `state`, and a member who is
+ * live may carry no separate playing activity at all. Without the promotion
+ * `@@stream_game@@` would be empty for exactly the Twitch streamer it exists to
+ * describe.
+ *
+ * **Confined to this token deliberately.** Promoting `state` inside
+ * {@link playingNames} would let a streamer start contributing a game to
+ * `@@game_name@@`, `{{GAME}}` and the party tokens in every guild that opted
+ * into nothing, which is a rename wave for a token nobody asked to change.
+ *
+ * Only promoted when `activities` is present, because `playingNames` falls back
+ * to the flat `playing` list otherwise and there is no activity to read.
+ */
+function liveMembersWithGames(members: VoiceMember[]): VoiceMember[] {
+  const live: VoiceMember[] = [];
+  for (const m of members) {
+    if (m.bot || !isLive(m)) continue;
+    const acts = m.activities;
+    if (acts && !acts.some((a) => a.kind === 'playing')) {
+      const streamed = acts.find((a) => a.kind === 'streaming' && a.state)?.state;
+      if (streamed !== undefined) {
+        live.push({ ...m, activities: [...acts, { kind: 'playing', name: streamed }] });
+        continue;
+      }
+    }
+    live.push(m);
+  }
+  return live;
+}
+
+/**
+ * The game the room's streamers are on, or `''` when nobody is streaming.
+ *
+ * `@@game_name@@` restricted to the live members, through the same
+ * {@link resolveGames} so the tie rules, the aliases, the "no game" label and
+ * the `game_name_mode` setting cannot disagree between the two tokens.
+ *
+ * **Empty means nobody is live, and that is the only thing it means.**
+ *
+ * **When no streamer has a detectable game it falls back to the ROOM's game**,
+ * which the caller passes in already resolved. This is not tidiness, it is the
+ * difference between the token being useful and it being a downgrade: a member
+ * with presence sharing off who hits Go Live in a room of three Halo players
+ * would otherwise turn `{{ANY_LIVE ?? 🔴 @@stream_game@@ // @@game_name@@}}`
+ * from `Halo` into `🔴 General`, spending a rename to show a game nobody is
+ * on, and the guard cannot help because `ANY_LIVE` is true. With the fallback
+ * the token is never less informative than the branch it displaces.
+ *
+ * A TIE among streamers is not that case and keeps resolving exactly as
+ * `@@game_name@@` would, including the "no game" label for three or more under
+ * `shared`: there the engine knows the games and is declining to pick one,
+ * which is a different statement from not knowing any.
+ *
+ * The owner tie-break applies only when the owner is one of the streamers,
+ * because `breakGameTie` looks them up in the list it is given. A tie between
+ * two other streamers falls through to the deterministic order, which is right:
+ * the owner has no opinion about a game they are not streaming.
+ */
+function streamGameName(ctx: RenderContext, roomGame: string): string {
+  const live = liveMembersWithGames(ctx.members);
+  if (live.length === 0) return '';
+  const resolved = resolveGames(live, {
+    ...(ctx.aliases ? { aliases: ctx.aliases } : {}),
+    ...(ctx.general ? { general: ctx.general } : {}),
+    ...(ctx.gameNameMode ? { mode: ctx.gameNameMode } : {}),
+    ...(ctx.creator ? { ownerId: ctx.creator.id } : {}),
+  });
+  // `names` is `[general]` with no `representative` in two different cases:
+  // nobody playing anything, and a three-or-more-way tie under `shared`. Only
+  // the first is "we know nothing", and a zero-length count map is what tells
+  // them apart, so ask the members rather than reading the label back.
+  if (!live.some((m) => playingNames(m).some((g) => g !== 'Custom Status'))) return roomGame;
+  return joinGameNames(resolved.names, ctx.general ?? 'General', ctx.aliases ?? {});
+}
+
 // ---------------------------------------------------------------------------
 // ""mode:text"" — string transforms applied to already-substituted text
 // ---------------------------------------------------------------------------
@@ -1321,6 +1402,7 @@ export interface RenderContext {
  * - `@@num@@` / `@@num_others@@`   → member count (all / excluding owner)
  * - `@@owner@@` (or the older `@@creator@@`) → owner display name
  * - `@@stream_name@@`             → owner's stream title (or empty)
+ * - `@@stream_game@@`             → the streamers' game (empty when nobody is live)
  * - `@@num_playing@@` / `@@party_size@@` / `@@party_state@@` / `@@party_details@@`
  *                                 → rich-presence party info for the channel's game
  * - `[[a/b/c]]`                   → random pick, fixed per channel (via `seed`)
@@ -1484,8 +1566,20 @@ export function renderChannelName(
   //    title. These land AFTER conditionals, so they can never be conditional
   //    operands; only `""` is still an unresolved marker here, so that is all
   //    they collapse (an owner called `Greg // AVC` renders unchanged).
-  if (name.includes('@@game_name@@')) {
-    name = name.split('@@game_name@@').join(collapseMarkers(gameName, LATE_MARKER_CHARS));
+  if (name.includes('@@game_name@@') || name.includes('@@stream_game@@')) {
+    const gameText = collapseMarkers(gameName, LATE_MARKER_CHARS);
+    // Lazy: the second, filtered resolution only runs when the token is
+    // actually used, so `@@game_name@@` alone costs exactly what it always did.
+    const streamText = name.includes('@@stream_game@@')
+      ? collapseMarkers(streamGameName(ctx, gameName), LATE_MARKER_CHARS)
+      : '';
+    // ONE pass over the original string, for the reason the owner block below
+    // records: a game title really can contain the literal text of the other
+    // token, and two chained passes would substitute into what the first one
+    // inserted. Longest alternative first.
+    name = name.replace(/@@stream_game@@|@@game_name@@/g, (m) =>
+      m === '@@stream_game@@' ? streamText : gameText,
+    );
   }
   if (
     name.includes('@@owner@@') ||

@@ -113,6 +113,35 @@ function looksLikeToken(text: string): boolean {
 }
 
 /**
+ * What to reach for instead, per late token.
+ *
+ * Per-token rather than one sentence, because the honest answer differs and a
+ * wrong remedy is worse than none: `GAME` is the ROOM's game, so offering it
+ * for `@@stream_game@@` produces a condition that fires whenever the room is on
+ * that game with nobody streaming, which is the opposite of what was asked.
+ */
+function lateTokenRemedy(token: string): string {
+  if (token === '@@game_name@@') return 'Use the `GAME` variable to test the game.';
+  if (token === '@@stream_game@@') {
+    return (
+      'There is no variable for it. Test whether anyone is streaming with ' +
+      '`{{ANY_LIVE ?? …}}` and put the token inside that branch.'
+    );
+  }
+  if (token === '@@stream_name@@') {
+    return (
+      'There is no variable for the stream title. Test whether the owner is ' +
+      'streaming with `{{LIVE ?? …}}` and put the token inside that branch.'
+    );
+  }
+  return (
+    'There is no variable for a display name, because names are changeable ' +
+    'and not unique. Test the owner with `{{OWNER:id ?? …}}` or their role with ' +
+    '`{{ROLE:id ?? …}}` instead.'
+  );
+}
+
+/**
  * Structural lint of a template, before it is rendered.
  *
  * `channelKind` is advisory only: the numbering tokens render `?` on a
@@ -196,10 +225,8 @@ export function lintTemplate(template: string, field: TemplateField): TemplateIs
         'token-in-condition',
         (LATE_TOKENS as string[]).includes(variable)
           ? `\`${variable}\` cannot go on the left of a condition: it is filled in ` +
-              'after conditions are worked out, so the test never matches. Use the ' +
-              '`GAME` variable to test the game. There is no variable for the owner ' +
-              "or the stream title, so test the owner's role with `{{ROLE:id ?? …}}` " +
-              'instead.'
+              'after conditions are worked out, so the test never matches. ' +
+              lateTokenRemedy(variable)
           : `\`${variable}\` cannot go on the left of a condition: it does not become a ` +
               'plain number, so the test silently never matches. The tokens that can be ' +
               `compared are: ${OPERAND_TOKENS.join(', ')}. (\`##\` renders \`#4\` and ` +

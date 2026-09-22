@@ -198,7 +198,10 @@ describe('TemplateAssistant.propose', () => {
       '#1 - General',
       '#1 - Halo',
       '#1 - Halo, Deep Rock Galactic',
-      '#1 - Deep Rock Galactic',
+      // The streaming scenario is two Halo players against a streamer on Deep
+      // Rock Galactic, so the ROOM's game is Halo. That divergence is the only
+      // thing `@@stream_game@@` has to show, which is why the fixture carries it.
+      '#1 - Halo',
       '#1 - Deep Rock Galactic',
       '#1 - General',
       '#1 - General',

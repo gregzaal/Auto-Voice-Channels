@@ -36,6 +36,15 @@
     },
     {
       "group": "intermediate",
+      "$comment": "@@stream_game@@ is blank when nobody is live, so the guard is the thing being graded, not the token. ANY_LIVE is the only variable that tests it.",
+      "request": "Name the room after whatever the streamer is playing while someone is streaming, and after the room's own game otherwise.",
+      "expect": {
+        "field": "name",
+        "contains": ["ANY_LIVE", "@@stream_game@@", "@@game_name@@"]
+      }
+    },
+    {
+      "group": "intermediate",
       "request": "Owner's name in small caps, and a random word from den, lair or lounge.",
       "expect": {
         "field": "name",

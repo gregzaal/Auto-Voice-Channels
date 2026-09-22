@@ -76,6 +76,7 @@ export const TOKEN_PROBES: readonly string[] = [
   '@@party_state@@',
   '@@party_details@@',
   '@@stream_name@@',
+  '@@stream_game@@',
   '@@random_emoji@@',
   '@@original_creator@@',
   '@@weekday@@',

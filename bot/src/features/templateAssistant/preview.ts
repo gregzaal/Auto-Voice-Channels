@@ -112,12 +112,19 @@ export function previewScenarios(opts: ScenarioOptions): PreviewScenario[] {
     playing: ['Halo'],
     activities: [{ kind: 'playing', name: 'Halo' }],
   });
+  /**
+   * A streamer whose game is only in the STREAM activity, which is the shape
+   * `@@stream_game@@`'s promotion exists for and the one the engine cannot
+   * verify against a real Discord payload. `playing` is empty to match what
+   * `toVoiceMember` would build: it derives that list from the activities.
+   *
+   * Every rendered value is what it was when the owner carried their own
+   * playing activity, because `@@game_name@@` here is decided by the two Halo
+   * players either way. So this buys the promotion a fixture for free.
+   */
   const liveOwner = member('owner', creatorName, {
-    playing: ['Deep Rock Galactic'],
-    activities: [
-      { kind: 'playing', name: 'Deep Rock Galactic' },
-      { kind: 'streaming', name: 'Hazard 5 all the way' },
-    ],
+    playing: [],
+    activities: [{ kind: 'streaming', name: 'Hazard 5 all the way', state: 'Deep Rock Galactic' }],
   });
   const partyOwner = member('owner', creatorName, {
     playing: ['Deep Rock Galactic'],
@@ -180,10 +187,33 @@ export function previewScenarios(opts: ScenarioOptions): PreviewScenario[] {
         creator: playingOwner,
       },
     },
+    /**
+     * The streamer is on a different game from the room, which is the only
+     * situation where `@@stream_game@@` says anything `@@game_name@@` does not.
+     * Two Halo players against one streamer on Deep Rock Galactic: the room's
+     * game is Halo and the stream's is Deep Rock Galactic. Folded into the
+     * existing scenario rather than given its own, and it keeps every
+     * owner-scoped value (`{{LIVE}}`, `{{LIVE_EXTERNAL}}`, `@@stream_name@@`)
+     * exactly as it was.
+     */
     {
       key: 'streaming',
-      label: 'the owner is streaming',
-      ctx: { ...base, members: [liveOwner, member('m2', 'Robin')], creator: liveOwner },
+      label: 'the owner is streaming a different game',
+      ctx: {
+        ...base,
+        members: [
+          liveOwner,
+          member('m2', 'Robin', {
+            playing: ['Halo'],
+            activities: [{ kind: 'playing', name: 'Halo' }],
+          }),
+          member('m3', 'Sam', {
+            playing: ['Halo'],
+            activities: [{ kind: 'playing', name: 'Halo' }],
+          }),
+        ],
+        creator: liveOwner,
+      },
     },
     {
       key: 'party',

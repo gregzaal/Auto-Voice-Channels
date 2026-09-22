@@ -962,6 +962,158 @@ describe('room-scoped variables', () => {
   });
 });
 
+describe('@@stream_game@@', () => {
+  const play = (id: string, game: string, extra: Partial<VoiceMember> = {}): VoiceMember =>
+    member({ id, playing: [game], activities: [{ kind: 'playing', name: game }], ...extra });
+  const ctx = (members: VoiceMember[], general?: string): RenderContext => ({
+    index: 0,
+    members,
+    creator: members[0]!,
+    creatorName: members[0]!.id,
+    ...(general ? { general } : {}),
+  });
+
+  /** The suggestion this exists for: name the room after what the streamer is on. */
+  it('names the streamers game rather than the rooms most-played one', () => {
+    const owner = play('a', 'Game A');
+    const two = play('b', 'Game A');
+    const three = play('c', 'Game A');
+    const streamer = play('d', 'Game B', { selfStreaming: true });
+    const room = ctx([owner, two, three, streamer]);
+    expect(renderChannelName('@@game_name@@', room)).toBe('Game A');
+    expect(renderChannelName('@@stream_game@@', room)).toBe('Game B');
+    expect(renderChannelName('{{ANY_LIVE ?? 🔴 [@@stream_game@@] // [@@game_name@@]}}', room)).toBe(
+      '🔴 [Game B]',
+    );
+  });
+
+  /**
+   * Empty means nobody is live, and nothing else. The guard is `{{ANY_LIVE}}`,
+   * the same shape `@@slots@@` teaches for an unlimited room.
+   */
+  it('renders empty when nobody is streaming, and the guard reads the false branch', () => {
+    const room = ctx([play('a', 'Game A'), play('b', 'Game A')]);
+    expect(renderChannelName('x@@stream_game@@y', room)).toBe('xy');
+    expect(renderChannelName('{{ANY_LIVE ?? 🔴 [@@stream_game@@] // [@@game_name@@]}}', room)).toBe(
+      '[Game A]',
+    );
+  });
+
+  /**
+   * A live member with no playing activity of their own: Discord carries the
+   * game in the stream activity's `state`, and without the promotion this is
+   * empty for exactly the Twitch streamer the token is for.
+   */
+  it('reads the game out of a streaming activity when there is no playing one', () => {
+    const twitch = member({
+      id: 'd',
+      activities: [{ kind: 'streaming', name: 'Twitch', state: 'Game B', details: 'a title' }],
+    });
+    const room = ctx([play('a', 'Game A'), twitch]);
+    expect(renderChannelName('@@stream_game@@', room)).toBe('Game B');
+    // And it stays confined to the new token: the room's own game is untouched.
+    expect(renderChannelName('@@game_name@@', room)).toBe('Game A');
+  });
+
+  it('aliases and applies the no-game label like @@game_name@@ does', () => {
+    const streamer = member({
+      id: 'a',
+      playing: ['League of Legends'],
+      activities: [{ kind: 'playing', name: 'League of Legends' }],
+      selfStreaming: true,
+    });
+    expect(renderChannelName('@@stream_game@@', ctx([streamer]))).toBe('LoL');
+    // Live but playing nothing detectable reads the "no game" label, not empty.
+    const idle = member({ id: 'a', selfStreaming: true });
+    expect(renderChannelName('@@stream_game@@', ctx([idle]))).toBe('General');
+    expect(renderChannelName('@@stream_game@@', ctx([idle], 'Chilling'))).toBe('Chilling');
+  });
+
+  it('ignores bots and non-streaming members', () => {
+    const bot = member({
+      id: 'bot',
+      bot: true,
+      selfStreaming: true,
+      playing: ['Game C'],
+      activities: [{ kind: 'playing', name: 'Game C' }],
+    });
+    expect(renderChannelName('x@@stream_game@@y', ctx([play('a', 'Game A'), bot]))).toBe('xy');
+  });
+
+  /** Two streamers on different games tie, and `shared` names both. */
+  it('follows the same tie rules as @@game_name@@', () => {
+    const one = play('a', 'Game A', { selfStreaming: true });
+    const two = play('b', 'Game B', { selfStreaming: true });
+    expect(renderChannelName('@@stream_game@@', ctx([one, two]))).toBe('Game A, Game B');
+    /**
+     * `top` with the OWNER on the second-sorted game, so the expectation is not
+     * also `tied[0]`. Written the other way round it passes whether or not the
+     * owner tie-break runs at all, which is the whole thing being pinned.
+     */
+    const owned: RenderContext = {
+      index: 0,
+      members: [one, two],
+      creator: two,
+      creatorName: 'b',
+      gameNameMode: 'top',
+    };
+    expect(renderChannelName('@@stream_game@@', owned)).toBe('Game B');
+    // And the room's own game agrees, because both go through one resolution.
+    expect(renderChannelName('@@game_name@@', owned)).toBe('Game B');
+  });
+
+  /**
+   * The fallback. A member with presence sharing off who hits Go Live has no
+   * detectable game, and without it the documented idiom turns `Halo` into
+   * `🔴 General`: a spent rename showing a game nobody is on, which the
+   * `{{ANY_LIVE}}` guard cannot prevent because `ANY_LIVE` is true.
+   */
+  it('falls back to the rooms game when no streamer has one', () => {
+    const silent = member({ id: 'd', selfStreaming: true, activities: [] });
+    const room = ctx([play('a', 'Halo'), play('b', 'Halo'), play('c', 'Halo'), silent]);
+    expect(renderChannelName('@@stream_game@@', room)).toBe('Halo');
+    expect(renderChannelName('{{ANY_LIVE ?? 🔴 @@stream_game@@ // @@game_name@@}}', room)).toBe(
+      '🔴 Halo',
+    );
+    // Nobody playing at all still reads the "no game" label, like @@game_name@@.
+    expect(renderChannelName('@@stream_game@@', ctx([silent]))).toBe('General');
+    // A three-way tie among streamers is NOT the same case: the engine knows
+    // the games and declines to pick, exactly as @@game_name@@ does.
+    const tie = ctx([
+      play('a', 'Game A', { selfStreaming: true }),
+      play('b', 'Game B', { selfStreaming: true }),
+      play('c', 'Game C', { selfStreaming: true }),
+      play('d', 'Halo'),
+    ]);
+    expect(renderChannelName('@@game_name@@', tie)).toBe('General');
+    expect(renderChannelName('@@stream_game@@', tie)).toBe('General');
+  });
+
+  /**
+   * The reason the two game tokens substitute in ONE regex pass. A game title
+   * really can be set to arbitrary text over RPC, and two chained passes would
+   * substitute into what the first one inserted.
+   */
+  it('does not substitute into a game name that contains the other token', () => {
+    const streamer = play('a', '@@game_name@@', { selfStreaming: true });
+    const room = ctx([streamer, play('b', 'Halo'), play('c', 'Halo')]);
+    expect(renderChannelName('@@stream_game@@', room)).toBe('@@game_name@@');
+    expect(renderChannelName('@@game_name@@ / @@stream_game@@', room)).toBe('Halo / @@game_name@@');
+    const odd = ctx([play('a', '@@stream_game@@'), play('b', '@@stream_game@@')]);
+    expect(renderChannelName('@@game_name@@', odd)).toBe('@@stream_game@@');
+  });
+
+  /**
+   * Late token, like `@@game_name@@`: it fills in after conditionals, so it can
+   * never be a conditional operand, and a game title cannot split a condition.
+   */
+  it('is substituted after conditionals and cannot inject one', () => {
+    const streamer = play('a', 'Game ?? A // B', { selfStreaming: true });
+    expect(renderChannelName('{{@@stream_game@@=x ?? Y // N}}', ctx([streamer]))).toBe('N');
+    expect(renderChannelName('[@@stream_game@@]', ctx([streamer]))).toBe('[Game ?? A // B]');
+  });
+});
+
 describe('PRIVATE', () => {
   const one = member({ id: 'a' });
   const ctx = (isPrivate?: boolean): RenderContext => ({
