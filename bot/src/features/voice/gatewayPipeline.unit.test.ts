@@ -8,17 +8,25 @@ import { fakeLogger } from '../../runtime/testUtils.js';
 
 const tick = (ms = 0): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-function voiceState(guildId: string, userId: string, channelId: string | null): VoiceState {
+function voiceState(
+  guildId: string,
+  userId: string,
+  channelId: string | null,
+  // `boolean | null`, like the real thing: discord.js leaves it null on a state
+  // built from a payload that carries no `self_video`.
+  streaming: boolean | null = false,
+): VoiceState {
   return {
     guild: { id: guildId },
     channelId,
+    streaming,
     member: {
       id: userId,
       displayName: userId,
       user: { bot: false },
       presence: { activities: [] },
       roles: { cache: new Map<string, unknown>() },
-      voice: { streaming: false },
+      voice: { streaming },
     },
   } as unknown as VoiceState;
 }
@@ -89,8 +97,87 @@ describe('registerVoiceGateway (gateway → dispatcher → feature pipeline)', (
       voiceState('g1', 'u1', 'sec-1'),
       voiceState('g1', 'u1', 'sec-1'),
     );
-    await tick(10);
+    await tick(20);
     expect(h.handleVoiceStateUpdate).not.toHaveBeenCalled();
+    // And nothing is scheduled either: mute/deafen/suppress change no rendered
+    // value, so they must stay free of the rename budget.
+    expect(h.rerenderChannelName).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Go Live is `self_stream` on the voice state, not a presence activity, so it
+   * arrives on the same-channel path that mute/unmute uses. It feeds
+   * `{{LIVE_DISCORD}}`, `{{ANY_LIVE}}`, `@@num_live@@` and `@@stream_game@@`.
+   */
+  describe('Discord Go Live in the channel the member is already in', () => {
+    it('schedules a rerender when it starts and when it stops', async () => {
+      const h = harness();
+      dispose = h.dispose;
+      h.client.emit(
+        'voiceStateUpdate',
+        voiceState('g1', 'u1', 'sec-1', false),
+        voiceState('g1', 'u1', 'sec-1', true),
+      );
+      await tick(20);
+      expect(h.rerenderChannelName).toHaveBeenCalledWith('g1', 'sec-1', {
+        onUnmanageable: 'abandon',
+      });
+      // No create/move/cleanup work: nobody joined or left.
+      expect(h.handleVoiceStateUpdate).not.toHaveBeenCalled();
+
+      h.rerenderChannelName.mockClear();
+      h.client.emit(
+        'voiceStateUpdate',
+        voiceState('g1', 'u1', 'sec-1', true),
+        voiceState('g1', 'u1', 'sec-1', false),
+      );
+      await tick(20);
+      expect(h.rerenderChannelName).toHaveBeenCalledWith('g1', 'sec-1', {
+        onUnmanageable: 'abandon',
+      });
+    });
+
+    /** `null` is discord.js's "unknown", not a toggle away from `false`. */
+    it('does not treat an unknown streaming flag as a change', async () => {
+      const h = harness();
+      dispose = h.dispose;
+      h.client.emit(
+        'voiceStateUpdate',
+        voiceState('g1', 'u1', 'sec-1', null),
+        voiceState('g1', 'u1', 'sec-1', false),
+      );
+      h.client.emit(
+        'voiceStateUpdate',
+        voiceState('g1', 'u1', 'sec-1', false),
+        voiceState('g1', 'u1', 'sec-1', null),
+      );
+      await tick(20);
+      expect(h.rerenderChannelName).not.toHaveBeenCalled();
+    });
+
+    it('is gated on entitlement and on ownership, like every other live event', async () => {
+      const gated = harness({ entitled: () => false });
+      gated.client.emit(
+        'voiceStateUpdate',
+        voiceState('gated', 'u1', 'sec-1', false),
+        voiceState('gated', 'u1', 'sec-1', true),
+      );
+      await tick(20);
+      expect(gated.rerenderChannelName).not.toHaveBeenCalled();
+      // Nobody joined, so the gated-join notice must not fire either.
+      expect(gated.onGatedJoin).not.toHaveBeenCalled();
+      gated.dispose();
+
+      const unowned = harness({ serving: () => false });
+      unowned.client.emit(
+        'voiceStateUpdate',
+        voiceState('g1', 'u1', 'sec-1', false),
+        voiceState('g1', 'u1', 'sec-1', true),
+      );
+      await tick(20);
+      expect(unowned.rerenderChannelName).not.toHaveBeenCalled();
+      unowned.dispose();
+    });
   });
 
   it('schedules a rerender when a member in voice changes game', async () => {

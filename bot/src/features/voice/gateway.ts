@@ -99,7 +99,10 @@ export interface VoiceGatewayDeps {
  * and fault-isolated across guilds.
  *
  * - `voiceStateUpdate` drives create/move/cleanup, and reports which secondaries
- *   may need a re-render (join/leave changes `@@num@@`/games).
+ *   may need a re-render (join/leave changes `@@num@@`/games). It also schedules
+ *   one when a member starts or stops Discord Go Live in the channel they are
+ *   already in, which is the only rendered value that moves without a channel
+ *   change and without a presence event.
  * - `presenceUpdate` schedules a re-render for the secondary a member is in when
  *   their game changes.
  *
@@ -138,7 +141,37 @@ export function registerVoiceGateway(deps: VoiceGatewayDeps): () => void {
   const onVoice = (oldState: VoiceState, newState: VoiceState): void => {
     const event = normalizeVoiceState(oldState, newState);
     if (!event) return;
-    if (event.beforeChannelId === event.afterChannelId) return; // mute/unmute
+
+    /**
+     * Same channel: nothing to create, move or clean up. One thing here still
+     * changes a rendered name, and it is the only name input that arrives on
+     * this event rather than on `presenceUpdate`: **Discord Go Live**, which is
+     * voice state (`self_stream`) rather than a presence activity. It feeds
+     * `{{LIVE_DISCORD}}`, `{{LIVE}}`, `{{ANY_LIVE}}`, `@@num_live@@` and
+     * `@@stream_game@@`. Without this the 🔴 waits for the five-minute sweep.
+     *
+     * Mute, deafen and suppress arrive here too and change nothing a template
+     * can read, so they must keep costing nothing. The `rerenderSecondary`
+     * no-op guard is the second half of that: a guild whose template does not
+     * read live state issues no rename even when this does schedule one.
+     */
+    if (event.beforeChannelId === event.afterChannelId) {
+      if (!event.afterChannelId) return;
+      // `VoiceState.streaming` is `boolean | null`: discord.js only refreshes it
+      // when the payload carries `self_video`, so a state built from partial
+      // data sits at `null`. Comparing raw would read `null !== false` as a
+      // toggle and schedule a re-render on the first ordinary event for that
+      // member. The no-op guard would drop the rename, but the dispatcher task
+      // and its channel lookup are not free at presence volume.
+      if (Boolean(oldState.streaming) === Boolean(newState.streaming)) return;
+      // Same order and reasons as the join/leave path below: ownership before
+      // anything else, then the hard entitlement gate. A gated guild gets no
+      // join hook here, because nobody joined.
+      if (deps.serving && !deps.serving()) return;
+      if (deps.entitled && !deps.entitled(event.guildId)) return;
+      scheduler.schedule(event.guildId, event.afterChannelId);
+      return;
+    }
 
     // Ownership before anything else: creating or cleaning up a room on a lease
     // this instance can no longer prove produces duplicate rooms. See `serving`.
