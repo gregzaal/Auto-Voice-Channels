@@ -11,6 +11,7 @@ describe('buildCommandDefinitions', () => {
       [
         'alias',
         'alwaysprivate',
+        'botprofile',
         'channelinfo',
         'controlpanel',
         'create',
@@ -46,9 +47,9 @@ describe('buildCommandDefinitions', () => {
    * ids, the recorded contact and every self-chosen nickname. `/docs/commands`
    * publishes "Manage Server" for both, so this is a published commitment.
    */
-  it('gates export and import behind ManageGuild, one tier higher', () => {
+  it('gates export, import and botprofile behind ManageGuild, one tier higher', () => {
     const manageGuild = PermissionFlagsBits.ManageGuild.toString();
-    for (const name of ['export', 'import']) {
+    for (const name of ['export', 'import', 'botprofile']) {
       expect(byName.get(name)!.default_member_permissions).toBe(manageGuild);
     }
   });
@@ -134,6 +135,7 @@ describe('buildCommandDefinitions', () => {
       'position',
       'alwaysprivate',
       'controlpanel',
+      'botprofile',
       'group',
       'logging',
     ]) {

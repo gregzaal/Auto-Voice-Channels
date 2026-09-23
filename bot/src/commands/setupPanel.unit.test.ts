@@ -264,6 +264,34 @@ describe('buildSetupPanel', () => {
     expect(withAssistant).toContain('Write a name template for me');
   });
 
+  /**
+   * The select only needs Manage Channels and the bot profile needs Manage
+   * Server, so the option is offered to exactly the admins it will accept.
+   */
+  it('offers the bot profile only to a viewer with Manage Server', () => {
+    expect(JSON.stringify(buildSetupPanel({ ...baseInput, isAdmin: true }))).not.toContain(
+      setupId('botprofile'),
+    );
+    const json = JSON.stringify(
+      buildSetupPanel({ ...baseInput, isAdmin: true, canManageGuild: true }),
+    );
+    expect(json).toContain(setupId('botprofile'));
+    expect(json).toContain('Bot profile');
+  });
+
+  /** Its resets still work there, so hiding it would hide a working action. */
+  it('keeps the bot profile reachable in an expired guild', () => {
+    const json = JSON.stringify(
+      buildSetupPanel({
+        ...baseInput,
+        isAdmin: true,
+        canManageGuild: true,
+        entitlement: 'expired',
+      }),
+    );
+    expect(json).toContain(setupId('botprofile'));
+  });
+
   it('never offers the assistant to a non-admin', () => {
     expect(
       JSON.stringify(buildSetupPanel({ ...baseInput, isAdmin: false, assistant: true })),

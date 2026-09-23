@@ -193,6 +193,25 @@ import {
   parseControlSettingsId,
   parseControlToggleId,
 } from './controlPanelSettings.js';
+import {
+  BOT_PROFILE_FILE_ID,
+  BOT_PROFILE_PREFIX,
+  BOT_PROFILE_TEXT_ID,
+  buildBotProfileModal,
+  buildBotProfilePanel,
+  botProfileViewOf,
+  parseBotProfileId,
+  type BotProfileMember,
+  type BotProfileView,
+} from './botProfilePanel.js';
+import {
+  isImageField,
+  loadProfileImage,
+  profileAuditReason,
+  profileEdit,
+  profileFailure,
+  type BotProfileField,
+} from '../features/botProfile.js';
 import { describeError } from '../ops/describeError.js';
 import { reinviteUrlFor } from '../ops/announce.js';
 
@@ -377,7 +396,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     if (interaction.isChatInputCommand()) return handleCommand(interaction, entitled);
     if (interaction.isButton()) return handleButton(interaction, entitled);
     if (interaction.isChannelSelectMenu()) return handleChannelSelect(interaction);
-    if (interaction.isStringSelectMenu()) return handleStringSelect(interaction);
+    if (interaction.isStringSelectMenu()) return handleStringSelect(interaction, entitled);
     if (interaction.isModalSubmit()) return handleModal(interaction);
   }
 
@@ -416,6 +435,13 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
          * rather than pretending the automation is running.
          */
         'channelinfo',
+        /**
+         * The panel opens so a gated admin can still take the bot's custom
+         * face off their server: the hard gate stops writes and destroys
+         * nothing, and a reset only removes. Its four set buttons are hidden
+         * in this state and refused below, so nothing new can go up.
+         */
+        'botprofile',
       ].includes(interaction.commandName);
     }
     if (interaction.isButton()) {
@@ -444,6 +470,12 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
        * matches the whole `info:` id rather than the namespace.
        */
       if (interaction.customId.startsWith(`${CONTROL_PANEL_PREFIX}info:`)) return true;
+      // The bot profile's resets, not its set buttons: see the command's
+      // entry above. The set MODALS are absent from the modal branch
+      // below for the same reason.
+      if (interaction.customId.startsWith(BOT_PROFILE_PREFIX)) {
+        return parseBotProfileId(interaction.customId)?.action !== 'set';
+      }
       return interaction.customId.startsWith(SETUP_PREFIX);
     }
     if (interaction.isStringSelectMenu()) {
@@ -618,6 +650,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return handleChannelInfo(interaction, entitled);
       case 'controlpanel':
         return openControlSettings(interaction);
+      case 'botprofile':
+        return openBotProfile(interaction, entitled);
       case 'create':
         return openCreateModal(interaction);
       case 'alias':
@@ -1578,7 +1612,11 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
    * an unauthorized destructive write. `safeReply` picks the right method.
    */
   async function requireManageGuild(
-    interaction: ChatInputCommandInteraction | ButtonInteraction,
+    interaction:
+      | ChatInputCommandInteraction
+      | ButtonInteraction
+      | StringSelectMenuInteraction
+      | ModalSubmitInteraction,
   ): Promise<boolean> {
     if (interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) === true) return true;
     await safeReply(interaction, 'You need the Manage Server permission to use that.');
@@ -2330,7 +2368,10 @@ Already subscribed? Add the new server ` +
   }
 
   /** The `/setup` "More settings" select, and the alias picker. */
-  async function handleStringSelect(interaction: StringSelectMenuInteraction): Promise<void> {
+  async function handleStringSelect(
+    interaction: StringSelectMenuInteraction,
+    entitled: boolean,
+  ): Promise<void> {
     if (interaction.customId.startsWith(CONTROL_PANEL_PREFIX))
       return handleControlPanelSelect(interaction);
     if (interaction.customId === SETUP_SETTINGS_ID) {
@@ -2345,7 +2386,7 @@ Already subscribed? Add the new server ` +
       // Gated here as well as inside, mirroring the alias branch below: this is
       // the boundary, and `runSetupAction` re-checks for the button path.
       if (!(await requireManageChannels(interaction))) return;
-      return runSetupAction(interaction, chosen.slice(SETUP_PREFIX.length));
+      return runSetupAction(interaction, chosen.slice(SETUP_PREFIX.length), entitled);
     }
     if (interaction.customId === LISTS_SELECT_ID) {
       if (!(await requireManageChannels(interaction))) return;
@@ -2487,6 +2528,7 @@ Already subscribed? Add the new server ` +
           }
         : {}),
       ...(config.timezone !== undefined ? { timezone: config.timezone } : {}),
+      canManageGuild: interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) === true,
       entitlement,
       // Guild-scoped, so an admin clicking it cannot authorize into the wrong
       // server. Self-host grants permissions on the role instead, so there is
@@ -2536,8 +2578,11 @@ Already subscribed? Add the new server ` +
   }
 
   /** The `/setup` panel buttons. */
-  async function handleSetupButton(interaction: ButtonInteraction): Promise<void> {
-    return runSetupAction(interaction, interaction.customId.slice(SETUP_PREFIX.length));
+  async function handleSetupButton(
+    interaction: ButtonInteraction,
+    entitled: boolean,
+  ): Promise<void> {
+    return runSetupAction(interaction, interaction.customId.slice(SETUP_PREFIX.length), entitled);
   }
 
   /**
@@ -2552,6 +2597,7 @@ Already subscribed? Add the new server ` +
   async function runSetupAction(
     interaction: ButtonInteraction | StringSelectMenuInteraction,
     action: string,
+    entitled: boolean,
   ): Promise<void> {
     // Create runs its own entitlement + permission gating (and opens a modal).
     if (action === 'create') return openCreateModal(interaction, { fromSetup: true });
@@ -2625,6 +2671,14 @@ Already subscribed? Add the new server ` +
       // `refreshListsPanel` defers for us if this branch ever gains a caller
       // that has not.
       await refreshListsPanel(interaction);
+      return;
+    }
+    if (action === 'botprofile') {
+      // One tier above the Manage Channels check above, as `/botprofile` is.
+      if (!(await requireManageGuild(interaction))) return;
+      // Replaces the panel, as the named lists do.
+      await interaction.deferUpdate();
+      await showBotProfile(interaction, { canChange: entitled });
       return;
     }
     if (action === 'manage') {
@@ -2777,7 +2831,10 @@ Already subscribed? Add the new server ` +
       return handleControlPanelButton(interaction, entitled);
     if (interaction.customId.startsWith(CONTROL_SETTINGS_PREFIX))
       return handleControlSettingsButton(interaction);
-    if (interaction.customId.startsWith(SETUP_PREFIX)) return handleSetupButton(interaction);
+    if (interaction.customId.startsWith(BOT_PROFILE_PREFIX))
+      return handleBotProfileButton(interaction, entitled);
+    if (interaction.customId.startsWith(SETUP_PREFIX))
+      return handleSetupButton(interaction, entitled);
 
     /**
      * Nothing claimed this id. Answering matters because falling off the end
@@ -3503,6 +3560,260 @@ Already subscribed? Add the new server ` +
       });
   }
 
+  // -- /botprofile : the bot's own profile in this server ------------------
+
+  type BotProfileInteraction =
+    | ChatInputCommandInteraction
+    | ButtonInteraction
+    | StringSelectMenuInteraction
+    | ModalSubmitInteraction;
+
+  const PROFILE_UNAVAILABLE =
+    "I can't read my profile in this server right now. Try again in a moment.";
+
+  /**
+   * The bot's own member, read from Discord rather than from the cache.
+   *
+   * `editMe` returns a patched CLONE and leaves `guild.members.me` alone, so
+   * the cache lags every change until the gateway's member update arrives,
+   * and `fetchMe` without `force` answers from that same cache. Null when it
+   * cannot be read, which every caller turns into a sentence.
+   */
+  async function readBotProfile(
+    interaction: BotProfileInteraction,
+  ): Promise<BotProfileView | null> {
+    const guild = interaction.guild;
+    if (!guild) return null;
+    try {
+      return botProfileViewOf(await guild.members.fetchMe({ force: true }));
+    } catch (err) {
+      deps.logger.warn({ err, guildId: guild.id }, 'could not read the bot profile');
+      return null;
+    }
+  }
+
+  /** Renders the panel into an interaction that has already been deferred. */
+  async function showBotProfile(
+    interaction: BotProfileInteraction,
+    opts: { canChange: boolean; note?: string },
+    view?: BotProfileView | null,
+  ): Promise<void> {
+    const current = view ?? (await readBotProfile(interaction));
+    if (!current) {
+      await interaction.editReply({
+        content: opts.note ? `${opts.note}\n\n${PROFILE_UNAVAILABLE}` : PROFILE_UNAVAILABLE,
+        embeds: [],
+        components: [],
+      });
+      return;
+    }
+    await interaction.editReply(toUpdate(buildBotProfilePanel(current, opts)));
+  }
+
+  /**
+   * `/botprofile` -> the panel.
+   *
+   * Gated before deferring, because the gate is local and a refusal after a
+   * defer would strand the "thinking" state above it. Deferred before reading,
+   * because the read is a Discord round trip (see {@link readBotProfile}).
+   */
+  async function openBotProfile(
+    interaction: ChatInputCommandInteraction,
+    entitled: boolean,
+  ): Promise<void> {
+    if (!(await requireManageGuild(interaction))) return;
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    await showBotProfile(interaction, { canChange: entitled });
+  }
+
+  /**
+   * The panel's buttons: a set and a reset per field.
+   *
+   * A set button opens a modal, which has to be the FIRST response, so nothing
+   * above it defers or waits on Discord. The name's modal is prefilled from the
+   * cached member for that reason: it lags a change by the moment the gateway
+   * takes to report it, which is harmless in a prefill, where a fresh read
+   * could outlast the three-second window.
+   */
+  async function handleBotProfileButton(
+    interaction: ButtonInteraction,
+    entitled: boolean,
+  ): Promise<void> {
+    const parsed = parseBotProfileId(interaction.customId);
+    if (!parsed) {
+      await safeReply(interaction, 'That button is out of date. Run `/botprofile` again.');
+      return;
+    }
+    if (!(await requireManageGuild(interaction))) return;
+    if (parsed.action === 'set') {
+      const me = parsed.field === 'name' ? (interaction.guild?.members.me ?? null) : null;
+      await interaction.showModal(
+        buildBotProfileModal(parsed.field, me ? botProfileViewOf(me) : null),
+      );
+      return;
+    }
+    await interaction.deferUpdate();
+    await applyBotProfile(interaction, parsed.field, null, entitled);
+  }
+
+  /**
+   * Profile images being downloaded or uploaded on this instance right now.
+   *
+   * Each one holds the file and its base64 copy, about 14 MB at the limit and
+   * several times that in transient copies, so an instance takes a couple at a
+   * time and refuses the rest with a sentence rather than letting a burst of
+   * admins find the memory ceiling (`/import` bounds its held work for the
+   * same reason).
+   */
+  let profileUploads = 0;
+  const MAX_PROFILE_UPLOADS = 2;
+
+  /**
+   * A submitted avatar, banner, name or bio.
+   *
+   * The fields are read BEFORE deferring, so a submit from an older build whose
+   * modal lacks the field answers "out of date" instead of falling to `route`'s
+   * generic catch. Then deferred: an image is a download of up to 10 MB and an
+   * upload of a third more as base64, and three seconds does not cover that.
+   * Always entitled here, because the gate refuses these modals in a gated
+   * guild.
+   */
+  async function handleBotProfileModal(interaction: ModalSubmitInteraction): Promise<void> {
+    const parsed = parseBotProfileId(interaction.customId);
+    if (!parsed || parsed.action !== 'set') {
+      await safeReply(interaction, 'That panel is out of date. Run `/botprofile` again.');
+      return;
+    }
+    if (!(await requireManageGuild(interaction))) return;
+    const image = isImageField(parsed.field);
+    let file: { url: string; size: number } | undefined;
+    let text = '';
+    try {
+      if (image) file = interaction.fields.getUploadedFiles(BOT_PROFILE_FILE_ID)?.first();
+      else text = interaction.fields.getTextInputValue(BOT_PROFILE_TEXT_ID).trim();
+    } catch {
+      await safeReply(interaction, 'That panel is out of date. Run `/botprofile` again.');
+      return;
+    }
+    if (image && profileUploads >= MAX_PROFILE_UPLOADS) {
+      await safeReply(
+        interaction,
+        'A lot of profile images are being uploaded right now. Try again in a minute.',
+      );
+      return;
+    }
+    // Opened from the panel, so the panel is what gets updated. The plain
+    // reply is the defence every modal here keeps for one with no message
+    // behind it, which cannot be answered with an update.
+    if (interaction.isFromMessage()) await interaction.deferUpdate();
+    else await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    if (!image) {
+      if (!text) {
+        await showBotProfile(interaction, {
+          canChange: true,
+          note: '⚠️ That was blank. Use the reset button to go back to the default.',
+        });
+        return;
+      }
+      await applyBotProfile(interaction, parsed.field, text, true);
+      return;
+    }
+    if (!file) {
+      await showBotProfile(interaction, { canChange: true, note: '⚠️ Attach an image first.' });
+      return;
+    }
+    profileUploads += 1;
+    try {
+      const loaded = await loadProfileImage(file);
+      if (!loaded.ok) {
+        await showBotProfile(interaction, { canChange: true, note: `⚠️ ${loaded.message}` });
+        return;
+      }
+      await applyBotProfile(interaction, parsed.field, loaded.dataUri, true);
+    } finally {
+      profileUploads -= 1;
+    }
+  }
+
+  const PROFILE_DONE: Record<BotProfileField, { set: string; reset: string }> = {
+    avatar: { set: 'Avatar updated.', reset: 'Avatar reset to the default.' },
+    banner: { set: 'Banner updated.', reset: 'Banner reset to the default.' },
+    name: { set: 'Name updated.', reset: 'Name reset to the default.' },
+    bio: { set: 'Bio updated.', reset: 'Bio reset to the default.' },
+  };
+
+  /**
+   * After every change that worked: Discord clients cache a member's profile,
+   * so the admin looking at the panel is often the last to see it change.
+   */
+  const PROFILE_RELOAD =
+    'This may take some time for everyone to see it. Press Ctrl-R to reload now.';
+
+  /**
+   * Writes one field (`null` resets it) and re-renders the panel with the
+   * outcome, into an interaction that has already been deferred.
+   *
+   * **Outside the guild's queue, deliberately**, for `/import`'s reason and one
+   * of its own. Nothing bounds a REST call under discord.js's automatic 429
+   * retry, and a queued one would hold every voice event for the guild behind
+   * an admin's upload; this writes no AVC state, so the queue orders nothing.
+   * And the queue logs a failed task as `{ err }`, which for a refused
+   * `editMe` is the whole request body: the image or the bio, in the logs the
+   * privacy policy says hold neither. Queued, admin mistakes like a missing
+   * Change Nickname would also count toward that guild's circuit breaker.
+   *
+   * The failure is caught here rather than left to `route`, whose catch would
+   * log it the same way and follow up on a deferred interaction, leaving the
+   * panel under a spinner.
+   */
+  async function applyBotProfile(
+    interaction: ButtonInteraction | ModalSubmitInteraction,
+    field: BotProfileField,
+    value: string | null,
+    entitled: boolean,
+  ): Promise<void> {
+    const guild = interaction.guild;
+    const guildId = interaction.guildId!;
+    if (!guild) {
+      await interaction.editReply({ content: PROFILE_UNAVAILABLE, embeds: [], components: [] });
+      return;
+    }
+    let member: BotProfileMember | null = null;
+    let note: string;
+    try {
+      member = await guild.members.editMe(
+        profileEdit(field, value, profileAuditReason(interaction.user)),
+      );
+      note = formatResult({
+        ok: true,
+        message: `${PROFILE_DONE[field][value === null ? 'reset' : 'set']} ${PROFILE_RELOAD}`,
+      });
+    } catch (err) {
+      const failure = profileFailure(err, field);
+      /**
+       * Never `{ err }`. A discord.js API error carries the request body, and
+       * pino's error serializer copies every enumerable property, so logging
+       * the error object would write the uploaded image (up to 13 MB of base64)
+       * or the bio into the logs. The privacy policy says we keep no copy.
+       */
+      deps.logger.warn({ guildId, field, error: describeError(err) }, 'bot profile change failed');
+      if (!failure.expected) {
+        deps.reportError?.('Bot profile change failed', {
+          guildId,
+          field,
+          error: describeError(err),
+        });
+      }
+      note = formatResult({ ok: false, message: failure.message });
+    }
+    await showBotProfile(
+      interaction,
+      { canChange: entitled, note },
+      member ? botProfileViewOf(member) : null,
+    );
+  }
+
   async function handleKickVote(interaction: ButtonInteraction): Promise<void> {
     const guildId = interaction.guildId!;
     const channelId = interaction.customId.slice(KICK_PREFIX.length);
@@ -3547,6 +3858,8 @@ Already subscribed? Add the new server ` +
       return handleControlPanelModal(interaction);
     if (interaction.customId.startsWith(CONTROL_SETTINGS_PREFIX))
       return handleControlAppearanceModal(interaction);
+    if (interaction.customId.startsWith(BOT_PROFILE_PREFIX))
+      return handleBotProfileModal(interaction);
     if (interaction.customId.startsWith(LISTS_PREFIX)) return handleListSaveSubmit(interaction);
     // `avc:alias` is the pre-panel id of the Add modal, still accepted so a
     // modal opened on an old instance mid-deploy can submit against a new one.

@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { DiscordAPIError, PermissionFlagsBits } from 'discord.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fakeLogger } from '../runtime/testUtils.js';
+import { GuildDispatcher } from '../runtime/dispatcher.js';
 import { readControlPanel } from '../features/voice/guildSettings.js';
 import { registerInteractionHandler, type InteractionDeps } from './interactions.js';
 import { LOGGING_MODAL_ID } from './loggingModal.js';
@@ -17,6 +18,7 @@ import { ALIAS_MODAL_ID } from './aliasModal.js';
 import { ALIAS_SELECT_ID, aliasHash, aliasId } from './aliasPanel.js';
 import { controlPanelId } from '../features/voice/controlPanel.js';
 import { controlAppearanceId, controlSettingsId, controlToggleId } from './controlPanelSettings.js';
+import { botProfileResetId, botProfileSetId } from './botProfilePanel.js';
 
 /** A Discord "Missing Permissions" (50013) rejection, as thrown by a failed create. */
 function missingPermissions(): DiscordAPIError {
@@ -81,6 +83,31 @@ interface FakeInteractionOpts {
    * at.
    */
   voiceChannels?: Record<string, { name: string; callerCanSee: boolean }>;
+  /** The bot's own member as `fetchMe` returns it, for `/botprofile`. */
+  fetchMe?: ReturnType<typeof vi.fn>;
+  /** `guild.members.editMe`, for `/botprofile`'s writes. */
+  editMe?: ReturnType<typeof vi.fn>;
+  /** The file a modal upload field carries. */
+  uploadedFile?: { url: string; size: number };
+  /** The cached bot member's nickname, which the name modal prefills from. */
+  botNickname?: string;
+}
+
+/** The bot's own guild member, with only what `/botprofile` reads. */
+function fakeBotMember(
+  over: { nickname?: string | null; avatar?: string | null; canRename?: boolean } = {},
+) {
+  return {
+    nickname: over.nickname ?? null,
+    avatar: over.avatar ?? null,
+    banner: null,
+    user: { username: 'AVC', globalName: null },
+    permissions: {
+      has: (p: bigint) => p !== PermissionFlagsBits.ChangeNickname || (over.canRename ?? true),
+    },
+    displayAvatarURL: () => 'https://cdn.discordapp.com/avatars/1/a.png',
+    bannerURL: () => null,
+  };
 }
 
 /** Builds a minimal interaction with the methods/getters the router touches. */
@@ -101,7 +128,14 @@ function fakeInteraction(opts: FakeInteractionOpts) {
           get: () =>
             opts.voiceChannelId ? { voice: { channelId: opts.voiceChannelId } } : undefined,
         },
-        me: { permissions: { has: (p: bigint) => holds(opts.botPerms, p) } },
+        // The cached bot member: its permissions are `botPerms`, and the rest
+        // is what `/botprofile` prefills from.
+        me: {
+          ...fakeBotMember({ nickname: opts.botNickname ?? null }),
+          permissions: { has: (p: bigint) => holds(opts.botPerms, p) },
+        },
+        fetchMe: opts.fetchMe ?? vi.fn().mockResolvedValue(fakeBotMember()),
+        editMe: opts.editMe ?? vi.fn().mockResolvedValue(fakeBotMember()),
       },
       channels: {
         cache: {
@@ -184,6 +218,7 @@ function fakeInteraction(opts: FakeInteractionOpts) {
       getSelectedChannels: () =>
         opts.selectedChannelId ? { first: () => ({ id: opts.selectedChannelId }) } : null,
       getTextInputValue: (k: string) => opts.textInputs?.[k] ?? '',
+      getUploadedFiles: () => (opts.uploadedFile ? { first: () => opts.uploadedFile } : null),
     },
     channelId: 'text1',
   };
@@ -3004,5 +3039,543 @@ describe('registerInteractionHandler (/controlpanel)', () => {
     expect(reply).toHaveBeenCalledWith(
       expect.objectContaining({ content: 'You need the Manage Channels permission.' }),
     );
+  });
+});
+
+describe('registerInteractionHandler (/botprofile)', () => {
+  let dispose: (() => void) | undefined;
+  afterEach(() => {
+    dispose?.();
+    vi.unstubAllGlobals();
+  });
+
+  const MANAGE_SERVER = 'You need the Manage Server permission to use that.';
+  const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 9, 9]);
+
+  /** Expired and not self-hosted, which is the only way to be hard-gated. */
+  const expired = () => ({
+    guilds: {
+      get: vi.fn().mockResolvedValue({ authStatus: 'expired' }),
+      isEntitled: vi.fn().mockResolvedValue(false),
+    } as never,
+    selfHosted: false,
+  });
+
+  /**
+   * Manage Channels is not enough: this changes how the bot looks to the whole
+   * server, which is `/import`'s reach.
+   */
+  it('refuses a caller with only Manage Channels, before reading anything', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const fetchMe = vi.fn();
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'botprofile',
+      manageChannels: true,
+      fetchMe,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(reply).toHaveBeenCalledWith(expect.objectContaining({ content: MANAGE_SERVER }));
+    expect(interaction.deferReply).not.toHaveBeenCalled();
+    expect(fetchMe).not.toHaveBeenCalled();
+  });
+
+  /**
+   * `force`, because `editMe` leaves the cached member alone and `fetchMe`
+   * without it answers from that cache: the panel would report the profile
+   * from before the last change.
+   */
+  it('opens the panel from a fresh read of the bot, not the cache', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const fetchMe = vi.fn().mockResolvedValue(fakeBotMember({ nickname: 'Roomie' }));
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'botprofile',
+      manageGuild: true,
+      fetchMe,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(fetchMe).toHaveBeenCalledWith({ force: true });
+    expect(interaction.deferReply).toHaveBeenCalled();
+    const json = JSON.stringify(editReply.mock.calls[0]?.[0]);
+    expect(json).toContain(botProfileSetId('avatar'));
+    expect(json).toContain('Roomie');
+  });
+
+  it('says so rather than showing a blank panel when the bot cannot be read', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'botprofile',
+      manageGuild: true,
+      fetchMe: vi.fn().mockRejectedValue(new Error('503')),
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain("can't read my profile");
+  });
+
+  /**
+   * `showModal` has to be the first response inside three seconds, so nothing
+   * may defer before it and nothing may wait on Discord: the prefill comes from
+   * the cached member, not a fetch.
+   */
+  it('opens the name modal prefilled from the cache, without deferring or fetching', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const fetchMe = vi.fn();
+    const { interaction } = fakeInteraction({
+      kind: 'button',
+      customId: botProfileSetId('name'),
+      manageGuild: true,
+      botNickname: 'Roomie',
+      fetchMe,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(interaction.deferUpdate).not.toHaveBeenCalled();
+    expect(fetchMe).not.toHaveBeenCalled();
+    expect(JSON.stringify(interaction.showModal.mock.calls[0]?.[0])).toContain('"value":"Roomie"');
+  });
+
+  it('refuses a set button without Manage Server, and opens nothing', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'button',
+      customId: botProfileSetId('avatar'),
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(reply).toHaveBeenCalledWith(expect.objectContaining({ content: MANAGE_SERVER }));
+    expect(interaction.showModal).not.toHaveBeenCalled();
+  });
+
+  it('resets one field with null, names the admin in the audit log, and re-renders', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const editMe = vi.fn().mockResolvedValue(fakeBotMember());
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'button',
+      customId: botProfileResetId('avatar'),
+      manageGuild: true,
+      editMe,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(interaction.deferUpdate).toHaveBeenCalled();
+    expect(editMe).toHaveBeenCalledWith({ avatar: null, reason: '/botprofile, by kay (u1)' });
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('Avatar reset to the default.');
+    // Discord clients cache a profile, so the admin is told how to see it now.
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain(
+      'This may take some time for everyone to see it. Press Ctrl-R to reload now.',
+    );
+  });
+
+  it('sets the name from the modal', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const editMe = vi.fn().mockResolvedValue(fakeBotMember({ nickname: 'Bob' }));
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'modal',
+      customId: botProfileSetId('name'),
+      manageGuild: true,
+      fromMessage: true,
+      textInputs: { value: '  Bob  ' },
+      editMe,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(editMe).toHaveBeenCalledWith(expect.objectContaining({ nick: 'Bob' }));
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('Name updated.');
+  });
+
+  /**
+   * The invite does not ask for Change Nickname, so a server that took it off
+   * @everyone refuses the rename. That is the admin's to fix and not an
+   * incident, so it is told to them and not reported.
+   */
+  it('tells the admin how to grant Change Nickname when the rename is refused', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'modal',
+      customId: botProfileSetId('name'),
+      manageGuild: true,
+      fromMessage: true,
+      textInputs: { value: 'Bob' },
+      editMe: vi.fn().mockRejectedValue(missingPermissions()),
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    const json = JSON.stringify(editReply.mock.calls.at(-1)?.[0]);
+    expect(json).toContain('Change Nickname');
+    expect(json).toContain(botProfileSetId('name'));
+    expect(env.reportError).not.toHaveBeenCalled();
+  });
+
+  it('uploads an image as a data URI typed by its bytes', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: () => Promise.resolve(PNG.buffer.slice(0)),
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    const env = setup();
+    dispose = env.dispose;
+    const editMe = vi.fn().mockResolvedValue(fakeBotMember({ avatar: 'abc' }));
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'modal',
+      customId: botProfileSetId('avatar'),
+      manageGuild: true,
+      fromMessage: true,
+      uploadedFile: { url: 'https://cdn.discordapp.com/ephemeral-attachments/1/2/a.jpg', size: 10 },
+      editMe,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    await flush();
+    expect(interaction.deferUpdate).toHaveBeenCalled();
+    expect(editMe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        avatar: `data:image/png;base64,${Buffer.from(PNG).toString('base64')}`,
+      }),
+    );
+    expect(JSON.stringify(editReply.mock.calls.at(-1)?.[0])).toContain('Avatar updated.');
+  });
+
+  /**
+   * A discord.js API error carries the request body, and pino's error
+   * serializer copies it, so a refused upload logged as `{ err }` would write
+   * the whole image into the logs. The privacy policy says we keep no copy.
+   *
+   * Through a REAL dispatcher and every log level, because the leak this
+   * caught in review was not in the handler at all: the guild queue logs a
+   * failed task as `{ err }` before the handler's own catch runs, and a
+   * pass-through dispatcher hid it.
+   */
+  it('never logs the uploaded image when Discord refuses it, at any level', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue({ ok: true, arrayBuffer: () => Promise.resolve(PNG.buffer.slice(0)) }),
+    );
+    const logged = vi.fn();
+    const logger: Record<string, unknown> = {};
+    for (const level of ['trace', 'debug', 'info', 'warn', 'error', 'fatal'])
+      logger[level] = logged;
+    logger.child = () => logger;
+    const env = setup({
+      logger: logger as never,
+      dispatcher: new GuildDispatcher({ logger: logger as never }),
+    });
+    dispose = env.dispose;
+    const refused = new DiscordAPIError(
+      {
+        code: 50035,
+        message: 'Invalid Form Body',
+        errors: {
+          avatar: { _errors: [{ code: 'X', message: 'File cannot be larger than 10240.0 kb.' }] },
+        },
+      } as never,
+      50035,
+      400,
+      'PATCH',
+      'https://discord.test',
+      { body: { avatar: 'data:image/png;base64,THEIMAGEBYTES' } } as never,
+    );
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'modal',
+      customId: botProfileSetId('avatar'),
+      manageGuild: true,
+      fromMessage: true,
+      uploadedFile: { url: 'https://cdn.discordapp.com/ephemeral-attachments/1/2/a.png', size: 10 },
+      editMe: vi.fn().mockRejectedValue(refused),
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    await flush();
+    expect(logged).toHaveBeenCalled();
+    expect(JSON.stringify(logged.mock.calls)).not.toContain('THEIMAGEBYTES');
+    expect(JSON.stringify(editReply.mock.calls.at(-1)?.[0])).toContain('10240.0 kb');
+    expect(env.reportError).not.toHaveBeenCalled();
+  });
+
+  /** Anything that is not the admin's to fix is an operator's to hear about. */
+  it('reports an unexpected failure, and still re-renders the panel', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'button',
+      customId: botProfileResetId('bio'),
+      manageGuild: true,
+      editMe: vi.fn().mockRejectedValue(new Error('socket hang up')),
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(env.reportError).toHaveBeenCalledWith(
+      'Bot profile change failed',
+      expect.objectContaining({ field: 'bio' }),
+    );
+    const json = JSON.stringify(editReply.mock.calls.at(-1)?.[0]);
+    expect(json).toContain('socket hang up');
+    expect(json).toContain(botProfileResetId('bio'));
+  });
+
+  it('refuses a blank name rather than sending one', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const editMe = vi.fn();
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'modal',
+      customId: botProfileSetId('name'),
+      manageGuild: true,
+      fromMessage: true,
+      textInputs: { value: '   ' },
+      editMe,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(editMe).not.toHaveBeenCalled();
+    expect(JSON.stringify(editReply.mock.calls.at(-1)?.[0])).toContain('blank');
+  });
+
+  it('asks for an image when an upload modal arrives without one', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const editMe = vi.fn();
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'modal',
+      customId: botProfileSetId('avatar'),
+      manageGuild: true,
+      fromMessage: true,
+      editMe,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(editMe).not.toHaveBeenCalled();
+    expect(JSON.stringify(editReply.mock.calls.at(-1)?.[0])).toContain('Attach an image first');
+  });
+
+  /**
+   * A submit from an older build, or a forged one, whose modal lacks the field:
+   * discord.js throws on the read, and it must be answered before any defer
+   * rather than reaching `route`'s generic catch.
+   */
+  it('answers a modal missing its field as out of date, without deferring', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'modal',
+      customId: botProfileSetId('bio'),
+      manageGuild: true,
+      fromMessage: true,
+    });
+    interaction.fields.getTextInputValue = () => {
+      throw new Error('Required field "value" not found.');
+    };
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(interaction.deferUpdate).not.toHaveBeenCalled();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('out of date');
+  });
+
+  /** A modal with no message behind it cannot be answered with an update. */
+  it('answers a modal that did not come from the panel with a fresh reply', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'modal',
+      customId: botProfileSetId('bio'),
+      manageGuild: true,
+      fromMessage: false,
+      textInputs: { value: 'Rooms that name themselves.' },
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(interaction.deferReply).toHaveBeenCalled();
+    expect(interaction.deferUpdate).not.toHaveBeenCalled();
+    expect(JSON.stringify(editReply.mock.calls.at(-1)?.[0])).toContain('Bio updated.');
+  });
+
+  /**
+   * Each upload in flight holds the file and its base64 copy, so an instance
+   * takes two at a time and says so to the third rather than finding the
+   * memory ceiling.
+   */
+  it('refuses a third concurrent upload on one instance, before downloading', async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => (release = r));
+    const fetchSpy = vi.fn().mockImplementation(async () => {
+      await held;
+      return { ok: true, arrayBuffer: () => Promise.resolve(PNG.buffer.slice(0)) };
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    const env = setup();
+    dispose = env.dispose;
+    const upload = () =>
+      fakeInteraction({
+        kind: 'modal',
+        customId: botProfileSetId('avatar'),
+        manageGuild: true,
+        fromMessage: true,
+        uploadedFile: {
+          url: 'https://cdn.discordapp.com/ephemeral-attachments/1/2/a.png',
+          size: 10,
+        },
+      });
+    const first = upload();
+    const second = upload();
+    const third = upload();
+    env.client.emit('interactionCreate', first.interaction);
+    env.client.emit('interactionCreate', second.interaction);
+    await flush();
+    env.client.emit('interactionCreate', third.interaction);
+    await flush();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(third.interaction.deferUpdate).not.toHaveBeenCalled();
+    expect(JSON.stringify(third.reply.mock.calls[0]?.[0])).toContain('Try again in a minute');
+    release();
+    await flush();
+    await flush();
+    // Both slots are free again once the first two finish.
+    const fourth = upload();
+    env.client.emit('interactionCreate', fourth.interaction);
+    await flush();
+    await flush();
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it('never fetches an upload from a host that is not Discord', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    const env = setup();
+    dispose = env.dispose;
+    const editMe = vi.fn();
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'modal',
+      customId: botProfileSetId('banner'),
+      manageGuild: true,
+      fromMessage: true,
+      uploadedFile: { url: 'https://evil.example/b.png', size: 10 },
+      editMe,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(editMe).not.toHaveBeenCalled();
+    expect(JSON.stringify(editReply.mock.calls.at(-1)?.[0])).toContain('not hosted by Discord');
+  });
+
+  it('opens from the /setup settings select, replacing that panel', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'stringSelect',
+      customId: SETUP_SETTINGS_ID,
+      values: [setupId('botprofile')],
+      manageChannels: true,
+      manageGuild: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(interaction.deferUpdate).toHaveBeenCalled();
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain(botProfileResetId('bio'));
+  });
+
+  /** The option is hidden from these admins, but option values are client input. */
+  it('refuses the /setup option to an admin without Manage Server', async () => {
+    const env = setup();
+    dispose = env.dispose;
+    const { interaction, reply } = fakeInteraction({
+      kind: 'stringSelect',
+      customId: SETUP_SETTINGS_ID,
+      values: [setupId('botprofile')],
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(reply).toHaveBeenCalledWith(expect.objectContaining({ content: MANAGE_SERVER }));
+    expect(interaction.deferUpdate).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A gated admin can still take the bot's custom face off their server, since
+   * a reset only removes, but cannot put anything new up.
+   */
+  it('lets a gated admin open the panel and reset, with no set buttons offered', async () => {
+    const env = setup(expired());
+    dispose = env.dispose;
+    const opened = fakeInteraction({
+      kind: 'command',
+      commandName: 'botprofile',
+      manageGuild: true,
+    });
+    env.client.emit('interactionCreate', opened.interaction);
+    await flush();
+    const json = JSON.stringify(opened.editReply.mock.calls[0]?.[0]);
+    expect(json).toContain(botProfileResetId('avatar'));
+    expect(json).not.toContain(botProfileSetId('avatar'));
+
+    const editMe = vi.fn().mockResolvedValue(fakeBotMember());
+    const reset = fakeInteraction({
+      kind: 'button',
+      customId: botProfileResetId('banner'),
+      manageGuild: true,
+      editMe,
+    });
+    env.client.emit('interactionCreate', reset.interaction);
+    await flush();
+    expect(editMe).toHaveBeenCalledWith(expect.objectContaining({ banner: null }));
+  });
+
+  it('opens the resets-only panel from /setup in a gated server', async () => {
+    const env = setup(expired());
+    dispose = env.dispose;
+    const { interaction, editReply } = fakeInteraction({
+      kind: 'stringSelect',
+      customId: SETUP_SETTINGS_ID,
+      values: [setupId('botprofile')],
+      manageChannels: true,
+      manageGuild: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    const json = JSON.stringify(editReply.mock.calls[0]?.[0]);
+    expect(json).toContain(botProfileResetId('name'));
+    expect(json).not.toContain(botProfileSetId('name'));
+  });
+
+  it('refuses a gated admin a set button and its modal', async () => {
+    const env = setup(expired());
+    dispose = env.dispose;
+    const button = fakeInteraction({
+      kind: 'button',
+      customId: botProfileSetId('avatar'),
+      manageGuild: true,
+    });
+    env.client.emit('interactionCreate', button.interaction);
+    await flush();
+    expect(button.interaction.showModal).not.toHaveBeenCalled();
+    expect(button.reply).toHaveBeenCalled();
+
+    const editMe = vi.fn();
+    const modal = fakeInteraction({
+      kind: 'modal',
+      customId: botProfileSetId('bio'),
+      manageGuild: true,
+      fromMessage: true,
+      textInputs: { value: 'hello' },
+      editMe,
+    });
+    env.client.emit('interactionCreate', modal.interaction);
+    await flush();
+    expect(editMe).not.toHaveBeenCalled();
   });
 });

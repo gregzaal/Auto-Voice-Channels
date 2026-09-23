@@ -230,6 +230,16 @@ export function buildCommandDefinitions(
         .setName('logging')
         .setDescription('Configure event logging to a text channel (or turn it off).'),
     ),
+    /**
+     * Manage Server rather than Manage Channels: this changes how the bot looks
+     * to everyone in the server, which is `/import`'s reach, not `/template`'s.
+     * Enforced again in code (`requireManageGuild`), since this is a default.
+     */
+    serverAdminOnly(
+      new SlashCommandBuilder()
+        .setName('botprofile')
+        .setDescription('Give the bot its own avatar, banner, name and bio in this server.'),
+    ),
     serverAdminOnly(
       new SlashCommandBuilder()
         .setName('export')

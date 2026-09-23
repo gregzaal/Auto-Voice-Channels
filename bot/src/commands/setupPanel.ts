@@ -406,6 +406,13 @@ export interface SetupPanelInput {
   textChannelRoleId?: string | undefined;
   /** That role's name, when it still resolves. */
   textChannelRoleName?: string | undefined;
+  /**
+   * Whether the viewer has Manage Server, which the bot profile option needs.
+   *
+   * The select itself only needs Manage Channels, so without this the option
+   * would be offered to admins it is about to refuse.
+   */
+  canManageGuild?: boolean;
 }
 
 /**
@@ -660,6 +667,21 @@ function settingsRow(
       )
       .setEmoji('🎲'),
   ];
+  /**
+   * The same panel `/botprofile` opens, here because this is where an admin
+   * finds out what the bot can do (owner, 2026-09-23). Offered in an expired
+   * guild too: that panel keeps its four resets there, and the gate lets them
+   * through.
+   */
+  if (input.canManageGuild === true) {
+    options.push(
+      new StringSelectMenuOptionBuilder()
+        .setLabel('Bot profile')
+        .setValue(setupId('botprofile'))
+        .setDescription('Give the bot its own avatar, banner, name and bio in this server')
+        .setEmoji('🖼️'),
+    );
+  }
   // The assistant is hidden in an expired guild because `allowedWhileExpired`
   // refuses it, and the panel must not offer an action it is about to refuse.
   // The pause toggle below is hidden for consistency only: that flag IS still
