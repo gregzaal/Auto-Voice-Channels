@@ -710,6 +710,25 @@ describe('BillingReconciler (integration)', () => {
       expect(await auditsFor('billing.notification.expired', guildId)).toHaveLength(2);
       // And still one message.
       expect(alertsAbout()).toBe(1);
+
+      /**
+       * And said again a month later, while it is still true. The first
+       * version of this dedupe read the per-expiry row, which is rewritten
+       * every three days, so the window never ran out and a guild was
+       * mentioned exactly once, ever. Only the alert marker ages.
+       *
+       * Aged by hand because `ops_audit.created_at` is the database's clock,
+       * not the injected one, so no amount of advancing `now` moves it.
+       */
+      await env.handle.pool.query(
+        "UPDATE ops_audit SET created_at = $1 WHERE action = 'billing.notification.expired_alerted' AND target = $2",
+        [new Date(now.getTime() - 31 * DAY_MS), guildId],
+      );
+      now = new Date(now.getTime() + 1 * DAY_MS);
+      await prod.reconciler.runOnce(); // re-derived, queued and tried
+      now = new Date(now.getTime() + 4 * DAY_MS);
+      await prod.reconciler.runOnce(); // gives up again, a month after the last message
+      expect(alertsAbout()).toBe(2);
     });
 
     /**
