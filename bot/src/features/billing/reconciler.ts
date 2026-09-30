@@ -228,6 +228,17 @@ const OVERDUE_LOCK_SLOT = 1;
 const OVERDUE_REPORT_EVERY_MS = 6 * 3_600_000;
 
 /**
+ * How long one guild's undeliverable notices stay quiet after the first alert.
+ *
+ * Thirty days: long enough that a permanently unreachable guild is a monthly
+ * reminder rather than a stream, short enough that it cannot be forgotten
+ * entirely while its grace window runs out. Per guild, not per notice: the
+ * operator's action — reach the server some other way — is the same whichever
+ * notice failed, so a second key failing in the same month is not news.
+ */
+const EXPIRED_NOTICE_REALERT_MS = 30 * 86_400_000;
+
+/**
  * The trial/billing reconcile job applies time-based transitions.
  * Three phases per tick:
  *
@@ -1502,11 +1513,35 @@ export class BillingReconciler {
          * still fires.
          */
         if (row.attempts === 0) continue;
-        gaveUp.push({
-          target: row.guildId ?? row.poolId ?? '',
-          key: row.key,
-          attempts: row.attempts,
-        });
+        const target = row.guildId ?? row.poolId ?? '';
+        /**
+         * Alerted the first time a guild gives up, not every time it does.
+         *
+         * A guild that cannot be reached at all never stamps its dedupe key, so
+         * the ladder re-derives the same notice on every pass and this queue
+         * expires it again every TTL, forever — nudges only start once the
+         * first notice lands, and nothing else ends the cycle. Alerting each
+         * expiry turned two unreachable servers into four or five messages a
+         * week about a fact nobody could act on twice, which is the shape of
+         * an alarm that gets muted. The news is "this guild cannot be
+         * reached", once, then restated monthly while it stays true.
+         *
+         * Checked BEFORE the audit row below is written, or every expiry would
+         * find itself. The row is still written each time: it is the record,
+         * and it is also what this check reads next time.
+         */
+        const alertedRecently = await this.deps.opsAudit
+          .hasActionSince(
+            'billing.notification.expired',
+            target,
+            new Date(now.getTime() - EXPIRED_NOTICE_REALERT_MS),
+          )
+          // Fails OPEN: a database that cannot answer is not a reason to
+          // swallow news that a customer went untold.
+          .catch(() => false);
+        if (!alertedRecently) {
+          gaveUp.push({ target, key: row.key, attempts: row.attempts });
+        }
         await this.deps.opsAudit
           .record({
             actor: 'billing-reconciler',

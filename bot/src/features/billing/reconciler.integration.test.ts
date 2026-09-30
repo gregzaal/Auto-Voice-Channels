@@ -674,6 +674,45 @@ describe('BillingReconciler (integration)', () => {
     });
 
     /**
+     * The week after the fix shipped: two servers that cannot be reached by any
+     * route re-derived the same notice on every pass, the queue expired it every
+     * three days, and every expiry was a message in the admin channel. The fact
+     * worth telling a person is that a guild is unreachable, once.
+     */
+    it('alerts once about a guild it cannot reach, not on every retry', async () => {
+      const guildId = 'split-unreachable-repeats';
+      let now = new Date('2026-07-04T12:00:00.000Z');
+      const counts = new Map([[guildId, 500]]);
+      await warnableGuild(guildId, now);
+      await presence.markPresent(guildId);
+
+      const notifier = new RecordingNotifier();
+      notifier.deliver = false; // every rung refuses, every time
+      const prod = makeReconciler({ now: () => now, counts, notifier });
+      const alertsAbout = (): number =>
+        prod.alerts.filter(
+          (a) =>
+            a.kind === 'billing.notification.expired' &&
+            (a.context.examples as { target: string }[]).some((e) => e.target === guildId),
+        ).length;
+
+      await prod.reconciler.runOnce(); // queued and tried
+      now = new Date(now.getTime() + 5 * DAY_MS);
+      await prod.reconciler.runOnce(); // first give-up: news
+      expect(alertsAbout()).toBe(1);
+
+      now = new Date(now.getTime() + 5 * DAY_MS);
+      await prod.reconciler.runOnce(); // re-derived, queued and tried again
+      now = new Date(now.getTime() + 4 * DAY_MS);
+      await prod.reconciler.runOnce(); // second give-up: the same fact again
+
+      // Still recorded, both times: the audit row is the record.
+      expect(await auditsFor('billing.notification.expired', guildId)).toHaveLength(2);
+      // And still one message.
+      expect(alertsAbout()).toBe(1);
+    });
+
+    /**
      * A guild whose notification was delivered by something outside the queue,
      * which is what a fleet on a pre-split build does: it sends inline and
      * stamps the dedupe key, knowing nothing about this table. The row it did
