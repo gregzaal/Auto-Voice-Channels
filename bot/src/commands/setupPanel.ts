@@ -646,14 +646,14 @@ function settingsRow(
       // server AND lets it see every hidden room, and a setting that sensitive must
       // be visible without opening anything. Turning the feature ON is per creator
       // channel (/textchannels), which is why this says where to do that.
-      // Sliced, like the time zone option above: Discord allows a 100-character
-      // ROLE name and `setDescription` throws at call time past 100, so an
-      // unsliced interpolation takes down the whole panel for that guild.
+      // The ROLE NAME is sliced, not the sentence: Discord allows a 100-character name
+      // and `setDescription` throws at call time past 100, so an unsliced interpolation
+      // takes down the whole panel for that guild, but cutting the sentence would drop
+      // the disclosure, which is the part that matters. 50 and the fixed words fit.
       .setDescription(
-        (input.textChannelRoleId
-          ? `@${input.textChannelRoleName ?? 'A role'} reads every room chat and sees hidden rooms`
-          : 'Name them, and pick a role that reads chats and sees hidden rooms. /textchannels turns them on'
-        ).slice(0, 100),
+        input.textChannelRoleId
+          ? `${input.textChannelRoleName ? `@${input.textChannelRoleName.slice(0, 50)}` : 'A role'} reads every room chat and sees hidden rooms`
+          : 'Name them, and pick a role that reads chats and sees hidden rooms. /textchannels turns them on',
       )
       .setEmoji('💬'),
     new StringSelectMenuOptionBuilder()

@@ -199,11 +199,6 @@ describe('renderAnnouncement', () => {
   });
 
   /**
-   * The same assertion for the other key that holds member ids. Every shape a
-   * `command_access` change can take, on both surfaces that reach more than the
-   * admin who ran the command.
-   */
-  /**
    * The same setting decides who sees a hidden room, so an import that changes it must say
    * so, in the preview and in the announcement an admin reads before anything is written.
    */
@@ -221,6 +216,11 @@ describe('renderAnnouncement', () => {
     expect(announced).toContain('Role that can read room text channels and see hidden rooms');
   });
 
+  /**
+   * The same assertion for the other key that holds member ids. Every shape a
+   * `command_access` change can take, on both surfaces that reach more than the
+   * admin who ran the command.
+   */
   it('emits no restricted member or role id for a command_access change, only a count', () => {
     const before = { rename: { users: [NICK_USER, RESTRICTED_USER], roles: [RESTRICTED_ROLE] } };
     const after = { nick: { users: [OTHER_USER] } };

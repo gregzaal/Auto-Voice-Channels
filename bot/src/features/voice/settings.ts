@@ -847,14 +847,18 @@ export class GuildSettingsService {
         remove: [SETTINGS_KEYS.textChannelRole],
         result: ok(
           'Cleared. Only the people in a room (and server admins) can read its text channel, ' +
-            'and a hidden room is seen only by server admins and the people let into it.',
+            'and a room hidden from now on is seen only by server admins and the people let into it.',
         ),
       }));
     }
     await this.deps.guilds.updateSettings(guildId, { [SETTINGS_KEYS.textChannelRole]: roleId });
+    // "From now on" for the hidden half, and not the "Existing channels" sentence's
+    // promise: a room already hidden keeps the role it was hidden with until somebody
+    // next changes it, because nothing re-converges hidden rooms when this changes.
     return ok(
-      `<@&${roleId}> can now read every room text channel, including private rooms, ` +
-        'and see hidden rooms. Existing channels are updated within a few minutes.',
+      `<@&${roleId}> can now read every room text channel, including private rooms. ` +
+        'Existing channels are updated within a few minutes. ' +
+        'The role also sees any room that is hidden from now on.',
     );
   }
 

@@ -107,6 +107,17 @@ describe('the feature list', () => {
   });
 
   /**
+   * The guard refuses the knock card's Always allow on this rule, so an admin who is
+   * told only about the commands would call the button open a bug. Block on the card is
+   * not a door of this feature, and the three undo directions stay open.
+   */
+  it('says Saved lists covers the join request button, and that removing, clearing and listing stay open', () => {
+    expect(FEATURE_COVERS.access).toContain('/access trust, block and admit commands');
+    expect(FEATURE_COVERS.access).toContain('Always allow button on a join request');
+    expect(FEATURE_COVERS.access).toContain('Removing, clearing and listing stay open to everyone');
+  });
+
+  /**
    * A feature is more than one door, and the reply has to say which. A saved
    * nickname is the second door of Nickname: it stops showing in room names, and
    * for a role rule that lands at the next re-render, which an admin cannot see.

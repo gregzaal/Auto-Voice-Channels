@@ -124,7 +124,7 @@ export const FEATURE_COVERS: Record<CommandFeature, string> = {
     'the /name command, the Name button, the template editor for their own room and the voice status',
   transfer: 'the /transfer command and the Transfer button',
   access:
-    'the /access trust, block and admit commands. Removing, clearing and listing stay open to everyone',
+    'the /access trust, block and admit commands and the Always allow button on a join request. Removing, clearing and listing stay open to everyone',
   nick: 'the /nick command, and a saved nickname showing in a room name. Removing a nickname stays open to everyone, and a room name that already shows one changes the next time the room refreshes its name',
 };
 

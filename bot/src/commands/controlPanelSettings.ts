@@ -175,7 +175,7 @@ export function buildAppearanceModal(
  * One sentence about the thing, not three about the mechanics of this screen.
  * The older copy narrated its own state ("rooms are not getting a control
  * panel", "panels already posted are updated too") in a panel whose state is
- * visible in the title and in seven ticks and crosses below it, which is the
+ * visible in the title and in eight ticks and crosses below it, which is the
  * self-referential copy AGENTS.md rules out.
  */
 const WHAT_IT_IS =

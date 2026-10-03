@@ -544,6 +544,21 @@ describe('buildSetupPanel', () => {
       }
     });
 
+    /**
+     * Cutting the whole sentence at 100 characters took the end off for a long role name,
+     * and the end is the disclosure. The name is what gives way.
+     */
+    it('keeps what the role can see when the role name is as long as Discord allows', () => {
+      const text = describe_({ textChannelRoleId: 'r1', textChannelRoleName: 'x'.repeat(100) });
+      expect(text.endsWith(' reads every room chat and sees hidden rooms')).toBe(true);
+    });
+
+    it('does not put an @ in front of a role whose name is not known', () => {
+      expect(describe_({ textChannelRoleId: 'r1' })).toBe(
+        'A role reads every room chat and sees hidden rooms',
+      );
+    });
+
     it('follows the copy rules', () => {
       for (const over of [{}, { textChannelRoleId: 'r1', textChannelRoleName: 'Mods' }]) {
         expect(describe_(over)).not.toMatch(/[—–‘’“”;]/);
