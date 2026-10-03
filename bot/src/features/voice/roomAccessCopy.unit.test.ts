@@ -131,8 +131,10 @@ describe('startModeMessage', () => {
     expect(startModeMessage('hidden', 'public')).not.toContain('instead');
   });
 
-  it('tells the owners of hidden rooms how to let people in', () => {
+  it('tells the owners of hidden rooms how to let people in, and that Administrators still see them', () => {
     expect(startModeMessage('hidden', 'public')).toContain('`/access trust`');
+    // The admin choosing this default is the one who would assume nobody else can see a room.
+    expect(startModeMessage('hidden', 'public')).toContain('Administrators always see them');
   });
 });
 

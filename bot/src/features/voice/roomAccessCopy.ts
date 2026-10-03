@@ -221,7 +221,8 @@ export function startModeMessage(after: StartMode, before: StartMode): string {
       return (
         '🙈 New rooms from this creator channel will be created **hidden** from the channel list ' +
         `automatically${before === 'locked' ? ', instead of private' : ''}. ` +
-        'Their owners can let people in with `/access trust` or `/access admit`.'
+        'Administrators always see them, and their owners can let people in with `/access trust` ' +
+        'or `/access admit`.'
       );
     default:
       return '🔓 New rooms from this creator channel will be created **public** (the default).';
