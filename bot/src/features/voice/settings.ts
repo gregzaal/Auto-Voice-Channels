@@ -845,6 +845,12 @@ export class GuildSettingsService {
     const primary = await this.primaryFor(guildId, channelId);
     if (!primary) return fail('That is not a creator channel or one of its rooms.');
     const removed = await this.deps.memberPrefs.clearByPrimary(guildId, primary.channelId);
+    // The only operator-side trace of an admin emptying what members saved, which cannot be
+    // undone, so it says where and how many. A count, never a member id or a name.
+    this.deps.logger.info(
+      { guildId, channelId: primary.channelId, removed },
+      'cleared remembered room settings',
+    );
     return ok(clearedNote(removed));
   }
 

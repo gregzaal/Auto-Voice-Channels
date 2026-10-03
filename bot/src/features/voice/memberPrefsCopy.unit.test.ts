@@ -56,7 +56,7 @@ describe('what turning it on says', () => {
    */
   it('says what members get, that a name is only remembered when set, and what is stored', () => {
     expect(REMEMBER_ON_NOTE).toContain('name, size and privacy');
-    expect(REMEMBER_ON_NOTE).toContain('instead of the server defaults');
+    expect(REMEMBER_ON_NOTE).toContain("instead of this creator channel's defaults");
     expect(REMEMBER_ON_NOTE).toContain(
       'A name is only remembered when the member set one themselves',
     );
@@ -85,7 +85,7 @@ describe('rememberedFieldValue', () => {
 
   it('says what an on creator channel does and what an off one does', () => {
     expect(rememberedFieldValue(true, undefined)).toContain(
-      'their own saved name, size and privacy, instead of the server defaults',
+      "their own saved name, size and privacy, instead of this creator channel's defaults",
     );
     expect(rememberedFieldValue(false, undefined)).toContain("this creator channel's defaults");
   });

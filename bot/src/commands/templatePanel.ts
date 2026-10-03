@@ -256,7 +256,9 @@ export function renderEditorPanel(
           .setCustomId(editorId('forget', scope, 'name', channelId))
           .setLabel('Clear saved settings')
           .setEmoji('🧹')
-          .setStyle(ButtonStyle.Secondary),
+          // Red like "Stop managing", the other button here that cannot be taken back, and it
+          // acts at once. The count of members it removes is in the field above it.
+          .setStyle(ButtonStyle.Danger),
       ),
     );
   }

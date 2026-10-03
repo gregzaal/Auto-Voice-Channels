@@ -39,7 +39,7 @@ function savedSentence(on: boolean, saved: number | undefined): string {
 export function rememberedFieldValue(on: boolean, saved: number | undefined): string {
   return on
     ? '**On.** A member who comes back gets a room that starts with their own saved name, size and ' +
-        `privacy, instead of the server defaults.${savedSentence(on, saved)}`
+        `privacy, instead of this creator channel's defaults.${savedSentence(on, saved)}`
     : `**Off.** Every new room starts from this creator channel's defaults.${savedSentence(on, saved)}`;
 }
 
@@ -51,9 +51,10 @@ export function rememberedFieldValue(on: boolean, saved: number | undefined): st
  */
 export const REMEMBER_ON_NOTE =
   '💾 Remembered settings are on for this creator channel. A member who comes back gets a room ' +
-  'that starts with the name, size and privacy they chose last time, instead of the server ' +
-  'defaults. A name is only remembered when the member set one themselves. To do this I store ' +
-  `each member's id and the names they choose, which the [Privacy page](${PRIVACY_URL}) covers. ` +
+  'that starts with the name, size and privacy they chose last time, instead of this creator ' +
+  "channel's defaults. A name is only remembered when the member set one themselves. To do " +
+  "this I store each member's id and the names they choose, which the " +
+  `[Privacy page](${PRIVACY_URL}) covers. ` +
   'Nothing is remembered until a member next changes their room.';
 
 /** What turning it off says, including that what members saved is kept. */

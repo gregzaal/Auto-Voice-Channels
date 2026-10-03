@@ -2653,6 +2653,50 @@ describe('/channelinfo', () => {
     expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('Channel info');
   });
 
+  /**
+   * The count of members with saved settings is read for the admin section and shown nowhere
+   * else, so a member who will never see it must not cause the read, on the one command any
+   * member can run. The command and every view button repeat it, so both are pinned.
+   */
+  it('asks for the saved-settings count only when the viewer is an admin', async () => {
+    for (const [manageChannels, savedCount] of [
+      [false, false],
+      [true, true],
+    ] as const) {
+      const env = infoEnv();
+      const { interaction } = fakeInteraction({
+        kind: 'command',
+        commandName: 'channelinfo',
+        manageChannels,
+        voiceChannelId: ROOM,
+        voiceChannels: visible,
+      });
+      env.client.emit('interactionCreate', interaction);
+      await flush();
+      expect(env.deps.feature.channelInfo).toHaveBeenCalledWith('g1', ROOM, { savedCount });
+      env.dispose();
+    }
+  });
+
+  it('asks for it on a view button by the same rule', async () => {
+    for (const [manageChannels, savedCount] of [
+      [false, false],
+      [true, true],
+    ] as const) {
+      const env = infoEnv();
+      const { interaction } = fakeInteraction({
+        kind: 'button',
+        customId: `avc:info:tokens:${ROOM}`,
+        manageChannels,
+        voiceChannels: visible,
+      });
+      env.client.emit('interactionCreate', interaction);
+      await flush();
+      expect(env.deps.feature.channelInfo).toHaveBeenCalledWith('g1', ROOM, { savedCount });
+      env.dispose();
+    }
+  });
+
   it('asks a member with no voice channel to join one', async () => {
     const env = infoEnv();
     dispose = env.dispose;
@@ -2729,7 +2773,7 @@ describe('/channelinfo', () => {
     });
     env.client.emit('interactionCreate', interaction);
     await flush();
-    expect(env.deps.feature.channelInfo).toHaveBeenCalledWith('g1', OTHER);
+    expect(env.deps.feature.channelInfo).toHaveBeenCalledWith('g1', OTHER, { savedCount: true });
     expect(JSON.stringify(editReply.mock.calls[0]?.[0])).toContain('Channel info');
   });
 
@@ -6536,44 +6580,76 @@ describe('registerInteractionHandler (remembered room settings)', () => {
         expect(fake.interaction.deferUpdate).not.toHaveBeenCalled();
       },
     );
-
-    /** No `/restrict` rule can stop somebody who can manage channels, so none is asked. */
-    it('is not subject to a /restrict rule, which no rule can apply to Manage Channels', async () => {
-      const { env, setRememberPrefs } = envWith({
-        over: {
-          guilds: {
-            get: vi.fn().mockResolvedValue({
-              authStatus: 'active',
-              settings: { command_access: { rename: { users: ['u1'] } } },
-            }),
-          } as never,
-        },
-      });
-      await press(env, idFor('remember_on'));
-      expect(setRememberPrefs).toHaveBeenCalledTimes(1);
-    });
   });
 
   /**
-   * Both are writes, so a server that has lapsed gets the reactivation notice and nothing is
-   * touched. Nothing lists an `avc:tpl:` button as allowed while expired, so an editor that was
-   * already open when the server lapsed cannot keep either working.
+   * The hard gate stops writes and destroys nothing, and leaves removals open (the `/access`
+   * erasures, the `/botprofile` resets). So the switch is a write and gets the reactivation
+   * notice, and "Clear saved settings" only removes and works: it is how an admin takes back
+   * what their members saved once the server is no longer paying. Only a panel that was
+   * already open when the server lapsed can press either, since the editor's commands are not
+   * on the list of what still opens.
    */
   describe('in a hard-gated guild', () => {
-    it.each(IDS)('refuses %s with the reactivation notice and writes nothing', async (action) => {
-      const { env, setRememberPrefs, clearRememberedPrefs, getEditorState } = envWith({
-        over: {
-          selfHosted: false,
-          guilds: { get: vi.fn().mockResolvedValue({ authStatus: 'expired' }) } as never,
-        },
-      });
-      const fake = await press(env, idFor(action));
+    const expired = () => ({
+      selfHosted: false,
+      guilds: { get: vi.fn().mockResolvedValue({ authStatus: 'expired' }) } as never,
+    });
 
-      expect(JSON.stringify(fake.reply.mock.calls[0]?.[0])).toContain('auto-voice.io');
+    it.each(['remember_on', 'remember_off'] as const)(
+      'refuses %s with the reactivation notice and writes nothing',
+      async (action) => {
+        const { env, setRememberPrefs, clearRememberedPrefs, getEditorState } = envWith({
+          over: expired(),
+        });
+        const fake = await press(env, idFor(action));
+
+        expect(JSON.stringify(fake.reply.mock.calls[0]?.[0])).toContain('auto-voice.io');
+        expect(setRememberPrefs).not.toHaveBeenCalled();
+        expect(clearRememberedPrefs).not.toHaveBeenCalled();
+        expect(getEditorState).not.toHaveBeenCalled();
+        expect(fake.interaction.deferUpdate).not.toHaveBeenCalled();
+      },
+    );
+
+    it('lets "Clear saved settings" through, since it only removes, and edits the panel in place', async () => {
+      const { env, setRememberPrefs, clearRememberedPrefs } = envWith({ over: expired() });
+      const fake = await press(env, idFor('forget'));
+
+      expect(clearRememberedPrefs).toHaveBeenCalledWith('g1', CHANNEL);
       expect(setRememberPrefs).not.toHaveBeenCalled();
+      expect(fake.interaction.deferUpdate).toHaveBeenCalledTimes(1);
+      expect(fake.editReply).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(fake.editReply.mock.calls[0]?.[0])).toContain('Removed 2 members.');
+      expect(fake.reply).not.toHaveBeenCalled();
+    });
+
+    /** The exemption is the one id on the creator channel's editor, and Manage Channels still decides who. */
+    it('still needs Manage Channels to clear', async () => {
+      const { env, clearRememberedPrefs } = envWith({ over: expired() });
+      const fake = await press(env, idFor('forget'), { manageChannels: false });
+
+      expect(fake.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: 'You need the Manage Channels permission.' }),
+      );
       expect(clearRememberedPrefs).not.toHaveBeenCalled();
-      expect(getEditorState).not.toHaveBeenCalled();
-      expect(fake.interaction.deferUpdate).not.toHaveBeenCalled();
+    });
+
+    /** Only the creator channel's editor draws it, so the same action under a room scope is not exempt. */
+    it('does not exempt the same action under a room scope, and no other editor button', async () => {
+      for (const customId of [
+        idFor('forget', 'channel'),
+        idFor('reset'),
+        idFor('save'),
+        idFor('edit'),
+      ]) {
+        const { env, clearRememberedPrefs } = envWith({ over: expired() });
+        const fake = await press(env, customId);
+
+        expect(JSON.stringify(fake.reply.mock.calls[0]?.[0]), customId).toContain('auto-voice.io');
+        expect(clearRememberedPrefs).not.toHaveBeenCalled();
+        env.dispose();
+      }
     });
 
     /** The same ids, from an active server, work: the refusal above is the gate and nothing else. */

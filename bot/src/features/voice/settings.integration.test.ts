@@ -5,7 +5,7 @@ import {
   SecondaryChannelRepository,
   db,
 } from '@avc/core';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PgTestEnv } from '../../test/pgContainer.js';
 import { startPostgres } from '../../test/pgContainer.js';
 import { fakeLogger } from '../../runtime/testUtils.js';
@@ -734,7 +734,7 @@ describe('GuildSettingsService (integration)', () => {
 
       const on = await service.setRememberPrefs(GUILD, PRIMARY, true);
       expect(on.message).toContain('name, size and privacy');
-      expect(on.message).toContain('server defaults');
+      expect(on.message).toContain("instead of this creator channel's defaults");
       expect(on.message).toContain('only remembered when the member set one themselves');
       expect(on.message).toContain("each member's id and the names they choose");
       expect(on.message).toContain('/privacy');
@@ -813,6 +813,35 @@ describe('GuildSettingsService (integration)', () => {
       const again = await service.clearRememberedPrefs(GUILD, PRIMARY);
       expect(again.ok).toBe(true);
       expect(again.message).toContain('nothing to clear');
+    });
+
+    /**
+     * An admin emptying what members saved cannot be undone, and this is the only record of it,
+     * so it logs where and how many. Ids and a count: never a member's id or a name they chose.
+     */
+    it('logs what it cleared as ids and a count, and never anything a member typed', async () => {
+      const prefs = new MemberRoomPrefsRepository(env.handle.db);
+      const info = vi.fn();
+      const service = new GuildSettingsService({
+        guilds,
+        autoChannels,
+        secondaries,
+        actions,
+        logger: { ...fakeLogger(), info } as never,
+        memberPrefs: prefs,
+      });
+      await creatorWith({ name: 'Room ##', rememberPrefs: true });
+      await prefs.saveName(GUILD, PRIMARY, 'u1', 'a secret den name');
+      await prefs.saveLimit(GUILD, PRIMARY, 'u2', 4);
+
+      await service.clearRememberedPrefs(GUILD, 'sec-remember');
+
+      expect(info).toHaveBeenCalledTimes(1);
+      const [fields, message] = info.mock.calls[0]!;
+      expect(fields).toEqual({ guildId: GUILD, channelId: PRIMARY, removed: 2 });
+      expect(message).toBe('cleared remembered room settings');
+      expect(JSON.stringify(info.mock.calls)).not.toContain('secret');
+      expect(JSON.stringify(info.mock.calls)).not.toContain('u1');
     });
 
     /** What an admin who switched it off may now want gone. */

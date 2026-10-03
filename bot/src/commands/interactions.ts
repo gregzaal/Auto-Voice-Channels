@@ -585,13 +585,20 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return parseBotProfileId(interaction.customId)?.action !== 'set';
       }
       /**
-       * No `avc:tpl:` button is exempt, and that includes the creator channel editor's pair for
-       * remembered room settings (`remember_on`, `remember_off` and `forget`). The switch
-       * writes a creator channel's settings, and the clear removes what members saved, so an
-       * editor that was already open when a server lapsed must not keep either working: the
-       * hard gate stops writes, and the whole editor is a write path. They fall to the
-       * reactivation notice here like the template buttons beside them.
+       * One `avc:tpl:` button is exempt: a creator channel editor's "Clear saved settings"
+       * (`forget`). It only removes, which is what the hard gate leaves open (the `/access`
+       * erasures and the `/botprofile` resets are the same), and it is how an admin takes back
+       * what their members saved when the server is no longer paying. Everything else on the
+       * editor is a write path and falls to the reactivation notice, the Remember switch
+       * included (`remember_on` and `remember_off`, which write the creator channel's
+       * settings), and so does `forget` under any scope but the creator channel's. The editor
+       * itself is not on the command list, so this only matters for a panel that was already
+       * open when the server lapsed.
        */
+      if (interaction.customId.startsWith(EDITOR_PREFIX)) {
+        const editor = parseEditorId(interaction.customId);
+        return editor?.action === 'forget' && editor.scope === 'primary';
+      }
       return interaction.customId.startsWith(SETUP_PREFIX);
     }
     if (interaction.isStringSelectMenu()) {
@@ -2437,10 +2444,12 @@ Already subscribed? Add the new server ` +
     entitled: boolean,
   ): Promise<ChannelInfoPanelInput> {
     const guildId = interaction.guildId!;
-    const info = await run(guildId, 'cmd:channelinfo', () =>
-      deps.feature.channelInfo(guildId, channelId),
-    );
     const isAdmin = hasManageChannels(interaction);
+    // The count of members with saved settings is shown only in the admin section, so a viewer
+    // who is not an admin does not pay the read for it, on every view button as well.
+    const info = await run(guildId, 'cmd:channelinfo', () =>
+      deps.feature.channelInfo(guildId, channelId, { savedCount: isAdmin }),
+    );
     return {
       info,
       currentName: interaction.guild?.channels.cache.get(channelId)?.name ?? '',

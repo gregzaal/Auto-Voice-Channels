@@ -2468,8 +2468,18 @@ export class VoiceFeature {
    * It renders nothing. The {@link RenderContext} goes out intact so the panel
    * probes the real engine, which is the only way a token readout cannot drift
    * from what the channel is actually named.
+   *
+   * `savedCount` says whether to count the members with remembered settings, which costs a
+   * read and which only the panel's admin section shows. It is the one thing here that is
+   * not free for a viewer who will never see it, on the one command any member can run, so
+   * the caller says false for them. It defaults to true, for a caller that cannot tell.
    */
-  async channelInfo(guildId: string, channelId: string): Promise<ChannelInfo> {
+  async channelInfo(
+    guildId: string,
+    channelId: string,
+    opts: { savedCount?: boolean } = {},
+  ): Promise<ChannelInfo> {
+    const savedCount = opts.savedCount ?? true;
     const guild = await this.deps.guilds.ensure(guildId);
     const settings = await this.voiceSettings(guild.settings, guildId);
     const members = this.deps.voice.membersInChannel(channelId);
@@ -2564,7 +2574,7 @@ export class VoiceFeature {
                 ? 'creator'
                 : 'server',
         },
-        ...(primary ? { primary: await this.primaryConfigOf(guildId, primary) } : {}),
+        ...(primary ? { primary: await this.primaryConfigOf(guildId, primary, savedCount) } : {}),
         ...(companion ? { companion } : {}),
         ...(secondary.state.seed !== undefined ? { seed: secondary.state.seed } : {}),
         ...(secondary.state.index !== undefined ? { index: secondary.state.index } : {}),
@@ -2610,7 +2620,7 @@ export class VoiceFeature {
           statusTemplate: own.template.status ?? settings.channelStatusTemplate,
           statusSource: own.template.status !== undefined ? 'creator' : 'server',
         },
-        primary: await this.primaryConfigOf(guildId, own),
+        primary: await this.primaryConfigOf(guildId, own, savedCount),
       };
     }
 
@@ -2956,11 +2966,16 @@ export class VoiceFeature {
 
   /**
    * A creator channel's own configuration for `/channelinfo`, with the count of members who
-   * have something saved when it remembers. Not paid for a creator channel that does not.
+   * have something saved when it remembers and the viewer will see it. Not paid for a creator
+   * channel that does not remember, nor for a viewer who is not an admin.
    */
-  private async primaryConfigOf(guildId: string, row: AutoChannelRow): Promise<PrimaryConfig> {
+  private async primaryConfigOf(
+    guildId: string,
+    row: AutoChannelRow,
+    countSaved: boolean,
+  ): Promise<PrimaryConfig> {
     const config = primaryConfig(row);
-    if (config.rememberPrefs !== true) return config;
+    if (config.rememberPrefs !== true || !countSaved) return config;
     const savedSettings = await this.savedSettingsOf(guildId, row.channelId);
     return savedSettings === undefined ? config : { ...config, savedSettings };
   }

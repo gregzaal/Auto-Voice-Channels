@@ -259,6 +259,17 @@ describe('templatePanel remembered settings', () => {
     });
   });
 
+  /**
+   * It removes every member's saved settings at once and cannot be undone, so it is drawn as
+   * the destructive button it is, like Stop managing, and not as one more neutral choice.
+   */
+  it('draws the clear button as a destructive one', () => {
+    const rows = rowsOf(
+      renderEditorPanel('primary', CHANNEL, primaryState({ rememberPrefs: true })),
+    );
+    expect(rows[2]![1]).toMatchObject({ style: ButtonStyle.Danger });
+  });
+
   it('round trips the three ids, which name the creator channel and no field', () => {
     for (const action of ['remember_on', 'remember_off', 'forget']) {
       expect(parseEditorId(editorId(action, 'primary', 'name', CHANNEL))).toEqual({

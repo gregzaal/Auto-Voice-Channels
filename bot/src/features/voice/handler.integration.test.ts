@@ -1696,6 +1696,33 @@ describe('VoiceFeature (integration)', () => {
         expect(room.primary).toMatchObject({ rememberPrefs: true, savedSettings: 2 });
       });
 
+      /**
+       * The count is shown only in the admin section, so a viewer who is not an admin must not
+       * cost the read, even for a creator channel that remembers.
+       */
+      it('does not count for a viewer who will not see it, and says it remembers all the same', async () => {
+        await remember(true);
+        const countByPrimary = vi.fn().mockResolvedValue(9);
+        const counting = featureWith({ countByPrimary });
+
+        const creator = await counting.channelInfo(GUILD, PRIMARY, { savedCount: false });
+        expect(creator.primary?.rememberPrefs).toBe(true);
+        expect(creator.primary).not.toHaveProperty('savedSettings');
+        const room = await counting.channelInfo(GUILD, 'rm-room', { savedCount: false });
+        expect(room.primary?.rememberPrefs).toBe(true);
+        expect(room.primary).not.toHaveProperty('savedSettings');
+        expect(countByPrimary).not.toHaveBeenCalled();
+
+        // Counted when asked, and by default for a caller that does not say.
+        expect(
+          (await counting.channelInfo(GUILD, PRIMARY, { savedCount: true })).primary,
+        ).toMatchObject({ savedSettings: 9 });
+        expect((await counting.channelInfo(GUILD, PRIMARY)).primary).toMatchObject({
+          savedSettings: 9,
+        });
+        expect(countByPrimary).toHaveBeenCalledTimes(2);
+      });
+
       it('leaves the count out when it cannot be read, and still answers', async () => {
         await remember(true);
         const failing = featureWith({ countByPrimary: () => Promise.reject(new Error('db down')) });
