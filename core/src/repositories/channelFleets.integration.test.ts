@@ -127,7 +127,7 @@ describe('channel repositories: fleet isolation (integration)', () => {
    * writing to it, or clearing it, is a permission change on a channel it does
    * not own. Every access method goes through the same `scoped` helper.
    */
-  it("cannot read, write or clear the other fleet's access record", async () => {
+  it("cannot read or write the other fleet's access record", async () => {
     await prodSecondaries.create({
       channelId: 'sec-prod',
       guildId: GUILD,
@@ -135,19 +135,21 @@ describe('channel repositories: fleet isolation (integration)', () => {
       ownerId: 'user-1',
       state: { private: true },
     });
-    await prodSecondaries.setAccess('sec-prod', { creatorId: 'user-1', hidden: true });
+    await prodSecondaries.mutateAccess('sec-prod', () => ({ creatorId: 'user-1', hidden: true }));
     const decide = vi.fn(() => ({ hidden: false }));
 
     expect(await betaSecondaries.getAccess('sec-prod')).toBeNull();
-    await betaSecondaries.setAccess('sec-prod', { blocked: ['user-hijack'] });
-    expect(await betaSecondaries.mutateAccess('sec-prod', decide)).toBeNull();
-    await betaSecondaries.transitionAccess('sec-prod', {
-      statePatch: { name: 'hijacked' },
-      stateRemove: ['private'],
-      access: null,
+    expect(await betaSecondaries.mutateAccess('sec-prod', decide)).toEqual({ status: 'missing' });
+    expect(
+      await betaSecondaries.transitionAccess('sec-prod', {
+        statePatch: { name: 'hijacked' },
+        stateRemove: ['private'],
+        access: () => null,
+      }),
+    ).toEqual({ status: 'missing' });
+    expect(await betaSecondaries.transitionAccess('sec-prod', { access: decide })).toEqual({
+      status: 'missing',
     });
-    await betaSecondaries.transitionAccess('sec-prod', { access: decide });
-    await betaSecondaries.clearAccess('sec-prod');
 
     // The callbacks are not even run: the room is not this fleet's to decide for.
     expect(decide).not.toHaveBeenCalled();

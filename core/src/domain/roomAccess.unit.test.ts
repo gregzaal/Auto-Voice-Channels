@@ -4,6 +4,7 @@ import {
   MAX_SAVED_TRUSTED,
   MEMBER_ACCESS_KINDS,
   parseRoomAccess,
+  readRoomAccess,
   roomAccessSchema,
 } from './roomAccess.js';
 
@@ -25,8 +26,9 @@ describe('roomAccessSchema', () => {
   });
 
   /**
-   * Every field optional is what lets a build that has never heard of one still
-   * read the rest, and an absent baseline bit means "unknown", not "none".
+   * Every top-level field optional is what lets a build that has never heard of
+   * one still read the rest, and an absent baseline bit means "unknown", not
+   * "none".
    */
   it('accepts a baseline with either bit missing, and keeps it missing', () => {
     expect(parseRoomAccess({ baseline: {} })).toEqual({ baseline: {} });
@@ -94,6 +96,38 @@ describe('parseRoomAccess', () => {
     ]) {
       expect(() => parseRoomAccess(bad), JSON.stringify(bad)).not.toThrow();
       expect(parseRoomAccess(bad), JSON.stringify(bad)).toBeNull();
+    }
+  });
+});
+
+/**
+ * What a WRITER needs that `parseRoomAccess` does not say: a column with nothing
+ * in it is not the same as a blob that is there and unreadable, because only the
+ * first is safe to write over.
+ */
+describe('readRoomAccess', () => {
+  it('reads an empty column as readable with no record', () => {
+    expect(readRoomAccess(null)).toEqual({ readable: true, access: null });
+    expect(readRoomAccess(undefined)).toEqual({ readable: true, access: null });
+  });
+
+  it('reads a valid record as readable', () => {
+    expect(readRoomAccess(full)).toEqual({ readable: true, access: full });
+    expect(readRoomAccess({})).toEqual({ readable: true, access: {} });
+  });
+
+  it('reads a blob that is there but does not parse as unreadable', () => {
+    for (const bad of [
+      'hidden',
+      42,
+      true,
+      [],
+      { hidden: 'yes' },
+      { trusted: 'u1' },
+      { baseline: { view: 'inherit' } },
+      { hidden: true, neutralised: [{ roleId: 'r', view: 'inherit' }] },
+    ]) {
+      expect(readRoomAccess(bad), JSON.stringify(bad)).toEqual({ readable: false });
     }
   });
 });
