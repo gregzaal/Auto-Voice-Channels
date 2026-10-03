@@ -507,6 +507,51 @@ describe('buildSetupPanel', () => {
   });
 
   /**
+   * The moderator role is the one setting that decides who reads every room chat AND who
+   * sees a hidden room, and the option toggles nothing, so its description is the only
+   * place the panel can say both without being opened.
+   */
+  describe('the room text channels option', () => {
+    const describe_ = (over: Record<string, unknown>): string => {
+      const row = buildSetupPanel({ ...baseInput, isAdmin: true, ...over }).components!.find((c) =>
+        JSON.stringify(c).includes(SETUP_SETTINGS_ID),
+      )!;
+      const select = (
+        row.toJSON() as { components: { options: { value: string; description?: string }[] }[] }
+      ).components[0]!;
+      return select.options.find((o) => o.value === setupId('textchannels'))!.description!;
+    };
+
+    it('says a role that is set reads every room chat and sees hidden rooms', () => {
+      const text = describe_({ textChannelRoleId: 'r1', textChannelRoleName: 'Mods' });
+      expect(text).toBe('@Mods reads every room chat and sees hidden rooms');
+    });
+
+    it('says what picking a role will do when none is set', () => {
+      const text = describe_({});
+      expect(text).toContain('pick a role that reads chats and sees hidden rooms');
+      expect(text).toContain('/textchannels turns them on');
+    });
+
+    /** Discord throws at call time past 100 characters, which takes the whole panel down. */
+    it('never passes 100 characters, however long the role name is', () => {
+      for (const over of [
+        {},
+        { textChannelRoleId: 'r1', textChannelRoleName: 'x'.repeat(100) },
+        { textChannelRoleId: 'r1' },
+      ]) {
+        expect(describe_(over).length).toBeLessThanOrEqual(100);
+      }
+    });
+
+    it('follows the copy rules', () => {
+      for (const over of [{}, { textChannelRoleId: 'r1', textChannelRoleName: 'Mods' }]) {
+        expect(describe_(over)).not.toMatch(/[—–‘’“”;]/);
+      }
+    });
+  });
+
+  /**
    * Exempt while expired, like every other setting on this select and unlike
    * the assistant. `allowedWhileExpired` refuses only the assistant, and the
    * panel must not offer an action it is about to refuse -- nor hide one it

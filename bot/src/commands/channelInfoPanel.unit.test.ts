@@ -74,6 +74,7 @@ function info(over: Partial<ChannelInfo> = {}): ChannelInfo {
     index: 1,
     userLimit: 4,
     isPrivate: false,
+    accessMode: 'public',
     members: { total: 2, bots: 0 },
     game: 'DRG',
     rawGames: ['Deep Rock Galactic'],
@@ -299,6 +300,65 @@ describe('buildChannelInfoPanel', () => {
     expect(text(buildChannelInfoPanel(input({ gatedNote: 'AVC is paused here.' })))).toContain(
       'paused',
     );
+  });
+
+  /**
+   * Public, locked and hidden are three different answers, and a hidden room is a locked
+   * one, so `isPrivate` alone cannot say. The readout names who else sees a hidden room,
+   * because the moderator role is a guild setting nobody in the room can see, and says no
+   * more than the channel list.
+   */
+  describe('the Access field', () => {
+    const ROLE = '123456789012345678';
+    const access = (over: Partial<ChannelInfo>): string => {
+      const field = (
+        buildChannelInfoPanel(input({ info: info(over) })).embeds![0] as {
+          fields: { name: string; value: string }[];
+        }
+      ).fields.find((f) => f.name === 'Access');
+      return field!.value;
+    };
+
+    it('says a public room is open to everyone and a locked one is private', () => {
+      expect(access({ accessMode: 'public' })).toBe('🔓 Open to everyone');
+      expect(access({ accessMode: 'locked', isPrivate: true })).toBe('🔒 Private');
+    });
+
+    it('says a hidden room is hidden from the channel list, and who still sees it', () => {
+      expect(access({ accessMode: 'hidden', isPrivate: true })).toBe(
+        '🙈 Hidden from the channel list\nStill seen by Administrators and anyone who was let in.',
+      );
+      expect(access({ accessMode: 'hidden', isPrivate: true, viewerRoleId: ROLE })).toBe(
+        `🙈 Hidden from the channel list\nStill seen by Administrators, <@&${ROLE}> and anyone who was let in.`,
+      );
+    });
+
+    /** A hidden room is private, and only a hidden one says so in its own words. */
+    it('does not call a hidden room private or open', () => {
+      const hidden = access({ accessMode: 'hidden', isPrivate: true });
+      expect(hidden).not.toContain('Private');
+      expect(hidden).not.toContain('Open to everyone');
+    });
+
+    it('does not guess for a room whose access settings cannot be read', () => {
+      const unknown = access({ accessMode: 'unknown', isPrivate: true });
+      expect(unknown).toContain("can't read this room's access settings");
+      expect(unknown).not.toContain('Private');
+      expect(unknown).not.toContain('Hidden');
+      expect(unknown).not.toContain('Open to everyone');
+    });
+
+    it('follows the copy rules in every state, and makes no claim beyond the channel list', () => {
+      const text = [
+        access({ accessMode: 'public' }),
+        access({ accessMode: 'locked', isPrivate: true }),
+        access({ accessMode: 'hidden', isPrivate: true }),
+        access({ accessMode: 'hidden', isPrivate: true, viewerRoleId: ROLE }),
+        access({ accessMode: 'unknown' }),
+      ].join('\n');
+      expect(text).not.toMatch(/[—–‘’“”;]/);
+      expect(text.toLowerCase()).not.toMatch(/primary|secondary|profile|activity|invisible/);
+    });
   });
 });
 

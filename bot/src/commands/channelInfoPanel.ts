@@ -266,11 +266,7 @@ export function buildChannelInfoPanel(input: ChannelInfoPanelInput): Interaction
             : `${people}, no limit set${info.members.bots > 0 ? ` (plus ${info.members.bots} bots)` : ''}`,
         inline: true,
       },
-      {
-        name: 'Access',
-        value: info.isPrivate ? '🔒 Private' : '🔓 Open to everyone',
-        inline: true,
-      },
+      { name: 'Access', value: accessLine(info), inline: true },
       { name: 'Game AVC sees', value: gameLine(info), inline: true },
     );
   }
@@ -462,6 +458,31 @@ export function buildScenarioPanel(input: ChannelInfoPanelInput): InteractionRep
   embed.fields!.push({ name: 'Renders as', value: lines.join('\n').slice(0, 1024) });
 
   return { embeds: [embed], components: rowsFor('scenarios', info), ephemeral: true };
+}
+
+/**
+ * What a room's access is, in the words the panel's buttons use.
+ *
+ * A hidden room says what hidden means and no more, and who else sees it: nobody can
+ * check that from the room itself, and the moderator role is a guild setting a member
+ * never sees. It never says "invisible" or promises more than the channel list, because
+ * what a profile or the activity feed shows somebody outside the room about a member
+ * inside it has not been checked. A record this build cannot read is not guessed at.
+ */
+function accessLine(info: ChannelInfo): string {
+  switch (info.accessMode) {
+    case 'hidden':
+      return (
+        '🙈 Hidden from the channel list\n' +
+        `Still seen by Administrators${info.viewerRoleId ? `, <@&${info.viewerRoleId}>` : ''} and anyone who was let in.`
+      );
+    case 'locked':
+      return '🔒 Private';
+    case 'unknown':
+      return "❔ I can't read this room's access settings right now";
+    default:
+      return '🔓 Open to everyone';
+  }
 }
 
 function gameLine(info: ChannelInfo): string {

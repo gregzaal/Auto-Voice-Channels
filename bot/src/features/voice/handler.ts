@@ -34,7 +34,7 @@ import {
 import type { CommandResult } from './commands.js';
 import type { PanelOwnerAccess, RoomPanelView } from './controlPanel.js';
 import type { PanelRoomRow } from './controlPanelPoster.js';
-import { roomMode } from './roomMode.js';
+import { roomMode, type RoomMode } from './roomMode.js';
 
 /** A fresh 31-bit random seed for a channel's `[[random]]` picks. */
 function randomSeed(): number {
@@ -473,6 +473,20 @@ export interface ChannelInfo {
   /** LIVE, from Discord, not the creator channel's configured default. */
   userLimit: number;
   isPrivate: boolean;
+  /**
+   * How open a room is, as `/channelinfo` states it: public, locked, hidden from the
+   * channel list, or `unknown` when its access record cannot be read (a newer build wrote
+   * it, and saying "public" or "locked" for what may be a hidden room is the harm).
+   * `public` for every kind that is not a room. `isPrivate` stays true for a hidden room,
+   * which is a locked one, and is what `{{PRIVATE}}` reads.
+   */
+  accessMode: RoomMode;
+  /**
+   * The moderator role this room's record says can see it while it is hidden, so the
+   * readout can name who else sees a room hidden from the channel list. Absent when the
+   * room is not hidden, has no such role, or its record cannot be read.
+   */
+  viewerRoleId?: string;
   members: { total: number; bots: number };
   /** The representative game after aliases, and the raw names behind it. */
   game: string;
@@ -2260,6 +2274,7 @@ export class VoiceFeature {
       originalCreator: null as string | null,
       userLimit,
       isPrivate: false,
+      accessMode: 'public' as RoomMode,
       members: { total: members.length, bots: members.filter((m) => m.bot).length },
       game: getGameName(members, { ...gameOptions, general: settings.general }),
       rawGames: getChannelGames(members, settings.general, gameOptions),
@@ -2271,6 +2286,14 @@ export class VoiceFeature {
     if (isRoom) {
       const primary = await this.deps.autoChannels.get(secondary.primaryChannelId);
       const companion = (await this.deps.companionText?.describeRoom(guildId, channelId)) ?? null;
+      // The row's own `access` cannot say whether a record was unreadable, so it is read as
+      // one: a command anyone may run, and the one that has to tell a hidden room from a
+      // locked one.
+      const access = (await this.deps.secondaries.readAccess(channelId)) ?? {
+        readable: true as const,
+        access: secondary.access,
+      };
+      const viewerRoleId = access.readable ? access.access?.viewerRoleId : undefined;
       const renderCtx = this.buildRenderContext({
         channelId,
         settings,
@@ -2288,7 +2311,11 @@ export class VoiceFeature {
         kind: 'room',
         ownerId: secondary.ownerId,
         originalCreator: secondary.originalCreator,
-        isPrivate: secondary.state.private === true,
+        isPrivate:
+          secondary.state.private === true ||
+          roomMode({ state: secondary.state, access }) === 'hidden',
+        accessMode: roomMode({ state: secondary.state, access }),
+        ...(viewerRoleId ? { viewerRoleId } : {}),
         render: {
           ctx: renderCtx,
           synthetic: false,

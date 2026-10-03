@@ -203,6 +203,24 @@ describe('renderAnnouncement', () => {
    * `command_access` change can take, on both surfaces that reach more than the
    * admin who ran the command.
    */
+  /**
+   * The same setting decides who sees a hidden room, so an import that changes it must say
+   * so, in the preview and in the announcement an admin reads before anything is written.
+   */
+  it('says the moderator role also sees hidden rooms, wherever the import names it', () => {
+    const change = setting({
+      key: 'text_channel_role',
+      before: undefined,
+      after: '666666666666666666',
+    });
+    const preview = renderPreview(plan({ settingChanges: [change] }), ctx);
+    expect(JSON.stringify(preview)).toContain(
+      'Role that can read room text channels and see hidden rooms',
+    );
+    const announced = renderAnnouncement(plan({ settingChanges: [change] }), ctx);
+    expect(announced).toContain('Role that can read room text channels and see hidden rooms');
+  });
+
   it('emits no restricted member or role id for a command_access change, only a count', () => {
     const before = { rename: { users: [NICK_USER, RESTRICTED_USER], roles: [RESTRICTED_ROLE] } };
     const after = { nick: { users: [OTHER_USER] } };

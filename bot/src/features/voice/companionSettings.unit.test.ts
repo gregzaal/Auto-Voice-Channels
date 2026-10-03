@@ -117,6 +117,26 @@ describe('companion text settings', () => {
       expect(result.message).toMatch(/existing channels are updated/i);
     });
 
+    /**
+     * The same setting decides who sees a hidden room, so a confirmation that spoke only
+     * of chat would leave an admin granting more than the sentence says.
+     */
+    it('says the role also sees hidden rooms, when it is set and when it is cleared', async () => {
+      const { service } = makeService();
+      const set = await service.setTextChannelRole(GUILD, '555000111222333444');
+      expect(set.message).toContain('see hidden rooms');
+      const cleared = await service.setTextChannelRole(GUILD, null);
+      expect(cleared.message).toContain('a hidden room is seen only by server admins');
+    });
+
+    it('follows the copy rules in what it says', async () => {
+      const { service } = makeService();
+      for (const role of ['555000111222333444', null, GUILD]) {
+        const { message } = await service.setTextChannelRole(GUILD, role);
+        expect(message).not.toMatch(/[—–‘’“”;]/);
+      }
+    });
+
     it('clears the role', async () => {
       const { service, mergeSettings } = makeService();
       await service.setTextChannelRole(GUILD, null);

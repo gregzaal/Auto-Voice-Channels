@@ -63,6 +63,8 @@ export function buildTextChannelsModal(current: TextChannelSettings): ModalBuild
         .setTextInputComponent(name),
       new LabelBuilder()
         .setLabel('Role that can read every room chat')
+        // The setting also decides who sees a hidden room, which a label about chat does not say.
+        .setDescription('This role can also see hidden rooms.')
         .setRoleSelectMenuComponent(role),
     );
 }

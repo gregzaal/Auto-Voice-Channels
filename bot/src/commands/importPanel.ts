@@ -248,7 +248,7 @@ const SETTING_LABELS: Record<string, string> = {
   lists: 'Named lists',
   game_name_mode: 'Tied games',
   text_channel_name: 'Room text channel name',
-  text_channel_role: 'Role that can read room text channels',
+  text_channel_role: 'Role that can read room text channels and see hidden rooms',
   control_panel: 'Room control panel buttons',
   control_panel_style: 'Room control panel title, description and colour',
   command_access: 'Who can use room commands',

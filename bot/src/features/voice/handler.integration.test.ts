@@ -1628,6 +1628,84 @@ describe('VoiceFeature (integration)', () => {
       expect(renderChannelName(info.render!.nameTemplate, info.render!.ctx)).toBe('#1 [Halo]');
     });
 
+    /**
+     * `/channelinfo` has to tell hidden from locked, and the row's own `access` cannot: it
+     * is null both for no record and for one this build cannot read.
+     */
+    describe('says how open a room is', () => {
+      const room = async (channelId: string) => {
+        await secondaries.create({
+          channelId,
+          guildId: GUILD,
+          primaryChannelId: PRIMARY,
+          ownerId: 'alice',
+          state: { index: 0 },
+        });
+        voice.put(channelId, member('alice'));
+      };
+
+      it('public for a room with no record, and for a creator channel', async () => {
+        await room('ci-public');
+        const info = await feature.channelInfo(GUILD, 'ci-public');
+        expect(info.accessMode).toBe('public');
+        expect(info.isPrivate).toBe(false);
+        expect((await feature.channelInfo(GUILD, PRIMARY)).accessMode).toBe('public');
+      });
+
+      it('locked for a private room that no record says is hidden', async () => {
+        await room('ci-locked');
+        await secondaries.updateState('ci-locked', {
+          ...(await secondaries.get('ci-locked'))!.state,
+          private: true,
+        });
+        const info = await feature.channelInfo(GUILD, 'ci-locked');
+        expect(info.accessMode).toBe('locked');
+        expect(info.isPrivate).toBe(true);
+        expect(info.viewerRoleId).toBeUndefined();
+      });
+
+      it('hidden for a hidden room, still private for the condition probes, and names the role that sees it', async () => {
+        await room('ci-hidden');
+        await secondaries.transitionAccess('ci-hidden', {
+          statePatch: { private: true },
+          access: (stored) => ({ ...(stored ?? {}), hidden: true, viewerRoleId: 'mods' }),
+        });
+        const info = await feature.channelInfo(GUILD, 'ci-hidden');
+        expect(info.accessMode).toBe('hidden');
+        expect(info.isPrivate).toBe(true);
+        expect(info.viewerRoleId).toBe('mods');
+      });
+
+      /** A stale whole-state write dropping `private` from a hidden room must not make it read as public. */
+      it('hidden even when a stale write dropped private from the state', async () => {
+        await room('ci-stale');
+        await secondaries.transitionAccess('ci-stale', {
+          statePatch: { private: true },
+          access: (stored) => ({ ...(stored ?? {}), hidden: true }),
+        });
+        const { private: _gone, ...rest } = (await secondaries.get('ci-stale'))!.state;
+        await secondaries.updateState('ci-stale', rest);
+        const info = await feature.channelInfo(GUILD, 'ci-stale');
+        expect(info.accessMode).toBe('hidden');
+        expect(info.isPrivate).toBe(true);
+      });
+
+      it('unknown for a record this build cannot read, rather than public or locked', async () => {
+        await room('ci-unknown');
+        await secondaries.updateState('ci-unknown', {
+          ...(await secondaries.get('ci-unknown'))!.state,
+          private: true,
+        });
+        await env.handle.pool.query(
+          'UPDATE secondary_channels SET access = $1::jsonb WHERE channel_id = $2',
+          [JSON.stringify({ hidden: 'yes' }), 'ci-unknown'],
+        );
+        const info = await feature.channelInfo(GUILD, 'ci-unknown');
+        expect(info.accessMode).toBe('unknown');
+        expect(info.viewerRoleId).toBeUndefined();
+      });
+    });
+
     it("prefers the room's own override, and says so", async () => {
       await secondaries.create({
         channelId: 'ci-override',
