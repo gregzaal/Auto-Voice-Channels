@@ -1092,6 +1092,55 @@ describe('VoiceFeature (integration)', () => {
     ).toEqual(['c1', 'c2']);
   });
 
+  /**
+   * A restricted feature is inert for a denied member, saved data included. The
+   * nickname is a saved value that is already in every room name an owner has,
+   * and a role-based rule cannot clear it (a role's members are not listable), so
+   * the render has to stop using it.
+   */
+  describe('a restriction on Nickname', () => {
+    const DENIED_ROLE = '323456789012345678';
+
+    async function ownedRoom(id: string, owner: string, roleIds: string[]): Promise<void> {
+      await secondaries.create({
+        channelId: id,
+        guildId: GUILD,
+        primaryChannelId: PRIMARY,
+        ownerId: owner,
+        state: { name: 'stale', index: 0 },
+      });
+      voice.put(id, { ...member(owner), roleIds });
+    }
+
+    beforeEach(async () => {
+      await autoChannels.upsert(GUILD, PRIMARY, { name: '@@owner@@' });
+      await guilds.updateSettings(GUILD, {
+        custom_nicks: { alice: 'Big Alice', bea: 'Big Bea' },
+        command_access: { nick: { roles: [DENIED_ROLE] } },
+      });
+    });
+
+    it("names a role-denied owner's room by their Discord name, not their saved nickname", async () => {
+      await ownedRoom('c1', 'alice', ['999999999999999999', DENIED_ROLE]);
+      await feature.rerenderSecondary(GUILD, 'c1');
+      expect(actions.ofType('rename').map((a) => a.name)).toEqual(['alice']);
+    });
+
+    it('still uses a nickname for an owner nobody has restricted', async () => {
+      await ownedRoom('c2', 'bea', ['999999999999999999']);
+      await feature.rerenderSecondary(GUILD, 'c2');
+      expect(actions.ofType('rename').map((a) => a.name)).toEqual(['Big Bea']);
+    });
+
+    it('brings the nickname back when the rule is lifted, because it was never cleared', async () => {
+      await ownedRoom('c1', 'alice', [DENIED_ROLE]);
+      await feature.rerenderSecondary(GUILD, 'c1');
+      await guilds.updateSettings(GUILD, { command_access: {} });
+      await feature.rerenderSecondary(GUILD, 'c1');
+      expect(actions.ofType('rename').map((a) => a.name)).toEqual(['alice', 'Big Alice']);
+    });
+  });
+
   it('rerenderSiblings re-renders all channels of a primary, counting rate limits', async () => {
     actions.simulateRenameRateLimit = true;
     for (const id of ['s1', 's2']) {

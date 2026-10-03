@@ -288,7 +288,7 @@ export class GuildSettingsService {
 
   async getConfig(guildId: string): Promise<GuildConfig> {
     const guild = await this.deps.guilds.ensure(guildId);
-    const s = parseVoiceSettings(guild.settings);
+    const s = parseVoiceSettings(guild.settings, guildId);
     const primaries = await this.deps.autoChannels.listByGuild(guildId);
     return {
       enabled: s.enabled,
@@ -389,7 +389,7 @@ export class GuildSettingsService {
     ) => { lists: Record<string, string[]> } | CommandResult,
   ): Promise<CommandResult> {
     return this.deps.guilds.mergeSettings(guildId, (existing) => {
-      const current = parseVoiceSettings(existing?.settings ?? {}).lists;
+      const current = parseVoiceSettings(existing?.settings ?? {}, guildId).lists;
       const decided = decide(current);
       if ('lists' in decided) return { patch: { lists: decided.lists }, result: ok('') };
       return { patch: {}, result: decided };
@@ -399,7 +399,7 @@ export class GuildSettingsService {
   /** Every named list this guild has. A COPY, for the reason `listAliases` documents. */
   async listNamedLists(guildId: string): Promise<Record<string, string[]>> {
     const guild = await this.deps.guilds.ensure(guildId);
-    const lists = parseVoiceSettings(guild.settings).lists;
+    const lists = parseVoiceSettings(guild.settings, guildId).lists;
     return Object.fromEntries(Object.entries(lists).map(([name, options]) => [name, [...options]]));
   }
 
@@ -492,7 +492,7 @@ export class GuildSettingsService {
     // settings cache hands the same row to every caller, so returning it
     // directly would let one caller's `aliases[x] = y` corrupt the cache
     // process-wide with no write and no NOTIFY behind it.
-    return { ...parseVoiceSettings(guild.settings).aliases };
+    return { ...parseVoiceSettings(guild.settings, guildId).aliases };
   }
 
   /**
@@ -514,7 +514,7 @@ export class GuildSettingsService {
     ) => { aliases: Record<string, string> } | CommandResult,
   ): Promise<CommandResult> {
     return this.deps.guilds.mergeSettings(guildId, (existing) => {
-      const current = parseVoiceSettings(existing?.settings ?? {}).aliases;
+      const current = parseVoiceSettings(existing?.settings ?? {}, guildId).aliases;
       const decided = decide(current);
       if ('aliases' in decided) return { patch: { aliases: decided.aliases }, result: ok('') };
       return { patch: {}, result: decided };

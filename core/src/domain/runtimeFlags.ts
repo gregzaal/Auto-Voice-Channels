@@ -55,8 +55,11 @@ export const RUNTIME_FLAGS = {
    * makes every rule bite again at once. While it is on, the guard on the room
    * commands, the panel buttons and the `/template` channel editor lets
    * everybody through, and a room's panel shows every control again once it next
-   * re-renders. A saved nickname of a restricted member renders as well, which is
-   * the one place a rule is read outside a guard.
+   * re-renders.
+   *
+   * It does NOT unfreeze a restricted member's saved nickname, which stays out of
+   * room names while a rule names them: that is read on the synchronous render
+   * path, which consults no flag. Lifting the rule itself brings the name back.
    *
    * It never blocks `/restrict` itself, so an admin can still add, list and lift
    * rules while it is on, and `/restrict list` says that nothing is being

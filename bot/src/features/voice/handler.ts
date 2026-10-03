@@ -640,7 +640,7 @@ export class VoiceFeature {
     if (!primary || primary.guildId !== guildId) return { action: 'skip' };
 
     const guild = await this.deps.guilds.ensure(guildId);
-    const settings = parseVoiceSettings(guild.settings);
+    const settings = parseVoiceSettings(guild.settings, guildId);
     if (!settings.enabled) return { action: 'skip' };
     if (!isEntitled({ status: guild.authStatus, selfHosted: this.deps.selfHosted })) {
       this.deps.logger.debug({ guildId }, 'skipping creation: not entitled');
@@ -1149,7 +1149,7 @@ export class VoiceFeature {
 
     await this.deps.secondaries.setOwner(channelId, newOwner.id);
     const guild = await this.deps.guilds.ensure(guildId);
-    const newOwnerName = displayName(parseVoiceSettings(guild.settings), newOwner);
+    const newOwnerName = displayName(parseVoiceSettings(guild.settings, guildId), newOwner);
 
     this.deps.logger.info(
       { guildId, secondaryId: channelId, from: leaverId, to: newOwner.id },
@@ -1179,7 +1179,7 @@ export class VoiceFeature {
     if (!this.deps.onOwnerChanged) return;
     try {
       const guild = await this.deps.guilds.ensure(guildId);
-      const name = displayName(parseVoiceSettings(guild.settings), newOwner);
+      const name = displayName(parseVoiceSettings(guild.settings, guildId), newOwner);
       await this.deps.onOwnerChanged(guildId, channelId, newOwner.id, name);
     } catch (err) {
       this.deps.logger.warn(
@@ -1276,7 +1276,7 @@ export class VoiceFeature {
     if (row.template.name === undefined && row.template.status === undefined) return {};
 
     const guild = await this.deps.guilds.ensure(guildId);
-    const settings = parseVoiceSettings(guild.settings);
+    const settings = parseVoiceSettings(guild.settings, guildId);
     const members = this.deps.voice.membersInChannel(channelId);
     // An adopted standalone channel has no privacy model and no owning primary,
     // so `{{PRIVATE}}` is false and the numbering tokens keep rendering `?`.
@@ -1579,7 +1579,7 @@ export class VoiceFeature {
       return { found: false, scope: 'adopted', name: empty, status: empty };
     }
     const guild = await this.deps.guilds.ensure(guildId);
-    const settings = parseVoiceSettings(guild.settings);
+    const settings = parseVoiceSettings(guild.settings, guildId);
     const members = this.deps.voice.membersInChannel(channelId);
     const renderCtx = this.buildRenderContext({
       channelId,
@@ -1676,6 +1676,10 @@ export class VoiceFeature {
         : displayName(settings, {
             id: input.originalCreatorId,
             displayName: rawOriginalCreator,
+            // Only when they are in the room: the creator has usually left, and
+            // then a rule naming their ROLE cannot be checked, which reads as
+            // not restricted. See `displayName`.
+            roleIds: members.find((m) => m.id === input.originalCreatorId)?.roleIds,
           });
     return {
       index: input.index,
@@ -1720,7 +1724,7 @@ export class VoiceFeature {
     if (members.filter((m) => !m.bot).length === 0) return {};
 
     const guild = await this.deps.guilds.ensure(guildId);
-    const settings = parseVoiceSettings(guild.settings);
+    const settings = parseVoiceSettings(guild.settings, guildId);
     const primary = await this.deps.autoChannels.get(secondary.primaryChannelId);
     // Reconciliation may pass a freshly-computed sibling position to renumber
     // `##` tokens after a middle channel was deleted; otherwise use the stored one.
@@ -2076,7 +2080,7 @@ export class VoiceFeature {
    */
   async debugChannel(guildId: string, channelId: string): Promise<ChannelDebug> {
     const guild = await this.deps.guilds.ensure(guildId);
-    const settings = parseVoiceSettings(guild.settings);
+    const settings = parseVoiceSettings(guild.settings, guildId);
     const secondary = await this.deps.secondaries.get(channelId);
     const inGuild = secondary !== undefined && secondary.guildId === guildId;
     const isPrimary = await this.deps.autoChannels.isPrimary(guildId, channelId);
@@ -2166,7 +2170,7 @@ export class VoiceFeature {
    */
   async channelInfo(guildId: string, channelId: string): Promise<ChannelInfo> {
     const guild = await this.deps.guilds.ensure(guildId);
-    const settings = parseVoiceSettings(guild.settings);
+    const settings = parseVoiceSettings(guild.settings, guildId);
     const members = this.deps.voice.membersInChannel(channelId);
     const userLimit = this.deps.voice.userLimitOf?.(channelId) ?? 0;
     const secondary = await this.deps.secondaries.get(channelId);
@@ -2415,7 +2419,7 @@ export class VoiceFeature {
     // Adopted standalone channels live in their own repo, not as secondaries.
     if (scope === 'adopted') return this.getManagedEditorState(guildId, channelId);
     const guild = await this.deps.guilds.ensure(guildId);
-    const settings = parseVoiceSettings(guild.settings);
+    const settings = parseVoiceSettings(guild.settings, guildId);
     const empty: EditorFieldState = { effectiveTemplate: '', preview: '' };
     const secondary = await this.deps.secondaries.get(channelId);
     if (!secondary || secondary.guildId !== guildId) {

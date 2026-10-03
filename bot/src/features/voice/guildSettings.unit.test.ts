@@ -4,6 +4,7 @@ import {
   CONTROL_PANEL_CONTROLS,
   CONTROL_PANEL_DEFAULT_ENABLED,
   CONTROL_PANEL_DEFAULTS,
+  displayName,
   controlPanelConfirmation,
   readControlPanel,
   ROOT_GROUP_KEY,
@@ -16,9 +17,11 @@ import {
   readLogging,
 } from './guildSettings.js';
 
+const GUILD = '123456789012345678';
+
 describe('guildSettings', () => {
   it('applies defaults for an empty blob', () => {
-    const s = parseVoiceSettings({});
+    const s = parseVoiceSettings({}, GUILD);
     expect(s.enabled).toBe(true);
     expect(s.general).toBe('General');
     expect(s.channelNameTemplate).toBe(DEFAULT_CHANNEL_NAME_TEMPLATE);
@@ -27,13 +30,16 @@ describe('guildSettings', () => {
   });
 
   it('reads valid values', () => {
-    const s = parseVoiceSettings({
-      enabled: false,
-      general: 'Hangout',
-      channel_name_template: '@@creator@@',
-      aliases: { 'Counter-Strike 2': 'CS2' },
-      custom_nicks: { u1: 'Big G' },
-    });
+    const s = parseVoiceSettings(
+      {
+        enabled: false,
+        general: 'Hangout',
+        channel_name_template: '@@creator@@',
+        aliases: { 'Counter-Strike 2': 'CS2' },
+        custom_nicks: { u1: 'Big G' },
+      },
+      GUILD,
+    );
     expect(s.enabled).toBe(false);
     expect(s.general).toBe('Hangout');
     expect(s.channelNameTemplate).toBe('@@creator@@');
@@ -43,7 +49,7 @@ describe('guildSettings', () => {
 
   it('rejects non-string map values rather than passing them through', () => {
     // A corrupt/legacy blob with a non-string nick must not reach channel.setName.
-    const s = parseVoiceSettings({ custom_nicks: { u1: 42 }, aliases: ['not', 'a', 'map'] });
+    const s = parseVoiceSettings({ custom_nicks: { u1: 42 }, aliases: ['not', 'a', 'map'] }, GUILD);
     expect(s.customNicks).toEqual({});
     expect(s.aliases).toEqual({});
   });
@@ -239,5 +245,70 @@ describe('controlPanelConfirmation', () => {
         expect(text).not.toMatch(/;/);
       }
     }
+  });
+});
+
+/**
+ * A restricted feature is inert for a denied member, saved data included. The
+ * nickname is the one saved datum a rule has to reach at render time, because
+ * `/restrict add` can clear a USER's saved name but cannot list a ROLE's members.
+ */
+describe('displayName and a restriction on Nickname', () => {
+  const OWNER = '223456789012345678';
+  const DENIED_ROLE = '323456789012345678';
+  const OTHER_ROLE = '423456789012345678';
+
+  const settingsWith = (access: Record<string, unknown>) =>
+    parseVoiceSettings({ custom_nicks: { [OWNER]: 'Big G' }, command_access: access }, GUILD);
+  const member = (roleIds?: string[]) => ({ id: OWNER, displayName: 'Greg', roleIds });
+
+  it('keeps a saved nickname for a member nobody has restricted', () => {
+    expect(displayName(settingsWith({}), member([OTHER_ROLE]))).toBe('Big G');
+    expect(
+      displayName(settingsWith({ nick: { roles: [DENIED_ROLE] } }), member([OTHER_ROLE])),
+    ).toBe('Big G');
+  });
+
+  it('shows the Discord name for an owner whose ROLE is restricted, without clearing the nickname', () => {
+    const settings = settingsWith({ nick: { roles: [DENIED_ROLE] } });
+    expect(displayName(settings, member([OTHER_ROLE, DENIED_ROLE]))).toBe('Greg');
+    // Kept, not cleared: lifting the rule brings the name back.
+    expect(settings.customNicks).toEqual({ [OWNER]: 'Big G' });
+  });
+
+  it('shows the Discord name for an owner who is restricted by id', () => {
+    expect(displayName(settingsWith({ nick: { users: [OWNER] } }), member([]))).toBe('Greg');
+  });
+
+  it('only restricts Nickname, not another feature', () => {
+    expect(
+      displayName(settingsWith({ rename: { roles: [DENIED_ROLE] } }), member([DENIED_ROLE])),
+    ).toBe('Big G');
+  });
+
+  /**
+   * The original creator has usually left, so nobody can say what roles they
+   * hold. A rule naming their role cannot be checked and reads as not restricted,
+   * the direction that fails open, while a rule naming THEM still applies.
+   */
+  it('cannot check a role it was not given, and still applies a rule naming the person', () => {
+    expect(displayName(settingsWith({ nick: { roles: [DENIED_ROLE] } }), member(undefined))).toBe(
+      'Big G',
+    );
+    expect(displayName(settingsWith({ nick: { users: [OWNER] } }), member(undefined))).toBe('Greg');
+  });
+
+  /**
+   * `GuildMember.roles.cache` (and so the voice snapshot) includes `@everyone`,
+   * whose id is the guild id. A stored rule naming it would deny the whole
+   * server, so the reader drops it and it cannot match.
+   */
+  it('does not let a stored @everyone rule deny every member', () => {
+    expect(displayName(settingsWith({ nick: { roles: [GUILD] } }), member([GUILD]))).toBe('Big G');
+  });
+
+  it('has no effect for a member who never set a nickname', () => {
+    const settings = parseVoiceSettings({ command_access: { nick: { users: [OWNER] } } }, GUILD);
+    expect(displayName(settings, member([]))).toBe('Greg');
   });
 });

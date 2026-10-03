@@ -4,6 +4,11 @@ import {
   isValidTimeZone,
 } from './nameTemplate.js';
 import type { GameNameMode } from './nameTemplate.js';
+// A cycle with `commandAccess.ts`, which reads `SETTINGS_KEYS` and `isSnowflake`
+// from here. Safe while both only use the other's exports inside a function
+// body, as they do: nothing at module top level may touch an import from the
+// other, or whichever file loads second reads it before it is defined.
+import { mayUse, readCommandAccess, type CommandAccess } from './commandAccess.js';
 
 /**
  * Single source of truth for reading the guild `settings` jsonb blob. The blob is
@@ -110,6 +115,11 @@ export interface VoiceSettings {
    * both, `top` names one. See `GameNameMode`.
    */
   gameNameMode: GameNameMode;
+  /**
+   * Who may not use which room command, for the one read that is not a guard:
+   * whether a saved `/nick` still applies to a room's owner. See {@link displayName}.
+   */
+  commandAccess: CommandAccess;
 }
 
 /** True only when `value` is a plain object whose values are ALL strings. */
@@ -151,8 +161,18 @@ function stringArrayMap(value: unknown): Record<string, string[]> {
   return isStringArrayMap(value) ? value : {};
 }
 
-/** Parses the voice-relevant settings, applying defaults for missing/invalid fields. */
-export function parseVoiceSettings(settings: Record<string, unknown>): VoiceSettings {
+/**
+ * Parses the voice-relevant settings, applying defaults for missing/invalid fields.
+ *
+ * Takes the guild id because the restriction rules are read here, and
+ * `readCommandAccess` drops the `@everyone` role (whose id is the guild id) from
+ * them. Required rather than optional so a caller cannot forget it and quietly
+ * read no restrictions.
+ */
+export function parseVoiceSettings(
+  settings: Record<string, unknown>,
+  guildId: string,
+): VoiceSettings {
   return {
     enabled: settings[SETTINGS_KEYS.enabled] !== false,
     channelNameTemplate: asString(
@@ -172,6 +192,7 @@ export function parseVoiceSettings(settings: Record<string, unknown>): VoiceSett
     timezone: readTimeZone(settings),
     lists: stringArrayMap(settings[SETTINGS_KEYS.lists]),
     gameNameMode: readGameNameMode(settings),
+    commandAccess: readCommandAccess(settings, guildId),
   };
 }
 
@@ -228,12 +249,34 @@ export function readTimeZone(settings: Record<string, unknown>): string | undefi
   return typeof raw === 'string' && isValidTimeZone(raw) ? raw : undefined;
 }
 
-/** The display name to use for a member, honouring their `/nick` override. */
+/**
+ * The display name to use for a member, honouring their `/nick` override unless
+ * a restriction on Nickname now covers them.
+ *
+ * **A restricted feature is inert for a denied member, saved data included.**
+ * `/restrict add` removes the saved nickname of a USER it names, but it cannot
+ * list the members of a ROLE, so without this check a role-based rule would stop
+ * new `/nick` calls and leave every nickname already chosen showing in every
+ * room name, which is the thing the rule was written to stop. The saved name is
+ * kept rather than cleared, so lifting the rule (or the lever) brings it back.
+ *
+ * `roleIds` is the member's roles as the voice snapshot carries them, and may
+ * include the guild id: the rules never hold it, so it cannot match. Absent,
+ * which is the original creator of a room who has left, means nobody can say what
+ * they hold, so only a rule naming the person applies, the direction that fails
+ * open. `canManage` is false because a render has no permission data: a member
+ * with Manage Channels can still set a nickname (the guard lets them) that then
+ * does not render while a rule names them, and `/restrict add` refuses to name
+ * such a member in the first place.
+ */
 export function displayName(
   settings: VoiceSettings,
-  member: { id: string; displayName: string },
+  member: { id: string; displayName: string; roleIds?: readonly string[] | undefined },
 ): string {
-  return settings.customNicks[member.id] ?? member.displayName;
+  const nick = settings.customNicks[member.id];
+  if (nick === undefined) return member.displayName;
+  const caller = { userId: member.id, roleIds: member.roleIds ?? [], canManage: false };
+  return mayUse('nick', caller, settings.commandAccess) ? nick : member.displayName;
 }
 
 /** The per-guild logging configuration. */
