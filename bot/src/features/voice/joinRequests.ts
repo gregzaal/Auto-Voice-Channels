@@ -21,7 +21,7 @@ export interface JoinRequestsDeps {
  * request to the private channel's owner (Approve / Deny / Block buttons, handled
  * in the interaction router). The requester simply waits in the join channel
  * until the owner decides. The owner re-entering their own join channel is
- * ignored.
+ * ignored, and so is a member the owner has blocked, who is moved out instead.
  *
  * @returns a disposer that detaches the listener.
  */
@@ -42,6 +42,10 @@ export function registerJoinRequests(deps: JoinRequestsDeps): () => void {
     const ctx = await deps.privacy.getJoinContext(joinChannelId);
     if (!ctx) return; // not a join channel
     if (requesterId === ctx.creatorId) return; // owner re-entering their own lobby
+
+    // Somebody the owner has blocked, or a vote removed, gets no card: they are asked
+    // to leave the lobby and the owner never hears about it. Before anything is posted.
+    if (await deps.privacy.refuseBlockedKnock(ctx, requesterId)) return;
 
     // Post the request into the private channel's OWN integrated text chat: only
     // the owner (who is inside) and admitted members can see it — outsiders and
