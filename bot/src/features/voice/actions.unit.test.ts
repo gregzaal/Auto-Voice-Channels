@@ -107,6 +107,24 @@ describe('RecordingVoiceActions overwrites', () => {
     expect(result.written.map((o) => o.id)).toEqual(['departed', BOT]);
   });
 
+  it('leaves a departed member holding the overwrite they had when it is their change that is left out', async () => {
+    const actions = new RecordingVoiceActions();
+    actions.unknownMemberIds.add('departed');
+    const previous = [botOverwrite, member('departed', 1n)];
+    actions.seedOverwrites(ROOM, previous);
+    const result = await actions.applyOverwrites(
+      GUILD,
+      ROOM,
+      [botOverwrite, member('departed', 0n, VC)],
+      previous,
+    );
+    // Not deleted, as the adapter does not delete it, and not changed.
+    expect(result.droppedMemberIds).toEqual(['departed']);
+    expect(result.written).toEqual(previous);
+    expect(actions.overwritesOf(ROOM)).toEqual(previous);
+    expect(result.requests).toBe(0);
+  });
+
   it('rejects with Missing Permissions and changes nothing when told to fail', async () => {
     const actions = new RecordingVoiceActions();
     actions.seedOverwrites(ROOM, [role(GUILD)]);

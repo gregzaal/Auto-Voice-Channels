@@ -1,6 +1,7 @@
 import { DiscordAPIError } from 'discord.js';
 import {
   diffOverwrites,
+  leaveOutMembers,
   OVERWRITE_MEMBER,
   SINGLE_WRITE_MAX,
   type ResolvedOverwrite,
@@ -171,12 +172,14 @@ export interface MoveMemberOptions {
 /** What {@link VoiceActions.applyOverwrites} actually did. */
 export interface ApplyOverwritesResult {
   /**
-   * The overwrites asked of Discord: `desired` less the members it reported not
-   * being in the server. What the caller records as written, so an id that never
-   * got an overwrite is never remembered as having one.
+   * The overwrites asked of Discord: `desired` less what it asked for the members
+   * Discord reported not being in the server. What the caller records as written, so
+   * an id that never got an overwrite is never remembered as having one. One of those
+   * members who already had an overwrite is left holding it, unchanged, and is here
+   * as it was.
    */
   written: ResolvedOverwrite[];
-  /** Member ids left out because Discord does not have them in the server. */
+  /** Member ids whose change was left out because Discord does not have them in the server. */
   droppedMemberIds: string[];
   /** REST writes made: 0 when nothing differed, 1 for a bulk write. */
   requests: number;
@@ -248,8 +251,11 @@ export interface VoiceActions {
   /**
    * A room's permission overwrites as Discord holds them NOW, read fresh because
    * the cache can lag a channel update by long enough to plan against a set that
-   * is no longer there. Null when the channel is gone, or is not a voice channel.
-   * Throws for one the bot can no longer see.
+   * is no longer there. Null when the channel is confirmed gone, or is not a voice
+   * channel. Throws for one the bot can no longer see, and for one that exists but
+   * belongs to a guild this process does not hold or to a different guild: neither
+   * is "gone", and a caller that drops a room's record on null would drop a live
+   * room's.
    */
   readOverwrites(guildId: string, channelId: string): Promise<ResolvedOverwrite[] | null>;
   /**
@@ -708,7 +714,7 @@ export class RecordingVoiceActions implements VoiceActions {
       .filter((o) => o.type === OVERWRITE_MEMBER && this.unknownMemberIds.has(o.id))
       .map((o) => o.id);
     const dropped = new Set(droppedMemberIds);
-    const written = desired.filter((o) => !(o.type === OVERWRITE_MEMBER && dropped.has(o.id)));
+    const written = leaveOutMembers(desired, previous, dropped);
     const changes = diffOverwrites(previous, written);
     const size = changes.upserts.length + changes.deletes.length;
     const requests = size === 0 ? 0 : size > SINGLE_WRITE_MAX ? 1 : size;
