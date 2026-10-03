@@ -1471,6 +1471,15 @@ async function main(): Promise<void> {
         roomAccess: {
           disabled: runtimeFlags[RUNTIME_FLAGS.ROOM_ACCESS_DISABLED] === true,
         },
+        /**
+         * Whether remembered room settings are switched off. A room that starts without
+         * what a member chose last time is only ever seen from their side, so the lever is
+         * reported per fleet, because the failure mode of a freeze switch is being left on
+         * after the thing it was thrown for has been fixed.
+         */
+        memberPrefs: {
+          disabled: runtimeFlags[RUNTIME_FLAGS.MEMBER_PREFS_DISABLED] === true,
+        },
       };
     },
   });

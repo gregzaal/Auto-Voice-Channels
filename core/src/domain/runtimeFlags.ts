@@ -112,6 +112,34 @@ export const RUNTIME_FLAGS = {
    * a database blip must not quietly withdraw a feature that is on by default.
    */
   ROOM_ACCESS_DISABLED: 'room_access.disabled',
+  /**
+   * Stops remembering and restoring members' room settings on **this fleet**.
+   *
+   * It stops BOTH directions, because stopping one would leave a worse state than either:
+   * while it is on, a member's `/name`, `/limit`, `/unlimit`, `/private`, `/hide`, `/public`
+   * and `/unhide` store nothing for next time, and a room is made without whatever its
+   * creator saved, so its name, size and privacy come from the creator channel's own defaults
+   * exactly as they do for a creator channel that never turned remembering on.
+   *
+   * It **freezes rather than strips**: nothing is deleted, so every saved setting stays and
+   * lifting it makes the next room restore them again. What a member changes while it is on is
+   * not remembered, and the room they leave is unaffected: this governs only what is stored
+   * and what a NEW room starts with.
+   *
+   * It does **not** stop the admin's controls in the `/template` editor: the Remember switch
+   * and "Clear saved settings" still work, so an admin can still turn remembering off for a
+   * creator channel or empty what is stored, which is the way out if the cause is the data
+   * and not the feature. Nor does it stop the sweep that deletes saved settings of a creator
+   * channel that no longer exists, or erasure on request, since neither saves or restores
+   * anything. It is not a creation lever: a room is made whatever it says.
+   *
+   * Read through the creation gate's cached 2 second snapshot, and only on a path that would
+   * otherwise save or restore, so a creator channel that does not remember costs nothing. A
+   * failed flag read is treated as NOT disabled, matching `room_access.disabled`: remembering
+   * is something an admin opted a creator channel into, and a database blip must not quietly
+   * withdraw it.
+   */
+  MEMBER_PREFS_DISABLED: 'member_prefs.disabled',
   /** Throttle: max secondary creations per guild per minute (number; 0 = unlimited). */
   CREATE_RATE_LIMIT: 'create.rate_limit_per_min',
   /**

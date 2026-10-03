@@ -47,6 +47,7 @@ export class RuntimeCreationGate implements CreationGate {
         controlPanelDisabled: boolean;
         commandAccessDisabled: boolean;
         roomAccessDisabled: boolean;
+        memberPrefsDisabled: boolean;
       }
     | undefined;
 
@@ -168,6 +169,26 @@ export class RuntimeCreationGate implements CreationGate {
     }
   }
 
+  /**
+   * The remembered room settings lever alone, for the code that saves a member's settings
+   * after a command and the code that restores them into a room as it is made. Neither is a
+   * room create that may spend a throttle slot to ask, and the save runs after every `/name`,
+   * `/limit` and `/private` a member types.
+   *
+   * Fails OPEN like the four above, and for their reason: remembering is something an admin
+   * switched on for a creator channel, and a database blip must not quietly withdraw it, so a
+   * failed read counts as NOT disabled. Shares the cached snapshot, so asking costs no extra
+   * query. This is NOT `deps.flags.getBool`, which is an uncached SELECT per call.
+   */
+  async memberPrefsDisabled(): Promise<boolean> {
+    try {
+      return (await this.readFlags()).memberPrefsDisabled;
+    } catch (err) {
+      this.opts.logger.warn({ err }, 'member prefs flag read failed; treating as enabled');
+      return false;
+    }
+  }
+
   private async readFlags(): Promise<{
     paused: boolean;
     limit: number;
@@ -176,6 +197,7 @@ export class RuntimeCreationGate implements CreationGate {
     controlPanelDisabled: boolean;
     commandAccessDisabled: boolean;
     roomAccessDisabled: boolean;
+    memberPrefsDisabled: boolean;
   }> {
     const now = Date.now();
     if (this.flagCache && now - this.flagCache.at < this.flagCacheMs) {
@@ -187,6 +209,7 @@ export class RuntimeCreationGate implements CreationGate {
         controlPanelDisabled,
         commandAccessDisabled,
         roomAccessDisabled,
+        memberPrefsDisabled,
       } = this.flagCache;
       return {
         paused,
@@ -196,6 +219,7 @@ export class RuntimeCreationGate implements CreationGate {
         controlPanelDisabled,
         commandAccessDisabled,
         roomAccessDisabled,
+        memberPrefsDisabled,
       };
     }
     const all = await this.opts.flags.getAll();
@@ -207,6 +231,7 @@ export class RuntimeCreationGate implements CreationGate {
     const controlPanelDisabled = all[RUNTIME_FLAGS.CONTROL_PANEL_DISABLED] === true;
     const commandAccessDisabled = all[RUNTIME_FLAGS.COMMAND_ACCESS_DISABLED] === true;
     const roomAccessDisabled = all[RUNTIME_FLAGS.ROOM_ACCESS_DISABLED] === true;
+    const memberPrefsDisabled = all[RUNTIME_FLAGS.MEMBER_PREFS_DISABLED] === true;
     this.flagCache = {
       at: now,
       paused,
@@ -216,6 +241,7 @@ export class RuntimeCreationGate implements CreationGate {
       controlPanelDisabled,
       commandAccessDisabled,
       roomAccessDisabled,
+      memberPrefsDisabled,
     };
     return {
       paused,
@@ -225,6 +251,7 @@ export class RuntimeCreationGate implements CreationGate {
       controlPanelDisabled,
       commandAccessDisabled,
       roomAccessDisabled,
+      memberPrefsDisabled,
     };
   }
 }

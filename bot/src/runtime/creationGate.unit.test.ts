@@ -367,4 +367,98 @@ describe('RuntimeCreationGate', () => {
       expect(warn).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe('the remembered room settings lever', () => {
+    it('is off unless the flag is exactly true', async () => {
+      const unset = new RuntimeCreationGate({ flags: fakeFlags(), logger: fakeLogger() });
+      expect(await unset.memberPrefsDisabled()).toBe(false);
+      const truthy = new RuntimeCreationGate({
+        flags: fakeFlags({ [RUNTIME_FLAGS.MEMBER_PREFS_DISABLED]: 'yes' }),
+        logger: fakeLogger(),
+      });
+      expect(await truthy.memberPrefsDisabled()).toBe(false);
+      const on = new RuntimeCreationGate({
+        flags: fakeFlags({ [RUNTIME_FLAGS.MEMBER_PREFS_DISABLED]: true }),
+        logger: fakeLogger(),
+      });
+      expect(await on.memberPrefsDisabled()).toBe(true);
+    });
+
+    /**
+     * Its own flag: hiding rooms, the panel and the restriction guard each have a lever, and
+     * throwing one must not switch remembering off, or the reverse.
+     */
+    it('is independent of the other levers, and never rides a creation decision', async () => {
+      const gate = new RuntimeCreationGate({
+        flags: fakeFlags({ [RUNTIME_FLAGS.MEMBER_PREFS_DISABLED]: true }),
+        logger: fakeLogger(),
+      });
+      expect(await gate.memberPrefsDisabled()).toBe(true);
+      expect(await gate.roomAccessDisabled()).toBe(false);
+      expect(await gate.commandAccessDisabled()).toBe(false);
+      expect(await gate.controlPanelDisabled()).toBe(false);
+      expect(await gate.companionTextDisabled()).toBe(false);
+      // A room can still be created: this is not a creation lever.
+      expect(await gate.allowCreate('g1')).toEqual({ allowed: true });
+      for (const other of [
+        RUNTIME_FLAGS.ROOM_ACCESS_DISABLED,
+        RUNTIME_FLAGS.COMMAND_ACCESS_DISABLED,
+        RUNTIME_FLAGS.CONTROL_PANEL_DISABLED,
+        RUNTIME_FLAGS.COMPANION_TEXT_DISABLED,
+      ]) {
+        const unrelated = new RuntimeCreationGate({
+          flags: fakeFlags({ [other]: true }),
+          logger: fakeLogger(),
+        });
+        expect(await unrelated.memberPrefsDisabled()).toBe(false);
+      }
+    });
+
+    /** A save follows every command a member types, and `getAll` is a SELECT. */
+    it('reads through the cached snapshot, one query for many asks', async () => {
+      const getAll = vi.fn().mockResolvedValue({ [RUNTIME_FLAGS.MEMBER_PREFS_DISABLED]: true });
+      const gate = new RuntimeCreationGate({
+        flags: { getAll } as unknown as RuntimeFlagsRepository,
+        logger: fakeLogger(),
+      });
+      for (let i = 0; i < 5; i += 1) expect(await gate.memberPrefsDisabled()).toBe(true);
+      expect(getAll).toHaveBeenCalledTimes(1);
+    });
+
+    it('shares the snapshot the other levers read, so asking after one of them costs no query', async () => {
+      const getAll = vi.fn().mockResolvedValue({ [RUNTIME_FLAGS.MEMBER_PREFS_DISABLED]: true });
+      const gate = new RuntimeCreationGate({
+        flags: { getAll } as unknown as RuntimeFlagsRepository,
+        logger: fakeLogger(),
+      });
+      await gate.roomAccessDisabled();
+      expect(await gate.memberPrefsDisabled()).toBe(true);
+      expect(getAll).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not spend a throttle slot to answer', async () => {
+      const gate = new RuntimeCreationGate({
+        flags: fakeFlags({
+          [RUNTIME_FLAGS.MEMBER_PREFS_DISABLED]: true,
+          [RUNTIME_FLAGS.CREATE_RATE_LIMIT]: 1,
+        }),
+        logger: fakeLogger(),
+      });
+      expect(await gate.memberPrefsDisabled()).toBe(true);
+      expect(await gate.memberPrefsDisabled()).toBe(true);
+      expect((await gate.allowCreate('g1')).allowed).toBe(true);
+    });
+
+    /** A blip must not quietly withdraw something an admin opted a creator channel into. */
+    it('treats a failed flag read as not disabled', async () => {
+      const flags = { getAll: () => Promise.reject(new Error('db down')) };
+      const warn = vi.fn();
+      const gate = new RuntimeCreationGate({
+        flags: flags as unknown as RuntimeFlagsRepository,
+        logger: { ...fakeLogger(), warn } as unknown as Logger,
+      });
+      expect(await gate.memberPrefsDisabled()).toBe(false);
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+  });
 });

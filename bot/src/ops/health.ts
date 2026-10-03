@@ -123,6 +123,16 @@ export interface DiagnosticsReport {
    * idling instance, which holds no shards and so serves no rooms.
    */
   roomAccess?: { disabled: boolean };
+  /**
+   * Remembered room settings. Only the lever, for the reason `commandAccess` gives, and
+   * because a switch like this is only ever seen from a member's side: a room that starts
+   * without the name they chose last time looks like a bug, not a lever.
+   *
+   * `disabled` true means this fleet saves nothing a member sets and restores nothing into a
+   * new room, while everything already saved is kept. Per fleet, like the flag. Absent on an
+   * idling instance, which holds no shards and so serves no rooms.
+   */
+  memberPrefs?: { disabled: boolean };
 }
 
 export interface HealthServerOptions {
