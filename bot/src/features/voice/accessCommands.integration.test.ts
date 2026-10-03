@@ -173,6 +173,9 @@ describe('AccessCommands (integration)', () => {
       expect(res.ok).toBe(true);
       expect(await saved()).toEqual({ trusted: ['carol'], blocked: [] });
       expect(held('carol')).toBeUndefined();
+      // Nothing was applied to the room, so the reply does not say it was.
+      expect(res.message).not.toContain('applied');
+      expect(res.message).not.toContain('your current room');
     });
 
     it('lets them into a hidden room with View and Connect', async () => {
@@ -290,6 +293,20 @@ describe('AccessCommands (integration)', () => {
       await nothingHappened();
     });
 
+    /**
+     * The member cache holds only members the bot has seen, so an Administrator or the
+     * owner it has not is in neither fact above. What Discord resolved with the command
+     * (the member's permissions, the guild's owner id) is what the refusal reads first.
+     */
+    it.each([
+      ['an Administrator Discord resolved', { administrator: true }],
+      ['the server owner the guild names', { guildOwner: true }],
+    ])('to block %s, though the member cache has never seen them', async (_who, resolved) => {
+      const res = await access.save(GUILD, 'alice', target('boss', resolved), 'blocked');
+      expect(res).toEqual({ ok: false, message: ACCESS_REFUSALS.unblockable('boss') });
+      await nothingHappened();
+    });
+
     it('but lets an Administrator be trusted, which is harmless', async () => {
       voice.setMemberFacts('boss', { administrator: true });
       expect((await access.save(GUILD, 'alice', target('boss'), 'trusted')).ok).toBe(true);
@@ -344,10 +361,8 @@ describe('AccessCommands (integration)', () => {
 
       const res = await access.save(GUILD, 'alice', target('carol'), 'trusted');
 
-      expect(res).toEqual({
-        ok: true,
-        message: "<@carol> is already on your trusted list. I've applied it to your current room.",
-      });
+      // And it does not say it applied anything, because it did not.
+      expect(res).toEqual({ ok: true, message: '<@carol> is already on your trusted list.' });
       // Nothing to write: the room already holds it, so the apply is a read.
       expect(actions.actions.slice(before).filter((a) => a.type === 'overwrites')).toEqual([]);
     });

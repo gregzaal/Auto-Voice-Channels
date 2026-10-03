@@ -1321,6 +1321,44 @@ describe('PrivacyService (integration)', () => {
       expect((await access())?.viewerRoleId).toBe('role-mods-2');
     });
 
+    /**
+     * `revokeOnly` is the caller that takes entries away (`/access remove`, a handover under
+     * the lever), and the lever's promise is that it adds nothing. A moderator role the
+     * server set after the room was hidden is an addition, so the room keeps the one it
+     * recorded and the new one is left for a change that is allowed to add.
+     */
+    it('is not granted to the setting’s new role by a call that only takes entries away', async () => {
+      moderatorRole = MODS;
+      await privacy.hide(GUILD, SEC, 'alice');
+      await lists.add(GUILD, 'alice', 'carol', 'trusted');
+      await privacy.applyAccessLists(GUILD, SEC);
+      expect(held('carol')).toBeDefined();
+      await lists.remove(GUILD, 'alice', 'carol');
+      moderatorRole = 'role-mods-2';
+
+      const res = await privacy.applyAccessLists(GUILD, SEC, { revokeOnly: true });
+
+      expect(res.status).toBe('applied');
+      expect(held('carol')).toBeUndefined();
+      expect(held('role-mods-2', OVERWRITE_ROLE)).toBeUndefined();
+      expect(bits(held(MODS, OVERWRITE_ROLE))).toEqual({ allow: V, deny: 0n });
+      expect((await access())?.viewerRoleId).toBe(MODS);
+    });
+
+    it('is not granted to a role set after the hide by a call that only takes entries away', async () => {
+      await privacy.hide(GUILD, SEC, 'alice');
+      await lists.add(GUILD, 'alice', 'carol', 'trusted');
+      await privacy.applyAccessLists(GUILD, SEC);
+      await lists.remove(GUILD, 'alice', 'carol');
+      moderatorRole = MODS;
+
+      await privacy.applyAccessLists(GUILD, SEC, { revokeOnly: true });
+
+      expect(held('carol')).toBeUndefined();
+      expect(held(MODS, OVERWRITE_ROLE)).toBeUndefined();
+      expect((await access())?.viewerRoleId).toBeUndefined();
+    });
+
     it('is revoked when the setting is cleared', async () => {
       moderatorRole = MODS;
       await privacy.hide(GUILD, SEC, 'alice');
@@ -2859,7 +2897,9 @@ describe('PrivacyService (integration)', () => {
 
       const res = await privacy.approveJoin(joinId, 'bob', true);
 
-      expect(res).toEqual({ ok: false, message: ROOM_ACCESS_REPLIES.alwaysPaused });
+      // `keepCard` is what tells the router nothing was decided: the reply sends the owner
+      // to Approve, so the card has to still have it.
+      expect(res).toEqual({ ok: false, message: ROOM_ACCESS_REPLIES.alwaysPaused, keepCard: true });
       expect(res.message).toContain('Approve');
       expect(actions.actions).toHaveLength(before);
       expect((await lists.get(GUILD, 'alice')).trusted).toEqual([]);
@@ -2915,17 +2955,47 @@ describe('PrivacyService (integration)', () => {
       expect(held('mallory')).toBeUndefined();
     });
 
-    it('applies no list on a handover either, so the giver’s entries stay until the lever is lifted', async () => {
+    /**
+     * A handover is both directions at once: the recipient's lists go on, and the giver's
+     * entries come off. The lever holds back the first and never the second, or the
+     * giver's guests keep a room the giver gave away until somebody next edits a list.
+     */
+    it('takes the giver’s entries off on a handover, and applies none of the recipient’s', async () => {
       await withLeverOff(async () => {
         await privacy.makePrivate(GUILD, SEC, 'alice');
         await lists.add(GUILD, 'alice', 'carol', 'trusted');
+        await lists.add(GUILD, 'alice', 'mallory', 'blocked');
         await privacy.applyAccessLists(GUILD, SEC);
       });
+      expect(held('carol')).toBeDefined();
+      expect(held('mallory')).toBeDefined();
+      await lists.add(GUILD, 'bob', 'dave', 'trusted');
+      await lists.add(GUILD, 'bob', 'erin', 'blocked');
       await secondaries.setOwnerAndCreator(SEC, 'bob', 'Bob');
 
       await privacy.handleOwnerChanged(GUILD, SEC, 'bob', 'Bob', { handover: true });
 
-      expect(held('carol')).toBeDefined();
+      expect(held('carol')).toBeUndefined();
+      expect(held('mallory')).toBeUndefined();
+      // The recipient's lists wait for the lever to be lifted.
+      expect(held('dave')).toBeUndefined();
+      expect(held('erin')).toBeUndefined();
+      expect((await access())?.trusted).toBeUndefined();
+      expect((await access())?.blocked).toBeUndefined();
+    });
+
+    it('applies the recipient’s lists on a handover once the lever is lifted', async () => {
+      await withLeverOff(async () => {
+        await privacy.makePrivate(GUILD, SEC, 'alice');
+        await lists.add(GUILD, 'alice', 'carol', 'trusted');
+        await privacy.applyAccessLists(GUILD, SEC);
+        await lists.add(GUILD, 'bob', 'dave', 'trusted');
+        await secondaries.setOwnerAndCreator(SEC, 'bob', 'Bob');
+        await privacy.handleOwnerChanged(GUILD, SEC, 'bob', 'Bob', { handover: true });
+      });
+
+      expect(held('carol')).toBeUndefined();
+      expect(bits(held('dave'))).toEqual({ allow: C, deny: 0n });
     });
 
     describe('never stands between a member and an undo', () => {

@@ -32,6 +32,14 @@ export interface AccessTarget {
   bot: boolean;
   /** Discord resolved them as a member of this server. A user picked by id alone is not. */
   inServer: boolean;
+  /**
+   * What Discord's own answer holds that no overwrite can stop: Administrator, read from
+   * the resolved member's permissions, and the server's owner, whose id the guild always
+   * knows. Both are checked before the member cache, which has nobody the bot has not
+   * seen. Absent means the answer carried neither.
+   */
+  administrator?: boolean;
+  guildOwner?: boolean;
 }
 
 export interface AccessCommandsDeps {
@@ -88,8 +96,9 @@ export class AccessCommands {
    *
    * Refuses yourself, a bot, a user who is not in this server, and (for a block) an
    * Administrator or the server's owner, whom no overwrite can stop. That last check
-   * reads the member cache, so a member who is not cached is let through and is skipped
-   * again when the list is applied, which also catches somebody who is promoted later.
+   * reads what the interaction resolved first and the member cache second, so a member
+   * who is in neither is let through and is skipped again when the list is applied, which
+   * also catches somebody who is promoted later.
    */
   async save(
     guildId: string,
@@ -103,7 +112,13 @@ export class AccessCommands {
       const facts = this.deps.voice.memberFacts?.(guildId, target.id);
       if (target.bot || facts?.bot === true) return fail(ACCESS_REFUSALS.bot(target.id));
       if (!target.inServer) return fail(ACCESS_REFUSALS.notInServer(target.id));
-      if (kind === 'blocked' && (facts?.administrator === true || facts?.guildOwner === true)) {
+      if (
+        kind === 'blocked' &&
+        (target.administrator === true ||
+          target.guildOwner === true ||
+          facts?.administrator === true ||
+          facts?.guildOwner === true)
+      ) {
         return fail(ACCESS_REFUSALS.unblockable(target.id));
       }
 
@@ -177,10 +192,20 @@ export class AccessCommands {
       );
       switch (result.status) {
         case 'applied':
-        case 'unchanged':
-          sync.updated += 1;
-          if (opts.memberId && result.movedOut.includes(opts.memberId)) sync.movedTarget = true;
+        case 'unchanged': {
+          const moved = opts.memberId !== undefined && result.movedOut.includes(opts.memberId);
+          // A room that already held the entry, or where the entry has no effect (a
+          // trusted member in a room that is open to everyone), had no member's overwrite
+          // written, and saying "I've applied it" for that would be false. It counts only
+          // when the member's own overwrite changed (any member's, for a `clear`) or they
+          // were moved out, which is something that happened. The write also holds the
+          // bot's allow and the room's record, which say nothing about this edit.
+          const changed = result.changedMemberIds ?? [];
+          const touched = opts.memberId ? changed.includes(opts.memberId) : changed.length > 0;
+          if (touched || moved) sync.updated += 1;
+          if (moved) sync.movedTarget = true;
           break;
+        }
         case 'deferred':
           sync.queued += 1;
           break;

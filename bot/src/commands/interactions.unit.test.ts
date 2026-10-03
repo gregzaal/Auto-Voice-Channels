@@ -128,6 +128,8 @@ interface FakeInteractionOpts {
   uploadedFile?: { url: string; size: number };
   /** The cached bot member's nickname, which the name modal prefills from. */
   botNickname?: string;
+  /** `guild.ownerId`, which the guild always knows, cached members or not. */
+  guildOwnerId?: string;
 }
 
 /** The bot's own guild member, with only what `/botprofile` reads. */
@@ -172,6 +174,7 @@ function fakeInteraction(opts: FakeInteractionOpts) {
             },
     locale: opts.locale,
     guild: {
+      ownerId: opts.guildOwnerId,
       members: {
         cache: {
           get: () =>
@@ -1473,6 +1476,48 @@ describe('registerInteractionHandler (/access)', () => {
       },
     );
 
+    /**
+     * A member the bot has not cached is not in `guild.members.cache`, so the service
+     * cannot tell it an Administrator or the owner is one. What Discord resolved with
+     * the interaction (the member's permissions, in either shape it arrives in) and the
+     * guild's owner id (known with no member cache at all) are what the refusal reads.
+     */
+    it.each([
+      ['a cached member with Administrator', { permissions: { has: () => true } }],
+      ['a raw API member with Administrator', { permissions: '8' }],
+    ] as const)('tells the service the member holds Administrator: %s', async (_name, who) => {
+      const e = accessEnv();
+      await run(e, { subcommand: 'block', ...member({ member: who }) });
+      expect(e.access.save).toHaveBeenCalledWith(
+        'g1',
+        KAY,
+        { id: BOB, bot: false, inServer: true, administrator: true },
+        'blocked',
+      );
+    });
+
+    it('does not call a member an Administrator for permissions that are not', async () => {
+      const e = accessEnv();
+      await run(e, { subcommand: 'block', ...member({ member: { permissions: '1024' } }) });
+      expect(e.access.save).toHaveBeenCalledWith(
+        'g1',
+        KAY,
+        { id: BOB, bot: false, inServer: true },
+        'blocked',
+      );
+    });
+
+    it("tells the service when the user is the guild's owner, from the guild and not the member cache", async () => {
+      const e = accessEnv();
+      await run(e, { subcommand: 'block', guildOwnerId: BOB, ...member() });
+      expect(e.access.save).toHaveBeenCalledWith(
+        'g1',
+        KAY,
+        { id: BOB, bot: false, inServer: true, guildOwner: true },
+        'blocked',
+      );
+    });
+
     it('tells the service when the user is a bot, and when Discord resolved no member', async () => {
       const e = accessEnv();
       await run(e, { subcommand: 'trust', ...member({ bot: true }) });
@@ -1500,7 +1545,7 @@ describe('registerInteractionHandler (/access)', () => {
       expect(e.access.save).not.toHaveBeenCalled();
     });
 
-    it('/access admit says no channel when the caller is in none, and leaves the refusal to the service', async () => {
+    it('/access admit passes no channel on when the caller is in none, and leaves the refusal to the service', async () => {
       const e = accessEnv();
       const f = fakeInteraction({
         kind: 'command',
@@ -1566,15 +1611,17 @@ describe('registerInteractionHandler (/access)', () => {
       },
     );
 
-    it('puts a refusal behind the warning sign, and counts the command only when it ran', async () => {
+    it('puts a service refusal behind the warning sign, and still counts the command, which ran', async () => {
+      const countCommand = vi.fn();
       const e = accessEnv(undefined, {
         access: {
           save: vi.fn().mockResolvedValue({ ok: false, message: 'That is you.' }),
         } as never,
-        countCommand: vi.fn(),
+        countCommand,
       });
       const f = await run(e, { subcommand: 'trust', ...member() });
       expect(answer(f).content).toBe('⚠️ That is you.');
+      expect(countCommand).toHaveBeenCalledWith('access');
     });
   });
 
@@ -1913,6 +1960,45 @@ describe('registerInteractionHandler (the knock card and the kick vote)', () => 
       content: expect.stringContaining('Could not block <@bob>.'),
       components: [],
     });
+  });
+
+  /**
+   * `room_access.disabled` refuses an Always allow and says to use Approve. The card was
+   * already acknowledged, and turning it into the refusal would take Approve off it, so
+   * the owner would be told to press a button that no longer exists while the requester
+   * waits in the lobby. The refusal is for the owner alone and the card stays as it was.
+   */
+  it('keeps every button on the card when Always allow is refused and nothing was decided', async () => {
+    const refusal = {
+      ok: false,
+      message: 'Always allow is switched off for now. Use **Approve** to let them in this time.',
+      keepCard: true,
+    };
+    const c = await click('always', { result: refusal });
+    c.finish();
+    await flush();
+    expect(c.editReply).not.toHaveBeenCalled();
+    expect(c.interaction.update).not.toHaveBeenCalled();
+    expect(c.followUp).toHaveBeenCalledTimes(1);
+    expect(c.followUp).toHaveBeenCalledWith({
+      content: `⚠️ ${refusal.message}`,
+      flags: MessageFlags.Ephemeral,
+    });
+    // Nothing is posted to the lobby either: nobody was turned away.
+    expect(c.fetchChannel).not.toHaveBeenCalled();
+  });
+
+  it('still takes the buttons off the card for a failure that did decide something', async () => {
+    const c = await click('always', {
+      result: { ok: false, message: '<@bob> is on your blocked list, so I did not let them in.' },
+    });
+    c.finish();
+    await flush();
+    expect(c.editReply).toHaveBeenCalledWith({
+      content: expect.stringContaining('is on your blocked list'),
+      components: [],
+    });
+    expect(c.followUp).not.toHaveBeenCalled();
   });
 
   it('turns away a click from anyone but the owner without deferring or doing anything', async () => {

@@ -12,6 +12,7 @@ import type { CommandResult } from './commands.js';
 import type { GuildVoiceView, VoiceMember } from './types.js';
 import { describeError } from '../../ops/describeError.js';
 import {
+  OVERWRITE_MEMBER,
   OVERWRITE_ROLE,
   VIEW_CHANNEL,
   joinChannelOverwrites,
@@ -100,6 +101,8 @@ export interface PrivacyServiceDeps {
    * move on the card. It is deliberately not consulted by `makePrivate`, a vote's kick or
    * a creation: those are existing features whose rollback is a deploy, and a switch that
    * quietly stopped locking a room would be a worse fault than the one it was thrown for.
+   * They, `makePublic` and `unhide` therefore still write the creator's saved lists as
+   * part of their own change, so this does not stop every write of a saved list.
    */
   roomAccessDisabled?: () => Promise<boolean>;
 }
@@ -137,6 +140,13 @@ export type AccessOutcome =
   | { status: 'not_ready' | 'gone' | 'missing' | 'unreadable' }
   | { status: 'failed'; error: unknown };
 
+/**
+ * A knock decision's result. `keepCard` means nothing was decided (the lever refused
+ * an Always allow, so the owner can still press Approve), and a caller that turned the
+ * card into the result would strip the buttons that reply points at.
+ */
+export type JoinDecisionResult = CommandResult & { keepCard?: true };
+
 /** What {@link PrivacyService.applyAccessLists} did, for a caller that is not a command. */
 export interface AccessApplyResult {
   /**
@@ -150,6 +160,13 @@ export interface AccessApplyResult {
   movedOut: string[];
   /** Roles the plan could not edit and left as they were. */
   skippedRoleIds: string[];
+  /**
+   * Set on `applied` and `unchanged`: the members whose own overwrite was written to the
+   * room or taken off it. `applied` alone does not say that anybody's was, because the
+   * write also covers the bot's allow and the room's record, and a trusted member in a
+   * room that is open to everyone has no overwrite at all.
+   */
+  changedMemberIds?: string[];
   error?: unknown;
 }
 
@@ -183,6 +200,11 @@ interface ChangeInput {
   ownerId: string | null;
   /** The creator's lists, when the caller has already read them. */
   lists?: RoomLists;
+  /**
+   * The caller only takes entries away, so the plan may not add the moderator role: a
+   * hidden room keeps the one it recorded, whatever the server's setting says now.
+   */
+  revokeOnly?: boolean;
   /** The "⇩ Join" channel's name, asked only when one has to be made. */
   joinName: () => Promise<string>;
   /**
@@ -558,11 +580,13 @@ export class PrivacyService {
    * and writes nothing.
    *
    * **`room_access.disabled` skips it** (`reason: 'disabled'`), which is what keeps a
-   * handover, a knock card's Block and the sweep from applying lists while the lever is
-   * on. `revokeOnly` is for the caller that is TAKING ENTRIES AWAY (`/access remove` and
-   * `clear`): it is never skipped, and it applies only what the room already records, so
-   * an entry the lists hold but the room does not is not added by it. The lever never
-   * stands between a member and the removal of something they put there.
+   * knock card's Block and the sweep from applying lists while the lever is on.
+   * `revokeOnly` is for the caller that is TAKING ENTRIES AWAY (`/access remove` and
+   * `clear`, and a handover while the lever is on): it is never skipped, and it adds
+   * nothing to the room. It applies only the entries the room already records, and a
+   * hidden room keeps the moderator role it recorded rather than the one the server has
+   * set now. The lever never stands between a member and the removal of something they
+   * put there.
    */
   async applyAccessLists(
     guildId: string,
@@ -617,6 +641,7 @@ export class PrivacyService {
         ownerId: row.ownerId,
         lists,
         joinName: () => this.ownerJoinName(guildId, row),
+        ...(opts.revokeOnly ? { revokeOnly: true } : {}),
       });
       switch (outcome.status) {
         case 'applied':
@@ -625,6 +650,10 @@ export class PrivacyService {
             status: outcome.status,
             movedOut: outcome.movedOut,
             skippedRoleIds: outcome.plan.skippedRoleIds,
+            changedMemberIds: [
+              ...outcome.plan.diff.upserts.filter((o) => o.type === OVERWRITE_MEMBER),
+              ...outcome.plan.diff.deletes.filter((o) => o.type === OVERWRITE_MEMBER),
+            ].map((o) => o.id),
           };
         case 'deferred':
           return { status: 'deferred', movedOut: [], skippedRoleIds: outcome.plan.skippedRoleIds };
@@ -745,12 +774,14 @@ export class PrivacyService {
     joinChannelId: string,
     requesterId: string,
     always = false,
-  ): Promise<CommandResult> {
+  ): Promise<JoinDecisionResult> {
     const ctx = await this.deps.joinChannels.get(joinChannelId);
     if (!ctx) return fail('That request has expired.');
     // A new entry on a saved list, so the lever stops it. A plain approval is not an
     // entry direction (it is one person, this room, and dies with it) and goes ahead.
-    if (always && (await this.accessPaused())) return fail(say.alwaysPaused);
+    // Nothing was decided, and the reply sends the owner to Approve, so the card has to
+    // keep it: `keepCard` is what stops the router turning the card into this refusal.
+    if (always && (await this.accessPaused())) return { ...fail(say.alwaysPaused), keepCard: true };
     // A card outlives the decision that made it stale: the owner blocks a knock, then
     // approves the same person's second card, or the room votes them out in between.
     // A grant here would replace the deny the block left, so a barred member is refused.
@@ -892,7 +923,15 @@ export class PrivacyService {
     } finally {
       // Whether or not the companion could be renamed: who may enter the room does not
       // wait on what its lobby is called. Never throws, so it cannot hide the error above.
-      if (opts.handover) await this.applyAccessLists(guildId, secondaryChannelId);
+      // While the lever is on the recipient's lists are not APPLIED, but the giver's
+      // entries still come off: taking them away is a revoke, which the lever never
+      // holds back, and leaving them would keep the giver's guests in a room the giver
+      // gave away until somebody next edits a list.
+      if (opts.handover) {
+        await this.applyAccessLists(guildId, secondaryChannelId, {
+          revokeOnly: await this.accessPaused(),
+        });
+      }
     }
   }
 
@@ -1330,10 +1369,14 @@ export class PrivacyService {
     const lists = input.lists ?? (await this.listsFor(guildId, row, record));
 
     // The moderator role sees a hidden room (View only), unless it has been deleted,
-    // in which case the grant would fail the write with an error about a role.
+    // in which case the grant would fail the write with an error about a role. A caller
+    // that only takes entries away keeps the role the room recorded: a setting changed
+    // since the hide would otherwise be GRANTED here, which is an addition.
     let viewerRoleId: string | null = null;
     if (to === 'hidden') {
-      const configured = (await this.deps.moderatorRoleId?.(guildId)) ?? null;
+      const configured = input.revokeOnly
+        ? (record?.viewerRoleId ?? null)
+        : ((await this.deps.moderatorRoleId?.(guildId)) ?? null);
       if (
         configured &&
         configured !== guildId &&

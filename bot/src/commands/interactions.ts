@@ -3416,6 +3416,12 @@ Already subscribed? Add the new server ` +
           ? deps.privacy.approveJoin(joinChannelId, requesterId, true)
           : deps.privacy.denyJoin(joinChannelId, requesterId, action === 'block'),
     );
+    // Nothing was decided (the lever refused an Always allow, and the answer says to use
+    // Approve), so the card keeps every button and the refusal is for the owner alone.
+    if (!result.ok && 'keepCard' in result && result.keepCard) {
+      await interaction.followUp({ content: formatResult(result), flags: MessageFlags.Ephemeral });
+      return;
+    }
     await interaction.editReply({
       content: formatResult(result),
       components: [],
@@ -4741,11 +4747,25 @@ async function replyAccess(
  * about the account (a bot) and about membership (Discord resolves a member only for
  * somebody who is in this server, so a user picked by id alone has none). `null` when
  * the option carries no user, which only a hand-built request sends.
+ *
+ * Also what Discord's answer says about the two members a block cannot stop: the
+ * resolved member's permissions (a `GuildMember` when the guild is cached, the raw API
+ * member when not) and the guild's owner id, which needs no member cache. Neither is
+ * a reason to refuse here, only facts for the service to refuse on.
  */
 function pickedMember(interaction: ChatInputCommandInteraction): AccessTarget | null {
   const option = interaction.options.get('member');
   if (!option?.user) return null;
-  return { id: option.user.id, bot: option.user.bot === true, inServer: option.member != null };
+  const member = option.member;
+  return {
+    id: option.user.id,
+    bot: option.user.bot === true,
+    inServer: member != null,
+    ...(member && 'permissions' in member && carriesAdministrator(member.permissions)
+      ? { administrator: true }
+      : {}),
+    ...(interaction.guild?.ownerId === option.user.id ? { guildOwner: true } : {}),
+  };
 }
 
 /**
@@ -4799,6 +4819,19 @@ function carriesManageChannels(permissions: unknown): boolean {
   return (
     bits.has(PermissionFlagsBits.ManageChannels) || bits.has(PermissionFlagsBits.Administrator)
   );
+}
+
+/**
+ * Whether a resolved permission set holds Administrator, which no channel overwrite can
+ * stop. Takes the same two shapes as {@link carriesManageChannels}.
+ */
+function carriesAdministrator(permissions: unknown): boolean {
+  if (permissions === undefined || permissions === null) return false;
+  const bits =
+    typeof permissions === 'object' && 'has' in permissions
+      ? (permissions as { has: (permission: bigint) => boolean })
+      : new PermissionsBitField(permissions as never);
+  return bits.has(PermissionFlagsBits.Administrator);
 }
 
 /**

@@ -10,6 +10,12 @@ import { MAX_SAVED_BLOCKED, MAX_SAVED_TRUSTED, type MemberAccessKind } from '@av
  * says so. A block never stops an Administrator or the server's owner, because no
  * overwrite can: the replies that can be read as promising otherwise say it plainly.
  *
+ * **"The rooms you create" is a promise the create-path hook keeps, and it has not
+ * landed.** Until a new room has its creator's lists applied as it is made, a saved block
+ * reaches the rooms that already exist, a room when it is locked or hidden, and one that
+ * changes hands, but not a public room created after the entry was saved. This copy and
+ * the command descriptions that say the same must not be deployed ahead of that hook.
+ *
  * Replies are ephemeral and are sent with mentions suppressed, so a mention of the
  * person on a list pings nobody.
  */
@@ -105,6 +111,7 @@ export interface RoomSync {
   rooms: number;
   /** How many of them this reply left alone because it stops at a cap. */
   capped: number;
+  /** Rooms the edit changed. A room that already held the entry, or that it does nothing for, is not one. */
   updated: number;
   /** Discord has queued the change and it has not landed. */
   queued: number;
