@@ -75,17 +75,24 @@ export type OverwriteBit = 'allow' | 'deny' | 'none';
 /**
  * `@everyone`'s View and Connect before the room left public. Every field is
  * optional and an absent one means UNKNOWN, which is not `none` (a known absence).
+ *
+ * A type alias and not an interface, because core's record schema is `passthrough`
+ * and so carries an index signature, which an interface is not assignable to: the
+ * facts could not be merged into the stored record without a cast.
  */
-export interface AccessBaseline {
+export type AccessBaseline = {
   view?: OverwriteBit | undefined;
   connect?: OverwriteBit | undefined;
-}
+};
 
-export interface NeutralisedRole {
+export type NeutralisedRole = {
   roleId: string;
-  /** What the role's View bit was before it was flipped to deny. */
+  /**
+   * What the role's View bit was before this build changed it: an allow a hide
+   * flipped to a deny, or a deny the moderator grant flipped to an allow.
+   */
   view: OverwriteBit;
-}
+};
 
 export interface AccessPlanInput {
   /** The guild id, which is also `@everyone`'s role id. */
@@ -100,7 +107,16 @@ export interface AccessPlanInput {
    * a list to a room that is not changing mode.
    */
   previousMode: AccessMode;
-  /** The room's stored access record, or null when it has none. Only the fields named below are read. */
+  /**
+   * The room's stored access record, or null when it has none. Only the fields
+   * named below are read.
+   *
+   * **Null means the room has NO record, not that one could not be read.** A caller
+   * holding `readRoomAccess(...) === { readable: false }` (a shape a newer build
+   * wrote) must refuse to plan: with null this plans a hidden room as if its
+   * baseline, flipped roles and grants were unknown, and the exit then clears
+   * `@everyone` View instead of restoring it.
+   */
   record: RoomAccess | null;
   /** The room's current owner, or null for an ownerless room. Never blocked. */
   ownerId: string | null;
@@ -120,24 +136,29 @@ export interface AccessPlanInput {
    */
   leaveRoleId?: string | null | undefined;
   /**
-   * Roles the caller knows the bot cannot edit (above its own top role). They are
-   * left as they are, and a View allow on one is reported as defeating the hide:
-   * writing it would fail the whole bulk request, so it is not attempted.
+   * Roles the caller knows the bot cannot edit (above its own top role). Writing
+   * an overwrite for one would fail the whole bulk request, so none is attempted:
+   * a hide that one of them would defeat is refused (`role_defeats_hide`), and a
+   * restore, a take-back or a grant that needs one is skipped and reported in
+   * `skippedRoleIds`, leaving that role as it is.
    */
   uneditableRoleIds?: readonly string[] | undefined;
 }
 
 /**
- * What to record in the room's access record for this plan.
+ * What the room's access record should say.
  *
- * **Record what a plan adds BEFORE writing it, and what it takes back AFTER.** A PUT
- * is idempotent, so a replay converges, but only if the record already names every
- * baseline field, flipped role and moderator grant the channel depends on: a crash
- * between a flip and its record leaves a role denied that nothing will ever put back.
- * The same fields are what a restore READS, so clearing them before the restore has
- * landed leaves a replay with nothing to restore from.
+ * **A plan gives two of these, because a record has to be written twice.** A PUT is
+ * idempotent, so a replay converges, but only if the record already names everything
+ * the channel depends on: a crash between a flip and its record leaves a role denied
+ * that nothing will ever put back, and a member whose take-back has not landed has to
+ * stay named until it has, or nothing will ever take it back.
  *
- * Only the fields this plan decides are here. A caller merges them into the stored
+ *  - `AccessPlan.factsBeforeWrite` is persisted BEFORE the write. It is the union of
+ *    what the record already holds and what the plan adds.
+ *  - `AccessPlan.facts` is persisted once the write has landed: the final state.
+ *
+ * Only the fields a plan decides are here. A caller merges them into the stored
  * record and does not replace it, so a field a newer build added survives the write.
  */
 export interface AccessFacts {
@@ -154,7 +175,10 @@ export interface AccessFacts {
    * would otherwise read its own `@everyone` deny back as the original.
    */
   baselineCaptured: AccessBaseline | null;
-  /** Role overwrites whose View allow is now a deny because of the hide, to put back later. */
+  /**
+   * Role overwrites this build changed and has to put back: a View allow a hide
+   * flipped to a deny, or a View deny the moderator grant flipped to an allow.
+   */
   neutralised: NeutralisedRole[];
   /** The moderator role this plan leaves holding View (written by us), or null. */
   viewerRoleId: string | null;
@@ -162,7 +186,7 @@ export interface AccessFacts {
   trusted: string[];
   admitted: string[];
   blocked: string[];
-  /** Whether the room is really hidden: the mode is hidden and no role still defeats it. */
+  /** Whether the room is hidden. */
   hidden: boolean;
 }
 
@@ -179,15 +203,23 @@ export type AccessPlan =
       /** The complete overwrite set the channel should hold. */
       desired: ResolvedOverwrite[];
       diff: OverwriteDiff;
+      /** The record once the write has landed. */
       facts: AccessFacts;
       /**
-       * True only when, after neutralising, no role other than the bot's own and the
-       * moderator role still allows View. The caller must not tell the owner the room
-       * is hidden on any other basis.
+       * The record to persist BEFORE writing: everything stored plus everything this
+       * plan adds, so a write that fails or is cut short still leaves every member,
+       * role and grant it was about to take back named, for the converge pass to take
+       * back. Only the moderator role is single-valued: when it is being CHANGED the
+       * old role is named until the write lands, because the leak that matters is a
+       * role that can still see a hidden room.
        */
-      effectiveHidden: boolean;
-      /** Roles that still defeat the hide because they could not be neutralised. */
-      defeatedBy: string[];
+      factsBeforeWrite: AccessFacts;
+      /**
+       * Roles whose overwrite this plan would have changed, and did not, because the
+       * caller says the bot cannot edit them. They stay as they are and the record
+       * keeps naming them. A caller says so rather than reporting a clean result.
+       */
+      skippedRoleIds: string[];
     }
   | {
       ok: false;
@@ -195,6 +227,19 @@ export type AccessPlan =
       /** How many overwrites the plan would have produced. */
       count: number;
       cap: number;
+    }
+  | {
+      /**
+       * A hide that a role the bot cannot edit would defeat: its View allow beats the
+       * `@everyone` deny, so the room would stay visible to everyone holding it.
+       * Nothing is planned, so nothing is written and there is nothing to take back
+       * (a hide that did half the work would leave `@everyone` View denied on a room
+       * recorded as merely locked, and a later `/public` could not restore it).
+       */
+      ok: false;
+      reason: 'role_defeats_hide';
+      /** The roles that cannot be neutralised, sorted. */
+      defeatedBy: string[];
     };
 
 const key = (type: number, id: string): string => `${type}:${id}`;
@@ -239,11 +284,15 @@ const GRANTS: Record<
   { owner: bigint; occupant: bigint; trusted: bigint; admitted: bigint }
 > = {
   public: { owner: 0n, occupant: 0n, trusted: 0n, admitted: 0n },
+  // Connect alone, for everyone: a lock never touches View, so what a member can
+  // SEE is still the creator channel's own rule. Giving a trusted member View as
+  // well would let an owner's friend see a room that a role-gated server hides
+  // from them, which is the admin's rule to relax and not the owner's.
   locked: {
     owner: CONNECT,
     occupant: CONNECT,
-    trusted: VIEW_AND_CONNECT,
-    admitted: VIEW_AND_CONNECT,
+    trusted: CONNECT,
+    admitted: CONNECT,
   },
   // A hidden room needs View in the same overwrite: Connect alone leaves the
   // member connected but the room gone from their client (measured 2026-10-03).
@@ -383,28 +432,67 @@ export function planAccess(input: AccessPlanInput): AccessPlan {
     setBit(touch(OVERWRITE_MEMBER, id), VIEW_AND_CONNECT, 'deny');
   }
 
+  /**
+   * Role overwrites a PREVIOUS plan changed, and that are still how it left them.
+   *
+   * An entry is still ours while the role is denied View (the flip is still there)
+   * or while it is the moderator role holding the allow it was given. One a human
+   * has since changed or deleted is no longer ours to put back, and is never
+   * recreated. Read from the channel as it is NOW, before anything below edits it.
+   */
+  const priorViewer = record?.viewerRoleId ?? null;
+  const aliveEntries = new Map<string, NeutralisedRole>();
+  for (const entry of record?.neutralised ?? []) {
+    if (aliveEntries.has(entry.roleId)) continue;
+    const o = work.get(key(OVERWRITE_ROLE, entry.roleId));
+    if (!o) continue;
+    const grantedView = entry.roleId === priorViewer && (o.allow & VIEW_CHANNEL) !== 0n;
+    if ((o.deny & VIEW_CHANNEL) !== 0n || grantedView) aliveEntries.set(entry.roleId, entry);
+  }
+  /** Roles this plan would have changed but may not, because the bot cannot edit them. */
+  const skipped = new Set<string>();
+
   // The moderator role sees a hidden room (View only: joining silently is more
   // than "can see"). Manage Channels alone does not reveal one.
-  const priorViewer = record?.viewerRoleId ?? null;
-  const targetViewer = mode === 'hidden' ? viewerRoleId : null;
-  if (priorViewer && priorViewer !== targetViewer && priorViewer !== everyoneId) {
-    const k = key(OVERWRITE_ROLE, priorViewer);
-    const o = work.get(k);
-    if (o) {
-      touched.add(k);
-      o.allow &= ~VIEW_CHANNEL;
-    }
-  }
+  let targetViewer = mode === 'hidden' ? viewerRoleId : null;
   let viewerFact: string | null = null;
+  if (priorViewer && priorViewer !== targetViewer && priorViewer !== everyoneId) {
+    if (uneditable.has(priorViewer)) {
+      // It cannot be taken back, so it stays named and nothing else takes its place
+      // this round: a second viewer on a room would be one more role to forget.
+      skipped.add(priorViewer);
+      viewerFact = priorViewer;
+      targetViewer = null;
+    } else if (!aliveEntries.has(priorViewer)) {
+      const k = key(OVERWRITE_ROLE, priorViewer);
+      const o = work.get(k);
+      if (o) {
+        touched.add(k);
+        o.allow &= ~VIEW_CHANNEL;
+      }
+    }
+    // A role that was ALSO flipped by a hide is not simply cleared: the neutralised
+    // handling below puts it back to what that hide left, or to the original.
+  }
+  /** A moderator role that held a View deny, which the grant is about to flip. */
+  let viewerWasDenied: string | null = null;
   if (targetViewer) {
-    const existing = work.get(key(OVERWRITE_ROLE, targetViewer));
-    if (existing && (existing.allow & VIEW_CHANNEL) !== 0n) {
-      // Already allowed. It is ours only if we recorded writing it: an inherited
-      // allow is somebody else's and must survive the setting changing.
+    if (uneditable.has(targetViewer)) {
+      skipped.add(targetViewer);
       viewerFact = priorViewer === targetViewer ? targetViewer : null;
     } else {
-      setBit(touch(OVERWRITE_ROLE, targetViewer), VIEW_CHANNEL, 'allow');
-      viewerFact = targetViewer;
+      const existing = work.get(key(OVERWRITE_ROLE, targetViewer));
+      if (existing && (existing.allow & VIEW_CHANNEL) !== 0n) {
+        // Already allowed. It is ours only if we recorded writing it: an inherited
+        // allow is somebody else's and must survive the setting changing.
+        viewerFact = priorViewer === targetViewer ? targetViewer : null;
+      } else {
+        if (existing && (existing.deny & VIEW_CHANNEL) !== 0n && !aliveEntries.has(targetViewer)) {
+          viewerWasDenied = targetViewer;
+        }
+        setBit(touch(OVERWRITE_ROLE, targetViewer), VIEW_CHANNEL, 'allow');
+        viewerFact = targetViewer;
+      }
     }
   }
 
@@ -413,17 +501,26 @@ export function planAccess(input: AccessPlanInput): AccessPlan {
    * hide in a role-gated server is a no-op unless those allows are flipped. Each is
    * recorded with what it was, and put back when the room stops being hidden.
    */
-  let neutralised: NeutralisedRole[] = [];
+  const neutralised: NeutralisedRole[] = [];
   const defeatedBy: string[] = [];
-  const storedNeutralised = record?.neutralised ?? [];
   if (mode === 'hidden') {
     const spared = new Set([everyoneId, viewerRoleId, leaveRoleId].filter((id) => id !== null));
-    // What an earlier plan flipped stays recorded while it is still a deny. One a
-    // human has since changed is no longer ours to put back.
-    for (const entry of storedNeutralised) {
-      const o = work.get(key(OVERWRITE_ROLE, entry.roleId));
-      if (o && (o.deny & VIEW_CHANNEL) !== 0n && !spared.has(entry.roleId)) neutralised.push(entry);
+    // What an earlier plan changed stays recorded while it is still ours. A role
+    // that was the moderator grant and no longer is goes back to the deny a hide
+    // left it, so the room is still hidden from it.
+    for (const entry of aliveEntries.values()) {
+      if (entry.roleId === everyoneId || entry.roleId === leaveRoleId) continue;
+      neutralised.push(entry);
+      if (entry.roleId === viewerFact) continue;
+      const k = key(OVERWRITE_ROLE, entry.roleId);
+      const o = work.get(k)!;
+      if ((o.deny & VIEW_CHANNEL) === 0n) {
+        touched.add(k);
+        setBit(o, VIEW_CHANNEL, 'deny');
+      }
     }
+    // The moderator grant flipped a deny nobody else had recorded: say what it was.
+    if (viewerWasDenied) neutralised.push({ roleId: viewerWasDenied, view: 'deny' });
     for (const o of work.values()) {
       if (o.type !== OVERWRITE_ROLE || spared.has(o.id)) continue;
       if ((o.allow & VIEW_CHANNEL) === 0n) continue;
@@ -436,17 +533,25 @@ export function planAccess(input: AccessPlanInput): AccessPlan {
       setBit(o, VIEW_CHANNEL, 'deny');
     }
     neutralised.sort((a, b) => compareIds(a.roleId, b.roleId));
-  } else {
-    // Put back only what is still the flip we made. A role overwrite a human has
-    // deleted or changed since is left as they left it, never recreated.
-    for (const entry of storedNeutralised) {
-      const k = key(OVERWRITE_ROLE, entry.roleId);
-      const o = work.get(k);
-      if (!o || (o.deny & VIEW_CHANNEL) === 0n) continue;
-      touched.add(k);
-      setBit(o, VIEW_CHANNEL, entry.view);
+    // Refused whole. A role the bot cannot edit still shows the room, so a hide
+    // that went ahead would be a lock with `@everyone` View denied on top, which a
+    // later unhide that believes it is leaving a lock would never restore.
+    if (defeatedBy.length > 0) {
+      return { ok: false, reason: 'role_defeats_hide', defeatedBy: sortedUnique(defeatedBy) };
     }
-    neutralised = [];
+  } else {
+    // Put back only what is still the flip we made, and only where the bot may.
+    for (const entry of aliveEntries.values()) {
+      if (uneditable.has(entry.roleId)) {
+        skipped.add(entry.roleId);
+        neutralised.push(entry);
+        continue;
+      }
+      const k = key(OVERWRITE_ROLE, entry.roleId);
+      touched.add(k);
+      setBit(work.get(k)!, VIEW_CHANNEL, entry.view);
+    }
+    neutralised.sort((a, b) => compareIds(a.roleId, b.roleId));
   }
 
   /**
@@ -486,32 +591,54 @@ export function planAccess(input: AccessPlanInput): AccessPlan {
     };
   }
 
-  const effectiveHidden = mode === 'hidden' && defeatedBy.length === 0;
   const keptBaseline = Object.keys(baseline).length > 0 ? baseline : null;
+  const facts: AccessFacts = {
+    baseline: mode === 'public' ? null : keptBaseline,
+    baselineCaptured: Object.keys(captured).length > 0 ? captured : null,
+    neutralised,
+    viewerRoleId: viewerFact,
+    // Public leaves trusted and admitted overwrites on the room, so the record
+    // keeps them too, but never a member who has since been blocked.
+    trusted:
+      mode === 'public'
+        ? sortedUnique((record?.trusted ?? []).filter((id) => !blocked.has(id)))
+        : sortedUnique(trusted),
+    admitted:
+      mode === 'public'
+        ? sortedUnique((record?.admitted ?? []).filter((id) => !blocked.has(id)))
+        : sortedUnique(admitted),
+    blocked: sortedUnique(blocked),
+    hidden: mode === 'hidden',
+  };
+
+  // What the record must say BEFORE the write: everything it held and everything
+  // this plan adds. Whatever the plan takes back stays named until it has.
+  const named = new Map<string, NeutralisedRole>();
+  for (const entry of [...aliveEntries.values(), ...neutralised]) {
+    if (!named.has(entry.roleId)) named.set(entry.roleId, entry);
+  }
+  const factsBeforeWrite: AccessFacts = {
+    // Kept for a plan that goes public too: its restore reads it, and has not landed.
+    baseline: keptBaseline,
+    baselineCaptured: facts.baselineCaptured,
+    neutralised: [...named.values()].sort((a, b) => compareIds(a.roleId, b.roleId)),
+    // Single-valued, so a CHANGE of moderator role names the old one: a role that can
+    // still see a hidden room is the leak, and one left holding a stray View on a room
+    // that is no longer hidden is not.
+    viewerRoleId: priorViewer && priorViewer !== everyoneId ? priorViewer : viewerFact,
+    trusted: sortedUnique([...(record?.trusted ?? []), ...facts.trusted]),
+    admitted: sortedUnique([...(record?.admitted ?? []), ...facts.admitted]),
+    blocked: sortedUnique([...(record?.blocked ?? []), ...facts.blocked]),
+    hidden: (record?.hidden ?? false) || facts.hidden,
+  };
+
   return {
     ok: true,
     desired,
     diff: diffOverwrites(input.current, desired, { botId, guildId }),
-    facts: {
-      baseline: mode === 'public' ? null : keptBaseline,
-      baselineCaptured: Object.keys(captured).length > 0 ? captured : null,
-      neutralised,
-      viewerRoleId: viewerFact,
-      // Public leaves trusted and admitted overwrites on the room, so the record
-      // keeps them too, but never a member who has since been blocked.
-      trusted:
-        mode === 'public'
-          ? sortedUnique((record?.trusted ?? []).filter((id) => !blocked.has(id)))
-          : sortedUnique(trusted),
-      admitted:
-        mode === 'public'
-          ? sortedUnique((record?.admitted ?? []).filter((id) => !blocked.has(id)))
-          : sortedUnique(admitted),
-      blocked: sortedUnique(blocked),
-      hidden: effectiveHidden,
-    },
-    effectiveHidden,
-    defeatedBy: sortedUnique(defeatedBy),
+    facts,
+    factsBeforeWrite,
+    skippedRoleIds: sortedUnique(skipped),
   };
 }
 
@@ -554,4 +681,26 @@ export function diffOverwrites(
       .filter((o) => !after.has(key(o.type, o.id)))
       .map(({ id, type }) => ({ id, type })),
   };
+}
+
+/**
+ * `desired` without what it asks for the given members, who are not in the server.
+ *
+ * A member who already has an overwrite keeps exactly that one: the set is a full
+ * replacement and an overwrite for somebody who has left is not ours to delete (a
+ * block that outlives their membership still blocks them if they come back). A
+ * member who has none gets none.
+ */
+export function leaveOutMembers(
+  desired: readonly ResolvedOverwrite[],
+  previous: readonly ResolvedOverwrite[],
+  members: ReadonlySet<string>,
+): ResolvedOverwrite[] {
+  if (members.size === 0) return desired.map((o) => ({ ...o }));
+  const before = new Map(previous.map((o) => [key(o.type, o.id), o]));
+  return desired.flatMap((o) => {
+    if (o.type !== OVERWRITE_MEMBER || !members.has(o.id)) return [{ ...o }];
+    const was = before.get(key(o.type, o.id));
+    return was ? [{ ...was }] : [];
+  });
 }

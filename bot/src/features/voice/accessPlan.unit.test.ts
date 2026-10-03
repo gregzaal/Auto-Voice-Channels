@@ -1,3 +1,4 @@
+import type { RoomAccess } from '@avc/core';
 import { OverwriteType, PermissionFlagsBits } from 'discord.js';
 import { describe, expect, it } from 'vitest';
 import {
@@ -8,10 +9,11 @@ import {
   MOVE_MEMBERS,
   OVERWRITE_MEMBER,
   OVERWRITE_ROLE,
-  SINGLE_WRITE_MAX,
   VIEW_CHANNEL,
   diffOverwrites,
+  leaveOutMembers,
   planAccess,
+  type AccessFacts,
   type AccessMode,
   type AccessPlan,
   type AccessPlanInput,
@@ -87,6 +89,23 @@ function plan(
 
 const find = (p: Planned, key: string) => view(p.desired)[key];
 
+/**
+ * The record a caller holds after persisting a set of facts. Typed as the stored
+ * record on purpose: that the facts are assignable to it, with no cast, is what lets
+ * a caller merge them in.
+ */
+function recordOf(facts: AccessFacts): RoomAccess {
+  return {
+    ...(facts.baseline ? { baseline: facts.baseline } : {}),
+    neutralised: facts.neutralised,
+    ...(facts.viewerRoleId ? { viewerRoleId: facts.viewerRoleId } : {}),
+    trusted: facts.trusted,
+    admitted: facts.admitted,
+    blocked: facts.blocked,
+    hidden: facts.hidden,
+  };
+}
+
 describe('constants', () => {
   /** This file imports nothing from discord.js, so a typo here would be invisible without this. */
   it('are the bits and types Discord uses', () => {
@@ -117,12 +136,14 @@ describe('public to locked', () => {
       [m(BOT)]: { allow: BOT_ACCESS, deny: 0n },
       [m(OWNER)]: { allow: C, deny: 0n },
       [m(ALICE)]: { allow: C, deny: 0n },
-      [m(BOB)]: { allow: VC, deny: 0n },
-      [m(DAVE)]: { allow: VC, deny: 0n },
+      // Connect alone: a lock never touches View, so what a trusted or admitted
+      // member can see stays the creator channel's rule (a role-gated server's
+      // @everyone View deny is not the owner's to relax).
+      [m(BOB)]: { allow: C, deny: 0n },
+      [m(DAVE)]: { allow: C, deny: 0n },
       [m(CAROL)]: { allow: 0n, deny: VC },
       [r(GUILD)]: { allow: 0n, deny: C },
     });
-    expect(p.effectiveHidden).toBe(false);
     expect(p.facts.hidden).toBe(false);
   });
 
@@ -205,9 +226,8 @@ describe('public to hidden', () => {
       [m(CAROL)]: { allow: 0n, deny: VC },
       [r(GUILD)]: { allow: 0n, deny: VC },
     });
-    expect(p.effectiveHidden).toBe(true);
     expect(p.facts.hidden).toBe(true);
-    expect(p.defeatedBy).toEqual([]);
+    expect(p.skippedRoleIds).toEqual([]);
   });
 
   it('gives the moderator role View only, never Connect', () => {
@@ -242,7 +262,7 @@ describe('public to hidden', () => {
         { roleId: HELPERS, view: 'allow' },
         { roleId: MEMBERS, view: 'allow' },
       ]);
-      expect(p.effectiveHidden).toBe(true);
+      expect(p.facts.hidden).toBe(true);
     });
 
     it('handles @everyone through the baseline and never records it as a neutralised role', () => {
@@ -275,22 +295,56 @@ describe('public to hidden', () => {
       expect(find(p, r(MODS))).toEqual({ allow: V, deny: 0n });
       expect(find(p, r('botrole'))).toEqual({ allow: VC, deny: 0n });
       expect(p.facts.neutralised).toEqual([]);
-      expect(p.effectiveHidden).toBe(true);
+      expect(p.facts.hidden).toBe(true);
     });
 
-    it('reports a role it cannot edit as defeating the hide, and leaves it as it is', () => {
+    /**
+     * Refused whole and not planned half-way. A hide that went ahead with the
+     * `@everyone` deny written and the role still showing the room would be recorded
+     * as a lock, and a later /public (which restores `@everyone` View only when it
+     * is leaving a hide) would leave a room nobody but that role could see.
+     */
+    it('refuses a hide that a role it cannot edit would defeat, naming the roles', () => {
+      const result = planAccess({
+        guildId: GUILD,
+        botId: BOT,
+        current: [role('200', V), role('30', V | SPEAK), role(MEMBERS, V)],
+        mode: 'hidden',
+        previousMode: 'public',
+        record: null,
+        ownerId: OWNER,
+        occupants: [],
+        trusted: [],
+        admitted: [],
+        blocked: [],
+        uneditableRoleIds: ['200', '30'],
+      });
+      // In snowflake order, whatever order the caller listed them in.
+      expect(result).toEqual({ ok: false, reason: 'role_defeats_hide', defeatedBy: ['30', '200'] });
+    });
+
+    it('does not refuse a hide for a role it cannot edit that holds no View allow', () => {
       const p = plan({
         mode: 'hidden',
         previousMode: 'public',
-        uneditableRoleIds: ['admins-above-me'],
-        current: [role('admins-above-me', V), role(MEMBERS, V)],
+        uneditableRoleIds: ['above-me'],
+        current: [role('above-me', C | SPEAK), role('above-too', 0n, V)],
       });
-      expect(find(p, r('admins-above-me'))).toEqual({ allow: V, deny: 0n });
-      expect(find(p, r(MEMBERS))).toEqual({ allow: 0n, deny: V });
-      expect(p.defeatedBy).toEqual(['admins-above-me']);
-      expect(p.effectiveHidden).toBe(false);
-      // Not hidden, so it must not be recorded as hidden.
-      expect(p.facts.hidden).toBe(false);
+      expect(find(p, r('above-me'))).toEqual({ allow: C | SPEAK, deny: 0n });
+      expect(p.facts.hidden).toBe(true);
+    });
+
+    it('keeps, and does not refuse over, a role an earlier hide denied that has since become uneditable', () => {
+      // The flip is already on the channel: nothing is written for the role now.
+      const p = plan({
+        mode: 'hidden',
+        previousMode: 'hidden',
+        uneditableRoleIds: [MEMBERS],
+        current: [role(MEMBERS, 0n, V)],
+        record: { hidden: true, neutralised: [{ roleId: MEMBERS, view: 'allow' }] },
+      });
+      expect(p.facts.neutralised).toEqual([{ roleId: MEMBERS, view: 'allow' }]);
+      expect(p.skippedRoleIds).toEqual([]);
     });
 
     it('does not count a foreign member allow against the hide', () => {
@@ -302,14 +356,21 @@ describe('public to hidden', () => {
         current: [member('friend', V)],
       });
       expect(find(p, m('friend'))).toEqual({ allow: V, deny: 0n });
-      expect(p.effectiveHidden).toBe(true);
+      expect(p.facts.hidden).toBe(true);
     });
 
     it('is not hidden unless the mode is hidden', () => {
       const p = plan({ mode: 'locked', previousMode: 'public', current: [role(MEMBERS, V)] });
-      // Locked does not touch roles at all.
+      // Locked does not touch roles at all, and a role it cannot edit is no concern.
       expect(find(p, r(MEMBERS))).toEqual({ allow: V, deny: 0n });
-      expect(p.effectiveHidden).toBe(false);
+      expect(p.facts.hidden).toBe(false);
+      const unedited = plan({
+        mode: 'locked',
+        previousMode: 'public',
+        current: [role(MEMBERS, V)],
+        uneditableRoleIds: [MEMBERS],
+      });
+      expect(unedited.skippedRoleIds).toEqual([]);
     });
   });
 });
@@ -664,7 +725,7 @@ describe('overwrites it does not know about', () => {
       current: [member(BOB, 0n, C)],
       trusted: [BOB],
     });
-    expect(find(p, m(BOB))).toEqual({ allow: VC, deny: 0n });
+    expect(find(p, m(BOB))).toEqual({ allow: C, deny: 0n });
   });
 });
 
@@ -756,7 +817,8 @@ describe('entries an earlier plan wrote and the lists no longer name', () => {
       trusted: [CAROL],
       record: { blocked: [CAROL] },
     });
-    expect(find(p, m(CAROL))).toEqual({ allow: VC, deny: 0n });
+    // The block's deny comes off both bits, and a locked room grants Connect.
+    expect(find(p, m(CAROL))).toEqual({ allow: C, deny: 0n });
     expect(p.facts.trusted).toEqual([CAROL]);
     expect(p.facts.blocked).toEqual([]);
   });
@@ -931,6 +993,316 @@ describe('a role that was neutralised', () => {
     expect(find(p, r('a'))).toEqual({ allow: V, deny: 0n });
     expect(find(p, r('b'))).toEqual({ allow: 0n, deny: V });
     expect(find(p, r('c'))).toBeUndefined();
+  });
+});
+
+/**
+ * The moderator grant and a hide both rewrite the View bit of one role overwrite, so
+ * a role that is both has to remember what it was before either did.
+ */
+describe('a role that is neutralised and also the moderator role', () => {
+  const gated = () =>
+    plan({ mode: 'hidden', previousMode: 'public', current: [role(MEMBERS, VC)] });
+
+  function makeViewer(first: Planned) {
+    return plan({
+      mode: 'hidden',
+      previousMode: 'hidden',
+      current: first.desired,
+      record: recordOf(first.facts),
+      viewerRoleId: MEMBERS,
+    });
+  }
+
+  it('is granted View, and stays recorded with the allow it had', () => {
+    const first = gated();
+    expect(find(first, r(MEMBERS))).toEqual({ allow: C, deny: V });
+    const second = makeViewer(first);
+    expect(find(second, r(MEMBERS))).toEqual({ allow: VC, deny: 0n });
+    expect(second.facts.viewerRoleId).toBe(MEMBERS);
+    expect(second.facts.neutralised).toEqual([{ roleId: MEMBERS, view: 'allow' }]);
+  });
+
+  it('gets its original allow back when the room is unhidden', () => {
+    const second = makeViewer(gated());
+    for (const mode of ['locked', 'public'] as const) {
+      const out = plan({
+        mode,
+        previousMode: 'hidden',
+        current: second.desired,
+        record: recordOf(second.facts),
+        viewerRoleId: MEMBERS,
+      });
+      // Not View cleared, which is what taking the grant back alone would do.
+      expect(find(out, r(MEMBERS))).toEqual({ allow: VC, deny: 0n });
+      expect(out.facts.neutralised).toEqual([]);
+      expect(out.facts.viewerRoleId).toBeNull();
+    }
+  });
+
+  it('goes back to denied when it stops being the moderator role while the room is still hidden', () => {
+    const second = makeViewer(gated());
+    const third = plan({
+      mode: 'hidden',
+      previousMode: 'hidden',
+      current: second.desired,
+      record: recordOf(second.facts),
+      viewerRoleId: null,
+    });
+    expect(find(third, r(MEMBERS))).toEqual({ allow: C, deny: V });
+    expect(third.facts.neutralised).toEqual([{ roleId: MEMBERS, view: 'allow' }]);
+    expect(third.facts.viewerRoleId).toBeNull();
+  });
+
+  it('converges: planning the same thing again changes nothing', () => {
+    const second = makeViewer(gated());
+    const again = plan({
+      mode: 'hidden',
+      previousMode: 'hidden',
+      current: second.desired,
+      record: recordOf(second.facts),
+      viewerRoleId: MEMBERS,
+    });
+    expect(again.diff).toEqual({ upserts: [], deletes: [] });
+    expect(again.facts).toEqual({ ...second.facts, baselineCaptured: null });
+  });
+
+  it('puts back a View deny that the moderator grant replaced', () => {
+    const first = plan({
+      mode: 'hidden',
+      previousMode: 'public',
+      current: [role(MODS, 0n, V)],
+      viewerRoleId: MODS,
+    });
+    expect(find(first, r(MODS))).toEqual({ allow: V, deny: 0n });
+    expect(first.facts.neutralised).toEqual([{ roleId: MODS, view: 'deny' }]);
+    expect(first.facts.viewerRoleId).toBe(MODS);
+
+    const again = plan({
+      mode: 'hidden',
+      previousMode: 'hidden',
+      current: first.desired,
+      record: recordOf(first.facts),
+      viewerRoleId: MODS,
+    });
+    expect(again.diff).toEqual({ upserts: [], deletes: [] });
+
+    const unhidden = plan({
+      mode: 'locked',
+      previousMode: 'hidden',
+      current: first.desired,
+      record: recordOf(first.facts),
+      viewerRoleId: MODS,
+    });
+    expect(find(unhidden, r(MODS))).toEqual({ allow: 0n, deny: V });
+    expect(unhidden.facts.neutralised).toEqual([]);
+  });
+});
+
+/**
+ * One role above the bot's own must not fail a whole atomic write, which is all or
+ * nothing: the rest of the transition has to land and the role be reported.
+ */
+describe('a role the bot cannot edit', () => {
+  const hiddenRoom = [
+    member(BOT, BOT_ACCESS),
+    member(OWNER, VC),
+    everyone(0n, VC),
+    role(MEMBERS, C, V),
+    role(HELPERS, 0n, V),
+  ];
+  const record = {
+    hidden: true,
+    baseline: { view: 'none' as const, connect: 'none' as const },
+    neutralised: [
+      { roleId: HELPERS, view: 'allow' as const },
+      { roleId: MEMBERS, view: 'allow' as const },
+    ],
+  };
+
+  it('is left as it is on the way out, while the rest is restored', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'hidden',
+      current: hiddenRoom,
+      record,
+      uneditableRoleIds: [MEMBERS],
+    });
+    expect(find(p, r(MEMBERS))).toEqual({ allow: C, deny: V });
+    expect(find(p, r(HELPERS))).toEqual({ allow: V, deny: 0n });
+    expect(find(p, r(GUILD))).toEqual({ allow: 0n, deny: C });
+    expect(p.skippedRoleIds).toEqual([MEMBERS]);
+    // Still named, so the next plan puts it back.
+    expect(p.facts.neutralised).toEqual([{ roleId: MEMBERS, view: 'allow' }]);
+
+    const later = plan({
+      mode: 'public',
+      previousMode: 'locked',
+      current: p.desired,
+      record: recordOf(p.facts),
+    });
+    expect(find(later, r(MEMBERS))).toEqual({ allow: VC, deny: 0n });
+    expect(later.skippedRoleIds).toEqual([]);
+    expect(later.facts.neutralised).toEqual([]);
+  });
+
+  it('is skipped on the way to public too', () => {
+    const p = plan({
+      mode: 'public',
+      previousMode: 'hidden',
+      current: hiddenRoom,
+      record,
+      uneditableRoleIds: [HELPERS, MEMBERS],
+    });
+    expect(find(p, r(MEMBERS))).toEqual({ allow: C, deny: V });
+    expect(find(p, r(HELPERS))).toEqual({ allow: 0n, deny: V });
+    expect([...p.skippedRoleIds].sort()).toEqual([HELPERS, MEMBERS]);
+    expect(p.facts.neutralised).toHaveLength(2);
+    // @everyone is still restored: only the roles are held back.
+    expect(find(p, r(GUILD))).toBeUndefined();
+  });
+
+  it('keeps being named as the moderator role when its View cannot be taken back', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'hidden',
+      current: [member(BOT, BOT_ACCESS), role(MODS, V), everyone(0n, VC)],
+      record: { hidden: true, viewerRoleId: MODS, baseline: { view: 'none', connect: 'none' } },
+      uneditableRoleIds: [MODS],
+    });
+    expect(find(p, r(MODS))).toEqual({ allow: V, deny: 0n });
+    expect(p.skippedRoleIds).toEqual([MODS]);
+    expect(p.facts.viewerRoleId).toBe(MODS);
+  });
+
+  it('is not given the moderator View, and does not fail the hide', () => {
+    const p = plan({
+      mode: 'hidden',
+      previousMode: 'public',
+      viewerRoleId: MODS,
+      uneditableRoleIds: [MODS],
+    });
+    expect(find(p, r(MODS))).toBeUndefined();
+    expect(p.skippedRoleIds).toEqual([MODS]);
+    expect(p.facts.viewerRoleId).toBeNull();
+    expect(p.facts.hidden).toBe(true);
+  });
+
+  it('keeps a moderator View it wrote, when it cannot be edited and nothing changes', () => {
+    const p = plan({
+      mode: 'hidden',
+      previousMode: 'hidden',
+      current: [member(BOT, BOT_ACCESS), member(OWNER, VC), role(MODS, V), everyone(0n, VC)],
+      record: { hidden: true, viewerRoleId: MODS, baseline: { view: 'none', connect: 'none' } },
+      viewerRoleId: MODS,
+      uneditableRoleIds: [MODS],
+    });
+    expect(p.diff).toEqual({ upserts: [], deletes: [] });
+    expect(p.facts.viewerRoleId).toBe(MODS);
+  });
+});
+
+/**
+ * A record is written twice, and the first write has to hold everything the second
+ * will take away, or a write that fails in between leaves a grant nothing names.
+ */
+describe('the record before the write', () => {
+  const channel = [
+    member(BOT, BOT_ACCESS),
+    member(OWNER, VC),
+    member(ALICE, VC),
+    member(BOB, VC),
+    everyone(0n, VC),
+  ];
+  const inputs = {
+    mode: 'hidden' as const,
+    previousMode: 'hidden' as const,
+    current: channel,
+    occupants: [ALICE],
+    trusted: [ALICE],
+    record: {
+      hidden: true,
+      baseline: { view: 'none' as const, connect: 'none' as const },
+      trusted: [ALICE, BOB],
+      admitted: [DAVE],
+    },
+  };
+
+  it('keeps naming a member the plan takes back, until it has', () => {
+    const p = plan(inputs);
+    expect(p.facts.trusted).toEqual([ALICE]);
+    expect([...p.factsBeforeWrite.trusted].sort()).toEqual([ALICE, BOB]);
+    // An admitted member too: the room's admissions are dropped when it is rebuilt.
+    expect(p.facts.admitted).toEqual([]);
+    expect(p.factsBeforeWrite.admitted).toEqual([DAVE]);
+  });
+
+  /** The defect the second record exists for, shown by what each would let a replay do. */
+  it('lets a replay take back what a failed write left, which the final record could not', () => {
+    const p = plan(inputs);
+    // The write failed: the channel is as it was.
+    const fromBefore = plan({ ...inputs, record: recordOf(p.factsBeforeWrite) });
+    expect(find(fromBefore, m(BOB))).toBeUndefined();
+    const fromFinal = plan({ ...inputs, record: recordOf(p.facts) });
+    expect(find(fromFinal, m(BOB))).toEqual({ allow: VC, deny: 0n });
+  });
+
+  it('keeps naming a block that is being lifted', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'locked',
+      current: [member(BOT, BOT_ACCESS), member(CAROL, 0n, VC), member(DAVE, 0n, VC)],
+      blocked: [DAVE],
+      record: { blocked: [CAROL, DAVE] },
+    });
+    expect(p.facts.blocked).toEqual([DAVE]);
+    expect([...p.factsBeforeWrite.blocked].sort()).toEqual([CAROL, DAVE]);
+  });
+
+  it('names what a hide adds, before the flip: the roles it flips and the moderator grant', () => {
+    const p = plan({
+      mode: 'hidden',
+      previousMode: 'public',
+      current: [role(MEMBERS, V)],
+      viewerRoleId: MODS,
+    });
+    expect(p.factsBeforeWrite.neutralised).toEqual([{ roleId: MEMBERS, view: 'allow' }]);
+    expect(p.factsBeforeWrite.viewerRoleId).toBe(MODS);
+    expect(p.factsBeforeWrite.hidden).toBe(true);
+    expect(p.factsBeforeWrite.baselineCaptured).toEqual(p.facts.baselineCaptured);
+  });
+
+  it('keeps the roles it is about to restore, and the baseline it restores from, until it has', () => {
+    const p = plan({
+      mode: 'public',
+      previousMode: 'hidden',
+      current: [member(BOT, BOT_ACCESS), everyone(0n, VC), role(MEMBERS, C, V)],
+      record: {
+        hidden: true,
+        baseline: { view: 'none', connect: 'none' },
+        neutralised: [{ roleId: MEMBERS, view: 'allow' }],
+        viewerRoleId: MODS,
+      },
+    });
+    expect(p.facts.neutralised).toEqual([]);
+    expect(p.facts.baseline).toBeNull();
+    expect(p.facts.hidden).toBe(false);
+    expect(p.factsBeforeWrite.neutralised).toEqual([{ roleId: MEMBERS, view: 'allow' }]);
+    expect(p.factsBeforeWrite.baseline).toEqual({ view: 'none', connect: 'none' });
+    expect(p.factsBeforeWrite.hidden).toBe(true);
+    expect(p.factsBeforeWrite.viewerRoleId).toBe(MODS);
+  });
+
+  it('names the OLD moderator role while it is being changed, because that is the leak', () => {
+    const p = plan({
+      mode: 'hidden',
+      previousMode: 'hidden',
+      current: [role('old', V), role('new')],
+      viewerRoleId: 'new',
+      record: { hidden: true, viewerRoleId: 'old' },
+    });
+    expect(p.facts.viewerRoleId).toBe('new');
+    expect(p.factsBeforeWrite.viewerRoleId).toBe('old');
   });
 });
 
@@ -1128,6 +1500,25 @@ describe('idempotency', () => {
     expect(converge.facts).toEqual({ ...first.facts, baselineCaptured: null });
     expect(converge.desired).toEqual(first.desired);
   });
+
+  /**
+   * The record written BEFORE a write has to be enough to finish the transition from
+   * either side of it: the write never landed, or it landed and the process died
+   * before the final record did.
+   */
+  it.each(edges)('finishes %s to %s from the record written before the write', (from, to) => {
+    const first = plan(inputs(from, to));
+    const before = recordOf(first.factsBeforeWrite);
+    const expected = { ...first.facts, baselineCaptured: null };
+
+    const neverLanded = plan({ ...inputs(from, to), record: before });
+    expect(neverLanded.desired).toEqual(first.desired);
+    expect(neverLanded.facts).toEqual(expected);
+
+    const landed = plan({ ...inputs(from, to), current: first.desired, record: before });
+    expect(landed.diff).toEqual({ upserts: [], deletes: [] });
+    expect(landed.facts).toEqual(expected);
+  });
 });
 
 describe('determinism', () => {
@@ -1236,10 +1627,6 @@ describe('the size cap', () => {
     });
     expect(result.ok).toBe(false);
   });
-
-  it('is under Discord own ceiling of 1000', () => {
-    expect(MAX_PLANNED_OVERWRITES).toBeLessThan(1000);
-  });
 });
 
 describe('diffOverwrites', () => {
@@ -1285,10 +1672,6 @@ describe('diffOverwrites', () => {
     );
     expect(diff.upserts.map((o) => o.id)).toEqual(['a', 'b']);
   });
-
-  it('is what the single-write limit counts', () => {
-    expect(SINGLE_WRITE_MAX).toBe(2);
-  });
 });
 
 describe('a plan is a diff the adapter can apply', () => {
@@ -1318,5 +1701,35 @@ describe('a plan is a diff the adapter can apply', () => {
     });
     expect(p.diff.deletes).toEqual([{ id: GUILD, type: OVERWRITE_ROLE }]);
     expect(p.diff.upserts).toEqual([]);
+  });
+});
+
+describe('leaveOutMembers', () => {
+  const ghost = new Set(['ghost']);
+
+  it('drops what is asked of a member who is not in the server, when they had nothing', () => {
+    const out = leaveOutMembers([member(BOT, BOT_ACCESS), member('ghost', VC)], [], ghost);
+    expect(out).toEqual([member(BOT, BOT_ACCESS)]);
+  });
+
+  it('leaves the overwrite they already had exactly as it was, because a replacement would delete it', () => {
+    const had = member('ghost', SPEAK);
+    const out = leaveOutMembers([member('ghost', 0n, VC)], [had], ghost);
+    expect(out).toEqual([had]);
+    expect(out[0]).not.toBe(had);
+  });
+
+  it('leaves everybody else, and every role, alone, in the order given', () => {
+    // A role that shares the member's id is a different overwrite.
+    const desired = [role('ghost', V), member('alice', VC), member('ghost', VC), everyone(0n, C)];
+    const kept = leaveOutMembers(desired, [], ghost).map((o) => o.type + ':' + o.id);
+    expect(kept).toEqual(['0:ghost', '1:alice', '0:' + GUILD]);
+  });
+
+  it('copies, and changes nothing it was given', () => {
+    const desired = [member('alice', VC)];
+    const out = leaveOutMembers(desired, [], new Set());
+    expect(out).toEqual(desired);
+    expect(out[0]).not.toBe(desired[0]);
   });
 });
