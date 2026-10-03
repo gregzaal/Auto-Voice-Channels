@@ -59,6 +59,19 @@ describe('the room_access.disabled lever is wired to every consumer', () => {
     expect(statementFrom('registerInteractionHandler({')).toContain('access: accessCommands,');
   });
 
+  /**
+   * Both are optional on the feature and silent when absent: `handler.ts` returns from the
+   * create hook if `applyAccessLists` is missing, and skips the sweep's pass if `roomAccess`
+   * is. Either missing leaves every saved list and hidden room unapplied and unrepaired
+   * with every test green, because each integration test builds its own wiring.
+   */
+  it('hands the voice feature the create hook and the sweep pass, both silent when absent', () => {
+    const feature = statementFrom('const voiceFeature = new VoiceFeature({');
+    expect(feature).toContain('applyAccessLists: (gid, cid, creator) =>');
+    expect(feature).toContain('privacy.applyAccessLists(gid, cid, { creator })');
+    expect(feature).toContain('roomAccess: privacy,');
+  });
+
   it('is reported by /diagnostics, per fleet', () => {
     expect(SOURCE).toMatch(
       /roomAccess: \{\s*disabled: runtimeFlags\[RUNTIME_FLAGS\.ROOM_ACCESS_DISABLED\] === true,\s*\}/,

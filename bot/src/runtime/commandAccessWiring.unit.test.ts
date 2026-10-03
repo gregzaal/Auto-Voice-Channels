@@ -11,8 +11,9 @@ import { describe, expect, it } from 'vitest';
  * takes the lever as an optional dependency, and absent means "not disabled", so
  * a consumer that was never handed it enforces the rules while the incident
  * lever, thrown precisely because a rule is refusing people it should not, does
- * nothing there and says nothing. `index.ts` is the only place the four are wired
- * together, and no other test sees it.
+ * nothing there and says nothing. `index.ts` is the only place the five (the poster,
+ * the interaction handler, the voice feature, the privacy service and `/diagnostics`)
+ * are wired together, and no other test sees it.
  *
  * Residual limit, stated rather than papered over: this reads source text, so it
  * proves the wiring is written, not that the gate answers correctly, which is what
@@ -50,6 +51,21 @@ describe('the command_access.disabled lever is wired to every consumer', () => {
     expect(statementFrom('const voiceFeature = new VoiceFeature({')).toContain(
       'gate: creationGate,',
     );
+  });
+
+  /**
+   * The one rule that reaches saved lists: a member denied Saved lists has lists that apply
+   * to nothing. Absent means nobody is restricted, so a service built without it applies a
+   * denied member's lists in full, and without the lever in it the rule would go on holding
+   * a member's lists back while enforcement is switched off. It reads the lever inside a
+   * closure and not through the property the count below looks for, on purpose: it is only
+   * asked once a rule names the feature.
+   */
+  it('is read by the privacy service, which makes a denied member’s saved lists inert by it', () => {
+    const privacy = statementFrom('const privacy = new PrivacyService({');
+    expect(privacy).toContain('commandAccess: async (gid: string) =>');
+    expect(privacy).toContain('readCommandAccess(');
+    expect(privacy).toContain('await creationGate.commandAccessDisabled()');
   });
 
   it('is reported by /diagnostics, per fleet', () => {
