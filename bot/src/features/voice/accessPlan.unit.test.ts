@@ -1,0 +1,1322 @@
+import { OverwriteType, PermissionFlagsBits } from 'discord.js';
+import { describe, expect, it } from 'vitest';
+import {
+  BOT_ACCESS,
+  CONNECT,
+  MANAGE_CHANNELS,
+  MAX_PLANNED_OVERWRITES,
+  MOVE_MEMBERS,
+  OVERWRITE_MEMBER,
+  OVERWRITE_ROLE,
+  SINGLE_WRITE_MAX,
+  VIEW_CHANNEL,
+  diffOverwrites,
+  planAccess,
+  type AccessMode,
+  type AccessPlan,
+  type AccessPlanInput,
+  type OverwriteBit,
+  type ResolvedOverwrite,
+} from './accessPlan.js';
+
+const V = VIEW_CHANNEL;
+const C = CONNECT;
+const VC = V | C;
+const SPEAK = PermissionFlagsBits.Speak;
+const MUTE = PermissionFlagsBits.MuteMembers;
+
+/** `@everyone`'s role id is the guild id. */
+const GUILD = 'g1';
+const BOT = 'bot';
+const OWNER = 'owner';
+const ALICE = 'alice';
+const BOB = 'bob';
+const CAROL = 'carol';
+const DAVE = 'dave';
+const MODS = 'mods';
+const MEMBERS = 'members';
+const HELPERS = 'helpers';
+
+const role = (id: string, allow = 0n, deny = 0n): ResolvedOverwrite => ({
+  id,
+  type: OVERWRITE_ROLE,
+  allow,
+  deny,
+});
+const member = (id: string, allow = 0n, deny = 0n): ResolvedOverwrite => ({
+  id,
+  type: OVERWRITE_MEMBER,
+  allow,
+  deny,
+});
+const everyone = (allow = 0n, deny = 0n): ResolvedOverwrite => role(GUILD, allow, deny);
+
+const m = (id: string): string => `m:${id}`;
+const r = (id: string): string => `r:${id}`;
+
+/** An overwrite set as a record, so a test says what it expects without caring about order. */
+function view(list: readonly ResolvedOverwrite[]): Record<string, { allow: bigint; deny: bigint }> {
+  return Object.fromEntries(
+    list.map((o) => [
+      `${o.type === OVERWRITE_MEMBER ? 'm' : 'r'}:${o.id}`,
+      { allow: o.allow, deny: o.deny },
+    ]),
+  );
+}
+
+type Planned = Extract<AccessPlan, { ok: true }>;
+
+function plan(
+  over: Partial<AccessPlanInput> & { mode: AccessMode; previousMode: AccessMode },
+): Planned {
+  const result = planAccess({
+    guildId: GUILD,
+    botId: BOT,
+    current: [],
+    record: null,
+    ownerId: OWNER,
+    occupants: [],
+    trusted: [],
+    admitted: [],
+    blocked: [],
+    ...over,
+  });
+  if (!result.ok) throw new Error(`plan refused: ${result.reason}`);
+  return result;
+}
+
+const find = (p: Planned, key: string) => view(p.desired)[key];
+
+describe('constants', () => {
+  /** This file imports nothing from discord.js, so a typo here would be invisible without this. */
+  it('are the bits and types Discord uses', () => {
+    expect(V).toBe(PermissionFlagsBits.ViewChannel);
+    expect(C).toBe(PermissionFlagsBits.Connect);
+    expect(MANAGE_CHANNELS).toBe(PermissionFlagsBits.ManageChannels);
+    expect(MOVE_MEMBERS).toBe(PermissionFlagsBits.MoveMembers);
+    expect(OVERWRITE_ROLE).toBe(OverwriteType.Role);
+    expect(OVERWRITE_MEMBER).toBe(OverwriteType.Member);
+  });
+
+  it('keeps the bot allowed what the adapter grants it everywhere else', () => {
+    expect(BOT_ACCESS).toBe(V | C | MANAGE_CHANNELS | MOVE_MEMBERS);
+  });
+});
+
+describe('public to locked', () => {
+  it('denies @everyone Connect, lets the owner and occupants in, and blocks', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'public',
+      occupants: [ALICE],
+      trusted: [BOB],
+      admitted: [DAVE],
+      blocked: [CAROL],
+    });
+    expect(view(p.desired)).toEqual({
+      [m(BOT)]: { allow: BOT_ACCESS, deny: 0n },
+      [m(OWNER)]: { allow: C, deny: 0n },
+      [m(ALICE)]: { allow: C, deny: 0n },
+      [m(BOB)]: { allow: VC, deny: 0n },
+      [m(DAVE)]: { allow: VC, deny: 0n },
+      [m(CAROL)]: { allow: 0n, deny: VC },
+      [r(GUILD)]: { allow: 0n, deny: C },
+    });
+    expect(p.effectiveHidden).toBe(false);
+    expect(p.facts.hidden).toBe(false);
+  });
+
+  it('never touches @everyone View, whatever it holds', () => {
+    const p = plan({ mode: 'locked', previousMode: 'public', current: [everyone(0n, V)] });
+    expect(find(p, r(GUILD))).toEqual({ allow: 0n, deny: V | C });
+  });
+
+  /**
+   * What `@everyone` held before the lock, so going public restores it. Every shape
+   * is a different answer, and `none` is a KNOWN absence, not an unknown.
+   */
+  it.each<[string, ResolvedOverwrite[], { view: OverwriteBit; connect: OverwriteBit }]>([
+    ['no overwrite', [], { view: 'none', connect: 'none' }],
+    ['an empty overwrite', [everyone()], { view: 'none', connect: 'none' }],
+    ['Connect allowed', [everyone(C)], { view: 'none', connect: 'allow' }],
+    ['Connect denied', [everyone(0n, C)], { view: 'none', connect: 'deny' }],
+    [
+      'View denied (a role-gated creator channel)',
+      [everyone(0n, V)],
+      { view: 'deny', connect: 'none' },
+    ],
+    ['View allowed', [everyone(V)], { view: 'allow', connect: 'none' }],
+    ['View denied and Connect allowed', [everyone(C, V)], { view: 'deny', connect: 'allow' }],
+  ])('captures the baseline from %s', (_name, current, expected) => {
+    const p = plan({ mode: 'locked', previousMode: 'public', current });
+    expect(p.facts.baselineCaptured).toEqual(expected);
+    expect(p.facts.baseline).toEqual(expected);
+  });
+
+  it('keeps a baseline it already has and captures only the field it lacks', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'public',
+      current: [everyone(0n, C)],
+      record: { baseline: { connect: 'allow' } },
+    });
+    // The live Connect deny is NOT the original: the stored allow wins.
+    expect(p.facts.baseline).toEqual({ connect: 'allow', view: 'none' });
+    expect(p.facts.baselineCaptured).toEqual({ view: 'none' });
+  });
+
+  it('captures nothing when the whole baseline is already stored', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'public',
+      record: { baseline: { view: 'none', connect: 'none' } },
+    });
+    expect(p.facts.baselineCaptured).toBeNull();
+    expect(p.facts.baseline).toEqual({ view: 'none', connect: 'none' });
+  });
+
+  it('does not grant trusted members anything the owner has not saved', () => {
+    const p = plan({ mode: 'locked', previousMode: 'public', ownerId: null });
+    expect(view(p.desired)).toEqual({
+      [m(BOT)]: { allow: BOT_ACCESS, deny: 0n },
+      [r(GUILD)]: { allow: 0n, deny: C },
+    });
+  });
+});
+
+describe('public to hidden', () => {
+  it('denies @everyone View and Connect and gives every member an explicit allow', () => {
+    const p = plan({
+      mode: 'hidden',
+      previousMode: 'public',
+      occupants: [ALICE],
+      trusted: [BOB],
+      admitted: [DAVE],
+      blocked: [CAROL],
+    });
+    expect(view(p.desired)).toEqual({
+      [m(BOT)]: { allow: BOT_ACCESS, deny: 0n },
+      // The owner by id, although they are not in `occupants`: the move may not
+      // have landed in the cache yet.
+      [m(OWNER)]: { allow: VC, deny: 0n },
+      [m(ALICE)]: { allow: VC, deny: 0n },
+      [m(BOB)]: { allow: VC, deny: 0n },
+      [m(DAVE)]: { allow: VC, deny: 0n },
+      [m(CAROL)]: { allow: 0n, deny: VC },
+      [r(GUILD)]: { allow: 0n, deny: VC },
+    });
+    expect(p.effectiveHidden).toBe(true);
+    expect(p.facts.hidden).toBe(true);
+    expect(p.defeatedBy).toEqual([]);
+  });
+
+  it('gives the moderator role View only, never Connect', () => {
+    const p = plan({ mode: 'hidden', previousMode: 'public', viewerRoleId: MODS });
+    expect(find(p, r(MODS))).toEqual({ allow: V, deny: 0n });
+    expect(p.facts.viewerRoleId).toBe(MODS);
+  });
+
+  it('captures the baseline of both bits before denying them', () => {
+    const p = plan({ mode: 'hidden', previousMode: 'public', current: [everyone(C, 0n)] });
+    expect(p.facts.baselineCaptured).toEqual({ view: 'none', connect: 'allow' });
+  });
+
+  it('refuses to grant @everyone the moderator View, which would undo the hide', () => {
+    const p = plan({ mode: 'hidden', previousMode: 'public', viewerRoleId: GUILD });
+    expect(find(p, r(GUILD))).toEqual({ allow: 0n, deny: VC });
+    expect(p.facts.viewerRoleId).toBeNull();
+  });
+
+  describe('roles', () => {
+    /** A role's View allow beats the `@everyone` deny, measured on a real client 2026-10-03. */
+    it('flips a role View allow to a deny and records what it was', () => {
+      const p = plan({
+        mode: 'hidden',
+        previousMode: 'public',
+        current: [role(MEMBERS, VC), role(HELPERS, V | SPEAK)],
+      });
+      expect(find(p, r(MEMBERS))).toEqual({ allow: C, deny: V });
+      // Other bits are untouched.
+      expect(find(p, r(HELPERS))).toEqual({ allow: SPEAK, deny: V });
+      expect(p.facts.neutralised).toEqual([
+        { roleId: HELPERS, view: 'allow' },
+        { roleId: MEMBERS, view: 'allow' },
+      ]);
+      expect(p.effectiveHidden).toBe(true);
+    });
+
+    it('handles @everyone through the baseline and never records it as a neutralised role', () => {
+      // Recorded twice, it would be restored twice and by the wrong rule.
+      const p = plan({ mode: 'hidden', previousMode: 'public', current: [everyone(VC)] });
+      expect(find(p, r(GUILD))).toEqual({ allow: 0n, deny: VC });
+      expect(p.facts.baselineCaptured).toEqual({ view: 'allow', connect: 'allow' });
+      expect(p.facts.neutralised).toEqual([]);
+    });
+
+    it('leaves a role with no View allow alone', () => {
+      const p = plan({
+        mode: 'hidden',
+        previousMode: 'public',
+        current: [role('muted', 0n, V), role('talkers', C | SPEAK)],
+      });
+      expect(find(p, r('muted'))).toEqual({ allow: 0n, deny: V });
+      expect(find(p, r('talkers'))).toEqual({ allow: C | SPEAK, deny: 0n });
+      expect(p.facts.neutralised).toEqual([]);
+    });
+
+    it('leaves the moderator role and the bot role alone and does not count them', () => {
+      const p = plan({
+        mode: 'hidden',
+        previousMode: 'public',
+        viewerRoleId: MODS,
+        leaveRoleId: 'botrole',
+        current: [role(MODS, V), role('botrole', V | C)],
+      });
+      expect(find(p, r(MODS))).toEqual({ allow: V, deny: 0n });
+      expect(find(p, r('botrole'))).toEqual({ allow: VC, deny: 0n });
+      expect(p.facts.neutralised).toEqual([]);
+      expect(p.effectiveHidden).toBe(true);
+    });
+
+    it('reports a role it cannot edit as defeating the hide, and leaves it as it is', () => {
+      const p = plan({
+        mode: 'hidden',
+        previousMode: 'public',
+        uneditableRoleIds: ['admins-above-me'],
+        current: [role('admins-above-me', V), role(MEMBERS, V)],
+      });
+      expect(find(p, r('admins-above-me'))).toEqual({ allow: V, deny: 0n });
+      expect(find(p, r(MEMBERS))).toEqual({ allow: 0n, deny: V });
+      expect(p.defeatedBy).toEqual(['admins-above-me']);
+      expect(p.effectiveHidden).toBe(false);
+      // Not hidden, so it must not be recorded as hidden.
+      expect(p.facts.hidden).toBe(false);
+    });
+
+    it('does not count a foreign member allow against the hide', () => {
+      // A deliberate per-member grant is somebody letting one person in, which is
+      // not the hide failing for everyone else.
+      const p = plan({
+        mode: 'hidden',
+        previousMode: 'public',
+        current: [member('friend', V)],
+      });
+      expect(find(p, m('friend'))).toEqual({ allow: V, deny: 0n });
+      expect(p.effectiveHidden).toBe(true);
+    });
+
+    it('is not hidden unless the mode is hidden', () => {
+      const p = plan({ mode: 'locked', previousMode: 'public', current: [role(MEMBERS, V)] });
+      // Locked does not touch roles at all.
+      expect(find(p, r(MEMBERS))).toEqual({ allow: V, deny: 0n });
+      expect(p.effectiveHidden).toBe(false);
+    });
+  });
+});
+
+describe('locked to hidden', () => {
+  it('captures only the View baseline, because the live Connect deny is the lock itself', () => {
+    const p = plan({
+      mode: 'hidden',
+      previousMode: 'locked',
+      current: [everyone(0n, C | V)],
+    });
+    // Recording the Connect deny would restore a lock as the "original".
+    expect(p.facts.baselineCaptured).toEqual({ view: 'deny' });
+    expect(p.facts.baseline).toEqual({ view: 'deny' });
+  });
+
+  it('keeps the baseline the lock captured', () => {
+    const p = plan({
+      mode: 'hidden',
+      previousMode: 'locked',
+      current: [everyone(0n, C)],
+      record: { baseline: { view: 'none', connect: 'allow' } },
+    });
+    expect(p.facts.baselineCaptured).toBeNull();
+    expect(p.facts.baseline).toEqual({ view: 'none', connect: 'allow' });
+  });
+
+  it('writes the same hidden set as a public room would get', () => {
+    const fromLocked = plan({
+      mode: 'hidden',
+      previousMode: 'locked',
+      current: [everyone(0n, C), member(BOT, BOT_ACCESS), member(OWNER, C), member(ALICE, C)],
+      occupants: [ALICE],
+    });
+    expect(view(fromLocked.desired)).toEqual({
+      [m(BOT)]: { allow: BOT_ACCESS, deny: 0n },
+      [m(OWNER)]: { allow: VC, deny: 0n },
+      [m(ALICE)]: { allow: VC, deny: 0n },
+      [r(GUILD)]: { allow: 0n, deny: VC },
+    });
+  });
+});
+
+describe('hidden to locked', () => {
+  const hiddenRoom = [
+    member(BOT, BOT_ACCESS),
+    member(OWNER, VC),
+    member(ALICE, VC),
+    everyone(0n, VC),
+    role(MODS, V),
+    role(MEMBERS, C, V),
+  ];
+
+  it.each<[OverwriteBit | undefined, bigint, bigint]>([
+    ['none', 0n, C],
+    ['deny', 0n, VC],
+    ['allow', V, C],
+    // An unknown baseline clears the bit, which for View is the neutral state.
+    [undefined, 0n, C],
+  ])('restores @everyone View per a %s baseline and keeps Connect denied', (view_, allow, deny) => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'hidden',
+      current: hiddenRoom,
+      occupants: [ALICE],
+      viewerRoleId: MODS,
+      record: {
+        hidden: true,
+        baseline: { ...(view_ ? { view: view_ } : {}), connect: 'none' },
+        neutralised: [{ roleId: MEMBERS, view: 'allow' }],
+        viewerRoleId: MODS,
+      },
+    });
+    expect(find(p, r(GUILD))).toEqual({ allow, deny });
+  });
+
+  it('restores the neutralised roles, drops the moderator View, and keeps member grants', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'hidden',
+      current: hiddenRoom,
+      occupants: [ALICE],
+      viewerRoleId: MODS,
+      record: {
+        baseline: { view: 'none', connect: 'none' },
+        neutralised: [{ roleId: MEMBERS, view: 'allow' }],
+        viewerRoleId: MODS,
+      },
+    });
+    expect(find(p, r(MEMBERS))).toEqual({ allow: VC, deny: 0n });
+    // The moderator grant was View alone, so taking it back empties the overwrite.
+    expect(find(p, r(MODS))).toBeUndefined();
+    // The owner and the occupant keep View and Connect: harmless in a locked room.
+    expect(find(p, m(OWNER))).toEqual({ allow: VC, deny: 0n });
+    expect(find(p, m(ALICE))).toEqual({ allow: VC, deny: 0n });
+    expect(p.facts.neutralised).toEqual([]);
+    expect(p.facts.viewerRoleId).toBeNull();
+    expect(p.facts.hidden).toBe(false);
+  });
+});
+
+describe('locked or hidden to public', () => {
+  it('restores @everyone View and Connect per the baseline and drops the empty overwrite', () => {
+    const p = plan({
+      mode: 'public',
+      previousMode: 'hidden',
+      current: [everyone(0n, VC), member(BOT, BOT_ACCESS)],
+      record: { baseline: { view: 'none', connect: 'none' } },
+    });
+    expect(find(p, r(GUILD))).toBeUndefined();
+    expect(p.facts.baseline).toBeNull();
+  });
+
+  /** `/public` used to write `Connect: null`, wiping an inherited deny from a role-gated creator channel. */
+  it.each<[OverwriteBit, OverwriteBit, ResolvedOverwrite | undefined]>([
+    ['deny', 'deny', everyone(0n, VC)],
+    ['none', 'deny', everyone(0n, C)],
+    ['allow', 'none', everyone(V)],
+    ['none', 'allow', everyone(C)],
+    ['none', 'none', undefined],
+  ])('puts back a %s View and %s Connect baseline exactly', (viewBit, connectBit, expected) => {
+    const p = plan({
+      mode: 'public',
+      previousMode: 'hidden',
+      current: [everyone(0n, VC), member(BOT, BOT_ACCESS)],
+      record: { baseline: { view: viewBit, connect: connectBit } },
+    });
+    expect(p.desired.find((o) => o.id === GUILD)).toEqual(expected);
+  });
+
+  it('clears Connect with null when the baseline is unknown, as /public always has', () => {
+    const p = plan({
+      mode: 'public',
+      previousMode: 'locked',
+      current: [everyone(0n, C)],
+      record: null,
+    });
+    expect(find(p, r(GUILD))).toBeUndefined();
+  });
+
+  it('never records the live values as a baseline when it has none', () => {
+    const p = plan({ mode: 'public', previousMode: 'locked', current: [everyone(0n, C)] });
+    // The live Connect deny is the lock itself. Recording it would restore the
+    // lock as the "original" the next time the room is locked and opened.
+    expect(p.facts.baseline).toBeNull();
+    expect(p.facts.baselineCaptured).toBeNull();
+  });
+
+  it('leaves a View overwrite alone when it never wrote one, whether or not it knows the baseline', () => {
+    // Only a hide writes `@everyone` View. A human's deny on a locked room is theirs.
+    for (const record of [
+      null,
+      { baseline: { view: 'none' as const, connect: 'none' as const } },
+    ]) {
+      const p = plan({
+        mode: 'public',
+        previousMode: 'locked',
+        current: [everyone(0n, V | C)],
+        record,
+      });
+      expect(find(p, r(GUILD))).toEqual({ allow: 0n, deny: V });
+    }
+  });
+
+  it('clears View with null too when leaving hidden with an unknown baseline', () => {
+    const p = plan({
+      mode: 'public',
+      previousMode: 'hidden',
+      current: [everyone(0n, VC)],
+      record: { hidden: true },
+    });
+    expect(find(p, r(GUILD))).toBeUndefined();
+  });
+
+  it('restores the neutralised roles', () => {
+    const p = plan({
+      mode: 'public',
+      previousMode: 'hidden',
+      current: [everyone(0n, VC), role(MEMBERS, C, V)],
+      record: {
+        baseline: { view: 'none', connect: 'none' },
+        neutralised: [{ roleId: MEMBERS, view: 'allow' }],
+      },
+    });
+    expect(find(p, r(MEMBERS))).toEqual({ allow: VC, deny: 0n });
+  });
+
+  it('does not put back a role overwrite a human has deleted or changed since', () => {
+    const p = plan({
+      mode: 'public',
+      previousMode: 'hidden',
+      current: [everyone(0n, VC), role('changed', V, 0n)],
+      record: {
+        baseline: { view: 'none', connect: 'none' },
+        neutralised: [
+          { roleId: 'deleted', view: 'allow' },
+          { roleId: 'changed', view: 'allow' },
+        ],
+      },
+    });
+    // Never recreated, and not flipped again: no longer our flip to undo.
+    expect(find(p, r('deleted'))).toBeUndefined();
+    expect(find(p, r('changed'))).toEqual({ allow: V, deny: 0n });
+  });
+
+  it('leaves trusted overwrites on the room and in the record', () => {
+    const p = plan({
+      mode: 'public',
+      previousMode: 'locked',
+      current: [everyone(0n, C), member(BOB, VC), member(DAVE, VC)],
+      trusted: [BOB],
+      admitted: [DAVE],
+      record: { baseline: { connect: 'none' }, trusted: [BOB], admitted: [DAVE] },
+    });
+    expect(find(p, m(BOB))).toEqual({ allow: VC, deny: 0n });
+    expect(find(p, m(DAVE))).toEqual({ allow: VC, deny: 0n });
+    expect(p.facts.trusted).toEqual([BOB]);
+    expect(p.facts.admitted).toEqual([DAVE]);
+  });
+
+  it('writes no grants for the owner or occupants in a public room', () => {
+    const p = plan({ mode: 'public', previousMode: 'locked', occupants: [ALICE] });
+    expect(find(p, m(OWNER))).toBeUndefined();
+    expect(find(p, m(ALICE))).toBeUndefined();
+  });
+
+  it('applies blocks in a public room too', () => {
+    const p = plan({ mode: 'public', previousMode: 'public', blocked: [CAROL] });
+    expect(find(p, m(CAROL))).toEqual({ allow: 0n, deny: VC });
+    expect(p.facts.blocked).toEqual([CAROL]);
+    // And leaves @everyone alone: there is nothing to restore in a room that was
+    // not locked.
+    expect(find(p, r(GUILD))).toBeUndefined();
+  });
+});
+
+describe('blocks', () => {
+  it('beat an occupant, a trusted member and an admitted one', () => {
+    for (const mode of ['public', 'locked', 'hidden'] as const) {
+      const p = plan({
+        mode,
+        previousMode: 'public',
+        occupants: [CAROL],
+        trusted: [CAROL],
+        admitted: [CAROL],
+        blocked: [CAROL],
+      });
+      expect(find(p, m(CAROL))).toEqual({ allow: 0n, deny: VC });
+      expect(p.facts.trusted).not.toContain(CAROL);
+      expect(p.facts.admitted).not.toContain(CAROL);
+      expect(p.facts.blocked).toEqual([CAROL]);
+    }
+  });
+
+  it('take an existing allow off the member as well as denying it', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'locked',
+      current: [member(CAROL, VC | SPEAK)],
+      blocked: [CAROL],
+    });
+    // Speak is somebody else's bit and stays.
+    expect(find(p, m(CAROL))).toEqual({ allow: SPEAK, deny: VC });
+  });
+
+  it('never apply to the owner, who is also never locked out of their own room', () => {
+    const p = plan({ mode: 'hidden', previousMode: 'public', blocked: [OWNER] });
+    expect(find(p, m(OWNER))).toEqual({ allow: VC, deny: 0n });
+    expect(p.facts.blocked).toEqual([]);
+  });
+
+  it('never apply to the bot', () => {
+    const p = plan({ mode: 'locked', previousMode: 'public', blocked: [BOT] });
+    expect(find(p, m(BOT))).toEqual({ allow: BOT_ACCESS, deny: 0n });
+    expect(p.facts.blocked).toEqual([]);
+  });
+
+  it('clear a stale deny on a member who became the owner', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'locked',
+      current: [member(OWNER, 0n, VC)],
+      record: { blocked: [OWNER] },
+    });
+    expect(find(p, m(OWNER))).toEqual({ allow: C, deny: 0n });
+  });
+});
+
+describe('overwrites it does not know about', () => {
+  const foreign = [
+    // A human's role overwrite on bits this never writes.
+    role('stage', SPEAK, MUTE),
+    // A member overwrite from somewhere else on the channel.
+    member('friend', SPEAK),
+    // An approved knocker: Connect only.
+    member('knocker', C),
+    // A votekick deny on someone with no rule naming them.
+    member('kicked', 0n, C),
+    // An empty overwrite somebody left behind.
+    member('empty'),
+  ];
+
+  it.each<[AccessMode, AccessMode]>([
+    ['public', 'locked'],
+    ['public', 'hidden'],
+    ['locked', 'hidden'],
+    ['hidden', 'locked'],
+    ['locked', 'public'],
+    ['hidden', 'public'],
+  ])('keeps all of them untouched, %s to %s', (previousMode, mode) => {
+    const p = plan({
+      mode,
+      previousMode,
+      current: foreign,
+      record: { baseline: { view: 'none', connect: 'none' } },
+    });
+    for (const o of foreign) {
+      expect(p.desired.find((d) => d.id === o.id && d.type === o.type)).toEqual(o);
+    }
+  });
+
+  it('keeps the other bits on a member it does name, and only sets View and Connect', () => {
+    const p = plan({
+      mode: 'hidden',
+      previousMode: 'public',
+      current: [member(BOB, SPEAK, MUTE)],
+      trusted: [BOB],
+    });
+    expect(find(p, m(BOB))).toEqual({ allow: SPEAK | VC, deny: MUTE });
+  });
+
+  it('keeps the channel overwrites in the order they arrived in, with new ones after', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'public',
+      current: [member('z'), role('y', SPEAK), member('x', SPEAK)],
+      trusted: ['u2'],
+      ownerId: 'u1',
+    });
+    expect(p.desired.map((o) => o.id)).toEqual(['z', 'y', 'x', BOT, 'u1', 'u2', GUILD]);
+  });
+
+  /**
+   * A grant replaces an unrecorded deny on the same member. That is what undoes a
+   * votekick for someone on the owner's saved list, which is why the caller records
+   * a member voted out of a hidden room as blocked.
+   */
+  it('lets a grant replace an unrecorded deny on the same member', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'locked',
+      current: [member(BOB, 0n, C)],
+      trusted: [BOB],
+    });
+    expect(find(p, m(BOB))).toEqual({ allow: VC, deny: 0n });
+  });
+});
+
+describe('the bot', () => {
+  it.each<[AccessMode, AccessMode]>([
+    ['public', 'public'],
+    ['public', 'locked'],
+    ['public', 'hidden'],
+    ['locked', 'public'],
+    ['locked', 'locked'],
+    ['locked', 'hidden'],
+    ['hidden', 'public'],
+    ['hidden', 'locked'],
+    ['hidden', 'hidden'],
+  ])('is always present with its permissions, %s to %s', (previousMode, mode) => {
+    const p = plan({ mode, previousMode, blocked: [BOT], occupants: [BOT], trusted: [BOT] });
+    expect(find(p, m(BOT))).toEqual({ allow: BOT_ACCESS, deny: 0n });
+  });
+
+  it('has its denies cleared and keeps any other bit', () => {
+    const p = plan({
+      mode: 'hidden',
+      previousMode: 'public',
+      current: [member(BOT, SPEAK, V | MOVE_MEMBERS)],
+    });
+    expect(find(p, m(BOT))).toEqual({ allow: SPEAK | BOT_ACCESS, deny: 0n });
+  });
+
+  it('is never taken back as a stale trusted or blocked entry', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'locked',
+      record: { trusted: [BOT], blocked: [BOT] },
+    });
+    expect(find(p, m(BOT))).toEqual({ allow: BOT_ACCESS, deny: 0n });
+  });
+});
+
+describe('entries an earlier plan wrote and the lists no longer name', () => {
+  it('takes back trusted View and Connect, and deletes an overwrite that ends up empty', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'locked',
+      current: [member(BOB, VC), member(DAVE, VC | SPEAK)],
+      record: { trusted: [BOB], admitted: [DAVE] },
+    });
+    expect(find(p, m(BOB))).toBeUndefined();
+    // Only the bits it wrote.
+    expect(find(p, m(DAVE))).toEqual({ allow: SPEAK, deny: 0n });
+    expect(p.facts.trusted).toEqual([]);
+    expect(p.facts.admitted).toEqual([]);
+  });
+
+  it('never takes the way back from the owner or an occupant', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'locked',
+      current: [member(OWNER, VC), member(ALICE, VC)],
+      occupants: [ALICE],
+      record: { trusted: [OWNER, ALICE] },
+    });
+    expect(find(p, m(OWNER))).toEqual({ allow: VC, deny: 0n });
+    expect(find(p, m(ALICE))).toEqual({ allow: VC, deny: 0n });
+  });
+
+  it('leaves an entry for a member it has no overwrite for', () => {
+    const p = plan({ mode: 'locked', previousMode: 'locked', record: { trusted: [BOB] } });
+    expect(find(p, m(BOB))).toBeUndefined();
+  });
+
+  it('takes back a block when the member is no longer blocked, in any mode', () => {
+    for (const mode of ['public', 'locked', 'hidden'] as const) {
+      const p = plan({
+        mode,
+        previousMode: mode,
+        current: [member(CAROL, 0n, VC | MUTE)],
+        record: { blocked: [CAROL] },
+      });
+      expect(find(p, m(CAROL))).toEqual({ allow: 0n, deny: MUTE });
+      expect(p.facts.blocked).toEqual([]);
+    }
+  });
+
+  it('lets a member who moved from blocked to trusted in one plan end up allowed', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'locked',
+      current: [member(CAROL, 0n, VC)],
+      trusted: [CAROL],
+      record: { blocked: [CAROL] },
+    });
+    expect(find(p, m(CAROL))).toEqual({ allow: VC, deny: 0n });
+    expect(p.facts.trusted).toEqual([CAROL]);
+    expect(p.facts.blocked).toEqual([]);
+  });
+
+  it('lets a member who moved from trusted to blocked in one plan end up denied', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'locked',
+      current: [member(CAROL, VC)],
+      blocked: [CAROL],
+      record: { trusted: [CAROL] },
+    });
+    expect(find(p, m(CAROL))).toEqual({ allow: 0n, deny: VC });
+  });
+
+  it('leaves recorded trusted entries alone when the room goes public', () => {
+    const p = plan({
+      mode: 'public',
+      previousMode: 'locked',
+      current: [member(BOB, VC), everyone(0n, C)],
+      record: { trusted: [BOB], baseline: { connect: 'none' } },
+    });
+    expect(find(p, m(BOB))).toEqual({ allow: VC, deny: 0n });
+    expect(p.facts.trusted).toEqual([BOB]);
+  });
+});
+
+describe('the moderator role', () => {
+  it('is granted only in a hidden room', () => {
+    for (const mode of ['public', 'locked'] as const) {
+      const p = plan({ mode, previousMode: 'public', viewerRoleId: MODS });
+      expect(find(p, r(MODS))).toBeUndefined();
+      expect(p.facts.viewerRoleId).toBeNull();
+    }
+  });
+
+  it('is revoked when the setting changes, and when it clears', () => {
+    const current = [role('old', V), role('new')];
+    const changed = plan({
+      mode: 'hidden',
+      previousMode: 'hidden',
+      current,
+      viewerRoleId: 'new',
+      record: { viewerRoleId: 'old' },
+    });
+    expect(find(changed, r('old'))).toBeUndefined();
+    expect(find(changed, r('new'))).toEqual({ allow: V, deny: 0n });
+    expect(changed.facts.viewerRoleId).toBe('new');
+
+    const cleared = plan({
+      mode: 'hidden',
+      previousMode: 'hidden',
+      current: [role('old', V)],
+      viewerRoleId: null,
+      record: { viewerRoleId: 'old' },
+    });
+    expect(find(cleared, r('old'))).toBeUndefined();
+    expect(cleared.facts.viewerRoleId).toBeNull();
+  });
+
+  it('takes back only the View it granted, never other bits on the role', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'hidden',
+      current: [role(MODS, V | SPEAK)],
+      record: { viewerRoleId: MODS },
+    });
+    expect(find(p, r(MODS))).toEqual({ allow: SPEAK, deny: 0n });
+  });
+
+  it('does not claim, or later revoke, a View it did not write', () => {
+    const inherited = plan({
+      mode: 'hidden',
+      previousMode: 'public',
+      current: [role(MODS, V)],
+      viewerRoleId: MODS,
+    });
+    expect(find(inherited, r(MODS))).toEqual({ allow: V, deny: 0n });
+    expect(inherited.facts.viewerRoleId).toBeNull();
+
+    // Not recorded, so unhiding leaves it where the creator channel put it.
+    const unhidden = plan({
+      mode: 'locked',
+      previousMode: 'hidden',
+      current: inherited.desired,
+      record: { viewerRoleId: inherited.facts.viewerRoleId ?? undefined },
+    });
+    expect(find(unhidden, r(MODS))).toEqual({ allow: V, deny: 0n });
+  });
+
+  it('keeps a grant it did write across a converge pass', () => {
+    const first = plan({ mode: 'hidden', previousMode: 'public', viewerRoleId: MODS });
+    const again = plan({
+      mode: 'hidden',
+      previousMode: 'hidden',
+      current: first.desired,
+      viewerRoleId: MODS,
+      record: { viewerRoleId: MODS },
+    });
+    expect(again.facts.viewerRoleId).toBe(MODS);
+    expect(again.diff).toEqual({ upserts: [], deletes: [] });
+  });
+
+  it('re-grants a View somebody has taken off the role', () => {
+    const p = plan({
+      mode: 'hidden',
+      previousMode: 'hidden',
+      current: [role(MODS)],
+      viewerRoleId: MODS,
+      record: { viewerRoleId: MODS },
+    });
+    expect(find(p, r(MODS))).toEqual({ allow: V, deny: 0n });
+  });
+});
+
+describe('a role that was neutralised', () => {
+  it('stays recorded across a converge pass while it is still denied', () => {
+    const first = plan({
+      mode: 'hidden',
+      previousMode: 'public',
+      current: [role(MEMBERS, V)],
+    });
+    const again = plan({
+      mode: 'hidden',
+      previousMode: 'hidden',
+      current: first.desired,
+      record: { neutralised: first.facts.neutralised, baseline: first.facts.baseline ?? undefined },
+    });
+    expect(again.facts.neutralised).toEqual([{ roleId: MEMBERS, view: 'allow' }]);
+  });
+
+  it('drops an entry whose overwrite a human has since changed, and re-flips a new allow', () => {
+    const p = plan({
+      mode: 'hidden',
+      previousMode: 'hidden',
+      current: [role('relaxed', 0n, 0n), role('reallowed', V)],
+      record: {
+        neutralised: [
+          { roleId: 'relaxed', view: 'allow' },
+          { roleId: 'reallowed', view: 'allow' },
+        ],
+      },
+    });
+    expect(p.facts.neutralised).toEqual([{ roleId: 'reallowed', view: 'allow' }]);
+    expect(find(p, r('reallowed'))).toEqual({ allow: 0n, deny: V });
+  });
+
+  it('keeps a field a newer build added to an entry it keeps', () => {
+    const entry = { roleId: MEMBERS, view: 'allow' as const, note: 'from a newer build' };
+    const p = plan({
+      mode: 'hidden',
+      previousMode: 'hidden',
+      current: [role(MEMBERS, 0n, V)],
+      record: { neutralised: [entry] },
+    });
+    expect(p.facts.neutralised).toEqual([entry]);
+  });
+
+  it('is restored to whatever the entry says it was', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'hidden',
+      current: [role('a', 0n, V), role('b', 0n, V), role('c', 0n, V)],
+      record: {
+        neutralised: [
+          { roleId: 'a', view: 'allow' },
+          { roleId: 'b', view: 'deny' },
+          { roleId: 'c', view: 'none' },
+        ],
+      },
+    });
+    expect(find(p, r('a'))).toEqual({ allow: V, deny: 0n });
+    expect(find(p, r('b'))).toEqual({ allow: 0n, deny: V });
+    expect(find(p, r('c'))).toBeUndefined();
+  });
+});
+
+/**
+ * Hiding and unhiding must give back exactly what was there. The member
+ * overwrites a transition leaves behind (View and Connect for people who were
+ * inside) are harmless, so the round trip is judged on `@everyone` and the roles.
+ */
+describe('round trips', () => {
+  type Step = AccessMode;
+  const paths: Step[][] = [
+    ['locked', 'public'],
+    ['hidden', 'public'],
+    ['hidden', 'locked', 'public'],
+    ['locked', 'hidden', 'public'],
+    ['locked', 'hidden', 'locked', 'public'],
+    ['hidden', 'locked', 'hidden', 'public'],
+  ];
+  const starts: [string, ResolvedOverwrite[]][] = [
+    ['an open creator channel', []],
+    ['an empty @everyone overwrite', [everyone()]],
+    ['a role-gated creator channel', [everyone(0n, V), role(MEMBERS, VC), role(HELPERS, V)]],
+    ['a role-gated one that also denies Connect', [everyone(0n, VC), role(MEMBERS, VC)]],
+    ['an @everyone that allows Connect', [everyone(C), role(MEMBERS, V | SPEAK)]],
+    ['a moderator role that already sees it', [role(MODS, V), role(MEMBERS, V)]],
+  ];
+
+  // Named rows: a bigint cannot be printed into a test title.
+  it.each(starts.flatMap(([name]) => paths.map((path) => [name, path] as const)))(
+    'puts back %s after %j',
+    (name, path) => {
+      const start = starts.find(([n]) => n === name)![1];
+      let current = start.map((o) => ({ ...o }));
+      let record: AccessPlanInput['record'] = null;
+      let previousMode: AccessMode = 'public';
+      for (const mode of path) {
+        const p = plan({
+          mode,
+          previousMode,
+          current,
+          record,
+          occupants: [ALICE],
+          trusted: [BOB],
+          viewerRoleId: MODS,
+        });
+        current = p.desired;
+        record = {
+          ...(p.facts.baseline ? { baseline: p.facts.baseline } : {}),
+          neutralised: p.facts.neutralised,
+          ...(p.facts.viewerRoleId ? { viewerRoleId: p.facts.viewerRoleId } : {}),
+          trusted: p.facts.trusted,
+          admitted: p.facts.admitted,
+          blocked: p.facts.blocked,
+          hidden: p.facts.hidden,
+        };
+        previousMode = mode;
+      }
+      const roles = (list: readonly ResolvedOverwrite[]) =>
+        view(list.filter((o) => o.type === OVERWRITE_ROLE && (o.allow !== 0n || o.deny !== 0n)));
+      expect(roles(current)).toEqual(roles(start));
+      expect(record?.baseline).toBeUndefined();
+      expect(record?.neutralised).toEqual([]);
+      expect(record?.viewerRoleId).toBeUndefined();
+    },
+  );
+});
+
+describe('idempotency', () => {
+  const modes: AccessMode[] = ['public', 'locked', 'hidden'];
+  const edges = modes.flatMap((from) => modes.map((to) => [from, to] as const));
+
+  /** What a room that is already in `previousMode` looks like, record and all. */
+  function start(previousMode: AccessMode): Pick<AccessPlanInput, 'current' | 'record'> {
+    if (previousMode === 'public') {
+      return {
+        record: null,
+        current: [
+          member('foreign', SPEAK),
+          member('knocker', C),
+          member('kicked', 0n, C),
+          member(BOT, SPEAK, MOVE_MEMBERS),
+          role(MEMBERS, VC),
+          role(HELPERS, V | SPEAK),
+          everyone(),
+        ],
+      };
+    }
+    if (previousMode === 'locked') {
+      return {
+        record: { baseline: { view: 'none', connect: 'none' }, trusted: [BOB] },
+        current: [
+          member('foreign', SPEAK),
+          member(BOT, BOT_ACCESS),
+          member(OWNER, C),
+          member(ALICE, C),
+          member(BOB, VC),
+          role(MEMBERS, VC),
+          role(HELPERS, V | SPEAK),
+          everyone(0n, C),
+        ],
+      };
+    }
+    return {
+      record: {
+        hidden: true,
+        baseline: { view: 'none', connect: 'none' },
+        neutralised: [
+          { roleId: HELPERS, view: 'allow' },
+          { roleId: MEMBERS, view: 'allow' },
+        ],
+        viewerRoleId: MODS,
+        trusted: [BOB],
+      },
+      current: [
+        member('foreign', SPEAK),
+        member(BOT, BOT_ACCESS),
+        member(OWNER, VC),
+        member(ALICE, VC),
+        member(BOB, VC),
+        role(MEMBERS, C, V),
+        role(HELPERS, SPEAK, V),
+        role(MODS, V),
+        everyone(0n, VC),
+      ],
+    };
+  }
+
+  const inputs = (previousMode: AccessMode, mode: AccessMode) => ({
+    mode,
+    previousMode,
+    occupants: [ALICE],
+    trusted: [BOB],
+    admitted: [DAVE],
+    blocked: [CAROL],
+    viewerRoleId: MODS,
+    ...start(previousMode),
+  });
+
+  it.each(edges)('planning the result of %s to %s again changes nothing', (from, to) => {
+    const first = plan(inputs(from, to));
+    const original = inputs(from, to).record;
+    // A replay of the same transition, as a crashed apply would leave it: the
+    // channel holds the result, and the record is the one the transition started
+    // from plus the baseline the first attempt captured, which is persisted BEFORE
+    // any write precisely so a replay does not read its own deny as the original.
+    // A hide also records the roles it flipped and the moderator grant before it writes.
+    const added =
+      to === 'hidden'
+        ? {
+            neutralised: first.facts.neutralised,
+            ...(first.facts.viewerRoleId ? { viewerRoleId: first.facts.viewerRoleId } : {}),
+          }
+        : {};
+    const replay = plan({
+      ...inputs(from, to),
+      current: first.desired,
+      record: {
+        ...original,
+        ...added,
+        ...(first.facts.baselineCaptured
+          ? { baseline: { ...original?.baseline, ...first.facts.baselineCaptured } }
+          : {}),
+      },
+    });
+    expect(replay.diff).toEqual({ upserts: [], deletes: [] });
+    expect(view(replay.desired)).toEqual(view(first.desired));
+    // Set-if-absent: nothing is captured a second time.
+    expect(replay.facts).toEqual({ ...first.facts, baselineCaptured: null });
+  });
+
+  it('reads its own deny as the original when the baseline was not persisted first', () => {
+    // The hazard the ordering above exists for, pinned so it is not mistaken for a
+    // bug in the planner: a replay with no stored baseline captures what it finds.
+    const first = plan(inputs('public', 'locked'));
+    const replay = plan({ ...inputs('public', 'locked'), current: first.desired });
+    expect(replay.facts.baselineCaptured).toEqual({ view: 'none', connect: 'deny' });
+  });
+
+  it.each(edges)('converging on the result of %s to %s changes nothing', (from, to) => {
+    const first = plan(inputs(from, to));
+    const converge = plan({
+      ...inputs(from, to),
+      previousMode: to,
+      current: first.desired,
+      record: {
+        ...(first.facts.baseline ? { baseline: first.facts.baseline } : {}),
+        neutralised: first.facts.neutralised,
+        ...(first.facts.viewerRoleId ? { viewerRoleId: first.facts.viewerRoleId } : {}),
+        trusted: first.facts.trusted,
+        admitted: first.facts.admitted,
+        blocked: first.facts.blocked,
+      },
+    });
+    expect(converge.diff).toEqual({ upserts: [], deletes: [] });
+    expect(converge.facts).toEqual({ ...first.facts, baselineCaptured: null });
+    expect(converge.desired).toEqual(first.desired);
+  });
+});
+
+describe('determinism', () => {
+  const base = {
+    mode: 'hidden' as const,
+    previousMode: 'public' as const,
+    viewerRoleId: MODS,
+    current: [member('foreign', SPEAK), role(MEMBERS, V), role(HELPERS, V)],
+  };
+
+  it('orders what it adds by id, whatever order the sets arrive in', () => {
+    const a = plan({
+      ...base,
+      occupants: ['300', '20', '1000'],
+      trusted: ['9', '4000'],
+      admitted: ['70'],
+      blocked: ['5', '600'],
+    });
+    const b = plan({
+      ...base,
+      occupants: ['1000', '300', '20'],
+      trusted: ['4000', '9'],
+      admitted: ['70'],
+      blocked: ['600', '5'],
+    });
+    expect(b.desired).toEqual(a.desired);
+    expect(b.diff).toEqual(a.diff);
+    expect(b.facts).toEqual(a.facts);
+    // Grants first, then blocks, each in numeric order (snowflakes) and not in
+    // string order, which would put '1000' before '20'.
+    const added = a.desired.map((o) => o.id).filter((id) => /^\d+$/.test(id));
+    expect(added).toEqual(['9', '20', '70', '300', '1000', '4000', '5', '600']);
+    expect(a.facts.trusted).toEqual(['9', '4000']);
+    expect(a.facts.blocked).toEqual(['5', '600']);
+  });
+
+  it('does not change what it was given', () => {
+    const current = [member('foreign', SPEAK), role(MEMBERS, V), everyone(C)];
+    const frozen = current.map((o) => ({ ...o }));
+    const occupants = [ALICE];
+    plan({ ...base, current, occupants });
+    expect(current).toEqual(frozen);
+    expect(occupants).toEqual([ALICE]);
+  });
+
+  it('collapses a member listed twice into one overwrite', () => {
+    const p = plan({
+      ...base,
+      occupants: ['u1', 'u1'],
+      trusted: ['u1', 'u2', 'u2'],
+    });
+    expect(p.desired.filter((o) => o.id === 'u1')).toHaveLength(1);
+    expect(p.desired.filter((o) => o.id === 'u2')).toHaveLength(1);
+    expect(p.facts.trusted).toEqual(['u1', 'u2']);
+  });
+});
+
+describe('the size cap', () => {
+  const foreign = (n: number): ResolvedOverwrite[] =>
+    Array.from({ length: n }, (_, i) => member(`f${i}`, SPEAK));
+
+  it('plans a set that fits, with the bot added', () => {
+    const p = plan({
+      mode: 'public',
+      previousMode: 'public',
+      current: foreign(MAX_PLANNED_OVERWRITES - 1),
+    });
+    expect(p.desired).toHaveLength(MAX_PLANNED_OVERWRITES);
+  });
+
+  it('refuses a plan above 900 with a typed result rather than throwing', () => {
+    const result = planAccess({
+      guildId: GUILD,
+      botId: BOT,
+      current: foreign(MAX_PLANNED_OVERWRITES),
+      mode: 'public',
+      previousMode: 'public',
+      record: null,
+      ownerId: OWNER,
+      occupants: [],
+      trusted: [],
+      admitted: [],
+      blocked: [],
+    });
+    expect(result).toEqual({
+      ok: false,
+      reason: 'too_many_overwrites',
+      count: MAX_PLANNED_OVERWRITES + 1,
+      cap: MAX_PLANNED_OVERWRITES,
+    });
+  });
+
+  it('refuses when the lists alone would take it over', () => {
+    const result = planAccess({
+      guildId: GUILD,
+      botId: BOT,
+      current: [],
+      mode: 'locked',
+      previousMode: 'public',
+      record: null,
+      ownerId: OWNER,
+      occupants: [],
+      trusted: Array.from({ length: MAX_PLANNED_OVERWRITES }, (_, i) => `t${i}`),
+      admitted: [],
+      blocked: [],
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it('is under Discord own ceiling of 1000', () => {
+    expect(MAX_PLANNED_OVERWRITES).toBeLessThan(1000);
+  });
+});
+
+describe('diffOverwrites', () => {
+  it('reports nothing for identical sets, whatever the order', () => {
+    const a = [member('x', V), role('y', 0n, C)];
+    expect(diffOverwrites(a, [...a].reverse())).toEqual({ upserts: [], deletes: [] });
+  });
+
+  it('reports a changed overwrite, a new one and a removed one', () => {
+    const diff = diffOverwrites(
+      [member('x', V), member('gone', C), role('same', V)],
+      [member('x', V | C), member('new', V), role('same', V)],
+    );
+    expect(diff.upserts.map((o) => o.id)).toEqual(['x', 'new']);
+    expect(diff.deletes).toEqual([{ id: 'gone', type: OVERWRITE_MEMBER }]);
+  });
+
+  it('tells a member from a role that shares an id', () => {
+    const diff = diffOverwrites([member('1', V)], [member('1', V), role('1', V)]);
+    expect(diff.upserts).toEqual([role('1', V)]);
+  });
+
+  it('writes the bot first, grants, then denies, then @everyone last', () => {
+    const diff = diffOverwrites(
+      [],
+      [
+        everyone(0n, VC),
+        member('blocked', 0n, VC),
+        member('allowed', VC),
+        role('neutral', 0n, V),
+        member(BOT, BOT_ACCESS),
+      ],
+      { botId: BOT, guildId: GUILD },
+    );
+    expect(diff.upserts.map((o) => o.id)).toEqual([BOT, 'allowed', 'blocked', 'neutral', GUILD]);
+  });
+
+  it('counts a changed bit as a deny only when the deny is new', () => {
+    // Already denied, so changing something else on it is not "adding a deny".
+    const diff = diffOverwrites(
+      [member('a', 0n, VC), member('b')],
+      [member('a', SPEAK, VC), member('b', 0n, VC)],
+    );
+    expect(diff.upserts.map((o) => o.id)).toEqual(['a', 'b']);
+  });
+
+  it('is what the single-write limit counts', () => {
+    expect(SINGLE_WRITE_MAX).toBe(2);
+  });
+});
+
+describe('a plan is a diff the adapter can apply', () => {
+  it('reports the whole hide as upserts in write order', () => {
+    const p = plan({
+      mode: 'hidden',
+      previousMode: 'public',
+      occupants: [ALICE],
+      blocked: [CAROL],
+      current: [role(MEMBERS, V)],
+    });
+    const order = p.diff.upserts.map((o) => o.id);
+    expect(order[0]).toBe(BOT);
+    expect(order.at(-1)).toBe(GUILD);
+    // The members who must keep seeing the room are written before the deny.
+    expect(order.indexOf(ALICE)).toBeLessThan(order.indexOf(GUILD));
+    expect(order.indexOf(OWNER)).toBeLessThan(order.indexOf(GUILD));
+    expect(p.diff.deletes).toEqual([]);
+  });
+
+  it('reports an emptied overwrite as a delete', () => {
+    const p = plan({
+      mode: 'public',
+      previousMode: 'locked',
+      current: [member(BOT, BOT_ACCESS), everyone(0n, C)],
+      record: { baseline: { connect: 'none' } },
+    });
+    expect(p.diff.deletes).toEqual([{ id: GUILD, type: OVERWRITE_ROLE }]);
+    expect(p.diff.upserts).toEqual([]);
+  });
+});
