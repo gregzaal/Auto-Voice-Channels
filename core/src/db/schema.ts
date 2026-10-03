@@ -31,6 +31,13 @@ const AUTH_STATUSES = ['trial', 'active', 'grace', 'expired', 'blocked'] as cons
  */
 const FLEETS = ['prod', 'beta', 'gold'] as const;
 
+/**
+ * Which saved list a member sits on, inlined for the same reason as
+ * {@link AUTH_STATUSES}. MUST stay in sync with `MEMBER_ACCESS_KINDS` in
+ * `domain/roomAccess.ts`; `schema.unit.test.ts` asserts it.
+ */
+const MEMBER_ACCESS_KINDS = ['trusted', 'blocked'] as const;
+
 /** Bot-owned channels and coordination use this column; customer state is shared. */
 const fleet = () => text('fleet', { enum: FLEETS }).notNull().default('prod');
 
@@ -228,6 +235,24 @@ export const secondaryChannels = pgTable(
     state: jsonb('state')
       .notNull()
       .default(sql`'{}'::jsonb`),
+    /**
+     * Who may see and enter this room beyond the default: whether it is hidden,
+     * what `@everyone` had before it left public, and the member overwrites the
+     * bot wrote. Shape and rules: `RoomAccess` in `domain/roomAccess.ts`.
+     *
+     * **A column of its own rather than keys in {@link state}, and that is the
+     * point.** `SecondaryChannelRepository.updateState` replaces the whole
+     * `state` column from a snapshot read before a multi-second Discord round
+     * trip, so anything stored there is reverted by whichever of its nine
+     * callers lands last, and a lost record here is a permission nobody can
+     * ever revoke. This column is written only by the repository's access
+     * methods, never by `updateState`.
+     *
+     * Nullable, no default: null means "never touched", which is every room an
+     * older build made, and an older build selecting explicit columns neither
+     * reads nor writes it.
+     */
+    access: jsonb('access'),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -345,6 +370,52 @@ export const aliases = pgTable(
     createdAt: createdAt(),
   },
   (t) => [primaryKey({ columns: [t.guildId, t.gameName] })],
+);
+
+/**
+ * A room owner's saved trusted and blocked members, per server.
+ *
+ * One row per listed member, and the primary key is `(guild_id, owner_id,
+ * member_id)` WITHOUT `kind`, which is what makes the two lists exclusive:
+ * putting someone on one list while they are on the other is a single upsert
+ * that flips `kind`, so they cannot be on both, and no read-then-write can
+ * leave them there. The 25 and 25 caps are count checks, and erasure by the
+ * listed person (`member_id`) and by the owner are plain indexed deletes.
+ *
+ * **No `fleet` column, deliberately.** This is customer data about a person's
+ * own relationships, like `aliases` and the guild settings, and every fleet
+ * serving the guild must see the same lists; a per-fleet copy would let a block
+ * hold on one bot and not the other. The rooms the lists are APPLIED to are
+ * fleet-scoped, through `secondary_channels`.
+ *
+ * Not exported: `/export` carries `guilds.settings` and the creator channels,
+ * and these are neither, so a member's list does not leave the database through
+ * an admin's file.
+ */
+export const memberAccessLists = pgTable(
+  'member_access_lists',
+  {
+    guildId: text('guild_id').notNull(),
+    /** The room owner whose list this is. */
+    ownerId: text('owner_id').notNull(),
+    /** The member on the list. */
+    memberId: text('member_id').notNull(),
+    kind: text('kind', { enum: MEMBER_ACCESS_KINDS }).notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.guildId, t.ownerId, t.memberId] }),
+    /** Erasure on request by the person who is listed, across every owner and server. */
+    index('member_access_lists_member_idx').on(t.memberId),
+    /**
+     * `owner_id` first, unlike the primary key. A lookup by `(guild_id,
+     * owner_id)` is already served by the primary key's prefix, so an index in
+     * that order would be dead weight; this order serves the same lookup AND
+     * erasure by the owner alone, which spans servers.
+     */
+    index('member_access_lists_owner_idx').on(t.ownerId, t.guildId),
+  ],
 );
 
 // ---------------------------------------------------------------------------

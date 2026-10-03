@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { AUTH_STATUSES } from '../domain/auth.js';
 import { FLEETS } from '../domain/fleets.js';
+import { MEMBER_ACCESS_KINDS } from '../domain/roomAccess.js';
 import {
   guilds,
   guildAuthEvents,
   guildFleetPresence,
   identifyBuckets,
+  memberAccessLists,
   opsAudit,
   runtimeFlags,
+  secondaryChannels,
   shardLeases,
 } from './schema.js';
 
@@ -60,5 +63,34 @@ describe('schema fleet enum', () => {
    */
   it('leaves ops_audit.fleet nullable', () => {
     expect(opsAudit.fleet.notNull).toBe(false);
+  });
+});
+
+/**
+ * Saved trusted and blocked lists, and the column that records a room's access.
+ * Both are expand-only additions an older build never reads or writes.
+ */
+describe('schema room access', () => {
+  /** Same drift guard as the auth and fleet literals: the schema inlines the kinds. */
+  it('member_access_lists.kind matches domain MEMBER_ACCESS_KINDS', () => {
+    expect([...memberAccessLists.kind.enumValues]).toEqual([...MEMBER_ACCESS_KINDS]);
+  });
+
+  /**
+   * Customer data shared by every fleet, like `aliases`: a per-fleet copy would
+   * let a block hold on one bot and not on the other serving the same guild. The
+   * decision is recorded in the schema doc and in `plans/fleets.md`.
+   */
+  it('keeps member_access_lists shared across fleets', () => {
+    expect('fleet' in memberAccessLists).toBe(false);
+  });
+
+  /**
+   * Null and no default is what makes the column additive: every room an older
+   * build made has none, and an older build's insert never names it.
+   */
+  it('adds secondary_channels.access as nullable with no default', () => {
+    expect(secondaryChannels.access.notNull).toBe(false);
+    expect(secondaryChannels.access.hasDefault).toBe(false);
   });
 });
