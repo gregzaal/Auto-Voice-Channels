@@ -7,8 +7,9 @@ import type {
   PrimaryTemplate,
   SecondaryChannelRepository,
   SecondaryChannelRow,
+  StartMode,
 } from '@avc/core';
-import { isEntitled } from '@avc/core';
+import { isEntitled, startModeOf } from '@avc/core';
 import type { VoiceActions } from './actions.js';
 import type { GuildVoiceView, MemberActivity, VoiceMember, VoiceStateEvent } from './types.js';
 import {
@@ -26,6 +27,7 @@ import {
   type VoiceSettings,
 } from './guildSettings.js';
 import { isPermissionError } from './discordAdapter.js';
+import { CreationRefusedError } from './privacy.js';
 import {
   permissionProblemMessage,
   type PermissionOperation,
@@ -43,6 +45,22 @@ function randomSeed(): number {
 }
 
 /**
+ * What `{{PRIVATE}}` and `{{HIDDEN}}` read for a room that exists, from its row.
+ *
+ * Through `roomMode`, so a hidden room is hidden and private whatever a stale whole-state
+ * write did to `state.private`, and the render agrees with every other reader about what
+ * mode a room is in. The row's own `access` is null both for no record and for one this
+ * build cannot read, and a render takes both as not hidden: telling them apart costs a
+ * second read of the row on every render, and an unreadable record is a newer build's.
+ */
+function renderPrivacyOf(
+  row: Pick<SecondaryChannelRow, 'state' | 'access'>,
+): Pick<RenderContextInput, 'isPrivate' | 'isHidden'> {
+  const mode = roomMode({ state: row.state, access: { readable: true, access: row.access } });
+  return { isPrivate: mode !== 'public', isHidden: mode === 'hidden' };
+}
+
+/**
  * Everything a render context needs that is not derivable from the settings.
  *
  * `channelId` is the LIVE channel, read for its user limit. `startAt` comes
@@ -55,7 +73,10 @@ export interface RenderContextInput {
   index: number;
   ownerId?: string | null;
   seed?: number | undefined;
+  /** Not public: locked, or hidden, which is a kind of locked. For `{{PRIVATE}}`. */
   isPrivate?: boolean;
+  /** Hidden from the channel list, for `{{HIDDEN}}`. A hidden room is also `isPrivate`. */
+  isHidden?: boolean;
   startAt?: number | undefined;
   /**
    * Whoever created the room, for `@@original_creator@@`: the id so the
@@ -277,16 +298,20 @@ export interface VoiceFeatureDeps {
    */
   clock?: () => Date;
   /**
-   * Applies the private treatment to a just-spawned secondary when its primary is
-   * `defaultPrivate` (mirrors `/private`, but grants Connect to the owner by id
-   * since their move may not be in the voice cache yet). Idempotent; no-op when
-   * unset.
+   * Applies the private treatment to a just-spawned secondary when its primary starts
+   * its rooms locked or hidden (`mode`; mirrors `/private` or `/hide`, but grants the
+   * owner access by id since their move may not be in the voice cache yet). Idempotent;
+   * no-op when unset.
+   *
+   * **Throws when it cannot, which is what the create path's rollback reads**: a room
+   * that was meant to be locked or hidden and is not is deleted, never left open.
    */
   makePrivateOnCreate?: (
     guildId: string,
     channelId: string,
     ownerId: string,
     ownerName: string,
+    mode: 'locked' | 'hidden',
   ) => Promise<void>;
   /**
    * Applies the creator's saved trusted and blocked lists to a just-made room (the privacy
@@ -464,7 +489,8 @@ export interface PrimaryConfig {
   startAt?: number | undefined;
   above?: boolean | undefined;
   limit?: number | undefined;
-  defaultPrivate?: boolean | undefined;
+  /** How new rooms start: open, locked or hidden. A hidden default needs `defaultPrivate` too. */
+  defaultMode: StartMode;
   inheritperms?: string | undefined;
   /** Whether rooms from this creator channel get a private text channel. */
   textChannel?: boolean | undefined;
@@ -477,7 +503,7 @@ function primaryConfig(row: { channelId: string; template: PrimaryTemplate }): P
     startAt: row.template.startAt,
     above: row.template.above,
     limit: row.template.limit,
-    defaultPrivate: row.template.defaultPrivate,
+    defaultMode: startModeOf(row.template),
     inheritperms: row.template.inheritperms,
     textChannel: row.template.textChannel,
   };
@@ -808,6 +834,13 @@ export class VoiceFeature {
       }
     }
     const template = primary?.template.name ?? settings.channelNameTemplate;
+    /**
+     * How this room starts: open, locked or hidden. ONE value read ONE time, because the
+     * render, the slot reservation, the privacy step and the panel all have to agree on
+     * it, and four separate reads of the stored booleans are how they drift. It is the
+     * creator channel's default; a member's remembered preference will feed the same local.
+     */
+    const startMode: StartMode = primary ? startModeOf(primary.template) : 'public';
     // Generate the per-channel random seed once, here, so `[[random]]` picks are
     // fixed for this channel's lifetime and never trigger a later rename.
     const seed = randomSeed();
@@ -819,11 +852,12 @@ export class VoiceFeature {
         index,
         ownerId: member.id,
         seed,
-        // The room does not exist yet, so `{{PRIVATE}}` has to come from the
-        // primary's intent. `makePrivateOnCreate` runs AFTER this render, so
-        // reading it back would render `false` and cost an immediate second
-        // rename on every default-private room.
-        isPrivate: primary?.template.defaultPrivate === true,
+        // The room does not exist yet, so `{{PRIVATE}}` and `{{HIDDEN}}` have to come
+        // from the primary's intent. `makePrivateOnCreate` runs AFTER this render, so
+        // reading them back would render `false` and cost an immediate second
+        // rename on every default-private room. A hidden room is private as well.
+        isPrivate: startMode !== 'public',
+        isHidden: startMode === 'hidden',
         startAt: primary?.template.startAt,
         // On the create path the joining member IS the original creator, so
         // the token renders correctly on the very first name.
@@ -873,8 +907,9 @@ export class VoiceFeature {
         // Below the anchor means below its existing rooms too, not between them.
         afterChannelIds: blockIds,
         // A default-private room's "join" companion is created moments later and
-        // has to sit directly above it, so keep that slot free now.
-        ...(primary?.template.defaultPrivate ? { reserveSlotAbove: true } : {}),
+        // has to sit directly above it, so keep that slot free now. A hidden room has
+        // no Join channel, so there is nothing to reserve a slot for.
+        ...(startMode === 'locked' ? { reserveSlotAbove: true } : {}),
         // Inherit permissions from the primary by default (matching the legacy bot);
         // `/inheritpermissions` can switch the source to the category or a specific
         // channel. Unset must NOT fall through to Discord's category-sync.
@@ -912,21 +947,28 @@ export class VoiceFeature {
     });
     this.deps.countRoom?.('created', guildId);
 
-    // Default-private primaries: lock the new channel before the owner lands in
-    // it (granting Connect to them by id, since their move isn't cached yet).
-    if (primary?.template.defaultPrivate) {
+    // Default-private primaries: lock or hide the new channel before the owner lands in
+    // it (granting them access by id, since their move isn't cached yet). Hidden
+    // writes the owner's View and Connect, the bot's allow and the `@everyone` deny,
+    // and makes no Join channel.
+    if (startMode !== 'public') {
       try {
         await this.deps.makePrivateOnCreate?.(
           guildId,
           newChannelId,
           member.id,
           displayName(settings, member),
+          startMode,
         );
       } catch (err) {
-        if (!isPermissionError(err)) throw err;
+        // A refusal is a failure of the same kind as a missing permission: the plan will
+        // not hide the room (a role the bot cannot edit would still show it), so the room
+        // would be open to everyone. It is not a Discord error, so it needs its own check.
+        if (!isPermissionError(err) && !(err instanceof CreationRefusedError)) throw err;
         // Same recovery as a failed move: a channel we can't finish locking
         // down is worse than no channel, since nobody (not even the owner) can
-        // get into it. Stop tracking it, best-effort delete, and notify.
+        // get into it, and a room meant to be hidden that is open is worse
+        // still. Stop tracking it, best-effort delete, and notify.
         await this.deps.secondaries.remove(newChannelId);
         await this.deps.onSecondaryRemoved?.(guildId, newChannelId);
         await this.deps.actions.deleteChannel(guildId, newChannelId).catch(() => undefined);
@@ -937,7 +979,7 @@ export class VoiceFeature {
         });
         this.deps.serverLog?.(guildId, 1, permissionProblemMessage(channelId, 'privacy'));
         this.deps.logger.warn(
-          { guildId, primaryId: channelId, secondaryId: newChannelId, err },
+          { guildId, primaryId: channelId, secondaryId: newChannelId, mode: startMode, err },
           'created secondary but cannot make it private',
         );
         return { action: 'skip' };
@@ -1040,14 +1082,13 @@ export class VoiceFeature {
         {
           ownerId: member.id,
           primaryChannelId: channelId,
-          // Read from the row we just wrote rather than from Discord: the
-          // privacy overwrite was applied moments ago and the channel cache
-          // may not carry it yet, and a create is the one moment we know the
-          // answer for certain.
-          isPrivate: primary?.template.defaultPrivate === true,
-          // A room that has just been made is not hidden. On a replay that finds a live
-          // room the row says whether it is, as it does for the settings above.
-          isHidden: roomRow?.access?.hidden === true,
+          // From the mode the room was just made in, rather than read back from Discord:
+          // the overwrites were applied moments ago and the channel cache may not carry
+          // them yet, and a create is the one moment we know the answer for certain.
+          isPrivate: startMode !== 'public',
+          // On a replay that finds a live room the row says whether it is hidden, as it
+          // does for the settings above.
+          isHidden: startMode === 'hidden' || roomRow?.access?.hidden === true,
           userLimit: primary?.template.limit ?? 0,
           ownerAccess: this.panelOwnerAccess(newChannelId, member.id),
         },
@@ -1870,6 +1911,7 @@ export class VoiceFeature {
       gameNameMode: settings.gameNameMode,
       userLimit: this.deps.voice.userLimitOf?.(channelId) ?? 0,
       isPrivate: input.isPrivate ?? false,
+      isHidden: input.isHidden ?? false,
       // `startAt` is what the admin typed (the first room's number), so the
       // offset is one less. Absent means the default, 1.
       numberOffset: input.startAt === undefined ? 0 : input.startAt - 1,
@@ -1917,7 +1959,7 @@ export class VoiceFeature {
       index,
       ownerId: secondary.ownerId,
       seed: secondary.state.seed,
-      isPrivate: secondary.state.private === true,
+      ...renderPrivacyOf(secondary),
       startAt: primary?.template.startAt,
       originalCreatorId: secondary.originalCreator,
       originalCreatorName: secondary.state.originalCreatorName,
@@ -2287,7 +2329,7 @@ export class VoiceFeature {
           index: secondary.state.index ?? 0,
           ownerId: secondary.ownerId,
           seed: secondary.state.seed,
-          isPrivate: secondary.state.private === true,
+          ...renderPrivacyOf(secondary),
           startAt: primary?.template.startAt,
           originalCreatorId: secondary.originalCreator,
           originalCreatorName: secondary.state.originalCreatorName,
@@ -2400,7 +2442,10 @@ export class VoiceFeature {
         index: secondary.state.index ?? 0,
         ownerId: secondary.ownerId,
         seed: secondary.state.seed,
-        isPrivate: secondary.state.private === true,
+        // From the record as READ, so an unreadable one is not guessed at, and a hidden
+        // room is private as well, exactly as the render itself treats it.
+        isPrivate: secondary.state.private === true || accessMode === 'hidden',
+        isHidden: accessMode === 'hidden',
         startAt: primary?.template.startAt,
         originalCreatorId: secondary.originalCreator,
         originalCreatorName: secondary.state.originalCreatorName,
@@ -2734,7 +2779,7 @@ export class VoiceFeature {
       index: secondary.state.index ?? 0,
       ownerId: secondary.ownerId,
       seed: secondary.state.seed,
-      isPrivate: secondary.state.private === true,
+      ...renderPrivacyOf(secondary),
       startAt: primary?.template.startAt,
       originalCreatorId: secondary.originalCreator,
       originalCreatorName: secondary.state.originalCreatorName,
@@ -2850,11 +2895,12 @@ export class VoiceFeature {
      * Saved lists and hidden rooms: converge each live room's overwrites and Join channel
      * on what its creator's lists and its own access record say.
      *
-     * Here, ahead of the renumber pass, for two reasons. A hidden room is the one thing
-     * in this sweep that is a privacy fault when it is wrong, so it must not wait behind
-     * a rename that throws (the loops below have no per-room catch, and one 50013 aborts
-     * everything after it). And a repaired `private` flag is what the re-render below
-     * reads for `{{PRIVATE}}`. Skipped under a dry run, which reports and never acts.
+     * Here, ahead of the renumber pass, because a hidden room is the one thing in this
+     * sweep that is a privacy fault when it is wrong, so it must not wait behind a rename
+     * that throws (the loops below have no per-room catch, and one 50013 aborts everything
+     * after it). It does not have to run first for the name's sake: the render reads a
+     * hidden room's privacy from its record, not from the `private` flag this pass repairs.
+     * Skipped under a dry run, which reports and never acts.
      * Everything behind it is contained inside, per room, so nothing here can abort the
      * passes that follow, and `room_access.disabled` turns it off.
      */

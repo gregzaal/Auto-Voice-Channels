@@ -10,6 +10,7 @@ import {
 import {
   renderChannelName,
   type ChannelInfo,
+  type PrimaryConfig,
   type RenderContext,
   type TemplateSource,
 } from '../features/voice/index.js';
@@ -486,6 +487,21 @@ function accessLine(info: ChannelInfo): string {
   }
 }
 
+/**
+ * How a creator channel's new rooms start, in the words a room's own Access field uses. A
+ * hidden default is private as well, and says only the stronger thing, as that field does.
+ */
+function startModeWords(mode: PrimaryConfig['defaultMode']): string {
+  switch (mode) {
+    case 'hidden':
+      return 'hidden from the channel list';
+    case 'locked':
+      return 'private';
+    default:
+      return 'open to everyone';
+  }
+}
+
 function gameLine(info: ChannelInfo): string {
   const raw = info.rawGames.filter((g) => g !== info.general && g !== info.game);
   return raw.length > 0
@@ -553,7 +569,7 @@ function pushAdminFields(embed: APIEmbed, input: ChannelInfoPanelInput): void {
       `Creator channel: <#${p.channelId}>`,
       `New rooms appear ${p.above === true ? 'above' : 'below'} it, numbered from ${p.startAt ?? 1}`,
       `Default limit: ${p.limit && p.limit > 0 ? p.limit : 'none'}`,
-      `New rooms start private: ${p.defaultPrivate === true ? 'yes' : 'no'}`,
+      `New rooms start: ${startModeWords(p.defaultMode)}`,
       `Each room gets its own text channel: ${p.textChannel === true ? 'yes' : 'no'}`,
       `Permissions copied from: ${p.inheritperms ? `\`${escapeMarkdown(p.inheritperms)}\`` : 'the creator channel'}`,
     ];

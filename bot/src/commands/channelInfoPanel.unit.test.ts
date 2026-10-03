@@ -254,7 +254,7 @@ describe('buildChannelInfoPanel', () => {
     const admin = input({
       isAdmin: true,
       botPermissions: { ManageChannels: false },
-      info: info({ primary: { channelId: 'p1', startAt: 4, above: true } }),
+      info: info({ primary: { channelId: 'p1', startAt: 4, above: true, defaultMode: 'public' } }),
     });
     expect(text(buildChannelInfoPanel(admin))).toContain('ManageChannels');
     expect(text(buildChannelInfoPanel({ ...admin, isAdmin: false }))).not.toContain(
@@ -359,6 +359,47 @@ describe('buildChannelInfoPanel', () => {
       expect(text).not.toMatch(/[—–‘’“”;]/);
       expect(text.toLowerCase()).not.toMatch(/primary|secondary|profile|activity|invisible/);
     });
+  });
+});
+
+/**
+ * What a creator channel says about how its new rooms start. It was a yes or no about
+ * "private", which has two answers too few now that a room can also be hidden, and the
+ * three states are said in the words the room's own Access field uses.
+ */
+describe('the creator channel settings', () => {
+  const settings = (defaultMode: 'public' | 'locked' | 'hidden'): string => {
+    const reply = buildChannelInfoPanel(
+      input({
+        isAdmin: true,
+        info: info({
+          kind: 'creator',
+          primary: { channelId: 'p1', startAt: 4, above: true, defaultMode },
+        }),
+      }),
+    );
+    const field = (reply.embeds![0] as { fields: { name: string; value: string }[] }).fields.find(
+      (f) => f.name === 'Creator channel settings',
+    );
+    return field!.value;
+  };
+
+  it('says how new rooms start in all three states', () => {
+    expect(settings('public')).toContain('New rooms start: open to everyone');
+    expect(settings('locked')).toContain('New rooms start: private');
+    expect(settings('hidden')).toContain('New rooms start: hidden from the channel list');
+  });
+
+  it('no longer asks a yes or no question about private', () => {
+    for (const mode of ['public', 'locked', 'hidden'] as const) {
+      expect(settings(mode)).not.toMatch(/start private/i);
+    }
+  });
+
+  it('keeps to the copy rules and the vocabulary in every state', () => {
+    const all = (['public', 'locked', 'hidden'] as const).map(settings).join('\n');
+    expect(all).not.toMatch(/[—–‘’“”;]/);
+    expect(all.toLowerCase()).not.toMatch(/primary|secondary|profile|activity|invisible/);
   });
 });
 
@@ -619,7 +660,14 @@ describe('embed limits', () => {
       gatedNote: 'G'.repeat(200),
       info: info({
         render: { ...info().render!, ctx: wordy, nameTemplate: `{{GAME ?? ${'X'.repeat(600)}` },
-        primary: { channelId: 'p1', startAt: 4, above: true, limit: 8, inheritperms: 'category' },
+        primary: {
+          channelId: 'p1',
+          startAt: 4,
+          above: true,
+          limit: 8,
+          inheritperms: 'category',
+          defaultMode: 'hidden',
+        },
       }),
     });
     for (const view of ['summary', 'tokens', 'scenarios'] as const) {

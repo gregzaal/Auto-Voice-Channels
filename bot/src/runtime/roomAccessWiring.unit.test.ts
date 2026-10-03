@@ -82,3 +82,17 @@ describe('the room_access.disabled lever is wired to every consumer', () => {
     expect(SOURCE.split(WIRING).length - 1).toBe(2);
   });
 });
+
+/**
+ * The create path's privacy step takes the mode a creator channel starts its rooms in, and
+ * the hook is optional and typed to ignore extra arguments, so a wiring that drops it still
+ * compiles: a hidden creator channel would then quietly make LOCKED rooms, with a Join
+ * channel that names the owner, and every test green because each builds its own wiring.
+ */
+describe('the create hook is handed the mode a room starts in', () => {
+  it('passes it on to makePrivateForCreation', () => {
+    const feature = statementFrom('const voiceFeature = new VoiceFeature({');
+    expect(feature).toContain('makePrivateOnCreate: (gid, cid, ownerId, ownerName, mode) =>');
+    expect(feature).toContain('privacy.makePrivateForCreation(gid, cid, ownerId, ownerName, mode)');
+  });
+});

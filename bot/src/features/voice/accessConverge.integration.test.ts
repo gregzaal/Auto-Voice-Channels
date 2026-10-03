@@ -1729,22 +1729,30 @@ describe('the sweep keeps saved lists and hidden rooms in line (integration)', (
       expect(bits(held('r1', BOT))).toEqual({ allow: BOT_ACCESS, deny: 0n });
     });
 
-    /** A repaired `private` is what `{{PRIVATE}}` reads, so the re-render has to come after it. */
-    it('has repaired a lost `private` flag by the time the name is worked out from it', async () => {
+    /**
+     * A hidden room is private whether or not the flag survived. The name used to be worked
+     * out from `state.private` alone, so a stale whole-state write that dropped it left a
+     * hidden room named as an open one until this pass repaired the flag, and the repair then
+     * cost a rename. The render now reads the record, which a whole-state write cannot touch,
+     * so the name was right all along and the repair changes nothing a member can see.
+     */
+    it('names a hidden room private before its lost `private` flag is repaired, and the repair costs no rename', async () => {
       await autoChannels.upsert(GUILD, PRIMARY, { name: '{{PRIVATE ?? L // U}} room' });
       await room('r1');
       await privacy.hide(GUILD, 'r1', 'alice');
       const { private: _private, ...rest } = (await row('r1')).state;
-      // A stale whole-state write dropped the flag, and the name was last worked out without it.
+      // A stale whole-state write dropped the flag.
       await secondaries.updateState('r1', rest);
       await feature.rerenderSecondary(GUILD, 'r1');
       expect((await row('r1')).state.private).toBeUndefined();
-      expect((await row('r1')).state.name).toMatch(/^U/);
+      expect((await row('r1')).state.name).toMatch(/^L/);
+      const renames = actions.ofType('rename').length;
 
       await sweep();
 
       expect((await row('r1')).state.private).toBe(true);
       expect((await row('r1')).state.name).toMatch(/^L/);
+      expect(actions.ofType('rename')).toHaveLength(renames);
     });
   });
 

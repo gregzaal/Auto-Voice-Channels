@@ -11,7 +11,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import type { PgTestEnv } from '../../test/pgContainer.js';
 import { startPostgres } from '../../test/pgContainer.js';
 import { fakeLogger } from '../../runtime/testUtils.js';
-import { BOT_ACCESS, CONNECT } from './accessPlan.js';
+import { BOT_ACCESS, CONNECT, OVERWRITE_ROLE, VIEW_CHANNEL } from './accessPlan.js';
 import { RecordingVoiceActions } from './actions.js';
 import { CompanionTextService } from './companionText.js';
 import { ControlPanelPoster } from './controlPanelPoster.js';
@@ -1674,6 +1674,18 @@ describe('VoiceFeature (integration)', () => {
         expect(info.accessMode).toBe('hidden');
         expect(info.isPrivate).toBe(true);
         expect(info.viewerRoleId).toBe('mods');
+        // The probes render against this context, so it carries both, as the room's name does.
+        expect(info.render?.ctx).toMatchObject({ isPrivate: true, isHidden: true });
+      });
+
+      it('hands the probes a locked room that is private and not hidden', async () => {
+        await room('ci-locked-ctx');
+        await secondaries.transitionAccess('ci-locked-ctx', {
+          statePatch: { private: true },
+          access: (stored) => stored,
+        });
+        const info = await feature.channelInfo(GUILD, 'ci-locked-ctx');
+        expect(info.render?.ctx).toMatchObject({ isPrivate: true, isHidden: false });
       });
 
       /** A stale whole-state write dropping `private` from a hidden room must not make it read as public. */
@@ -1688,6 +1700,7 @@ describe('VoiceFeature (integration)', () => {
         const info = await feature.channelInfo(GUILD, 'ci-stale');
         expect(info.accessMode).toBe('hidden');
         expect(info.isPrivate).toBe(true);
+        expect(info.render?.ctx).toMatchObject({ isPrivate: true, isHidden: true });
       });
 
       it('unknown for a record this build cannot read, rather than public or locked', async () => {
@@ -1731,6 +1744,18 @@ describe('VoiceFeature (integration)', () => {
       expect(info.render?.synthetic).toBe(true);
       expect(info.render?.ctx.members).toHaveLength(0);
       expect(info.primary?.channelId).toBe(PRIMARY);
+    });
+
+    /** The creator channel's own readout carries how its new rooms start, in all three states. */
+    it.each([
+      ['public', {}],
+      ['locked', { defaultPrivate: true }],
+      ['hidden', { defaultPrivate: true, defaultHidden: true }],
+      // Leftover from an instance that predates the field: public, not hidden.
+      ['public', { defaultHidden: true }],
+    ] as const)('says a creator channel starts rooms %s', async (mode, template) => {
+      await autoChannels.upsert(GUILD, PRIMARY, { name: 'Room', ...template });
+      expect((await feature.channelInfo(GUILD, PRIMARY)).primary?.defaultMode).toBe(mode);
     });
 
     it('resolves an adopted channel that debugChannel reports as unmanaged', async () => {
@@ -1896,6 +1921,362 @@ describe('VoiceFeature (integration)', () => {
 
     expect(actions.ofType('privacy')).toHaveLength(0);
     expect(actions.ofType('joinChannel')).toHaveLength(0);
+  });
+
+  /**
+   * How a new room starts: open, locked behind a "⇩ Join" channel, or hidden from the channel
+   * list. One value, read once per creation, from the creator channel's stored pair.
+   */
+  describe('how a new room starts', () => {
+    const BOTH = VIEW_CHANNEL | CONNECT;
+    const ABOVE = 'role-above-the-bot';
+
+    /** The feature wired as index.ts does: the privacy service behind makePrivateOnCreate. */
+    function wire(over: { rerender?: boolean } = {}) {
+      const problems = new PermissionProblemTracker();
+      const logs: { level: number; message: string }[] = [];
+      const privacy = new PrivacyService({
+        secondaries,
+        joinChannels: new JoinChannelRepository(env.handle.db),
+        actions,
+        voice,
+        logger: fakeLogger(),
+        botUserId: () => 'bot',
+        permissionProblems: problems,
+        serverLog: (_g, level, message) => logs.push({ level, message }),
+      });
+      const views: { isPrivate: boolean; isHidden: boolean | 'unknown' }[] = [];
+      const f = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+        permissionProblems: problems,
+        serverLog: (_g, level, message) => logs.push({ level, message }),
+        // As index.ts wires it: the mode rides along.
+        makePrivateOnCreate: (g, c, ownerId, ownerName, mode) =>
+          privacy.makePrivateForCreation(g, c, ownerId, ownerName, mode),
+        controlPanel: {
+          postForRoom: (_g, _room, _primary, _destination, view) => {
+            views.push({ isPrivate: view.isPrivate, isHidden: view.isHidden });
+            return Promise.resolve();
+          },
+          refreshForRoom: () => Promise.resolve(),
+        },
+      });
+      void over;
+      return { f, problems, logs, views, privacy };
+    }
+
+    /** A name with its runs of spaces collapsed, so a branch's own padding is not the thing under test. */
+    const spaced = (name: string): string => name.replace(/\s+/g, ' ').trim();
+
+    /** Alice joins the creator channel, and the id of the room that was made for her. */
+    async function join(f: VoiceFeature): Promise<string> {
+      await guilds.transitionAuth({ guildId: GUILD, toStatus: 'trial' });
+      const alice = member('alice');
+      voice.put(PRIMARY, alice);
+      await f.handleVoiceStateUpdate({ guildId: GUILD, member: alice, afterChannelId: PRIMARY });
+      return actions.ofType('create')[0]!.channelId;
+    }
+
+    describe('a hidden creator channel', () => {
+      beforeEach(async () => {
+        await autoChannels.upsert(GUILD, PRIMARY, {
+          name: "@@creator@@'s room",
+          defaultPrivate: true,
+          defaultHidden: true,
+        });
+      });
+
+      it('spawns a room hidden from the channel list, with no Join channel', async () => {
+        const { f } = wire();
+        const id = await join(f);
+
+        const held = actions.overwritesOf(id);
+        // The bot's own allow, the creator's View and Connect by id (their move has not
+        // reached the cache), and @everyone denied both.
+        expect(held).toContainEqual(expect.objectContaining({ id: 'bot', allow: BOT_ACCESS }));
+        expect(held).toContainEqual(expect.objectContaining({ id: 'alice', allow: BOTH }));
+        expect(held).toContainEqual(expect.objectContaining({ id: GUILD, deny: BOTH }));
+        // Nothing for a stranger to knock on, which would name the owner.
+        expect(actions.ofType('joinChannel')).toHaveLength(0);
+        expect(await new JoinChannelRepository(env.handle.db).getBySecondary(id)).toBeUndefined();
+        // Recorded as hidden, and private for readers that predate hiding.
+        const row = (await secondaries.get(id))!;
+        expect(row.state.private).toBe(true);
+        expect(row.access?.hidden).toBe(true);
+      });
+
+      it('writes the access before the owner is moved in, so the owner can enter', async () => {
+        const { f } = wire();
+        const id = await join(f);
+
+        const hideIdx = actions.actions.findIndex(
+          (a) => a.type === 'overwrites' && a.channelId === id,
+        );
+        const moveIdx = actions.actions.findIndex(
+          (a) => a.type === 'move' && a.memberId === 'alice',
+        );
+        expect(hideIdx).toBeGreaterThanOrEqual(0);
+        expect(hideIdx).toBeLessThan(moveIdx);
+        // And the creator was moved: the room is not one they were shut out of.
+        expect(actions.ofType('move')).toContainEqual(
+          expect.objectContaining({ memberId: 'alice', channelId: id }),
+        );
+      });
+
+      it('reserves no slot above the room, since there is no Join channel to put there', async () => {
+        const { f } = wire();
+        await join(f);
+        expect(actions.ofType('create')[0]!.reserveSlotAbove).toBeUndefined();
+      });
+
+      /**
+       * The reason the create path hands the render its privacy explicitly: the access write
+       * happens after the name is rendered, so reading it back would render HIDDEN and
+       * PRIVATE as false and spend one of the room's two renames per ten minutes at once.
+       */
+      it('names the room hidden and private from the first render, with no second rename', async () => {
+        await autoChannels.upsert(GUILD, PRIMARY, {
+          name: '{{HIDDEN ?? 🙈 // 👁}}{{PRIVATE ?? 🔒 // 🔓}} @@creator@@',
+          defaultPrivate: true,
+          defaultHidden: true,
+        });
+        const { f } = wire();
+        const id = await join(f);
+        expect(spaced(actions.ofType('create')[0]!.name)).toBe('🙈 🔒 alice');
+
+        // The room as it stands once Alice is in it, re-rendered the way every sweep does.
+        voice.put(id, member('alice'));
+        expect(await f.rerenderSecondary(GUILD, id)).toEqual({});
+        expect(actions.ofType('rename')).toHaveLength(0);
+      });
+
+      it('hands the control panel a hidden room, not a public one', async () => {
+        const { f, views } = wire();
+        await join(f);
+        expect(views).toEqual([{ isPrivate: true, isHidden: true }]);
+      });
+
+      it('deletes the room when it cannot be hidden, blaming the creator channel once', async () => {
+        const { f, problems, logs } = wire();
+        actions.failOverwrites = true;
+        const id = await join(f);
+
+        expect(actions.ofType('delete')).toContainEqual(expect.objectContaining({ channelId: id }));
+        expect(await secondaries.get(id)).toBeUndefined();
+        // A room nobody can see, or one that is open to everyone, is worse than no room.
+        expect(actions.ofType('move')).toEqual([]);
+        const recorded = problems.recent(GUILD);
+        expect(recorded).toHaveLength(1);
+        expect(recorded[0]).toMatchObject({ channelId: PRIMARY, operation: 'privacy' });
+        expect(logs).toHaveLength(1);
+        expect(logs[0]!.message).toContain(`<#${PRIMARY}>`);
+        expect(logs[0]!.message).not.toContain(id);
+      });
+
+      /**
+       * A role the bot cannot edit that shows the creator channel would show the room, so
+       * the hide is refused. That is not a Discord error, and it must not leave an open room
+       * behind a creator channel the admin set to hidden, or count against the guild.
+       */
+      it('deletes the room when a role above the bot would still show it', async () => {
+        const { f, problems } = wire();
+        voice.setBotRoleAccess({ uneditableRoleIds: [ABOVE] });
+        actions.seedOverwrites('sec-1', [
+          { id: ABOVE, type: OVERWRITE_ROLE, allow: VIEW_CHANNEL, deny: 0n },
+        ]);
+        const id = await join(f);
+
+        expect(id).toBe('sec-1');
+        expect(actions.ofType('delete')).toContainEqual(expect.objectContaining({ channelId: id }));
+        expect(await secondaries.get(id)).toBeUndefined();
+        expect(actions.ofType('move')).toEqual([]);
+        expect(problems.recent(GUILD)).toEqual([
+          expect.objectContaining({ channelId: PRIMARY, operation: 'privacy' }),
+        ]);
+      });
+
+      it('still creates the room when the bot can neutralise the role', async () => {
+        const { f } = wire();
+        voice.setBotRoleAccess({ uneditableRoleIds: [] });
+        actions.seedOverwrites('sec-1', [
+          { id: ABOVE, type: OVERWRITE_ROLE, allow: VIEW_CHANNEL, deny: 0n },
+        ]);
+        const id = await join(f);
+        expect((await secondaries.get(id))!.access?.hidden).toBe(true);
+        // The role's View is flipped on this room's copy, or it would still show it.
+        expect(actions.overwritesOf(id)).toContainEqual(
+          expect.objectContaining({ id: ABOVE, deny: VIEW_CHANNEL }),
+        );
+      });
+
+      it('does not delete the room for an error that is not a refusal or a permission', async () => {
+        const failing = new VoiceFeature({
+          autoChannels,
+          secondaries,
+          guilds,
+          actions,
+          voice,
+          selfHosted: true,
+          logger: fakeLogger(),
+          makePrivateOnCreate: () => Promise.reject(new Error('socket hang up')),
+        });
+        await guilds.transitionAuth({ guildId: GUILD, toStatus: 'trial' });
+        const alice = member('alice');
+        voice.put(PRIMARY, alice);
+        await expect(
+          failing.handleVoiceStateUpdate({
+            guildId: GUILD,
+            member: alice,
+            afterChannelId: PRIMARY,
+          }),
+        ).rejects.toThrow('socket hang up');
+        // Left to the sweep and the breaker, as a failure to lock a room always was.
+        expect(actions.ofType('delete')).toHaveLength(0);
+      });
+    });
+
+    describe('a locked creator channel', () => {
+      beforeEach(async () => {
+        await autoChannels.upsert(GUILD, PRIMARY, {
+          name: "@@creator@@'s room",
+          defaultPrivate: true,
+        });
+      });
+
+      it('is unchanged: a Join channel, a reserved slot, and the owner allowed to connect', async () => {
+        const { f, views } = wire();
+        const id = await join(f);
+
+        expect(actions.ofType('create')[0]!.reserveSlotAbove).toBe(true);
+        expect(actions.ofType('joinChannel')).toHaveLength(1);
+        const held = actions.overwritesOf(id);
+        expect(held).toContainEqual(expect.objectContaining({ id: 'alice', allow: CONNECT }));
+        expect(held).toContainEqual(expect.objectContaining({ id: GUILD, deny: CONNECT }));
+        const row = (await secondaries.get(id))!;
+        expect(row.state.private).toBe(true);
+        expect(row.access?.hidden).not.toBe(true);
+        expect(views).toEqual([{ isPrivate: true, isHidden: false }]);
+      });
+
+      it('names the room private and not hidden from the first render', async () => {
+        await autoChannels.upsert(GUILD, PRIMARY, {
+          name: '{{HIDDEN ?? 🙈 // 👁}}{{PRIVATE ?? 🔒 // 🔓}} @@creator@@',
+          defaultPrivate: true,
+        });
+        const { f } = wire();
+        const id = await join(f);
+        expect(spaced(actions.ofType('create')[0]!.name)).toBe('👁 🔒 alice');
+        voice.put(id, member('alice'));
+        expect(await f.rerenderSecondary(GUILD, id)).toEqual({});
+        expect(actions.ofType('rename')).toHaveLength(0);
+      });
+    });
+
+    /**
+     * Hidden is a kind of private, so `defaultHidden` on its own is a leftover and not an
+     * instruction (an instance that predates the field can switch `defaultPrivate` off and
+     * leave it behind), and honouring it would hide the rooms of an admin who went back to
+     * public.
+     */
+    it('reads defaultHidden without defaultPrivate as public', async () => {
+      await autoChannels.upsert(GUILD, PRIMARY, {
+        name: '{{HIDDEN ?? 🙈 // 👁}} @@creator@@',
+        defaultHidden: true,
+      });
+      const { f, views } = wire();
+      const id = await join(f);
+
+      expect(actions.ofType('create')[0]!.name).toBe('👁 alice');
+      expect(actions.ofType('create')[0]!.reserveSlotAbove).toBeUndefined();
+      expect(actions.ofType('overwrites')).toHaveLength(0);
+      expect(actions.ofType('joinChannel')).toHaveLength(0);
+      const row = (await secondaries.get(id))!;
+      expect(row.state.private).not.toBe(true);
+      expect(row.access).toBeNull();
+      expect(views).toEqual([{ isPrivate: false, isHidden: false }]);
+    });
+
+    it('never touches privacy for a public creator channel', async () => {
+      const f = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+        makePrivateOnCreate: () => Promise.reject(new Error('should not be called')),
+      });
+      await join(f);
+      expect(actions.ofType('overwrites')).toHaveLength(0);
+    });
+  });
+
+  /**
+   * `{{PRIVATE}}` and `{{HIDDEN}}` for a room that exists, which every render path reads from the
+   * row: the sweep and every command's re-render, `/debug` and the `/template` preview. A
+   * hidden room is private as well, and it is hidden whatever a stale whole-state write did to
+   * `state.private`, so the row is made the way a stale write leaves it.
+   */
+  describe('a room that exists renders its own privacy', () => {
+    const NAME = '{{HIDDEN ?? H // V}}-{{PRIVATE ?? P // O}}';
+    /** The engine pads a branch with spaces, which is not what these assert. */
+    const squash = (name: string | undefined): string => (name ?? '').replace(/\s+/g, '');
+    const rows = [
+      ['public', 'V-O'],
+      ['locked', 'V-P'],
+      ['hidden', 'H-P'],
+    ] as const;
+
+    async function roomIn(mode: (typeof rows)[number][0]): Promise<string> {
+      const id = `priv-${mode}`;
+      await autoChannels.upsert(GUILD, PRIMARY, { name: NAME });
+      await secondaries.create({
+        channelId: id,
+        guildId: GUILD,
+        primaryChannelId: PRIMARY,
+        ownerId: 'alice',
+        state: { index: 0, name: 'stale' },
+      });
+      voice.put(id, member('alice'));
+      if (mode !== 'public') {
+        await secondaries.transitionAccess(id, {
+          statePatch: { private: true },
+          access: (stored) => (mode === 'hidden' ? { ...(stored ?? {}), hidden: true } : stored),
+        });
+      }
+      if (mode === 'hidden') {
+        // What a stale whole-state write leaves: hidden in the record, and no `private`.
+        const { private: _gone, ...rest } = (await secondaries.get(id))!.state;
+        await secondaries.updateState(id, rest);
+      }
+      return id;
+    }
+
+    it.each(rows)('renames a %s room to %s on a re-render', async (mode, expected) => {
+      const id = await roomIn(mode);
+      await feature.rerenderSecondary(GUILD, id);
+      const renamed = actions.ofType('rename').at(-1);
+      expect(renamed?.channelId).toBe(id);
+      expect(squash(renamed?.name)).toBe(expected);
+    });
+
+    it.each(rows)('shows a %s room as %s in /debug', async (mode, expected) => {
+      const id = await roomIn(mode);
+      expect(squash((await feature.debugChannel(GUILD, id)).renderedName)).toBe(expected);
+    });
+
+    it.each(rows)('previews a %s room as %s in the /name editor', async (mode, expected) => {
+      const id = await roomIn(mode);
+      const editor = await feature.getEditorState('channel', GUILD, id);
+      expect(squash(editor.name.preview)).toBe(expected);
+    });
   });
 
   describe('adopted standalone channels (managed)', () => {

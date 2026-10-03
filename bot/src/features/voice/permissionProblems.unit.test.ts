@@ -162,6 +162,17 @@ describe('permissionProblemMessage', () => {
     expect(msg).toContain('Manage Roles');
     expect(msg).not.toContain('lost access');
   });
+
+  /**
+   * A creator channel that starts rooms hidden has a third way to fail that the lock did
+   * not: a role above the bot with an override that lets it see the channel would still
+   * show the room, so the hide is refused and the room deleted. The two causes above send
+   * an admin to permissions the bot may already hold, so the third has to be named.
+   */
+  it('names the role above the bot as a cause, for rooms that start hidden', () => {
+    expect(permissionProblemMessage('123', 'privacy')).toContain('Rooms that start hidden');
+    expect(permissionProblemMessage('123', 'privacy')).toContain('my role above any role');
+  });
 });
 
 const problem = (
@@ -216,6 +227,7 @@ describe('permissionProblemSummary', () => {
     expect(line).not.toContain('could not create');
     expect(line).not.toContain('Move Members');
     expect(line).toContain('Manage Roles');
+    expect(line).toContain('Rooms that start hidden');
   });
 
   /**

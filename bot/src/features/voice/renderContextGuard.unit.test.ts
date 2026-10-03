@@ -113,3 +113,69 @@ describe('every render goes through buildRenderContext', () => {
     expect(body).toContain('userLimitOf');
   });
 });
+
+/**
+ * Every live render of a ROOM hands the assembler the room's privacy.
+ *
+ * **`{{PRIVATE}}` and `{{HIDDEN}}` are the two variables the assembler cannot work out for
+ * itself**: it has no row and must not read one, so each caller says. The failure is the
+ * one the guard above exists for, in a new place. A room render that leaves them out reads
+ * both as false, so a hidden room is named as an open one, and the next render that has
+ * them renames it back: a rename per call site per command, against a budget of two per ten
+ * minutes. An adopted standalone channel has no privacy model and passes neither, which is
+ * why this keys on the room itself rather than on every call.
+ */
+describe('every room render says whether the room is private and hidden', () => {
+  /** The text of every `this.buildRenderContext({ ... })` call, braces balanced. */
+  function assemblerCalls(source: string): string[] {
+    const calls: string[] = [];
+    for (const match of source.matchAll(/this\.buildRenderContext\(\{/g)) {
+      const open = match.index + match[0].length - 1;
+      let depth = 0;
+      for (let i = open; i < source.length; i++) {
+        if (source[i] === '{') depth++;
+        else if (source[i] === '}' && --depth === 0) {
+          calls.push(source.slice(open, i + 1));
+          break;
+        }
+      }
+    }
+    return calls;
+  }
+
+  const calls = assemblerCalls(SOURCE);
+  /** A call about a room: the create path, or any of the sites that hold a secondary's row. */
+  const roomCalls = calls.filter((c) => /secondary\.|startMode/.test(c));
+
+  it('found the room call sites, and the adopted ones it must leave alone', () => {
+    // create, re-render, /debug, /channelinfo and the /name and /template editor.
+    expect(roomCalls.length).toBeGreaterThanOrEqual(5);
+    expect(calls.length).toBeGreaterThan(roomCalls.length);
+  });
+
+  it('passes both, from the row or from the create path, at every room call site', () => {
+    for (const call of roomCalls) {
+      const fromRow = call.includes('renderPrivacyOf(');
+      const explicit = call.includes('isPrivate') && call.includes('isHidden');
+      expect(
+        fromRow || explicit,
+        `a room render leaves out isPrivate or isHidden:\n${call.slice(0, 400)}`,
+      ).toBe(true);
+    }
+  });
+
+  it('reads a room row through roomMode, so hidden wins over a dropped private flag', () => {
+    const from = SOURCE.indexOf('function renderPrivacyOf(');
+    expect(from).toBeGreaterThan(-1);
+    const body = SOURCE.slice(from, SOURCE.indexOf('\n}', from));
+    expect(body).toContain('roomMode(');
+  });
+
+  it('hands both on through the assembler', () => {
+    const from = SOURCE.indexOf('buildRenderContext(input: RenderContextInput)');
+    expect(from).toBeGreaterThan(-1);
+    const body = SOURCE.slice(from, SOURCE.indexOf('\n  }', from));
+    expect(body).toContain('isPrivate: input.isPrivate');
+    expect(body).toContain('isHidden: input.isHidden');
+  });
+});

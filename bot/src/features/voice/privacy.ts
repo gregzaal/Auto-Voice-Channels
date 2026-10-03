@@ -256,6 +256,24 @@ export type PrivateCreation =
       error?: unknown;
     };
 
+/**
+ * Thrown by {@link PrivacyService.makePrivateForCreation} when the plan REFUSED to make the
+ * room private or hidden (a role the bot cannot edit would still show a hidden room, or
+ * the room has too many overrides), as opposed to a write that failed.
+ *
+ * Its own class so the create path can treat it as the failure it is for an admin's
+ * default: a room that was meant to start hidden and cannot be is deleted, never left
+ * visible to everyone while its creator is told it is hidden. A refusal carries no
+ * Discord error to read, so without this it would be an unrecognised error that escapes
+ * the create path with the room still in place.
+ */
+export class CreationRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CreationRefusedError';
+  }
+}
+
 /** A room's creator's saved lists, as they apply to it. */
 interface RoomLists {
   creatorId: string | null;
@@ -477,9 +495,9 @@ export class PrivacyService {
       { quiet: true },
     );
     if (result.ok) return;
-    throw (
-      result.error ?? new Error(`could not make ${channelId} ${mode} on creation: ${result.reason}`)
-    );
+    const message = `could not make ${channelId} ${mode} on creation: ${result.reason}`;
+    if (result.reason === 'refused') throw new CreationRefusedError(message);
+    throw result.error ?? new Error(message);
   }
 
   /**

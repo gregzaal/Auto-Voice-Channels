@@ -21,7 +21,7 @@ import { RecordingVoiceActions, type VoiceActions } from './actions.js';
 import type { CommandResult } from './commands.js';
 import type { CommandAccess } from './commandAccess.js';
 import { PermissionProblemTracker } from './permissionProblems.js';
-import { PrivacyService, type PrivacyServiceDeps } from './privacy.js';
+import { CreationRefusedError, PrivacyService, type PrivacyServiceDeps } from './privacy.js';
 import { BLOCK_NOT_SAVED_PAUSED, ROOM_ACCESS_REPLIES, savedNote } from './roomAccessCopy.js';
 import { FakeVoiceView, fakeMember as member } from './voiceTestUtils.js';
 
@@ -2575,6 +2575,34 @@ describe('PrivacyService (integration)', () => {
       expect(bits(inFresh(GUILD, OVERWRITE_ROLE))).toEqual({ allow: 0n, deny: VC });
       expect((await recordOfFresh())?.hidden).toBe(true);
       expect(await joinChannels.getBySecondary(FRESH)).toBeUndefined();
+    });
+
+    /**
+     * A refusal carries no Discord error, so the throwing method gives it a type of its own
+     * for the rollback to recognise: a hide a role above the bot would defeat is a room that
+     * cannot be made hidden, and the create path deletes it. A plain Error would escape the
+     * create path with the room still open to everyone.
+     */
+    it('throws a CreationRefusedError when the plan refuses, and tryMake says refused', async () => {
+      voice.setBotRoleAccess({ uneditableRoleIds: [GATE] });
+      actions.seedOverwrites(FRESH, [roleOw(GATE, V)]);
+
+      expect(
+        await privacy.tryMakePrivateForCreation(GUILD, FRESH, 'dave', 'Dave', 'hidden'),
+      ).toEqual({ ok: false, reason: 'refused' });
+      // Nothing was written, so the room is exactly as it was created.
+      expect((await secondaries.get(FRESH))!.state.private).toBeUndefined();
+      expect(actions.ofType('overwrites')).toEqual([]);
+
+      await expect(
+        privacy.makePrivateForCreation(GUILD, FRESH, 'dave', 'Dave', 'hidden'),
+      ).rejects.toBeInstanceOf(CreationRefusedError);
+      // And not for a failure that is not a refusal.
+      actions.failOverwrites = true;
+      voice.setBotRoleAccess({ uneditableRoleIds: [] });
+      await expect(
+        privacy.makePrivateForCreation(GUILD, FRESH, 'dave', 'Dave', 'hidden'),
+      ).rejects.not.toBeInstanceOf(CreationRefusedError);
     });
 
     it('throws what a failed Join channel threw, so the rollback can read it, and tryMake says it', async () => {

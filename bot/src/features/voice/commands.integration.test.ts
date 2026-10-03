@@ -566,4 +566,108 @@ describe('VoiceCommands (integration)', () => {
       expect(res.message).toContain('7');
     });
   });
+
+  /**
+   * Hiding and showing a room re-render the name for `{{HIDDEN}}`, after the access write
+   * (the render reads the stored record), and cost nothing for a template that does not read
+   * it. Both halves matter for the reason the block above gives: the no-op guard is what
+   * keeps a command from spending one of a room's two renames per ten minutes on every
+   * room in the install base.
+   *
+   * `{{PRIVATE}}` stays true for a hidden room, so a template that reads only that one has
+   * nothing to rename when a locked room is hidden or a hidden one is shown.
+   */
+  describe('hiding and showing a room', () => {
+    let privacy: PrivacyService;
+    let rooms: VoiceFeature;
+
+    beforeEach(async () => {
+      await env.handle.db.delete(db.schema.joinChannels);
+      rooms = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+      });
+      // As index.ts wires it: the privacy service re-renders through the feature.
+      privacy = new PrivacyService({
+        secondaries,
+        joinChannels: new JoinChannelRepository(env.handle.db),
+        actions,
+        voice,
+        logger: fakeLogger(),
+        botUserId: () => 'bot',
+        rerender: (gid, cid) => rooms.rerenderSecondary(gid, cid),
+      });
+    });
+
+    /** Polls for the detached re-render, which several awaited round trips make slow to predict. */
+    const settle = async (done: () => boolean): Promise<void> => {
+      for (let i = 0; i < 200; i++) {
+        if (done()) return;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    };
+
+    /** Runs a command and returns how many renames it cost, once the detached re-render is quiet. */
+    async function renamesFrom(run: () => Promise<{ ok: boolean }>): Promise<string[]> {
+      const before = actions.ofType('rename').length;
+      expect((await run()).ok).toBe(true);
+      await settle(() => actions.ofType('rename').length > before);
+      // Nothing to wait FOR on the negative path, and a second rename would arrive late.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      return actions
+        .ofType('rename')
+        .slice(before)
+        .map((r) => r.name.replace(/\s+/g, ''));
+    }
+
+    /** Puts the room's stored name where its template says an open room is called. */
+    async function settleName(template: string): Promise<void> {
+      await autoChannels.upsert(GUILD, PRIMARY, { name: template });
+      await rooms.rerenderSecondary(GUILD, SEC);
+    }
+
+    it('renames exactly once on hide and once on unhide when the template reads HIDDEN', async () => {
+      await settleName('{{HIDDEN ?? H // V}}room');
+
+      expect(await renamesFrom(() => privacy.hide(GUILD, SEC, 'alice'))).toEqual(['Hroom']);
+      expect(await renamesFrom(() => privacy.unhide(GUILD, SEC, 'alice'))).toEqual(['Vroom']);
+    });
+
+    it('costs no rename at all when the template does not read HIDDEN or PRIVATE', async () => {
+      await settleName('## [@@game_name@@]');
+
+      expect(await renamesFrom(() => privacy.hide(GUILD, SEC, 'alice'))).toEqual([]);
+      expect(await renamesFrom(() => privacy.unhide(GUILD, SEC, 'alice'))).toEqual([]);
+    });
+
+    it('costs no rename for a template that reads only HIDDEN when a room is locked or opened', async () => {
+      await settleName('{{HIDDEN ?? H // V}}room');
+
+      expect(await renamesFrom(() => privacy.makePrivate(GUILD, SEC, 'alice'))).toEqual([]);
+      expect(await renamesFrom(() => privacy.makePublic(GUILD, SEC, 'alice'))).toEqual([]);
+    });
+
+    it('leaves a name that reads only PRIVATE alone between locked and hidden', async () => {
+      await settleName('{{PRIVATE ?? P // O}}room');
+
+      expect(await renamesFrom(() => privacy.makePrivate(GUILD, SEC, 'alice'))).toEqual(['Proom']);
+      // Hidden is private too, so the name was already right.
+      expect(await renamesFrom(() => privacy.hide(GUILD, SEC, 'alice'))).toEqual([]);
+      expect(await renamesFrom(() => privacy.unhide(GUILD, SEC, 'alice'))).toEqual([]);
+      expect(await renamesFrom(() => privacy.makePublic(GUILD, SEC, 'alice'))).toEqual(['Oroom']);
+    });
+
+    it('renames once from public straight to hidden for a template reading both', async () => {
+      await settleName('{{HIDDEN ?? H // V}}{{PRIVATE ?? P // O}}');
+
+      // One command, one rename, and not a hidden name followed by a private one.
+      expect(await renamesFrom(() => privacy.hide(GUILD, SEC, 'alice'))).toEqual(['HP']);
+      expect(await renamesFrom(() => privacy.makePublic(GUILD, SEC, 'alice'))).toEqual(['VO']);
+    });
+  });
 });
