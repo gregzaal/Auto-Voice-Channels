@@ -1416,11 +1416,14 @@ export class DiscordVoiceView implements GuildVoiceView {
    *
    * The roles are the member's own, without `@everyone` (whose id is the guild
    * id and is in every member's `roles.cache`). `canManage` comes from the
-   * member's GUILD-level permissions, which is what `/restrict` bypasses on: it
-   * does not look at overwrites on this one room, so a member who can manage
-   * channels only here is still restricted, the same as the slash commands see
-   * them. Cache only, and `undefined` when the room or the member is not in it,
-   * which the panel reads as "cannot say" and hides nothing for.
+   * member's GUILD-level permissions, which is the closest the cache offers to
+   * what `/restrict` bypasses on. The guard itself reads the interaction's own
+   * permissions, which also include the channel's overwrites, so a member who can
+   * manage channels only through an overwrite is let through by the guard and
+   * still has the button hidden here. That errs toward hiding, and the slash
+   * command is still theirs. Cache only, and `undefined` when the room or the
+   * member is not in it, which the panel reads as "cannot say" and hides nothing
+   * for.
    */
   ownerAccessOf(channelId: string, ownerId: string): CommandCaller | undefined {
     const channel = this.client.channels.cache.get(channelId);
