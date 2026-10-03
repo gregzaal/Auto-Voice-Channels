@@ -13,7 +13,6 @@ import {
   JoinChannelRepository,
   loadConfig,
   ManagedChannelRepository,
-  MemberAccessListRepository,
   MemberPoolGuildRepository,
   MemberPoolRepository,
   METRICS,
@@ -359,11 +358,6 @@ async function main(): Promise<void> {
   const joinChannelsRepo = new JoinChannelRepository(db, config.fleet);
   const companionsRepo = new CompanionChannelRepository(db, config.fleet);
   const guildsRepo = new GuildRepository(db);
-  // Saved trusted and blocked lists. Customer data shared by every fleet, so no
-  // fleet argument (like `guildsRepo`). Constructed ahead of its first reader so
-  // the commands that use it land as wiring only; nothing reads it yet.
-  const memberAccessListsRepo = new MemberAccessListRepository(db);
-  void memberAccessListsRepo;
   const presenceRepo = new GuildFleetPresenceRepository(db, config.fleet ?? DEFAULT_FLEET);
   const memberPoolGuildsRepo = new MemberPoolGuildRepository(db);
   const memberPoolsRepo = new MemberPoolRepository(db);
