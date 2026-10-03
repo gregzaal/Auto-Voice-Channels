@@ -36,8 +36,8 @@ import { isSnowflake, SETTINGS_KEYS } from './guildSettings.js';
  *
  * Append only, and never rename: the stored map is keyed by these strings, so a
  * renamed id silently un-restricts everybody an admin named under the old one.
- * Hide and Saved lists are listed ahead of their commands so the ids are
- * reserved, but nothing offers or enforces them until those commands exist.
+ * Saved lists is listed ahead of `/access` so the id is reserved, but nothing offers
+ * or enforces it until that command exists.
  *
  * Claim, Kick and Info are not features. They are occupant-level, so a
  * restriction on one could not be hidden from the people it does not apply to
@@ -70,14 +70,15 @@ export type CommandFeature = (typeof COMMAND_FEATURES)[number];
 export const RESTRICT_ENFORCED = true;
 
 /**
- * The features `/restrict` offers today.
+ * The features `/restrict` offers today, in the order it lists them.
  *
- * Hide and Saved lists are absent because the commands they restrict do not
- * exist in this build, so an admin could restrict nothing and would be told they
- * had. Add one here in the commit that ships its command.
+ * Saved lists is absent because `/access` does not exist in this build, so an admin
+ * could restrict nothing and be told they had. Add one here in the commit that ships
+ * its command.
  */
 export const AVAILABLE_FEATURES = [
   'privacy',
+  'hide',
   'limit',
   'rename',
   'transfer',
@@ -131,14 +132,15 @@ export const FEATURE_COVERS: Record<CommandFeature, string> = {
 /**
  * Slash command to feature, for the commands a rule can stop.
  *
- * Absent means the command is never restricted: `public` and `unlimit` are undo
- * directions, `reclaim` and `kick` are occupant-level, and the admin commands
+ * Absent means the command is never restricted: `public`, `unhide` and `unlimit` are
+ * undo directions, `reclaim` and `kick` are occupant-level, and the admin commands
  * are governed by Discord permissions and not by this map. A lookup is by
  * `featureForCommand`, which is an own-property test, because the name is client
  * input and `constructor` is a property of every object.
  */
 export const COMMAND_FEATURE: Readonly<Record<string, CommandFeature>> = {
   private: 'privacy',
+  hide: 'hide',
   limit: 'limit',
   name: 'rename',
   transfer: 'transfer',
@@ -196,7 +198,7 @@ export function nickFeatureFor(name: string | null): CommandFeature | null {
  *
  * A `Record` over every action, not a lookup that defaults, so a new panel action
  * cannot compile without a decision about whether a rule can stop it. `null` is a
- * decision: `unlock` is the undo direction, and Claim, Kick and Info are
+ * decision: `unlock` and `unhide` are the undo directions, and Claim, Kick and Info are
  * occupant-level (see {@link COMMAND_FEATURES}). The two-step actions are the
  * same act as their button: `limitset` and `renameset` are the modals the Size
  * and Name buttons open, and `transferpick` is the member picker Transfer opens,
@@ -205,6 +207,8 @@ export function nickFeatureFor(name: string | null): CommandFeature | null {
 export const PANEL_ACTION_FEATURE: Record<ControlPanelAction, CommandFeature | null> = {
   lock: 'privacy',
   unlock: null,
+  hide: 'hide',
+  unhide: null,
   limit: 'limit',
   limitset: 'limit',
   rename: 'rename',

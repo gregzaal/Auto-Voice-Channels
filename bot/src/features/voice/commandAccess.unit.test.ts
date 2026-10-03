@@ -53,19 +53,25 @@ describe('the feature list', () => {
   });
 
   /**
-   * Hide and Saved lists do not exist yet. Offering them would let an admin
-   * restrict nothing and be told they had.
+   * Saved lists does not exist yet. Offering it would let an admin restrict nothing and
+   * be told they had.
    */
   it('offers only the features whose commands exist', () => {
-    expect([...AVAILABLE_FEATURES]).toEqual(['privacy', 'limit', 'rename', 'transfer', 'nick']);
+    expect([...AVAILABLE_FEATURES]).toEqual([
+      'privacy',
+      'hide',
+      'limit',
+      'rename',
+      'transfer',
+      'nick',
+    ]);
     for (const feature of AVAILABLE_FEATURES) expect(COMMAND_FEATURES).toContain(feature);
-    expect(AVAILABLE_FEATURES).not.toContain('hide');
     expect(AVAILABLE_FEATURES).not.toContain('access');
   });
 
   it('recognises an available feature and nothing else, since the id is client input', () => {
     expect(isAvailableFeature('rename')).toBe(true);
-    expect(isAvailableFeature('hide')).toBe(false);
+    expect(isAvailableFeature('hide')).toBe(true);
     expect(isAvailableFeature('access')).toBe(false);
     expect(isAvailableFeature('claim')).toBe(false);
     expect(isAvailableFeature('constructor')).toBe(false);
@@ -190,8 +196,9 @@ describe('the settings key', () => {
 });
 
 describe('which commands a rule can stop', () => {
-  it('maps the five commands that have an owner-level feature', () => {
+  it('maps the six commands that have an owner-level feature', () => {
     expect(featureForCommand('private')).toBe('privacy');
+    expect(featureForCommand('hide')).toBe('hide');
     expect(featureForCommand('limit')).toBe('limit');
     expect(featureForCommand('name')).toBe('rename');
     expect(featureForCommand('transfer')).toBe('transfer');
@@ -202,6 +209,7 @@ describe('which commands a rule can stop', () => {
   it('never maps an undo direction, an occupant-level command or an admin command', () => {
     for (const name of [
       'public',
+      'unhide',
       'unlimit',
       'reclaim',
       'kick',
@@ -297,6 +305,12 @@ describe('which panel actions a rule can stop', () => {
     expect(PANEL_ACTION_FEATURE.unlock).toBeNull();
   });
 
+  /** The same shape as privacy: the entry direction is gated and the undo is never. */
+  it('stops the hide, never the unhide', () => {
+    expect(PANEL_ACTION_FEATURE.hide).toBe('hide');
+    expect(PANEL_ACTION_FEATURE.unhide).toBeNull();
+  });
+
   /** A rule has to stop every step of an act, or the second step is the way round it. */
   it('stops both steps of Size, Name and Transfer', () => {
     expect(PANEL_ACTION_FEATURE.limit).toBe('limit');
@@ -317,6 +331,7 @@ describe('which panel actions a rule can stop', () => {
     expect(Object.keys(PANEL_ACTION_FEATURE).sort()).toEqual(
       [
         'claim',
+        'hide',
         'info',
         'kick',
         'kickpick',
@@ -327,6 +342,7 @@ describe('which panel actions a rule can stop', () => {
         'renameset',
         'transfer',
         'transferpick',
+        'unhide',
         'unlock',
       ].sort(),
     );

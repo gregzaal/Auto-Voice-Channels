@@ -475,6 +475,12 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return interaction.options.getSubcommand(false) !== 'add';
       }
       /**
+       * `/unhide` is open and `/hide` is not: the hard gate stops writes and destroys
+       * nothing, and showing a room again is an undo that only removes. A gated owner
+       * whose room is hidden can bring it back, and cannot hide another.
+       */
+      if (interaction.commandName === 'unhide') return true;
+      /**
        * `/export` is on this list and `/import` deliberately is not.
        *
        * Refusing to let someone take their own configuration with them because
@@ -536,6 +542,9 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
        * matches the whole `info:` id rather than the namespace.
        */
       if (interaction.customId.startsWith(`${CONTROL_PANEL_PREFIX}info:`)) return true;
+      // Unhide, the button of the `/unhide` command above, for the same reason. Hide is
+      // a write and stays refused, with every other button on the panel.
+      if (interaction.customId.startsWith(`${CONTROL_PANEL_PREFIX}unhide:`)) return true;
       // The bot profile's resets, not its set buttons: see the command's
       // entry above. The set MODALS are absent from the modal branch
       // below for the same reason.
@@ -664,6 +673,16 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
           await run(guildId, 'cmd:public', () =>
             deps.privacy.makePublic(guildId, channelId, userId),
           ),
+        );
+      case 'hide':
+        return replyResult(
+          interaction,
+          await run(guildId, 'cmd:hide', () => deps.privacy.hide(guildId, channelId, userId)),
+        );
+      case 'unhide':
+        return replyResult(
+          interaction,
+          await run(guildId, 'cmd:unhide', () => deps.privacy.unhide(guildId, channelId, userId)),
         );
       case 'reclaim':
         return replyResult(
@@ -3392,6 +3411,18 @@ Already subscribed? Add the new server ` +
           () => deps.privacy.makePublic(guildId, roomId, userId),
           'panel:unlock',
         );
+      case 'hide':
+        return replyPanelResult(
+          interaction,
+          () => deps.privacy.hide(guildId, roomId, userId),
+          'panel:hide',
+        );
+      case 'unhide':
+        return replyPanelResult(
+          interaction,
+          () => deps.privacy.unhide(guildId, roomId, userId),
+          'panel:unhide',
+        );
       case 'claim':
         return replyPanelResult(
           interaction,
@@ -4723,6 +4754,8 @@ const DEFERRED_COMMANDS = new Set([
   'unlimit',
   'private',
   'public',
+  'hide',
+  'unhide',
   'reclaim',
   'transfer',
   'nick',

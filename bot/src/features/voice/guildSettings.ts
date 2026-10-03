@@ -410,6 +410,9 @@ export function readGroups(settings: Record<string, unknown>): Record<string, Gr
  * Appending is safe; reordering changes every server's panel at once, and
  * renaming an id silently re-enables a control somebody switched off, because
  * the stored map is keyed by these strings.
+ *
+ * Hide is last because it was appended. It shows after Info, and a server on the
+ * default buttons (five, with Claim and Transfer off) gets a second row holding it.
  */
 export const CONTROL_PANEL_CONTROLS = [
   'privacy',
@@ -419,6 +422,7 @@ export const CONTROL_PANEL_CONTROLS = [
   'transfer',
   'kick',
   'info',
+  'hide',
 ] as const;
 
 export type ControlPanelControl = (typeof CONTROL_PANEL_CONTROLS)[number];
@@ -468,6 +472,13 @@ export const CONTROL_PANEL_DEFAULTS: Record<ControlPanelControl, boolean> = {
   transfer: false,
   kick: true,
   info: true,
+  /**
+   * On, by the owner's decision (2026-10-03): beta testers accept some friction. Moving
+   * this moves every server that has not said otherwise, so the first panel re-render
+   * after it ships adds a button to every live panel, and `room_access.disabled` is the
+   * lever that makes the button answer that hiding is switched off.
+   */
+  hide: true,
 };
 
 /**
@@ -691,6 +702,7 @@ const CONTROL_PANEL_NAMES: Record<ControlPanelControl, string> = {
   transfer: 'Transfer',
   kick: 'Kick',
   info: 'Info',
+  hide: 'Hide and Unhide',
 };
 
 /**

@@ -7,7 +7,7 @@ import {
   SecondaryChannelRepository,
   db,
 } from '@avc/core';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PgTestEnv } from '../../test/pgContainer.js';
 import { startPostgres } from '../../test/pgContainer.js';
 import { fakeLogger } from '../../runtime/testUtils.js';
@@ -2727,6 +2727,7 @@ describe('VoiceFeature (integration)', () => {
           control_panel: { panel: true, claim: false, kick: false, info: false },
           command_access: {
             privacy: { roles: [DENIED_ROLE] },
+            hide: { roles: [DENIED_ROLE] },
             limit: { roles: [DENIED_ROLE] },
             rename: { roles: [DENIED_ROLE] },
             transfer: { roles: [DENIED_ROLE] },
@@ -2751,6 +2752,156 @@ describe('VoiceFeature (integration)', () => {
         expect(last.components).toEqual([]);
         // Not the line that says the server switched the controls off.
         expect(last.content).toBeUndefined();
+      });
+
+      /**
+       * The Hide control follows the room like the privacy button does, and its state
+       * lives in the access column, which the row schema reads as null both for no
+       * record and for one this build cannot read. So the refresh reads it for a locked
+       * room, the only kind an unreadable record changes anything for.
+       */
+      describe('and the hide control', () => {
+        const hasAction = (payload: unknown, action: string, room: string): boolean =>
+          JSON.stringify(payload).includes(`avc:panel:${action}:${room}`);
+
+        /** What a hide leaves in the row: `private` in state and the flag in the record. */
+        const hide = (room: string) =>
+          secondaries.transitionAccess(room, {
+            statePatch: { private: true },
+            access: (stored) => ({ ...(stored ?? {}), hidden: true }),
+          });
+
+        /** The lock an older instance leaves behind: `private` and no record at all. */
+        const lock = async (room: string) =>
+          secondaries.updateState(room, { ...(await secondaries.get(room))!.state, private: true });
+
+        it('offers Hide in the panel a new room is posted with', async () => {
+          buildCapturing();
+          await makeRoom();
+          expect(has(posted[0]!.payload, 'hide')).toBe(true);
+          expect(has(posted[0]!.payload, 'unhide')).toBe(false);
+        });
+
+        it('offers Unhide with Public once the room is hidden, and Hide with Private before', async () => {
+          buildCapturing();
+          const room = await makeRoom();
+          await feature.rerenderSecondary(GUILD, room);
+          expect(edited).toHaveLength(0);
+
+          await hide(room);
+          await feature.rerenderSecondary(GUILD, room);
+
+          expect(edited).toHaveLength(1);
+          expect(hasAction(edited[0]!.payload, 'unhide', room)).toBe(true);
+          expect(hasAction(edited[0]!.payload, 'hide', room)).toBe(false);
+          expect(hasAction(edited[0]!.payload, 'unlock', room)).toBe(true);
+          expect(hasAction(edited[0]!.payload, 'lock', room)).toBe(false);
+        });
+
+        /**
+         * A stale whole-state write can drop `private` from a hidden room. The record
+         * still says hidden, so the panel must still show Unhide and Public, never Private.
+         */
+        it('still draws a hidden room as hidden and locked when a stale write dropped private', async () => {
+          buildCapturing();
+          const room = await makeRoom();
+          await hide(room);
+          const { private: _gone, ...rest } = (await secondaries.get(room))!.state;
+          await secondaries.updateState(room, rest);
+
+          await feature.rerenderSecondary(GUILD, room);
+
+          expect(hasAction(edited[0]!.payload, 'unhide', room)).toBe(true);
+          expect(hasAction(edited[0]!.payload, 'unlock', room)).toBe(true);
+          expect(hasAction(edited[0]!.payload, 'lock', room)).toBe(false);
+        });
+
+        /**
+         * A record this build cannot read may be a hidden room's: the control is left off,
+         * rather than offering a Hide that would be refused or an Unhide that is a guess.
+         */
+        it('offers neither Hide nor Unhide when the record cannot be read, and keeps Public', async () => {
+          buildCapturing();
+          const room = await makeRoom();
+          await lock(room);
+          await env.handle.pool.query(
+            'UPDATE secondary_channels SET access = $1::jsonb WHERE channel_id = $2',
+            [JSON.stringify({ hidden: 'yes' }), room],
+          );
+
+          await feature.rerenderSecondary(GUILD, room);
+
+          expect(edited).toHaveLength(1);
+          expect(hasAction(edited[0]!.payload, 'hide', room)).toBe(false);
+          expect(hasAction(edited[0]!.payload, 'unhide', room)).toBe(false);
+          expect(hasAction(edited[0]!.payload, 'unlock', room)).toBe(true);
+        });
+
+        it('offers Hide on a locked room with no record, which an older instance leaves behind', async () => {
+          buildCapturing();
+          const room = await makeRoom();
+          await lock(room);
+
+          await feature.rerenderSecondary(GUILD, room);
+
+          expect(hasAction(edited[0]!.payload, 'hide', room)).toBe(true);
+          expect(hasAction(edited[0]!.payload, 'unlock', room)).toBe(true);
+        });
+
+        /**
+         * Per-read DB pricing: the refresh runs for every room on every sweep, so the
+         * extra read happens only where it can change the answer.
+         */
+        it('reads the access record only for a locked room that has none, never for a public one', async () => {
+          buildCapturing();
+          const room = await makeRoom();
+          const read = vi.spyOn(secondaries, 'readAccess');
+
+          await feature.rerenderSecondary(GUILD, room);
+          expect(read).not.toHaveBeenCalled();
+
+          await lock(room);
+          await feature.rerenderSecondary(GUILD, room);
+          expect(read).toHaveBeenCalledTimes(1);
+
+          read.mockClear();
+          await hide(room);
+          await feature.rerenderSecondary(GUILD, room);
+          // The row carries a record, which is readable by being there.
+          expect(read).not.toHaveBeenCalled();
+          read.mockRestore();
+        });
+
+        it('skips the refresh and tries again when that read fails, rather than draw a guess', async () => {
+          buildCapturing();
+          const room = await makeRoom();
+          await lock(room);
+          const read = vi
+            .spyOn(secondaries, 'readAccess')
+            .mockRejectedValueOnce(new Error('db down'));
+
+          await feature.rerenderSecondary(GUILD, room);
+          expect(edited).toHaveLength(0);
+
+          await feature.rerenderSecondary(GUILD, room);
+          expect(edited).toHaveLength(1);
+          read.mockRestore();
+        });
+
+        it('withdraws Hide from a denied owner and keeps Unhide for the same owner once hidden', async () => {
+          buildCapturing();
+          await guilds.updateSettings(GUILD, {
+            command_access: { hide: { roles: [DENIED_ROLE] } },
+          });
+          voice.setOwnerAccess('alice', { roleIds: [DENIED_ROLE] });
+          const room = await makeRoom();
+          expect(has(posted[0]!.payload, 'hide')).toBe(false);
+
+          await hide(room);
+          await feature.rerenderSecondary(GUILD, room);
+
+          expect(hasAction(edited[0]!.payload, 'unhide', room)).toBe(true);
+        });
       });
     });
 

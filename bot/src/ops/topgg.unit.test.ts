@@ -216,6 +216,7 @@ describe('toTopggCommands', () => {
     ]);
     expect(add?.options?.[0]?.choices?.map((c) => c.value)).toEqual([
       'privacy',
+      'hide',
       'limit',
       'rename',
       'transfer',

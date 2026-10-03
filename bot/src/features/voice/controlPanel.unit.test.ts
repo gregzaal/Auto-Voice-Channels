@@ -48,6 +48,7 @@ const view = (over: Partial<RoomPanelView> = {}): RoomPanelView => ({
   ownerId: OWNER,
   primaryChannelId: CREATOR,
   isPrivate: false,
+  isHidden: false,
   userLimit: 0,
   ...over,
 });
@@ -86,6 +87,18 @@ describe('control panel custom ids', () => {
    */
   it('is never the privacy control id itself', () => {
     expect(parseControlPanelId(`${CONTROL_PANEL_PREFIX}privacy:${ROOM}`)).toBeNull();
+  });
+
+  /**
+   * Hide is the same kind of control as privacy: it carries the transition the room can
+   * make. An instance that predates it parses neither id and answers "from an older
+   * version", which is the graceful end of a rolling deploy.
+   */
+  it('round-trips hide and unhide', () => {
+    for (const action of ['hide', 'unhide'] as const) {
+      expect(parseControlPanelId(controlPanelId(action, ROOM))).toEqual({ action, roomId: ROOM });
+    }
+    expect(controlPanelId('hide', ROOM)).toBe(`${CONTROL_PANEL_PREFIX}hide:${ROOM}`);
   });
 });
 
@@ -316,6 +329,9 @@ describe('copy rules', () => {
     JSON.stringify([
       buildControlPanel(ROOM, allOn(), view()),
       buildControlPanel(ROOM, allOn(), view({ isPrivate: true, userLimit: 5, ownerId: null })),
+      // A hidden room, and one whose access record cannot be read.
+      buildControlPanel(ROOM, allOn(), view({ isPrivate: true, isHidden: true })),
+      buildControlPanel(ROOM, allOn(), view({ isPrivate: true, isHidden: 'unknown' })),
       // A panel a restriction has stripped, down to no buttons at all.
       buildControlPanel(ROOM, onlyRestrictable(), view({ ownerAccess: standing() }), DENY_ALL),
       buildLimitModal(ROOM, 3).toJSON(),
@@ -490,16 +506,19 @@ const standing = (over: Partial<{ roleIds: string[]; canManage: boolean }> = {})
 /** Every owner-level feature denied to one role. */
 const DENY_ALL: CommandAccess = {
   privacy: { users: [], roles: [DENIED_ROLE] },
+  hide: { users: [], roles: [DENIED_ROLE] },
   limit: { users: [], roles: [DENIED_ROLE] },
   rename: { users: [], roles: [DENIED_ROLE] },
   transfer: { users: [], roles: [DENIED_ROLE] },
 };
 
-/** Only the four restrictable controls enabled, so hiding them all leaves nothing. */
+/** Only the five restrictable controls enabled, so hiding them all leaves nothing. */
 function onlyRestrictable(): ControlPanelConfig {
   const config = defaults();
   for (const c of CONTROL_PANEL_CONTROLS) config.controls[c] = false;
-  for (const c of ['privacy', 'limit', 'rename', 'transfer'] as const) config.controls[c] = true;
+  for (const c of ['privacy', 'hide', 'limit', 'rename', 'transfer'] as const) {
+    config.controls[c] = true;
+  }
   return config;
 }
 
@@ -513,11 +532,12 @@ describe('buildControlPanel and /restrict', () => {
     expect(buildControlPanel(ROOM, allOn(), view({ ownerAccess: standing() }), {})).toEqual(plain);
   });
 
-  it('hides Private, Size, Name and Transfer from a room whose owner is denied them', () => {
+  it('hides Private, Hide, Size, Name and Transfer from a room whose owner is denied them', () => {
     const panel = buildControlPanel(ROOM, allOn(), view({ ownerAccess: standing() }), DENY_ALL);
     // Claim, Kick and Info are occupant-level and are never hidden.
     expect(actionsOf(panel)).toEqual(['claim', 'kick', 'info']);
     expect(fieldsOf(panel).map((f) => f.name)).not.toContain('🔒 Private');
+    expect(fieldsOf(panel).map((f) => f.name)).not.toContain('🙈 Hide');
   });
 
   it('hides only the features the owner is denied', () => {
@@ -528,7 +548,15 @@ describe('buildControlPanel and /restrict', () => {
       view({ ownerAccess: standing({ roleIds: [] }) }),
       access,
     );
-    expect(actionsOf(panel)).toEqual(['lock', 'limit', 'claim', 'transfer', 'kick', 'info']);
+    expect(actionsOf(panel)).toEqual([
+      'lock',
+      'limit',
+      'claim',
+      'transfer',
+      'kick',
+      'info',
+      'hide',
+    ]);
   });
 
   it('keeps the undo direction: a locked room still shows Public to a denied owner', () => {
@@ -538,6 +566,7 @@ describe('buildControlPanel and /restrict', () => {
       view({ isPrivate: true, ownerAccess: standing() }),
       DENY_ALL,
     );
+    // Hide is withdrawn here too: a locked room that is not hidden is offered it.
     expect(actionsOf(panel)).toEqual(['unlock', 'claim', 'kick', 'info']);
   });
 
@@ -566,6 +595,7 @@ describe('buildControlPanel and /restrict', () => {
       'transfer',
       'kick',
       'info',
+      'hide',
     ]);
   });
 
@@ -589,6 +619,7 @@ describe('buildControlPanel and /restrict', () => {
       'transfer',
       'kick',
       'info',
+      'hide',
     ]);
     // And absent, which is what a caller that predates restrictions passes.
     expect(actionsOf(buildControlPanel(ROOM, allOn(), view(), DENY_ALL))).toEqual(
@@ -599,7 +630,15 @@ describe('buildControlPanel and /restrict', () => {
   it('hides nothing from an ownerless room for a feature nobody is denied', () => {
     const access: CommandAccess = { limit: { users: [], roles: [DENIED_ROLE] } };
     const panel = buildControlPanel(ROOM, allOn(), view({ ownerId: null }), access);
-    expect(actionsOf(panel)).toEqual(['lock', 'rename', 'claim', 'transfer', 'kick', 'info']);
+    expect(actionsOf(panel)).toEqual([
+      'lock',
+      'rename',
+      'claim',
+      'transfer',
+      'kick',
+      'info',
+      'hide',
+    ]);
   });
 
   it('keeps Public on an ownerless locked room', () => {
@@ -615,8 +654,16 @@ describe('buildControlPanel and /restrict', () => {
   it('computes the hidden set from the action each control would carry', () => {
     const hidden = (over: Partial<RoomPanelView>) =>
       [...hiddenControls(view({ ownerAccess: standing(), ...over }), DENY_ALL)].sort();
-    expect(hidden({})).toEqual(['limit', 'privacy', 'rename', 'transfer']);
-    expect(hidden({ isPrivate: true })).toEqual(['limit', 'rename', 'transfer']);
+    expect(hidden({})).toEqual(['hide', 'limit', 'privacy', 'rename', 'transfer']);
+    expect(hidden({ isPrivate: true })).toEqual(['hide', 'limit', 'rename', 'transfer']);
+    // A hidden room is a locked one, and its Unhide and Public are the undo directions.
+    expect(hidden({ isPrivate: true, isHidden: true })).toEqual(['limit', 'rename', 'transfer']);
+    // And a room whose record cannot be read has no Hide control to withdraw at all.
+    expect(hidden({ isPrivate: true, isHidden: 'unknown' })).toEqual([
+      'limit',
+      'rename',
+      'transfer',
+    ]);
   });
 
   /**
@@ -651,5 +698,158 @@ describe('buildControlPanel and /restrict', () => {
     const before = buildControlPanel(ROOM, allOn(), view({ ownerAccess: standing() }), {});
     const after = buildControlPanel(ROOM, allOn(), view({ ownerAccess: standing() }), DENY_ALL);
     expect(controlPanelFingerprint(after)).not.toBe(controlPanelFingerprint(before));
+  });
+});
+
+/**
+ * The Hide control: one button that offers the transition the room can make, like
+ * the privacy one beside it, so the panel never shows both Hide and Unhide.
+ */
+describe('the hide control', () => {
+  const nameOf = (
+    panel: ReturnType<typeof buildControlPanel>,
+    action: string,
+  ): string | undefined =>
+    fieldsOf(panel).find((f) => f.name.endsWith(action === 'hide' ? 'Hide' : 'Unhide'))?.name;
+
+  it('is the last control, so appending it moved no existing button', () => {
+    expect(CONTROL_PANEL_CONTROLS.at(-1)).toBe('hide');
+    expect([...CONTROL_PANEL_CONTROLS].slice(0, 7)).toEqual([
+      'privacy',
+      'limit',
+      'rename',
+      'claim',
+      'transfer',
+      'kick',
+      'info',
+    ]);
+  });
+
+  /** The owner's decision (2026-10-03): beta testers expect some friction. */
+  it('is on by default, which puts it in a second row beside the default five', () => {
+    expect(CONTROL_PANEL_DEFAULTS.hide).toBe(true);
+    const panel = buildControlPanel(ROOM, defaults(), view())!;
+    const rows = panel.components.map((r) => (r.toJSON().components as unknown[]).length);
+    expect(rows).toEqual([5, 1]);
+    expect(actionsOf(panel)).toEqual(['lock', 'limit', 'rename', 'kick', 'info', 'hide']);
+  });
+
+  it('offers Hide on a public room and on a locked one, and Unhide only on a hidden one', () => {
+    for (const isPrivate of [false, true]) {
+      const room = buildControlPanel(ROOM, defaults(), view({ isPrivate }));
+      expect(buttonIds(room)).toContain(controlPanelId('hide', ROOM));
+      expect(buttonIds(room)).not.toContain(controlPanelId('unhide', ROOM));
+      expect(nameOf(room, 'hide')).toBe('🙈 Hide');
+    }
+    const hidden = buildControlPanel(ROOM, defaults(), view({ isPrivate: true, isHidden: true }));
+    expect(buttonIds(hidden)).toContain(controlPanelId('unhide', ROOM));
+    expect(buttonIds(hidden)).not.toContain(controlPanelId('hide', ROOM));
+    expect(nameOf(hidden, 'unhide')).toBe('👁️ Unhide');
+  });
+
+  /** The privacy button keeps flipping between Private and Public, and a hidden room is a locked one. */
+  it('leaves the privacy button offering Public on a hidden room', () => {
+    const hidden = buildControlPanel(ROOM, defaults(), view({ isPrivate: true, isHidden: true }));
+    expect(buttonIds(hidden)).toContain(controlPanelId('unlock', ROOM));
+    expect(buttonIds(hidden)).not.toContain(controlPanelId('lock', ROOM));
+  });
+
+  /**
+   * A record this build cannot read may be a hidden room's. Offering Hide would be
+   * refused and offering Unhide would be a guess, so the control is left off and the
+   * rest of the panel is unchanged.
+   */
+  it('offers neither transition when the room access record cannot be read', () => {
+    const unknown = buildControlPanel(
+      ROOM,
+      defaults(),
+      view({ isPrivate: true, isHidden: 'unknown' }),
+    );
+    expect(buttonIds(unknown)).not.toContain(controlPanelId('hide', ROOM));
+    expect(buttonIds(unknown)).not.toContain(controlPanelId('unhide', ROOM));
+    expect(actionsOf(unknown)).toEqual(['unlock', 'limit', 'rename', 'kick', 'info']);
+    expect(fieldsOf(unknown).map((f) => f.name)).not.toContain('🙈 Hide');
+  });
+
+  it('is off when an admin switched it off, whatever the room is', () => {
+    const config = defaults();
+    config.controls.hide = false;
+    for (const isHidden of [false, true, 'unknown'] as const) {
+      const panel = buildControlPanel(ROOM, config, view({ isPrivate: true, isHidden }));
+      expect(actionsOf(panel)).not.toContain('hide');
+      expect(actionsOf(panel)).not.toContain('unhide');
+    }
+  });
+
+  it('moves the fingerprint when the room is hidden or shown, and when the record becomes unreadable', () => {
+    const fingerprint = (isHidden: boolean | 'unknown') =>
+      controlPanelFingerprint(
+        buildControlPanel(ROOM, defaults(), view({ isPrivate: true, isHidden })),
+      );
+    expect(new Set([fingerprint(false), fingerprint(true), fingerprint('unknown')]).size).toBe(3);
+  });
+
+  describe('and /restrict', () => {
+    const access: CommandAccess = { hide: { users: [], roles: [DENIED_ROLE] } };
+    const denied = view({ ownerAccess: standing() });
+
+    it('withdraws Hide from a denied owner, on a public room and on a locked one', () => {
+      for (const isPrivate of [false, true]) {
+        const panel = buildControlPanel(ROOM, defaults(), { ...denied, isPrivate }, access);
+        expect(actionsOf(panel)).not.toContain('hide');
+        expect(actionsOf(panel)).not.toContain('unhide');
+      }
+    });
+
+    /** Undo is never restricted, so an already hidden room shows Unhide to its denied owner. */
+    it('keeps Unhide for a denied owner of a hidden room', () => {
+      const panel = buildControlPanel(
+        ROOM,
+        defaults(),
+        { ...denied, isPrivate: true, isHidden: true },
+        access,
+      );
+      expect(actionsOf(panel)).toContain('unhide');
+      expect(actionsOf(panel)).toContain('unlock');
+    });
+
+    it('shows Hide to an owner who is not denied it', () => {
+      const panel = buildControlPanel(
+        ROOM,
+        defaults(),
+        view({ ownerAccess: standing({ roleIds: [OTHER_ROLE] }) }),
+        access,
+      );
+      expect(actionsOf(panel)).toContain('hide');
+    });
+
+    it('withdraws Hide from an ownerless room but keeps Unhide, and shows it for an unresolved owner', () => {
+      const ownerless = buildControlPanel(ROOM, defaults(), view({ ownerId: null }), access);
+      expect(actionsOf(ownerless)).not.toContain('hide');
+      const ownerlessHidden = buildControlPanel(
+        ROOM,
+        defaults(),
+        view({ ownerId: null, isPrivate: true, isHidden: true }),
+        access,
+      );
+      expect(actionsOf(ownerlessHidden)).toContain('unhide');
+      const unresolved = buildControlPanel(
+        ROOM,
+        defaults(),
+        view({ ownerAccess: 'unknown' }),
+        access,
+      );
+      expect(actionsOf(unresolved)).toContain('hide');
+    });
+
+    it('never withdraws it from an owner who can manage channels', () => {
+      const panel = buildControlPanel(
+        ROOM,
+        defaults(),
+        view({ ownerAccess: standing({ canManage: true }) }),
+        access,
+      );
+      expect(actionsOf(panel)).toContain('hide');
+    });
   });
 });

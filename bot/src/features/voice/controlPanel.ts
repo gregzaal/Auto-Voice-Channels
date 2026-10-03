@@ -85,21 +85,26 @@ export const CONTROL_PANEL_PREFIX = 'avc:panel:';
  * (a button cannot carry a member id, so it has to ask) and the two modals Size
  * and Name open. `privacy` is never a custom id: the button carries `lock` or
  * `unlock`, whichever it currently offers, so a stale panel cannot ask for the
- * transition the room has already made.
+ * transition the room has already made. `hide` is the same kind of control, with
+ * `hide` and `unhide` for its two faces.
  */
 export type ControlPanelAction =
-  | Exclude<ControlPanelControl, 'privacy'>
+  | Exclude<ControlPanelControl, 'privacy' | 'hide'>
   | 'lock'
   | 'unlock'
+  | 'hide'
+  | 'unhide'
   | 'transferpick'
   | 'kickpick'
   | 'limitset'
   | 'renameset';
 
 const ACTIONS: readonly string[] = [
-  ...CONTROL_PANEL_CONTROLS.filter((c) => c !== 'privacy'),
+  ...CONTROL_PANEL_CONTROLS.filter((c) => c !== 'privacy' && c !== 'hide'),
   'lock',
   'unlock',
+  'hide',
+  'unhide',
   'transferpick',
   'kickpick',
   'limitset',
@@ -173,8 +178,19 @@ export interface RoomPanelView {
   ownerId: string | null;
   /** The creator channel, for the "make your own" pointer. */
   primaryChannelId: string;
-  /** Whether the room is locked right now, which decides the privacy button. */
+  /**
+   * Whether the room is locked right now, which decides the privacy button. True for
+   * a hidden room too: a hidden room is a locked one, so its button offers Public.
+   */
   isPrivate: boolean;
+  /**
+   * Whether the room is hidden from the channel list, which decides whether the Hide
+   * control offers Hide or Unhide. `unknown` when the room's access record could not
+   * be read: it may be hidden, and the panel never offers a transition on a guess, so
+   * the control is left off until the record can be read. Not optional, so that a
+   * builder cannot forget it and draw a hidden room's panel as a public one.
+   */
+  isHidden: boolean | 'unknown';
   /** The live user limit, 0 for none, shown on the Size field. */
   userLimit: number;
   /**
@@ -204,12 +220,26 @@ const PRIVACY_FACES: Record<'lock' | 'unlock', ControlFace> = {
 };
 
 /**
- * Label, emoji and description for every control but privacy.
+ * The two faces of the hide control: the transition the room can actually make, as
+ * with privacy, and what "hidden" means said in no stronger words than the channel
+ * list. Who still sees a hidden room is the `/hide` reply's to say.
+ */
+const HIDE_FACES: Record<'hide' | 'unhide', ControlFace> = {
+  hide: { label: 'Hide', emoji: '🙈', blurb: 'Take the room off the channel list' },
+  unhide: { label: 'Unhide', emoji: '👁️', blurb: 'Show the room in the channel list again' },
+};
+
+/**
+ * Label, emoji and description for every control but the two that flip with the room
+ * (privacy and hide, which have faces of their own above).
  *
  * Exported because `/controlpanel` lists the same set, and an admin switching
  * one off has to be looking at the word the member sees on the button.
  */
-export const CONTROL_PANEL_FACES: Record<Exclude<ControlPanelControl, 'privacy'>, ControlFace> = {
+export const CONTROL_PANEL_FACES: Record<
+  Exclude<ControlPanelControl, 'privacy' | 'hide'>,
+  ControlFace
+> = {
   limit: { label: 'Size', emoji: '👥', blurb: 'Set a limit on the room size' },
   rename: {
     label: 'Name',
@@ -222,14 +252,24 @@ export const CONTROL_PANEL_FACES: Record<Exclude<ControlPanelControl, 'privacy'>
   info: { label: 'Info', emoji: 'ℹ️', blurb: 'See how this room is configured' },
 };
 
-/** How one control looks right now: its action id and its face. */
+/**
+ * How one control looks right now: its action id and its face, or null when the room
+ * cannot be offered it at all (see {@link RoomPanelView.isHidden}).
+ */
 function faceOf(
   control: ControlPanelControl,
   view: RoomPanelView,
-): { action: ControlPanelAction; face: ControlFace } {
+): { action: ControlPanelAction; face: ControlFace } | null {
   if (control === 'privacy') {
     const action = view.isPrivate ? 'unlock' : 'lock';
     return { action, face: PRIVACY_FACES[action] };
+  }
+  if (control === 'hide') {
+    // A record this build cannot read may be a hidden room's. Offering Hide would be
+    // refused and offering Unhide would be a guess, so the control is left off.
+    if (view.isHidden === 'unknown') return null;
+    const action = view.isHidden ? 'unhide' : 'hide';
+    return { action, face: HIDE_FACES[action] };
   }
   const face = CONTROL_PANEL_FACES[control];
   // The one other field that reads the room: a limit nobody set says nothing,
@@ -246,15 +286,24 @@ function faceOf(
  * Privacy gets its own, naming BOTH sides. An admin switching it off is not
  * taking away "Private", they are taking away the only way a locked room gets
  * opened again from the panel, and a label reading just "Private" hides half of
- * what the toggle does.
+ * what the toggle does. Hide is the same: one switch for both Hide and Unhide.
  */
 export function settingsFaceOf(control: ControlPanelControl): ControlFace {
-  if (control !== 'privacy') return CONTROL_PANEL_FACES[control];
-  return {
-    label: 'Private and Public',
-    emoji: '🔒',
-    blurb: 'Lock the room, and open it again. One button, whichever applies',
-  };
+  if (control === 'privacy') {
+    return {
+      label: 'Private and Public',
+      emoji: '🔒',
+      blurb: 'Lock the room, and open it again. One button, whichever applies',
+    };
+  }
+  if (control === 'hide') {
+    return {
+      label: 'Hide and Unhide',
+      emoji: '🙈',
+      blurb: 'Take the room off the channel list, and show it again. One button, whichever applies',
+    };
+  }
+  return CONTROL_PANEL_FACES[control];
 }
 
 /**
@@ -289,8 +338,10 @@ function ownerRestricted(
  * Decided from the action each control would CARRY right now, not from the
  * control, so the undo direction is never hidden: a locked room still shows
  * Public, because opening a room again is never restricted, and Private is
- * hidden only while the room is public. Size, Name and Transfer are hidden when
- * the owner is denied. Claim, Kick and Info are occupant-level and never hidden.
+ * hidden only while the room is public. The same goes for Hide: an already
+ * hidden room shows Unhide to everyone, and Hide is withdrawn only while the room
+ * is not hidden. Size, Name and Transfer are hidden when the owner is denied.
+ * Claim, Kick and Info are occupant-level and never hidden.
  * `PANEL_ACTION_FEATURE` is a `Record` over every action, so a control added
  * later cannot reach here without a decision about it.
  */
@@ -300,7 +351,9 @@ export function hiddenControls(
 ): ReadonlySet<ControlPanelControl> {
   const hidden = new Set<ControlPanelControl>();
   for (const control of CONTROL_PANEL_CONTROLS) {
-    const feature = PANEL_ACTION_FEATURE[faceOf(control, view).action];
+    const face = faceOf(control, view);
+    if (face === null) continue;
+    const feature = PANEL_ACTION_FEATURE[face.action];
     if (feature !== null && ownerRestricted(feature, view, access)) hidden.add(control);
   }
   return hidden;
@@ -338,7 +391,12 @@ export function buildControlPanel(
   if (enabled.length === 0) return null;
 
   const hidden = hiddenControls(view, access);
-  const faces = enabled.filter((c) => !hidden.has(c)).map((c) => faceOf(c, view));
+  const faces = enabled
+    .filter((c) => !hidden.has(c))
+    .map((c) => faceOf(c, view))
+    // A control the room cannot be offered at all (the Hide control of a room whose
+    // access record cannot be read) is left off, like one a rule withdraws.
+    .filter((f): f is NonNullable<typeof f> => f !== null);
 
   const fields: APIEmbedField[] = faces.map(({ face }) => ({
     name: `${face.emoji} ${face.label}`,

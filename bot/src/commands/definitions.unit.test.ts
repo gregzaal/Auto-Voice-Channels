@@ -21,6 +21,7 @@ describe('buildCommandDefinitions', () => {
         'defaultlimit',
         'export',
         'group',
+        'hide',
         'import',
         'inheritpermissions',
         'invite',
@@ -40,6 +41,7 @@ describe('buildCommandDefinitions', () => {
         'template',
         'textchannels',
         'transfer',
+        'unhide',
         'unlimit',
       ].sort(),
     );
@@ -80,7 +82,7 @@ describe('buildCommandDefinitions', () => {
       expect(byName.get(name)!.default_member_permissions).toBe(manage);
     }
     // Per-channel + utility commands stay open (owner checks live in logic).
-    for (const name of ['limit', 'nick', 'ping', 'invite', 'source']) {
+    for (const name of ['limit', 'hide', 'unhide', 'nick', 'ping', 'invite', 'source']) {
       expect(byName.get(name)!.default_member_permissions ?? null).toBeNull();
     }
   });
@@ -135,6 +137,8 @@ describe('buildCommandDefinitions', () => {
       'name',
       'private',
       'public',
+      'hide',
+      'unhide',
       'reclaim',
       'template',
       'position',
@@ -196,12 +200,13 @@ describe('buildCommandDefinitions', () => {
       expect(sub('list').options ?? []).toHaveLength(0);
     });
 
-    /** Hide and Saved lists have no command yet, so offering them would restrict nothing. */
+    /** Saved lists has no command yet, so offering it would restrict nothing. */
     it('offers exactly the features that exist, labelled as the panel labels them', () => {
       const choices = (sub('add').options![0] as { choices: { name: string; value: string }[] })
         .choices;
       expect(choices).toEqual([
         { name: 'Private and Public', value: 'privacy' },
+        { name: 'Hide', value: 'hide' },
         { name: 'Size', value: 'limit' },
         { name: 'Name', value: 'rename' },
         { name: 'Transfer', value: 'transfer' },

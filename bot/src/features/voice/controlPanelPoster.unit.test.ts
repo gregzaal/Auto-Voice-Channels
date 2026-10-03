@@ -23,6 +23,7 @@ const view = (over: Partial<RoomPanelView> = {}): RoomPanelView => ({
   ownerId: '423456789012345678',
   primaryChannelId: PRIMARY,
   isPrivate: false,
+  isHidden: false,
   userLimit: 0,
   ...over,
 });
@@ -321,6 +322,7 @@ describe('ControlPanelPoster and /restrict', () => {
   const RULES = {
     command_access: {
       privacy: { roles: [DENIED_ROLE] },
+      hide: { roles: [DENIED_ROLE] },
       limit: { roles: [DENIED_ROLE] },
       rename: { roles: [DENIED_ROLE] },
       transfer: { roles: [DENIED_ROLE] },
@@ -347,7 +349,7 @@ describe('ControlPanelPoster and /restrict', () => {
       view({ ownerId: OWNER, ownerAccess: denied }),
     );
     const text = JSON.stringify(send.mock.calls[0]![1]);
-    for (const hidden of ['lock', 'limit', 'rename', 'transfer']) {
+    for (const hidden of ['lock', 'hide', 'limit', 'rename', 'transfer']) {
       expect(text).not.toContain(`avc:panel:${hidden}:`);
     }
     expect(text).toContain('avc:panel:kick:');

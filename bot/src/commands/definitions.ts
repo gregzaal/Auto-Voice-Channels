@@ -112,6 +112,16 @@ export function buildCommandDefinitions(
     ),
     guildOnly(
       new SlashCommandBuilder()
+        .setName('hide')
+        .setDescription('Hide your voice channel from the channel list.'),
+    ),
+    guildOnly(
+      new SlashCommandBuilder()
+        .setName('unhide')
+        .setDescription('Show your hidden voice channel in the channel list again.'),
+    ),
+    guildOnly(
+      new SlashCommandBuilder()
         .setName('reclaim')
         .setDescription('Reclaim your channel from a caretaker, or claim one whose owner left.'),
     ),

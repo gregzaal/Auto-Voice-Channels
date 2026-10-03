@@ -181,7 +181,7 @@ export function buildAppearanceModal(
 const WHAT_IT_IS =
   'The control panel is a message posted in every room this server makes, so members can see, and ' +
   'easily reach, the things they can do with their own room. Each button can be switched off here. ' +
-  'Private, Size, Name and Transfer can also be withheld from a person or a role with ' +
+  'Private, Hide, Size, Name and Transfer can also be withheld from a person or a role with ' +
   '/restrict.';
 
 /**
@@ -208,10 +208,10 @@ const controlStateTitle = (enabled: boolean): string =>
 /**
  * The configuration panel.
  *
- * Buttons rather than a select, so the whole state is visible at once: seven
- * fields showing what each control does and whether it is on, and seven buttons
- * under them that flip it. A select would hide six of the seven behind a click
- * and could not show state without repeating it in every option label.
+ * Buttons rather than a select, so the whole state is visible at once: a field
+ * for each control showing what it does and whether it is on, and a button under
+ * them that flips it. A select would hide all but one behind a click and could not
+ * show state without repeating it in every option label.
  */
 export function buildControlSettingsPanel(
   config: ControlPanelConfig,
@@ -260,7 +260,7 @@ export function buildControlSettingsPanel(
 
   const rows: ActionRowBuilder<ButtonBuilder>[] = [];
   if (config.enabled) {
-    // Five per row is Discord's ceiling, so seven controls land as five and two.
+    // Five per row is Discord's ceiling, so eight controls land as five and three.
     for (let i = 0; i < CONTROL_PANEL_CONTROLS.length; i += 5) {
       rows.push(
         new ActionRowBuilder<ButtonBuilder>().addComponents(

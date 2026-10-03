@@ -298,20 +298,23 @@ describe('renderRestrictionList', () => {
 
   it('says nobody is restricted for every feature when nothing is stored', () => {
     const text = renderRestrictionList({});
-    for (const label of ['Private and Public', 'Size', 'Name', 'Transfer', 'Nickname']) {
+    for (const label of ['Private and Public', 'Hide', 'Size', 'Name', 'Transfer', 'Nickname']) {
       expect(text).toContain(`**${label}**: nobody is restricted`);
     }
   });
 
-  /** Hide and Saved lists have no command yet, so offering them would restrict nothing. */
+  /** Saved lists has no command yet, so offering it would restrict nothing. */
   it('lists only the features /restrict offers, even when others are stored', () => {
     const text = renderRestrictionList({
-      hide: { users: [USER.id], roles: [] },
       access: { users: [USER.id], roles: [] },
     });
-    expect(text).not.toContain('Hide');
     expect(text).not.toContain('Saved lists');
     expect(text).not.toContain(USER.id);
+  });
+
+  it('lists Hide, which has a command now', () => {
+    const text = renderRestrictionList({ hide: { users: [USER.id], roles: [] } });
+    expect(text).toContain(`**Hide**: <@${USER.id}>`);
   });
 
   it('shows roles before people, as mentions', () => {
@@ -323,8 +326,9 @@ describe('renderRestrictionList', () => {
 
   it('keeps each feature to its own line, in the order /restrict offers them', () => {
     const lines = renderRestrictionList({ nick: { users: [USER.id], roles: [] } }).split('\n');
-    expect(lines.slice(1, 6).map((l) => l.split(':')[0])).toEqual([
+    expect(lines.slice(1, 7).map((l) => l.split(':')[0])).toEqual([
       '**Private and Public**',
+      '**Hide**',
       '**Size**',
       '**Name**',
       '**Transfer**',

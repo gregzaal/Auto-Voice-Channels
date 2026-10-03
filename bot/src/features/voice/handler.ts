@@ -34,6 +34,7 @@ import {
 import type { CommandResult } from './commands.js';
 import type { PanelOwnerAccess, RoomPanelView } from './controlPanel.js';
 import type { PanelRoomRow } from './controlPanelPoster.js';
+import { roomMode } from './roomMode.js';
 
 /** A fresh 31-bit random seed for a channel's `[[random]]` picks. */
 function randomSeed(): number {
@@ -988,6 +989,9 @@ export class VoiceFeature {
           // may not carry it yet, and a create is the one moment we know the
           // answer for certain.
           isPrivate: primary?.template.defaultPrivate === true,
+          // A room that has just been made is never hidden: that arrives with the
+          // creator channel default, and the row says so for a replay that finds a live one.
+          isHidden: roomRow?.access?.hidden === true,
           userLimit: primary?.template.limit ?? 0,
           ownerAccess: this.panelOwnerAccess(newChannelId, member.id),
         },
@@ -2411,10 +2415,13 @@ export class VoiceFeature {
        * shedding is; a permanently stale one would not be.
        */
       if (await this.deps.gate?.controlPanelDisabled?.()) return;
+      const isHidden = await this.panelHidden(secondary);
       await this.deps.controlPanel.refreshForRoom(guildId, secondary.channelId, secondary, {
         ownerId: secondary.ownerId,
         primaryChannelId: primaryChannelId ?? secondary.primaryChannelId,
-        isPrivate: secondary.state.private === true,
+        // A hidden room is a locked one, whatever a stale whole-state write did to `private`.
+        isPrivate: secondary.state.private === true || isHidden === true,
+        isHidden,
         userLimit: this.deps.voice.userLimitOf?.(secondary.channelId) ?? 0,
         ownerAccess: this.panelOwnerAccess(secondary.channelId, secondary.ownerId),
       });
@@ -2424,6 +2431,27 @@ export class VoiceFeature {
         'could not refresh the room control panel',
       );
     }
+  }
+
+  /**
+   * Whether a room is hidden, for the panel's Hide control: `unknown` when its access
+   * record cannot be read, which leaves the control off rather than guess.
+   *
+   * The row's own `access` is null both for no record and for one this build cannot
+   * read, so it cannot say on its own. A row that has a record is readable and answers
+   * for itself. One without is read only when the room is locked, which is the only
+   * state an unreadable record changes anything for: a public room with an unreadable
+   * record is offered Hide, which is refused with an explanation, and that is the
+   * price of not reading a second row on every panel refresh for every public room. A
+   * read that throws is left to the caller, which skips this refresh and tries again.
+   */
+  private async panelHidden(row: SecondaryChannelRow): Promise<boolean | 'unknown'> {
+    if (row.access !== null) return row.access.hidden === true;
+    if (row.state.private !== true) return false;
+    const read = await this.deps.secondaries.readAccess(row.channelId);
+    if (!read) return false;
+    const mode = roomMode({ state: row.state, access: read });
+    return mode === 'unknown' ? 'unknown' : mode === 'hidden';
   }
 
   /**

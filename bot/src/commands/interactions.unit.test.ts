@@ -1295,7 +1295,17 @@ describe('registerInteractionHandler (/alias panel buttons)', () => {
  * was the command's OWN `setUserLimit`.
  */
 describe('commands that talk to Discord acknowledge first', () => {
-  const deferring = ['limit', 'unlimit', 'private', 'public', 'reclaim', 'transfer', 'nick'];
+  const deferring = [
+    'limit',
+    'unlimit',
+    'private',
+    'public',
+    'hide',
+    'unhide',
+    'reclaim',
+    'transfer',
+    'nick',
+  ];
 
   it('defers, then answers with editReply rather than reply', async () => {
     for (const commandName of deferring) {
@@ -1309,6 +1319,8 @@ describe('commands that talk to Discord acknowledge first', () => {
         privacy: {
           makePrivate: vi.fn().mockResolvedValue({ ok: true, message: 'done' }),
           makePublic: vi.fn().mockResolvedValue({ ok: true, message: 'done' }),
+          hide: vi.fn().mockResolvedValue({ ok: true, message: 'done' }),
+          unhide: vi.fn().mockResolvedValue({ ok: true, message: 'done' }),
         } as never,
         settings: {
           setNick: vi.fn().mockResolvedValue({ ok: true, message: 'done' }),
@@ -2481,6 +2493,66 @@ describe('registerInteractionHandler (the expired-guild carve-out)', () => {
   afterEach(() => dispose?.());
 
   /**
+   * `/hide` is a write and is refused like every other, and `/unhide` is open because
+   * it is an undo, as is the panel button that does the same thing. Hide's own button
+   * is a write and stays refused with the rest of the panel.
+   */
+  describe('hiding and showing a room', () => {
+    const gated = () => {
+      const hide = vi.fn().mockResolvedValue({ ok: true, message: 'hidden' });
+      const unhide = vi.fn().mockResolvedValue({ ok: true, message: 'shown' });
+      const env = setup({
+        privacy: { hide, unhide } as never,
+        guilds: {
+          get: vi.fn().mockResolvedValue({ authStatus: 'expired' }),
+          isEntitled: vi.fn().mockResolvedValue(false),
+        } as never,
+        selfHosted: false,
+      });
+      dispose = env.dispose;
+      return { env, hide, unhide };
+    };
+    const fire = async (
+      env: ReturnType<typeof gated>['env'],
+      opts: Parameters<typeof fakeInteraction>[0],
+    ) => {
+      const fake = fakeInteraction(opts);
+      env.client.emit('interactionCreate', fake.interaction);
+      await flush();
+      return fake;
+    };
+
+    it('refuses /hide and the Hide button with the reactivation notice, and does nothing', async () => {
+      const g = gated();
+      const command = await fire(g.env, {
+        kind: 'command',
+        commandName: 'hide',
+        voiceChannelId: 'v1',
+      });
+      expect(JSON.stringify(command.reply.mock.calls[0]?.[0])).toContain('auto-voice.io');
+      const button = await fire(g.env, { kind: 'button', customId: controlPanelId('hide', 'r1') });
+      expect(JSON.stringify(button.reply.mock.calls[0]?.[0])).toContain('auto-voice.io');
+      expect(g.hide).not.toHaveBeenCalled();
+    });
+
+    it('lets /unhide and the Unhide button through, since showing a room again is an undo', async () => {
+      const g = gated();
+      const command = await fire(g.env, {
+        kind: 'command',
+        commandName: 'unhide',
+        voiceChannelId: 'v1',
+      });
+      expect(JSON.stringify(command.editReply.mock.calls[0]?.[0])).toContain('shown');
+      const button = await fire(g.env, {
+        kind: 'button',
+        customId: controlPanelId('unhide', 'r1'),
+      });
+      expect(JSON.stringify(button.editReply.mock.calls[0]?.[0])).toContain('shown');
+      expect(g.unhide).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  /**
    * `/setup` and its settings modals are the exemption that lets a gated admin
    * see and fix their state, and the named-lists PANEL is reachable from the
    * exempt settings select. Its buttons therefore have to be exempt too:
@@ -2629,6 +2701,8 @@ describe('registerInteractionHandler (room control panel)', () => {
   const privacy = () => ({
     makePrivate: vi.fn().mockResolvedValue({ ok: false, message: 'Only the channel owner can.' }),
     makePublic: vi.fn().mockResolvedValue({ ok: true, message: 'opened' }),
+    hide: vi.fn().mockResolvedValue({ ok: true, message: 'hidden' }),
+    unhide: vi.fn().mockResolvedValue({ ok: true, message: 'shown' }),
   });
   const feature = (overrides: Record<string, unknown> = {}) => ({
     getRoomPanelState: vi.fn().mockResolvedValue({
@@ -2659,6 +2733,34 @@ describe('registerInteractionHandler (room control panel)', () => {
     await flush();
     expect(p.makePublic).toHaveBeenCalledWith('g1', 'room-9', 'u1');
   });
+
+  /**
+   * Hide and Unhide are the privacy pair's twin: the same service call as the slash
+   * command, answered ephemerally with the service's own words, and never an edit of
+   * the shared panel.
+   */
+  it.each([
+    ['hide', 'hide', 'hidden'],
+    ['unhide', 'unhide', 'shown'],
+  ] as const)(
+    'the %s button calls %s on the room in the id and answers privately',
+    async (action, method, said) => {
+      const p = privacy();
+      const env = setup({ privacy: p as never, voiceCommands: voiceCommands() as never });
+      dispose = env.dispose;
+      const { interaction, editReply } = fakeInteraction({
+        kind: 'button',
+        customId: controlPanelId(action, 'room-9'),
+        voiceChannelId: 'some-other-room',
+      });
+      env.client.emit('interactionCreate', interaction);
+      await flush();
+      expect(p[method]).toHaveBeenCalledWith('g1', 'room-9', 'u1');
+      expect(interaction.update).not.toHaveBeenCalled();
+      expect(interaction.deferReply).toHaveBeenCalled();
+      expect(editReply).toHaveBeenCalledWith(expect.objectContaining({ content: `✅ ${said}` }));
+    },
+  );
 
   it('never edits the panel it was pressed on', async () => {
     const env = setup({ privacy: privacy() as never, voiceCommands: voiceCommands() as never });
@@ -4256,7 +4358,7 @@ describe('registerInteractionHandler (/restrict)', () => {
       expect(denied.blob()).toEqual(stored);
 
       const hand = restrictEnv(stored);
-      const refused = await restrict(hand, clear('hide'));
+      const refused = await restrict(hand, clear('claim'));
       expect(refused.content).toContain('Pick one of the room commands from the list.');
       expect(hand.blob()).toEqual(stored);
     });
@@ -4279,7 +4381,7 @@ describe('registerInteractionHandler (/restrict)', () => {
   });
 
   describe('treats its options as client input', () => {
-    it.each(['hide', 'access', 'claim', 'kick', 'constructor'])(
+    it.each(['access', 'claim', 'kick', 'constructor'])(
       'refuses the feature %j, which /restrict does not offer',
       async (feature) => {
         const e = restrictEnv();
@@ -4312,7 +4414,7 @@ describe('registerInteractionHandler (/restrict)', () => {
     it('says nobody is restricted for every feature when nothing is stored', async () => {
       const e = restrictEnv();
       const { content, payload } = await restrict(e, { subcommand: 'list' });
-      for (const label of ['Private and Public', 'Size', 'Name', 'Transfer', 'Nickname']) {
+      for (const label of ['Private and Public', 'Hide', 'Size', 'Name', 'Transfer', 'Nickname']) {
         expect(content).toContain(`**${label}**: nobody is restricted`);
       }
       expect(payload?.flags).toBe(EPHEMERAL);
@@ -4333,10 +4435,16 @@ describe('registerInteractionHandler (/restrict)', () => {
     });
 
     it('does not show a feature that has no command yet, whatever is stored', async () => {
-      const e = restrictEnv({ command_access: { hide: { users: [TARGET] } } });
+      const e = restrictEnv({ command_access: { access: { users: [TARGET] } } });
       const { content } = await restrict(e, { subcommand: 'list' });
       expect(content).not.toContain(TARGET);
-      expect(content).not.toContain('Hide');
+      expect(content).not.toContain('Saved lists');
+    });
+
+    it('shows Hide, which has a command now', async () => {
+      const e = restrictEnv({ command_access: { hide: { users: [TARGET] } } });
+      const { content } = await restrict(e, { subcommand: 'list' });
+      expect(content).toContain(`**Hide**: <@${TARGET}>`);
     });
   });
 
@@ -4598,7 +4706,7 @@ describe('registerInteractionHandler (/restrict)', () => {
       [{}, addRole('rename', ROLE, String(MANAGE))],
       [{}, addUser('rename', TARGET, { user: { id: TARGET, bot: true } })],
       [{}, addUser('rename', TARGET, { member: { permissions: holds(MANAGE) } })],
-      [{}, addUser('hide')],
+      [{}, addUser('claim')],
       [stored, addUser('rename')],
       [stored, removeUser('rename')],
       [{}, removeUser('rename')],
@@ -4663,6 +4771,7 @@ describe('registerInteractionHandler (the restriction guard)', () => {
   /** Every feature `/restrict` offers, denied to Kay by id. */
   const DENY_KAY = {
     privacy: { users: [KAY] },
+    hide: { users: [KAY] },
     limit: { users: [KAY] },
     rename: { users: [KAY] },
     transfer: { users: [KAY] },
@@ -4684,6 +4793,8 @@ describe('registerInteractionHandler (the restriction guard)', () => {
       transfer: ok(),
       makePrivate: ok(),
       makePublic: ok(),
+      hide: ok(),
+      unhide: ok(),
       setNick: ok(),
       getEditorState: vi.fn().mockResolvedValue({ found: false, scope: 'channel' }),
       getRoomPanelState: vi.fn().mockResolvedValue({
@@ -4723,7 +4834,12 @@ describe('registerInteractionHandler (the restriction guard)', () => {
         claim: s.claim,
         transfer: s.transfer,
       } as never,
-      privacy: { makePrivate: s.makePrivate, makePublic: s.makePublic } as never,
+      privacy: {
+        makePrivate: s.makePrivate,
+        makePublic: s.makePublic,
+        hide: s.hide,
+        unhide: s.unhide,
+      } as never,
       settings: {
         setNick: s.setNick,
         getConfig: vi
@@ -4788,6 +4904,7 @@ describe('registerInteractionHandler (the restriction guard)', () => {
       label: 'Private',
       acted: (s: ReturnType<typeof services>) => s.makePrivate,
     },
+    { name: 'hide', label: 'Hide', acted: (s: ReturnType<typeof services>) => s.hide },
     { name: 'name', label: 'Name', acted: (s: ReturnType<typeof services>) => s.getEditorState },
     { name: 'transfer', label: 'Transfer', acted: (s: ReturnType<typeof services>) => s.transfer },
     { name: 'nick', label: 'Nickname', acted: (s: ReturnType<typeof services>) => s.setNick },
@@ -4809,6 +4926,7 @@ describe('registerInteractionHandler (the restriction guard)', () => {
     it('lets a member through who is not named by the rule', async () => {
       const e = guardEnv({
         privacy: { users: [OTHER] },
+        hide: { users: [OTHER] },
         limit: { users: [OTHER] },
         rename: { users: [OTHER] },
         transfer: { users: [OTHER] },
@@ -4909,8 +5027,8 @@ describe('registerInteractionHandler (the restriction guard)', () => {
    * `/unlimit` does by another name.
    */
   describe('the undo directions', () => {
-    it('leaves /public, /unlimit and /reclaim open to a member denied everything', async () => {
-      for (const commandName of ['public', 'unlimit', 'reclaim']) {
+    it('leaves /public, /unhide, /unlimit and /reclaim open to a member denied everything', async () => {
+      for (const commandName of ['public', 'unhide', 'unlimit', 'reclaim']) {
         const e = guardEnv(DENY_KAY);
         const f = await fire(e, { kind: 'command', commandName, voiceChannelId: 'room-1' });
         expect(notRefused(f), commandName).toBe(true);
@@ -4919,6 +5037,9 @@ describe('registerInteractionHandler (the restriction guard)', () => {
       const e = guardEnv(DENY_KAY);
       await fire(e, { kind: 'command', commandName: 'public', voiceChannelId: 'room-1' });
       expect(e.s.makePublic).toHaveBeenCalled();
+      const shown = guardEnv(DENY_KAY);
+      await fire(shown, { kind: 'command', commandName: 'unhide', voiceChannelId: 'room-1' });
+      expect(shown.s.unhide).toHaveBeenCalledWith('g1', 'room-1', KAY);
     });
 
     it('treats /limit 0 as removing a limit, so it is never restricted', async () => {
@@ -5107,6 +5228,7 @@ describe('registerInteractionHandler (the restriction guard)', () => {
 
     it.each([
       ['lock', 'Private', (s: ReturnType<typeof services>) => s.makePrivate],
+      ['hide', 'Hide', (s: ReturnType<typeof services>) => s.hide],
       ['limit', 'Size', (s: ReturnType<typeof services>) => s.getRoomPanelState],
       ['rename', 'Name', (s: ReturnType<typeof services>) => s.getRoomPanelState],
       ['transfer', 'Transfer', (s: ReturnType<typeof services>) => s.getRoomPanelState],
@@ -5123,8 +5245,8 @@ describe('registerInteractionHandler (the restriction guard)', () => {
       },
     );
 
-    it('leaves Public, Claim and Kick open to a member denied everything', async () => {
-      for (const action of ['unlock', 'claim', 'kick'] as const) {
+    it('leaves Public, Unhide, Claim and Kick open to a member denied everything', async () => {
+      for (const action of ['unlock', 'unhide', 'claim', 'kick'] as const) {
         const e = guardEnv(DENY_KAY);
         const f = await fire(e, { kind: 'button', customId: controlPanelId(action, ROOM) });
         expect(notRefused(f), action).toBe(true);
@@ -5133,6 +5255,15 @@ describe('registerInteractionHandler (the restriction guard)', () => {
       const e = guardEnv(DENY_KAY);
       await fire(e, { kind: 'button', customId: controlPanelId('unlock', ROOM) });
       expect(e.s.makePublic).toHaveBeenCalledWith('g1', ROOM, KAY);
+      const shown = guardEnv(DENY_KAY);
+      await fire(shown, { kind: 'button', customId: controlPanelId('unhide', ROOM) });
+      expect(shown.s.unhide).toHaveBeenCalledWith('g1', ROOM, KAY);
+    });
+
+    it('lets a member who is not denied Hide press it', async () => {
+      const e = guardEnv({ hide: { users: [OTHER] } });
+      await fire(e, { kind: 'button', customId: controlPanelId('hide', ROOM) });
+      expect(e.s.hide).toHaveBeenCalledWith('g1', ROOM, KAY);
     });
 
     it('opens the modals and the picker for a member who is not denied', async () => {
@@ -5318,10 +5449,12 @@ describe('registerInteractionHandler (the restriction guard)', () => {
       for (const [kind, extra] of [
         ['command', { commandName: 'limit', voiceChannelId: 'room-1' }],
         ['command', { commandName: 'private', voiceChannelId: 'room-1' }],
+        ['command', { commandName: 'hide', voiceChannelId: 'room-1' }],
         ['command', { commandName: 'name', voiceChannelId: 'room-1' }],
         ['command', { commandName: 'transfer', voiceChannelId: 'room-1' }],
         ['command', { commandName: 'nick', voiceChannelId: 'room-1' }],
         ['button', { customId: controlPanelId('lock', 'room-9') }],
+        ['button', { customId: controlPanelId('hide', 'room-9') }],
         ['modal', { customId: controlPanelId('renameset', 'room-9'), textInputs: { input: 'x' } }],
       ] as const) {
         const e = guardEnv(DENY_KAY);

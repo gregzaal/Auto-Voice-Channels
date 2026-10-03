@@ -223,6 +223,21 @@ describe('readControlPanel', () => {
   });
 });
 
+/** Hide is the control appended to the stored list, and the one that ships on. */
+describe('the Hide control setting', () => {
+  it('is on for a server that has never said otherwise, and a departure is what is stored', () => {
+    expect(CONTROL_PANEL_DEFAULTS.hide).toBe(true);
+    expect(readControlPanel({}).controls.hide).toBe(true);
+    expect(readControlPanel({ control_panel: { hide: false } }).controls.hide).toBe(false);
+    expect(readControlPanel({ control_panel: { hide: true } }).controls.hide).toBe(true);
+  });
+
+  it('is named for both of its faces in a /controlpanel confirmation', () => {
+    expect(controlPanelConfirmation('hide', true)).toContain('**Hide and Unhide**');
+    expect(controlPanelConfirmation('hide', false)).toContain('**Hide and Unhide**');
+  });
+});
+
 describe('controlPanelConfirmation', () => {
   it('always says the panels already posted are updated too', () => {
     for (const on of [true, false]) {

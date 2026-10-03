@@ -157,6 +157,27 @@ describe('buildControlSettingsPanel', () => {
       ).toBeLessThanOrEqual(5);
     }
   });
+
+  /**
+   * Eight controls make a row of five and a row of three, then the appearance row
+   * and the whole-panel row: four rows, one under Discord's ceiling.
+   */
+  it('lays eight toggles out as five and three', () => {
+    expect(CONTROL_PANEL_CONTROLS).toHaveLength(8);
+    const rows = buildControlSettingsPanel(readControlPanel(ON)).components!.map(
+      (r) => (r.toJSON().components as unknown[]).length,
+    );
+    expect(rows).toEqual([5, 3, 3, 2]);
+  });
+
+  /** One switch for both faces of the control, named for both so nobody reads half of it. */
+  it('lists Hide as one switch named for both of its faces, on by default', () => {
+    const json = buildControlSettingsPanel(readControlPanel(ON));
+    const fields = (json.embeds![0]! as { fields?: { name: string; value: string }[] }).fields!;
+    expect(fields.map((f) => f.name)).toContain('✅ 🙈 Hide and Unhide');
+    expect(JSON.stringify(json)).toContain(controlToggleId('hide'));
+    expect(CONTROL_PANEL_DEFAULTS.hide).toBe(true);
+  });
 });
 
 describe('parseControlAppearanceId', () => {
@@ -245,7 +266,7 @@ describe('buildAppearanceModal', () => {
    * list says Private and not Private and Public, because opening a room again is
    * never restricted.
    */
-  it('says Private, Size, Name and Transfer can be restricted with /restrict', () => {
+  it('says Private, Hide, Size, Name and Transfer can be restricted with /restrict', () => {
     const none = Object.fromEntries(CONTROL_PANEL_CONTROLS.map((c) => [c, false]));
     for (const settings of [ON, {}, { control_panel: { ...none, panel: true } }]) {
       const description = (
@@ -254,7 +275,7 @@ describe('buildAppearanceModal', () => {
         }
       ).description;
       expect(description).toContain(
-        'Private, Size, Name and Transfer can also be withheld from a person or a role with /restrict.',
+        'Private, Hide, Size, Name and Transfer can also be withheld from a person or a role with /restrict.',
       );
     }
   });
