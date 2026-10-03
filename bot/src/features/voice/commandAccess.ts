@@ -25,10 +25,10 @@ import { isSnowflake, SETTINGS_KEYS } from './guildSettings.js';
  * never lock themselves out.
  *
  * **Undo directions are never restricted.** Opening a room again, removing a
- * limit (`/unlimit`, or a limit of 0 by any door) and (later) showing a room or
- * removing a saved member must always work:
+ * limit (`/unlimit`, or a limit of 0), removing a saved nickname and (later)
+ * showing a room or removing a saved member must always work:
  * a creator channel whose rooms start private has to leave its owner a way to
- * open one, and a saved list is something a member must be able to erase.
+ * open one, and saved data is something a member must be able to erase.
  */
 
 /**
@@ -119,13 +119,13 @@ export const FEATURE_COVERS: Record<CommandFeature, string> = {
     'the /private command and the Private button. Opening a room again stays open to everyone',
   hide: 'the /hide command and the Hide button. Showing a room again stays open to everyone',
   limit:
-    'the /limit command and the Size button. The /unlimit command, and a limit of 0, stay open to everyone',
+    'the /limit command and the Size button. The /unlimit command and /limit 0 stay open to everyone',
   rename:
     'the /name command, the Name button, the template editor for their own room and the voice status',
   transfer: 'the /transfer command and the Transfer button',
   access:
     'the /access trust, block and admit commands. Removing, clearing and listing stay open to everyone',
-  nick: 'the /nick command',
+  nick: 'the /nick command, and a saved nickname showing in a room name. Removing a nickname stays open to everyone, and a room name that already shows one changes the next time the room refreshes its name',
 };
 
 /**
@@ -157,12 +157,37 @@ export function featureForCommand(commandName: string): CommandFeature | null {
  *
  * A limit of 0 is "no limit", which is `/unlimit` by another name and so the undo
  * direction. It is never restricted, whichever door it comes in by: `/limit 0`,
- * and the panel's Size box submitted blank or as 0. Anything else, including a
- * value that is not a number, is a Size action and a rule can stop it. `null` (a
- * `/limit` with no count, which only a hand-built request sends) is not 0.
+ * and the panel's Size box submitted blank or as 0. The box is only reachable
+ * from the Size button, which a rule withdraws and refuses, so that last door
+ * matters only for a box opened before the rule was added. Anything else,
+ * including a value that is not a number, is a Size action and a rule can stop
+ * it. `null` (a `/limit` with no count, which only a hand-built request sends) is
+ * not 0.
  */
 export function limitFeatureFor(count: number | null): CommandFeature | null {
   return count === 0 ? null : 'limit';
+}
+
+/**
+ * Whether a `/nick` value removes the saved nickname, which is what `setNick`
+ * does for `reset` in any case or for nothing but spaces. One predicate for both,
+ * so the guard and the writer cannot disagree about which values are a removal.
+ */
+export function isNickReset(name: string): boolean {
+  const value = name.trim();
+  return value === '' || value.toLowerCase() === 'reset';
+}
+
+/**
+ * The feature a `/nick` value belongs to: none when it removes the nickname.
+ *
+ * Removing is the undo direction, and the one a member needs when a rule names
+ * one of their ROLES: `/restrict add` clears the saved nickname of a USER it
+ * names, but it cannot list a role's members, so a member under a role rule
+ * would otherwise be left with saved text they cannot erase.
+ */
+export function nickFeatureFor(name: string | null): CommandFeature | null {
+  return name !== null && isNickReset(name) ? null : 'nick';
 }
 
 /**

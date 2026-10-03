@@ -38,6 +38,17 @@ export const RESTRICT_NOTE =
 const label = (feature: CommandFeature): string => `**${FEATURE_LABELS[feature]}**`;
 
 /**
+ * How a feature reads to the MEMBER it was turned off for, where that differs
+ * from the admin's label.
+ *
+ * Privacy is the one: an admin picks "Private and Public" because that is the
+ * pair of buttons, but only going private is ever restricted, and opening a room
+ * again stays open to everyone ({@link FEATURE_COVERS}). A member who has just
+ * been refused `/private` must not be told they lost the way to open a room.
+ */
+const REFUSAL_LABELS: Partial<Record<CommandFeature, string>> = { privacy: 'Private' };
+
+/**
  * What a member is told when a rule stops them, from a command, a panel button, a
  * modal or a picker alike.
  *
@@ -47,7 +58,7 @@ const label = (feature: CommandFeature): string => `**${FEATURE_LABELS[feature]}
  * business. No mention, so nothing here can ping.
  */
 export function restrictedRefusal(feature: CommandFeature): string {
-  return `A server admin has turned off ${label(feature)} for you.`;
+  return `A server admin has turned off **${REFUSAL_LABELS[feature] ?? FEATURE_LABELS[feature]}** for you.`;
 }
 
 /**

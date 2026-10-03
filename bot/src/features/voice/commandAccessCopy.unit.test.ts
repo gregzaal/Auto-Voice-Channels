@@ -156,9 +156,11 @@ describe('restrictAddedMessage', () => {
     );
   });
 
-  it('does not mention a nickname when none was removed', () => {
+  it('does not say a nickname was removed when none was', () => {
     const text = restrictAddedMessage(USER, 'nick', { already: false, nicknameCleared: false });
-    expect(text).not.toContain('nickname');
+    // What Nickname covers does say "nickname", so it is the removal that is absent.
+    expect(text).not.toContain('Their saved nickname was removed');
+    expect(text).toContain('a saved nickname showing in a room name');
   });
 });
 
@@ -236,9 +238,24 @@ describe('the refusals', () => {
 describe('restrictedRefusal', () => {
   it('names only the feature, and that a server admin turned it off for the member', () => {
     expect(restrictedRefusal('rename')).toBe('A server admin has turned off **Name** for you.');
-    expect(restrictedRefusal('privacy')).toBe(
-      'A server admin has turned off **Private and Public** for you.',
-    );
+    expect(restrictedRefusal('privacy')).toBe('A server admin has turned off **Private** for you.');
+  });
+
+  /**
+   * Opening a room again is never restricted (`PANEL_ACTION_FEATURE.unlock` is
+   * null and `/public` has no feature), so a member who was just refused `/private`
+   * must not be told they lost Public. The admin's label for the pair stays "Private
+   * and Public", which is what `/restrict` shows next to the explanation.
+   */
+  it('does not tell a member who was refused Private that Public is off too', () => {
+    expect(restrictedRefusal('privacy')).not.toContain('Public');
+    expect(restrictRemovedMessage(ROLE, 'privacy', { was: true })).toContain('Private and Public');
+  });
+
+  it('names a feature the way its button reads, for every feature but privacy', () => {
+    expect(restrictedRefusal('limit')).toContain('**Size**');
+    expect(restrictedRefusal('transfer')).toContain('**Transfer**');
+    expect(restrictedRefusal('nick')).toContain('**Nickname**');
   });
 
   it('never mentions anybody, so it cannot ping', () => {

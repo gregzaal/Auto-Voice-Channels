@@ -60,6 +60,7 @@ import {
   MAX_RESTRICTED_ROLES,
   MAX_RESTRICTED_USERS,
   MAX_RESTRICTIONS,
+  isNickReset,
   readCommandAccess,
   readIds,
   type CommandAccess,
@@ -668,7 +669,7 @@ export class GuildSettingsService {
       ? { ...guild.settings.custom_nicks }
       : {};
     const value = name.trim();
-    if (value.toLowerCase() === 'reset' || value === '') {
+    if (isNickReset(value)) {
       delete nicks[userId];
       await this.deps.guilds.updateSettings(guildId, { custom_nicks: nicks });
       return ok('Removed your custom nickname.');

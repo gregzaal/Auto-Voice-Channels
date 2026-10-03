@@ -4,8 +4,8 @@ import { AVAILABLE_FEATURES } from '../features/voice/commandAccess.js';
 import { buildCommandDefinitions } from './definitions.js';
 
 describe('buildCommandDefinitions', () => {
-  // `/restrict` is asked for explicitly: it is not registered by default until a
-  // guard reads the restrictions (see `RESTRICT_ENFORCED`), and its shape is tested.
+  // `/restrict` is asked for explicitly, so its shape is tested whatever
+  // `RESTRICT_ENFORCED` is. That it is registered by default is `commandAccess.unit.test.ts`.
   const defs = buildCommandDefinitions({ includeRestrict: true });
   const byName = new Map(defs.map((d) => [d.name, d]));
 

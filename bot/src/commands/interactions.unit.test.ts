@@ -4458,6 +4458,7 @@ describe('registerInteractionHandler (the restriction guard)', () => {
     const countCommand = vi.fn();
     const commandAccessDisabled = vi.fn().mockResolvedValue(false);
     const warn = vi.fn();
+    const info = vi.fn();
     const get = vi.fn().mockResolvedValue({
       authStatus: 'active',
       ...(rules === undefined ? {} : { settings: { command_access: rules } }),
@@ -4486,13 +4487,13 @@ describe('registerInteractionHandler (the restriction guard)', () => {
         getRoomPanelState: s.getRoomPanelState,
         rerenderByOwner: s.rerenderByOwner,
       } as never,
-      logger: { ...fakeLogger(), warn } as never,
+      logger: { ...fakeLogger(), warn, info } as never,
       countCommand,
       commandAccessDisabled,
       ...overrides,
     });
     dispose = env.dispose;
-    return { env, s, countCommand, commandAccessDisabled, warn, get };
+    return { env, s, countCommand, commandAccessDisabled, warn, info, get };
   }
 
   type Env = ReturnType<typeof guardEnv>;
@@ -4535,7 +4536,7 @@ describe('registerInteractionHandler (the restriction guard)', () => {
     { name: 'limit', label: 'Size', acted: (s: ReturnType<typeof services>) => s.setLimit },
     {
       name: 'private',
-      label: 'Private and Public',
+      label: 'Private',
       acted: (s: ReturnType<typeof services>) => s.makePrivate,
     },
     { name: 'name', label: 'Name', acted: (s: ReturnType<typeof services>) => s.getEditorState },
@@ -4630,7 +4631,7 @@ describe('registerInteractionHandler (the restriction guard)', () => {
     });
 
     /**
-     * A member's own role list includes \`@everyone\`, whose id is the guild id.
+     * A member's own role list includes `@everyone`, whose id is the guild id.
      * A stored rule naming it would deny the whole server, so it is dropped both
      * where it is read and where the caller's roles are built, and each shape
      * is checked because the real class includes it and the raw one does not.
@@ -4656,7 +4657,7 @@ describe('registerInteractionHandler (the restriction guard)', () => {
   /**
    * Undo directions are never restricted. An owner whose creator channel starts
    * rooms private must always be able to open one, and a limit of 0 is what
-   * \`/unlimit\` does by another name.
+   * `/unlimit` does by another name.
    */
   describe('the undo directions', () => {
     it('leaves /public, /unlimit and /reclaim open to a member denied everything', async () => {
@@ -4692,6 +4693,77 @@ describe('registerInteractionHandler (the restriction guard)', () => {
         optionInteger: 5,
       });
       expectRefused(f, 'Size');
+    });
+
+    /**
+     * `/restrict add` clears the saved nickname of a USER it names but cannot list
+     * a ROLE's members, so a member under a role rule holds saved text that only
+     * they can remove. The guard must leave them that way out.
+     */
+    it.each(['reset', 'RESET', '  Reset  ', '', '   '])(
+      'treats /nick %j as removing the nickname, so it is never restricted',
+      async (optionString) => {
+        const e = guardEnv(DENY_KAY);
+        const f = await fire(e, {
+          kind: 'command',
+          commandName: 'nick',
+          voiceChannelId: 'room-1',
+          optionString,
+        });
+        expect(notRefused(f)).toBe(true);
+        expect(e.s.setNick).toHaveBeenCalledWith('g1', KAY, optionString);
+        expect(e.countCommand).toHaveBeenCalledWith('nick');
+      },
+    );
+
+    it('still refuses /nick with a name, including one that only starts with reset', async () => {
+      for (const optionString of ['Big Kay', 'resets']) {
+        const e = guardEnv(DENY_KAY);
+        const f = await fire(e, {
+          kind: 'command',
+          commandName: 'nick',
+          voiceChannelId: 'room-1',
+          optionString,
+        });
+        expectRefused(f, 'Nickname');
+        expect(e.s.setNick).not.toHaveBeenCalled();
+        dispose?.();
+      }
+    });
+  });
+
+  // -- the trace a refusal leaves ---------------------------------------------
+
+  /**
+   * A refusal is seen only from the member's side, so the log line is the one
+   * thing an operator has when a rule is refusing people it was not meant to. Ids
+   * only: never what the member typed.
+   */
+  describe('what an operator can see of a refusal', () => {
+    it('logs the guild, the member and the feature, and nothing they typed', async () => {
+      const e = guardEnv(DENY_KAY);
+      await fire(e, {
+        kind: 'command',
+        commandName: 'nick',
+        voiceChannelId: 'room-1',
+        optionString: 'a secret nickname',
+      });
+      expect(e.info).toHaveBeenCalledWith(
+        { guildId: 'g1', userId: KAY, feature: 'nick' },
+        'refused by a restriction',
+      );
+      expect(JSON.stringify(e.info.mock.calls)).not.toContain('secret');
+    });
+
+    it('logs nothing when the member is let through, or while enforcement is off', async () => {
+      const allowed = guardEnv({ limit: { users: [OTHER] } });
+      await fire(allowed, { kind: 'command', commandName: 'limit', voiceChannelId: 'room-1' });
+      expect(allowed.info).not.toHaveBeenCalled();
+      dispose?.();
+
+      const paused = guardEnv(DENY_KAY, { commandAccessDisabled: vi.fn().mockResolvedValue(true) });
+      await fire(paused, { kind: 'command', commandName: 'limit', voiceChannelId: 'room-1' });
+      expect(paused.info).not.toHaveBeenCalled();
     });
   });
 
@@ -4785,7 +4857,7 @@ describe('registerInteractionHandler (the restriction guard)', () => {
     const ROOM = 'room-9';
 
     it.each([
-      ['lock', 'Private and Public', (s: ReturnType<typeof services>) => s.makePrivate],
+      ['lock', 'Private', (s: ReturnType<typeof services>) => s.makePrivate],
       ['limit', 'Size', (s: ReturnType<typeof services>) => s.getRoomPanelState],
       ['rename', 'Name', (s: ReturnType<typeof services>) => s.getRoomPanelState],
       ['transfer', 'Transfer', (s: ReturnType<typeof services>) => s.getRoomPanelState],
@@ -4910,7 +4982,7 @@ describe('registerInteractionHandler (the restriction guard)', () => {
     const ROOM = 'room-9';
 
     /**
-     * \`/name\` out of a voice channel answers with a picker, and the chosen
+     * `/name` out of a voice channel answers with a picker, and the chosen
      * channel arrives as a separate select interaction that never passes the
      * command's guard.
      */

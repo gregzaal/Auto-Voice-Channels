@@ -241,9 +241,11 @@ describe('buildAppearanceModal', () => {
 
   /**
    * A switched-on control looks plainly on here, so the one place an admin reads
-   * what the panel is has to say a control can also be withheld from people.
+   * what the panel is has to say a control can also be withheld from people. The
+   * list says Private and not Private and Public, because opening a room again is
+   * never restricted.
    */
-  it('says Private and Public, Size, Name and Transfer can be restricted with /restrict', () => {
+  it('says Private, Size, Name and Transfer can be restricted with /restrict', () => {
     const none = Object.fromEntries(CONTROL_PANEL_CONTROLS.map((c) => [c, false]));
     for (const settings of [ON, {}, { control_panel: { ...none, panel: true } }]) {
       const description = (
@@ -252,7 +254,7 @@ describe('buildAppearanceModal', () => {
         }
       ).description;
       expect(description).toContain(
-        'Private and Public, Size, Name and Transfer can also be withheld from a person or a role with /restrict.',
+        'Private, Size, Name and Transfer can also be withheld from a person or a role with /restrict.',
       );
     }
   });

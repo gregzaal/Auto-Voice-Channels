@@ -9,11 +9,13 @@ import {
   FEATURE_LABELS,
   featureForCommand,
   isAvailableFeature,
+  isNickReset,
   limitFeatureFor,
   MAX_RESTRICTED_ROLES,
   MAX_RESTRICTED_USERS,
   MAX_RESTRICTIONS,
   mayUse,
+  nickFeatureFor,
   PANEL_ACTION_FEATURE,
   readCommandAccess,
   RESTRICT_ENFORCED,
@@ -99,11 +101,25 @@ describe('the feature list', () => {
     expect(FEATURE_COVERS.rename).toContain('template editor');
     expect(FEATURE_COVERS.rename).toContain('voice status');
     expect(FEATURE_COVERS.privacy).toContain('stays open to everyone');
-    // `/unlimit` and a limit of 0 (`/limit 0`, a blank or 0 Size box) both remove
-    // a limit, which is the undo direction, so both are named as the open ones.
+    // `/unlimit` and `/limit 0` both remove a limit, which is the undo direction,
+    // so both are named as the open ones. Not "a limit of 0 by any door": the Size
+    // button is refused before its box can open, so only the command is reachable.
     expect(FEATURE_COVERS.limit).toContain(
-      'The /unlimit command, and a limit of 0, stay open to everyone',
+      'The /unlimit command and /limit 0 stay open to everyone',
     );
+    expect(FEATURE_COVERS.limit).not.toMatch(/any door|Size box/);
+  });
+
+  /**
+   * A feature is more than one door, and the reply has to say which. A saved
+   * nickname is the second door of Nickname: it stops showing in room names, and
+   * for a role rule that lands at the next re-render, which an admin cannot see.
+   */
+  it('says a restricted nickname stops showing in room names, and that removing one stays open', () => {
+    expect(FEATURE_COVERS.nick).toContain('/nick command');
+    expect(FEATURE_COVERS.nick).toContain('saved nickname showing in a room name');
+    expect(FEATURE_COVERS.nick).toContain('Removing a nickname stays open to everyone');
+    expect(FEATURE_COVERS.nick).toContain('next time the room refreshes its name');
   });
 
   /**
@@ -244,6 +260,34 @@ describe('limitFeatureFor', () => {
     expect(mayUse(limitFeatureFor(5), caller(), { limit: { users: [USER], roles: [] } })).toBe(
       false,
     );
+  });
+});
+
+/**
+ * Removing a saved nickname is the undo direction. A rule naming a ROLE cannot
+ * clear the nicknames of that role's members (the writer cannot list them), so
+ * without this a member under one would hold saved text they cannot erase.
+ */
+describe('nickFeatureFor', () => {
+  it('never restricts a value that removes the nickname', () => {
+    for (const name of ['reset', 'RESET', ' Reset ', '', '   ', '\t']) {
+      expect(isNickReset(name), JSON.stringify(name)).toBe(true);
+      expect(nickFeatureFor(name), JSON.stringify(name)).toBeNull();
+    }
+    expect(mayUse(nickFeatureFor('reset'), caller(), { nick: { users: [USER], roles: [] } })).toBe(
+      true,
+    );
+  });
+
+  it('restricts any other value, and a missing one, which only a hand-built request sends', () => {
+    for (const name of ['Big Bob', 'resets', 'reset me', '0']) {
+      expect(isNickReset(name), name).toBe(false);
+      expect(nickFeatureFor(name), name).toBe('nick');
+    }
+    expect(nickFeatureFor(null)).toBe('nick');
+    expect(
+      mayUse(nickFeatureFor('Big Bob'), caller(), { nick: { users: [USER], roles: [] } }),
+    ).toBe(false);
   });
 });
 

@@ -191,6 +191,7 @@ import {
   isAvailableFeature,
   limitFeatureFor,
   mayUse,
+  nickFeatureFor,
   PANEL_ACTION_FEATURE,
   readCommandAccess,
   type CommandFeature,
@@ -596,19 +597,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
      * deferred interaction would have to be edited into one. The one thing this
      * can wait on is the lever read, and only when a refusal is about to happen,
      * through the creation gate's cached snapshot, so a server with no rules
-     * costs nothing. `/limit 0` is the undo direction and is never restricted.
+     * costs nothing. `/limit 0` and `/nick reset` are undo directions and are
+     * never restricted.
      */
-    if (
-      !(await allowed(
-        interaction,
-        settings,
-        interaction.commandName === 'limit'
-          ? limitFeatureFor(interaction.options.getInteger('count'))
-          : featureForCommand(interaction.commandName),
-      ))
-    ) {
-      return;
-    }
+    if (!(await allowed(interaction, settings, guardedFeatureOf(interaction)))) return;
 
     /**
      * Counted here rather than in `route`, so the number means "commands that
@@ -1924,10 +1916,12 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
    * `/template` channel editor that `/name` opens. A rule that stopped only the
    * command would leave the same act one click away.
    *
-   * **Fails OPEN on any read problem.** A rule that locks out people it was never
-   * meant to is the failure an admin cannot diagnose from inside Discord, so a
-   * thrown read, a settings blob of the wrong shape and a missing row all read as
-   * "no restriction" and are logged by id.
+   * **Fails OPEN on a problem reading the rules.** A rule that locks out people it
+   * was never meant to is the failure an admin cannot diagnose from inside
+   * Discord, so a settings blob of the wrong shape, a missing row and anything
+   * that throws while checking all read as "no restriction", and a throw is
+   * logged by id. The one exception is the lever: its accessor never throws, and
+   * a failed flag read counts as NOT disabled, so the rules keep applying.
    *
    * **Ordered so the common case costs nothing.** The permission bit and the
    * stored map are checked first and are pure. The `command_access.disabled`
@@ -1953,6 +1947,9 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       };
       if (mayUse(feature, caller, readCommandAccess(settings ?? {}, guildId))) return null;
       if (await deps.commandAccessDisabled?.()) return null;
+      // The only trace of a refusal an operator gets, since it is seen from the
+      // member's side alone. Ids only, never what they typed.
+      deps.logger.info({ guildId, userId: caller.userId, feature }, 'refused by a restriction');
       return restrictedRefusal(feature);
     } catch (err) {
       deps.logger.warn({ err, guildId, feature }, 'could not check a restriction, allowing it');
@@ -4609,6 +4606,24 @@ function carriesManageChannels(permissions: unknown): boolean {
   return (
     bits.has(PermissionFlagsBits.ManageChannels) || bits.has(PermissionFlagsBits.Administrator)
   );
+}
+
+/**
+ * The feature a slash command is guarded as, or null when no rule can stop it.
+ *
+ * Size and Nickname are decided by their value, because each has a direction that
+ * undoes it: `/limit 0` and `/nick reset` are never restricted, so a rule cannot
+ * leave a member holding something they have no way to remove.
+ */
+function guardedFeatureOf(interaction: ChatInputCommandInteraction): CommandFeature | null {
+  switch (interaction.commandName) {
+    case 'limit':
+      return limitFeatureFor(interaction.options.getInteger('count'));
+    case 'nick':
+      return nickFeatureFor(interaction.options.getString('name'));
+    default:
+      return featureForCommand(interaction.commandName);
+  }
 }
 
 /**
