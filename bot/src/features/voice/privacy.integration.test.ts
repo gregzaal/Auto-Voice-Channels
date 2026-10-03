@@ -5,7 +5,7 @@ import {
   db,
 } from '@avc/core';
 import { DiscordAPIError } from 'discord.js';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PgTestEnv } from '../../test/pgContainer.js';
 import { startPostgres } from '../../test/pgContainer.js';
 import { fakeLogger } from '../../runtime/testUtils.js';
@@ -505,7 +505,7 @@ describe('PrivacyService (integration)', () => {
         expect(res).toEqual({
           ok: false,
           message:
-            "I can't read this room's access settings, so I have left the room exactly as it is. A newer version of AVC probably wrote them. Try again in a few minutes.",
+            "I can't read this room's access settings right now, so I have left the room exactly as it is. Try again later, and tell an admin if it keeps happening.",
         });
         expect(await rawAccess()).toEqual(blob);
         await untouched();
@@ -970,19 +970,42 @@ describe('PrivacyService (integration)', () => {
     it('finishes when the same exit is asked for again once the limit has cleared', async () => {
       await privacy.hide(GUILD, SEC, 'alice');
       actions.simulateOverwriteRateLimit = true;
-      expect((await privacy.unhide(GUILD, SEC, 'alice')).ok).toBe(false);
+      const queued = await privacy.unhide(GUILD, SEC, 'alice');
+      expect(queued.ok).toBe(false);
+      // It says what finishes it, because nothing watches the write land.
+      expect(queued.message).toContain('run `/unhide` again to finish');
       // Not finalised: still recorded as hidden, because the queued write has not been seen to land.
       expect((await access())?.hidden).toBe(true);
-      // The lock gets its Join channel all the same.
-      expect(await joinRow()).toBeDefined();
+      // And no Join channel beside it: it names the owner, and the room has not been
+      // seen to open. A hidden room that has one is the leak the hide exists to prevent.
+      expect(await joinRow()).toBeUndefined();
+      expect(liveJoinChannels()).toHaveLength(0);
 
       actions.simulateOverwriteRateLimit = false;
       const again = await privacy.unhide(GUILD, SEC, 'alice');
 
       expect(again.ok).toBe(true);
       expect((await access())?.hidden).toBeUndefined();
-      // And the repeat does not make a second one.
+      // The repeat makes it, once the write is known to have landed.
       expect(liveJoinChannels()).toHaveLength(1);
+    });
+
+    it('says to run /public again, not that it is on its way, for a queued opening', async () => {
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      actions.simulateOverwriteRateLimit = true;
+
+      const res = await privacy.makePublic(GUILD, SEC, 'alice');
+
+      expect(res.ok).toBe(false);
+      expect(res.message).toContain('run `/public` again to finish');
+    });
+
+    it('says how to take a queued lock back if it never arrives', async () => {
+      actions.simulateOverwriteRateLimit = true;
+
+      const res = await privacy.makePrivate(GUILD, SEC, 'alice');
+
+      expect(res.message).toContain('run `/public` and try again');
     });
   });
 
@@ -1061,6 +1084,67 @@ describe('PrivacyService (integration)', () => {
     });
   });
 
+  // -- the re-render after a change ---------------------------------------------------
+
+  /**
+   * `{{PRIVATE}}` and `{{HIDDEN}}` follow the room, so every change that happened, or is
+   * queued to, asks for the name to be worked out again. Detached, because the reply
+   * is already waiting on a read, a bulk write and a channel, and a failed rename must
+   * never fail a change that landed.
+   */
+  describe('the re-render after a change', () => {
+    const rerender = vi.fn(
+      (_guildId: string, _channelId: string): Promise<unknown> => Promise.resolve(),
+    );
+    beforeEach(() => {
+      rerender.mockClear();
+      rerender.mockImplementation(() => Promise.resolve());
+      privacy = build({ rerender });
+    });
+
+    it.each([
+      ['private', () => privacy.makePrivate(GUILD, SEC, 'alice')],
+      ['hide', () => privacy.hide(GUILD, SEC, 'alice')],
+    ] as const)('asks for it once after %s', async (_name, run) => {
+      expect((await run()).ok).toBe(true);
+      expect(rerender).toHaveBeenCalledTimes(1);
+      expect(rerender).toHaveBeenCalledWith(GUILD, SEC);
+    });
+
+    it.each([
+      ['unhide', () => privacy.unhide(GUILD, SEC, 'alice')],
+      ['public', () => privacy.makePublic(GUILD, SEC, 'alice')],
+    ] as const)('asks for it once after %s', async (_name, run) => {
+      await privacy.hide(GUILD, SEC, 'alice');
+      rerender.mockClear();
+      expect((await run()).ok).toBe(true);
+      expect(rerender).toHaveBeenCalledTimes(1);
+      expect(rerender).toHaveBeenCalledWith(GUILD, SEC);
+    });
+
+    it('asks for it when the write is only queued, since the intent is recorded and will land', async () => {
+      actions.simulateOverwriteRateLimit = true;
+      expect((await privacy.hide(GUILD, SEC, 'alice')).ok).toBe(false);
+      expect(rerender).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not ask for it when nothing changed: a refusal, or a write that failed', async () => {
+      await privacy.makePrivate(GUILD, SEC, 'bob');
+      await privacy.makePublic(GUILD, SEC, 'alice');
+      await privacy.unhide(GUILD, SEC, 'alice');
+      actions.failOverwrites = true;
+      await privacy.hide(GUILD, SEC, 'alice');
+      expect(rerender).not.toHaveBeenCalled();
+    });
+
+    it('never fails a change that landed because the name could not be worked out', async () => {
+      rerender.mockImplementation(() => Promise.reject(new Error('rename failed')));
+      expect((await privacy.makePrivate(GUILD, SEC, 'alice')).ok).toBe(true);
+      await Promise.resolve();
+      expect(rerender).toHaveBeenCalledTimes(1);
+    });
+  });
+
   // -- a stale snapshot --------------------------------------------------------------
 
   /**
@@ -1113,6 +1197,30 @@ describe('PrivacyService (integration)', () => {
       ]);
       expect((await access())?.hidden).toBe(true);
       expect((await privacy.makePrivate(GUILD, SEC, 'alice')).message).toContain('`/unhide`');
+    });
+
+    /**
+     * The defect: a LOCKED room that lost `private` reads as public, the next apply
+     * (a handover, a knock decision) planned it public to public and cleared the baseline
+     * the lock had captured, and the next lock then recorded its own `@everyone` deny as
+     * the original, so opening the room gave that deny back and it never opened.
+     */
+    it('keeps the baseline of a locked room that lost private, so it can still be opened', async () => {
+      // An explicit `@everyone` Connect allow before anything was locked.
+      actions.seedOverwrites(SEC, [roleOw(GUILD, C)]);
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      expect((await access())?.baseline).toEqual({ view: 'none', connect: 'allow' });
+      const { private: _lost, ...stripped } = (await row()).state;
+      await secondaries.updateState(SEC, stripped);
+
+      const applied = await privacy.applyAccessLists(GUILD, SEC);
+
+      expect(applied.status).toBe('unchanged');
+      expect((await access())?.baseline).toEqual({ view: 'none', connect: 'allow' });
+      // The owner locks and opens it again, as a room that reads as public.
+      expect((await privacy.makePrivate(GUILD, SEC, 'alice')).ok).toBe(true);
+      expect((await privacy.makePublic(GUILD, SEC, 'alice')).ok).toBe(true);
+      expect(bits(everyone())).toEqual({ allow: C, deny: 0n });
     });
   });
 
@@ -1181,7 +1289,7 @@ describe('PrivacyService (integration)', () => {
     it('says only Administrators see it when none is set', async () => {
       const res = await privacy.hide(GUILD, SEC, 'alice');
       expect(res.message).toContain('Administrators always see everything');
-      expect(res.message).toContain('nobody else sees it unless you let them in');
+      expect(res.message).toContain('Everyone else sees it only if you let them in');
       expect(res.message).not.toContain('<@&');
     });
 
@@ -1296,7 +1404,6 @@ describe('PrivacyService (integration)', () => {
       // Connect alone: a lock never touches what a member can see.
       expect(bits(held('carol'))).toEqual({ allow: C, deny: 0n });
 
-      await privacy.unhide(GUILD, SEC, 'alice').catch(() => undefined);
       await privacy.hide(GUILD, SEC, 'alice');
       expect(bits(held('carol'))).toEqual({ allow: VC, deny: 0n });
     });
@@ -1620,6 +1727,31 @@ describe('PrivacyService (integration)', () => {
       expect(bits(held('carol'))).toEqual({ allow: VC, deny: 0n });
     });
 
+    /**
+     * The defect: a member Discord has not got in the server was left out of the write,
+     * and the reply still said they could join, with their id kept in the record.
+     */
+    it.each(['locked', 'hidden'] as const)(
+      'says so, and records nothing, when Discord has nobody by that id in a %s room',
+      async (mode) => {
+        if (mode === 'locked') await privacy.makePrivate(GUILD, SEC, 'alice');
+        else await privacy.hide(GUILD, SEC, 'alice');
+        await privacy.admit(GUILD, SEC, 'alice', 'dave');
+        actions.unknownMemberIds.add('carol');
+
+        const res = await privacy.admit(GUILD, SEC, 'alice', 'carol');
+
+        expect(res).toEqual({
+          ok: false,
+          message: "<@carol> isn't in this server, so I couldn't let them in.",
+        });
+        expect(held('carol')).toBeUndefined();
+        // Only the one who is not there comes back out, and the member who is stays.
+        expect((await access())?.admitted).toEqual(['dave']);
+        expect(held('dave')).toBeDefined();
+      },
+    );
+
     it('says an open room has nothing to admit anyone to', async () => {
       const res = await privacy.admit(GUILD, SEC, 'alice', 'carol');
       expect(res.ok).toBe(false);
@@ -1802,7 +1934,7 @@ describe('PrivacyService (integration)', () => {
         );
       });
 
-      it('persists before it touches Discord, and moves them out last', async () => {
+      it('applies the block to the room first, and moves them out last', async () => {
         const joinId = await lock();
         await privacy.denyJoin(joinId, 'carol', true);
         const log = actions.actions.slice(
@@ -1812,6 +1944,64 @@ describe('PrivacyService (integration)', () => {
         expect(types.at(-1)).toBe('move');
         expect(types.indexOf('overwrites')).toBeLessThan(types.indexOf('move'));
       });
+
+      /**
+       * The defect: a failed deny on the join channel returned "could not block" before
+       * the requester was moved, although the block was saved and applied, and the card's
+       * buttons were already gone, so they sat in the lobby with no way to be removed.
+       */
+      it('is a note, not a failure, when only the join channel deny fails, and they are still moved out', async () => {
+        const joinId = await lock();
+        actions.setMemberConnect = () => Promise.reject(apiError(50013));
+
+        const res = await privacy.denyJoin(joinId, 'carol', true);
+
+        expect(res.ok).toBe(true);
+        expect(res.message).toContain('Blocked <@carol>.');
+        expect(res.message).toContain(
+          'I could not stop them knocking on the **⇩ Join** channel again.',
+        );
+        expect((await lists.get(GUILD, 'alice')).blocked).toEqual(['carol']);
+        expect(bits(held('carol'))).toEqual({ allow: 0n, deny: VC });
+        expect(actions.ofType('move')).toContainEqual(
+          expect.objectContaining({ memberId: 'carol', channelId: null, onlyFrom: joinId }),
+        );
+      });
+
+      it('fails when the join channel deny fails and nothing was saved, because that was the whole block', async () => {
+        const joinId = await lock();
+        actions.setMemberConnect = () => Promise.reject(apiError(50013));
+        const plain = build({ memberAccessLists: undefined });
+
+        const res = await plain.denyJoin(joinId, 'carol', true);
+
+        expect(res.ok).toBe(false);
+        expect(res.message).toContain('Could not block <@carol>');
+        expect(actions.ofType('move').filter((a) => a.memberId === 'carol')).toEqual([]);
+      });
+
+      it.each([
+        ['an Administrator', () => voice.setMemberFacts('admin', { administrator: true }), 'admin'],
+        ['the server owner', () => voice.setMemberFacts('boss', { guildOwner: true }), 'boss'],
+        ['the bot', () => undefined, BOT],
+      ])(
+        'only denies %s, says no block can stop them, and saves nothing',
+        async (_who, stage, id) => {
+          const joinId = await lock();
+          stage();
+
+          const res = await privacy.denyJoin(joinId, id, true);
+
+          expect(res.ok).toBe(true);
+          expect(res.message).toMatch(/^Denied /);
+          expect(res.message).not.toContain('Blocked');
+          expect(res.message).toContain('permissions that override any block');
+          expect((await lists.get(GUILD, 'alice')).blocked).toEqual([]);
+          expect(actions.ofType('connect').filter((a) => a.memberId === id)).toEqual([]);
+          // The bot always holds its own allow on the room.
+          if (id !== BOT) expect(held(id)).toBeUndefined();
+        },
+      );
 
       it('does not lose the block when the requester has already left voice', async () => {
         const joinId = await lock();
@@ -1936,8 +2126,82 @@ describe('PrivacyService (integration)', () => {
       });
     });
 
+    /**
+     * A card outlives the decision that made it stale. The owner blocks a knock, the
+     * same person knocks again, and the older card's Approve is pressed: a grant would
+     * replace the deny the block left and the bot would move them straight in.
+     */
+    describe('Approve on a card that has gone stale', () => {
+      it('refuses a requester the owner has since blocked, and grants them nothing', async () => {
+        const joinId = await lock();
+        await privacy.denyJoin(joinId, 'carol', true);
+        const before = actions.actions.length;
+
+        const res = await privacy.approveJoin(joinId, 'carol');
+
+        expect(res).toEqual({
+          ok: false,
+          message:
+            '<@carol> is on your blocked list, so I did not let them in. Take them off it first if you want them in.',
+        });
+        expect(bits(held('carol'))).toEqual({ allow: 0n, deny: VC });
+        expect(actions.actions).toHaveLength(before);
+      });
+
+      it('refuses one a vote has since removed from the room', async () => {
+        const joinId = await lock();
+        await privacy.denyKicked(GUILD, SEC, 'eve');
+        const before = actions.actions.length;
+
+        const res = await privacy.approveJoin(joinId, 'eve', true);
+
+        expect(res).toEqual({
+          ok: false,
+          message: '<@eve> was voted out of this room, so I did not let them in.',
+        });
+        expect(bits(held('eve'))).toEqual({ allow: 0n, deny: VC });
+        expect(actions.actions).toHaveLength(before);
+        expect((await lists.get(GUILD, 'alice')).trusted).toEqual([]);
+      });
+
+      it('still admits an Administrator who is on the list, since nothing written keeps them out', async () => {
+        const joinId = await lock();
+        await lists.add(GUILD, 'alice', 'admin', 'blocked');
+        voice.setMemberFacts('admin', { administrator: true });
+
+        expect((await privacy.approveJoin(joinId, 'admin')).ok).toBe(true);
+      });
+
+      it('admits when the list cannot be read, as a knock is let through', async () => {
+        const joinId = await lock();
+        const broken = build({
+          memberAccessLists: {
+            get: () => Promise.reject(new Error('db down')),
+          } as unknown as MemberAccessListRepository,
+        });
+
+        expect(await broken.approveJoin(joinId, 'bob')).toEqual({
+          ok: true,
+          message: 'Admitted <@bob>.',
+        });
+        expect(actions.ofType('move')).toContainEqual(
+          expect.objectContaining({ memberId: 'bob', channelId: SEC }),
+        );
+      });
+    });
+
     describe('a blocked requester', () => {
       const ctxOf = async (joinId: string) => (await privacy.getJoinContext(joinId))!;
+
+      it('is not turned away when nothing written could keep them out of the room anyway', async () => {
+        const joinId = await lock();
+        await lists.add(GUILD, 'alice', 'admin', 'blocked');
+        voice.setMemberFacts('admin', { administrator: true });
+
+        expect(await privacy.refuseBlockedKnock(await ctxOf(joinId), 'admin')).toBe(false);
+
+        expect(actions.ofType('move')).toEqual([]);
+      });
 
       it('is turned away: moved out of the join channel, and the caller posts nothing', async () => {
         const joinId = await lock();
@@ -2063,6 +2327,35 @@ describe('PrivacyService (integration)', () => {
       expect(await joinChannels.get(mine)).toBeUndefined();
     });
 
+    /**
+     * The defect: only the oldest channel was deleted while every row was forgotten, so a
+     * second one, left by a replay, stayed visible beside a hidden room and named its owner.
+     */
+    it.each(['hide', 'public'] as const)(
+      'deletes every Join channel the room has when it %s, and forgets each',
+      async (leave) => {
+        await privacy.makePrivate(GUILD, SEC, 'alice');
+        const first = actions.ofType('joinChannel')[0]!.channelId;
+        await joinChannels.create({
+          channelId: 'second-join',
+          guildId: GUILD,
+          secondaryChannelId: SEC,
+          creatorId: 'alice',
+        });
+
+        const res =
+          leave === 'hide'
+            ? await privacy.hide(GUILD, SEC, 'alice')
+            : await privacy.makePublic(GUILD, SEC, 'alice');
+
+        expect(res.ok).toBe(true);
+        expect(actions.ofType('delete').map((a) => a.channelId)).toEqual(
+          expect.arrayContaining([first, 'second-join']),
+        );
+        expect(await joinRow()).toBeUndefined();
+      },
+    );
+
     it('is one channel when the same unhide runs twice at once', async () => {
       await privacy.hide(GUILD, SEC, 'alice');
       await Promise.all([privacy.unhide(GUILD, SEC, 'alice'), privacy.unhide(GUILD, SEC, 'alice')]);
@@ -2164,6 +2457,92 @@ describe('PrivacyService (integration)', () => {
       ).rejects.toMatchObject({
         code: 50013,
       });
+    });
+
+    /** The defect: a mode the throwing method dropped made every admin default a lock. */
+    it('makes a hidden room from makePrivateForCreation when it is told to', async () => {
+      await privacy.makePrivateForCreation(GUILD, FRESH, 'dave', 'Dave', 'hidden');
+
+      expect(bits(inFresh(GUILD, OVERWRITE_ROLE))).toEqual({ allow: 0n, deny: VC });
+      expect((await recordOfFresh())?.hidden).toBe(true);
+      expect(await joinChannels.getBySecondary(FRESH)).toBeUndefined();
+    });
+
+    it('throws what a failed Join channel threw, so the rollback can read it, and tryMake says it', async () => {
+      actions.createJoinChannel = () => Promise.reject(apiError(50013));
+
+      const typed = await privacy.tryMakePrivateForCreation(GUILD, FRESH, 'dave', 'Dave');
+      expect(typed).toMatchObject({ ok: false, reason: 'failed' });
+      expect((typed as { error?: unknown }).error).toBeInstanceOf(DiscordAPIError);
+      // The lock itself landed: only the way for others to knock is missing.
+      expect((await secondaries.get(FRESH))!.state.private).toBe(true);
+
+      await secondaries.create({
+        channelId: 'sec-fresh-2',
+        guildId: GUILD,
+        primaryChannelId: 'p',
+        ownerId: 'erin',
+        state: { name: 'Erin’s den', roster: ['erin'] },
+      });
+      await expect(
+        privacy.makePrivateForCreation(GUILD, 'sec-fresh-2', 'erin', 'Erin'),
+      ).rejects.toMatchObject({ code: 50013 });
+    });
+
+    it('is applied, and says it is only queued, behind a rate limit', async () => {
+      actions.simulateOverwriteRateLimit = true;
+
+      expect(await privacy.tryMakePrivateForCreation(GUILD, FRESH, 'dave', 'Dave')).toEqual({
+        ok: true,
+        applied: true,
+        deferred: true,
+      });
+      // The create path treats a queued lock as done, so it must not roll the room back.
+      await secondaries.create({
+        channelId: 'sec-fresh-3',
+        guildId: GUILD,
+        primaryChannelId: 'p',
+        ownerId: 'erin',
+        state: { name: 'Erin’s den', roster: ['erin'] },
+      });
+      await expect(
+        privacy.makePrivateForCreation(GUILD, 'sec-fresh-3', 'erin', 'Erin'),
+      ).resolves.toBeUndefined();
+    });
+
+    it('is not attempted before the bot knows who it is, and throws that from makePrivateForCreation', async () => {
+      const early = build({ botUserId: () => undefined });
+
+      expect(await early.tryMakePrivateForCreation(GUILD, FRESH, 'dave', 'Dave')).toEqual({
+        ok: false,
+        reason: 'not_ready',
+      });
+      await expect(early.makePrivateForCreation(GUILD, FRESH, 'dave', 'Dave')).rejects.toThrow(
+        /not_ready/,
+      );
+      expect(actions.actions).toEqual([]);
+    });
+
+    /**
+     * The defect: the service recorded the failure against the room, then the create
+     * path's rollback deleted the room and recorded it against the creator channel, so
+     * the guild was told twice and one of the two named a channel that no longer exists.
+     */
+    it('leaves the problem to the rollback when the throwing method fails, and records it when a remembered preference fails', async () => {
+      actions.failOverwrites = true;
+
+      await expect(
+        privacy.makePrivateForCreation(GUILD, FRESH, 'dave', 'Dave'),
+      ).rejects.toMatchObject({ code: 50013 });
+      expect(problems.recent(GUILD)).toEqual([]);
+      expect(serverLogs).toEqual([]);
+
+      // A remembered preference keeps its room, so the guild does hear about this one.
+      const res = await privacy.tryMakePrivateForCreation(GUILD, FRESH, 'dave', 'Dave');
+      expect(res).toMatchObject({ ok: false, reason: 'failed' });
+      expect(problems.recent(GUILD)).toHaveLength(1);
+      expect(problems.recent(GUILD)[0]).toMatchObject({ channelId: FRESH, operation: 'access' });
+      expect(serverLogs).toHaveLength(1);
     });
 
     it('says a hide a role would defeat is refused, and writes nothing', async () => {
@@ -2295,7 +2674,7 @@ describe('PrivacyService (integration)', () => {
 
       expect(res.ok).toBe(true);
       expect(held(MODS, OVERWRITE_ROLE)).toBeUndefined();
-      expect(res.message).toContain('nobody else sees it unless you let them in');
+      expect(res.message).toContain('Everyone else sees it only if you let them in');
       expect(res.message).not.toContain('and so do members with');
       // And it says which role it could not change, and why.
       expect(res.message).toContain('<@&role-mods>');
@@ -2431,8 +2810,24 @@ describe('PrivacyService (integration)', () => {
    * because a source scan only catches a curly quote. Last, so it sees them all.
    */
   describe('copy rules', () => {
-    it('has replies to check', () => {
-      expect(replies.length).toBeGreaterThan(40);
+    /**
+     * The rules below read what earlier tests collected, so a run of this block alone
+     * would check nothing. It makes its own: one pass through every command a member
+     * can give, refusals included.
+     */
+    it('has replies to check', async () => {
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      await privacy.makePrivate(GUILD, SEC, 'bob');
+      await privacy.admit(GUILD, SEC, 'alice', 'carol');
+      await privacy.hide(GUILD, SEC, 'alice');
+      await privacy.hide(GUILD, SEC, 'alice');
+      await privacy.unhide(GUILD, SEC, 'alice');
+      await privacy.unhide(GUILD, SEC, 'alice');
+      await privacy.makePublic(GUILD, SEC, 'alice');
+      await privacy.makePublic(GUILD, SEC, 'alice');
+      await privacy.admit(GUILD, SEC, 'alice', 'carol');
+      expect(replies.length).toBeGreaterThan(10);
     });
 
     it('uses no em or en dashes, curly quotes, or prose semicolons', () => {

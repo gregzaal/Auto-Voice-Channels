@@ -8,8 +8,9 @@
  * feed shows someone who is not in the room about a member inside it has not been
  * checked, so no reply here says more than the channel list.
  *
- * Role mentions (`<@&id>`) are for the reader of an ephemeral reply, and the
- * caller sends it with mentions suppressed so nothing here can ping.
+ * Role mentions (`<@&id>`) are for the reader of an ephemeral reply, which nobody is
+ * notified by. A reply that is ever posted where others can read it has to send it
+ * with mentions suppressed.
  */
 
 /** "a", "a and b", "a, b and c". */
@@ -46,7 +47,7 @@ export const ROOM_ACCESS_REPLIES = {
   notOwnerUnhide: 'Only the room owner can show it in the channel list again.',
   notOwnerAdmit: 'Only the room owner can let someone in.',
   unreadable:
-    "I can't read this room's access settings, so I have left the room exactly as it is. A newer version of AVC probably wrote them. Try again in a few minutes.",
+    "I can't read this room's access settings right now, so I have left the room exactly as it is. Try again later, and tell an admin if it keeps happening.",
   notReady: "I'm not ready to change this room yet. Try again in a moment.",
   gone: 'That room no longer exists.',
   alreadyPrivate: 'This channel is already private.',
@@ -61,9 +62,31 @@ export const ROOM_ACCESS_REPLIES = {
     'It is open to everyone, so there is no need to let anyone in. Lock or hide the room first if you want a guest list.',
   admitSelf: 'You already have access to your own room.',
   admitBot: 'I always have access to this room.',
-  deferred:
-    "Discord is slowing down changes to this room, so I've queued this one. It hasn't taken effect yet and should within a minute or so.",
 } as const;
+
+const QUEUED = "Discord is slowing down changes to this room, so I've queued this one.";
+
+/**
+ * Said when Discord has only queued a change, so it has not happened and is never
+ * confirmed. What to do next depends on the direction, because nothing watches a
+ * queued write land: a lock or a hide is on its way and has only to be checked, but an
+ * opening is recorded as it was until it is seen to have landed, and asking again is
+ * what finishes it.
+ */
+export function deferredMessage(
+  command: 'private' | 'public' | 'hide' | 'unhide' | 'admit',
+): string {
+  switch (command) {
+    case 'private':
+    case 'hide':
+      return `${QUEUED} It hasn't taken effect yet and should within a minute or so. If it still hasn't by then, run \`/public\` and try again.`;
+    case 'public':
+    case 'unhide':
+      return `${QUEUED} It hasn't taken effect yet. Give it a minute, then run \`/${command}\` again to finish.`;
+    case 'admit':
+      return `${QUEUED} It hasn't taken effect yet. Give it a minute, then try again to check.`;
+  }
+}
 
 /** What a refused hide says: which roles still show the room, and how to fix that. */
 export function roleDefeatsHide(roleIds: readonly string[]): string {
@@ -97,10 +120,12 @@ export function hiddenMessage(opts: {
 }): string {
   const who = opts.viewerRoleId
     ? `Administrators always see everything, and so do members with <@&${opts.viewerRoleId}>.`
-    : 'Administrators always see everything, and nobody else sees it unless you let them in.';
+    : 'Administrators always see everything.';
+  // Permissions given to a person by name are left as they were, so they still show it.
   return (
     '🙈 Your room is now hidden from the channel list. ' +
-    `${who} Let people in with \`/access trust\` or \`/access admit\`.` +
+    `${who} Anyone given direct access to this room still sees it too. ` +
+    'Everyone else sees it only if you let them in, with `/access trust` or `/access admit`.' +
     skippedRolesNote(opts.skippedRoleIds ?? [])
   );
 }
@@ -134,6 +159,11 @@ export function admitBlocked(memberId: string): string {
 
 export function admitKicked(memberId: string): string {
   return `<@${memberId}> was voted out of this room, so I did not let them in.`;
+}
+
+/** Discord has no such member in the server to let in, so nothing was written for them. */
+export function admitNotInServer(memberId: string): string {
+  return `<@${memberId}> isn't in this server, so I couldn't let them in.`;
 }
 
 export function admitted(memberId: string, mode: 'locked' | 'hidden'): string {

@@ -605,7 +605,12 @@ export function planAccess(input: AccessPlanInput): AccessPlan {
 
   const keptBaseline = Object.keys(baseline).length > 0 ? baseline : null;
   const facts: AccessFacts = {
-    baseline: mode === 'public' ? null : keptBaseline,
+    // Used up only by the plan that restores it. A public room that holds one was left
+    // by something other than an exit that landed: a failed entry, or a lock whose
+    // `private` a stale whole-state write dropped, which reads as public while
+    // `@everyone` is still denied. Dropping it there would let the next lock record
+    // that deny as the original, and `/public` would restore it for good.
+    baseline: mode === 'public' && previousMode !== 'public' ? null : keptBaseline,
     baselineCaptured: Object.keys(captured).length > 0 ? captured : null,
     neutralised,
     viewerRoleId: viewerFact,

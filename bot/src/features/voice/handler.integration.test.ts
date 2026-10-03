@@ -1739,6 +1739,10 @@ describe('VoiceFeature (integration)', () => {
   it('deletes a default-private room it could not lock down, blaming the creator channel', async () => {
     await env.handle.db.delete(db.schema.joinChannels);
     const joinChannels = new JoinChannelRepository(env.handle.db);
+    const problems = new PermissionProblemTracker();
+    const logs: { level: number; message: string }[] = [];
+    // Wired into the service as well as the feature, as production does: a service
+    // that records its own failure here is what put a second problem on the list.
     const privacy = new PrivacyService({
       secondaries,
       joinChannels,
@@ -1746,8 +1750,9 @@ describe('VoiceFeature (integration)', () => {
       voice,
       logger: fakeLogger(),
       botUserId: () => 'bot',
+      permissionProblems: problems,
+      serverLog: (_g, level, message) => logs.push({ level, message }),
     });
-    const problems = new PermissionProblemTracker();
     const f = new VoiceFeature({
       autoChannels,
       secondaries,
@@ -1757,6 +1762,7 @@ describe('VoiceFeature (integration)', () => {
       selfHosted: true,
       logger: fakeLogger(),
       permissionProblems: problems,
+      serverLog: (_g, level, message) => logs.push({ level, message }),
       makePrivateOnCreate: (g, c, ownerId, ownerName) =>
         privacy.makePrivateForCreation(g, c, ownerId, ownerName),
     });
@@ -1785,6 +1791,11 @@ describe('VoiceFeature (integration)', () => {
     expect(recorded).toHaveLength(1);
     expect(recorded[0]!.channelId).toBe(PRIMARY);
     expect(recorded[0]!.operation).toBe('privacy');
+    // One line for the guild too, naming the creator channel and never the room
+    // that is already deleted (a `<#id>` for it would be a dead link).
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.message).toContain(`<#${PRIMARY}>`);
+    expect(logs[0]!.message).not.toContain(secondaryId);
   });
 
   it('a public (default) primary spawns secondaries without locking them', async () => {

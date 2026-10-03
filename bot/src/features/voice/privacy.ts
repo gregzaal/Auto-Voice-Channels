@@ -22,7 +22,7 @@ import {
   type AccessPlanInput,
   type ResolvedOverwrite,
 } from './accessPlan.js';
-import { recordWithFacts, sameFacts, withMember } from './accessRecord.js';
+import { recordWithFacts, sameFacts, withMember, withoutMember } from './accessRecord.js';
 import { ChannelObfuscatedError, isPermissionError } from './discordAdapter.js';
 import { permissionProblemMessage, type PermissionProblemTracker } from './permissionProblems.js';
 import {
@@ -32,7 +32,9 @@ import {
   admitBlocked,
   admitFailed,
   admitKicked,
+  admitNotInServer,
   admitted,
+  deferredMessage,
   hiddenMessage,
   lockedWithoutJoin,
   roleDefeatsHide,
@@ -107,6 +109,11 @@ export type AccessOutcome =
       viewerRoleId: string | null;
       /** Blocked members who were in the room and were asked to leave it. */
       movedOut: string[];
+      /**
+       * Members the write left out because Discord has nobody by that id in the server.
+       * They hold no overwrite, whatever the plan asked for.
+       */
+      droppedMemberIds: string[];
       /** Set when the room is right but its "⇩ Join" channel could not be made. */
       joinError?: unknown;
     }
@@ -163,6 +170,11 @@ interface ChangeInput {
   lists?: RoomLists;
   /** The "⇩ Join" channel's name, asked only when one has to be made. */
   joinName: () => Promise<string>;
+  /**
+   * Log a failure and leave it off the guild's problem list. For a caller that is
+   * about to delete the room and report the problem against another channel itself.
+   */
+  quiet?: boolean;
 }
 
 /** The facts, less members Discord does not have in the server, unless they were already recorded. */
@@ -250,6 +262,10 @@ export class PrivacyService {
    * nobody (not even the owner) could get into it. A caller that must not do that,
    * a REMEMBERED preference, calls {@link tryMakePrivateForCreation}, which says what
    * went wrong and throws nothing.
+   *
+   * It does not record the failure as an access problem on the room: the rollback
+   * deletes the room and records it against the creator channel, and a second entry
+   * for a channel that no longer exists would be one nothing ever clears.
    */
   async makePrivateForCreation(
     guildId: string,
@@ -264,6 +280,7 @@ export class PrivacyService {
       ownerId,
       ownerName,
       mode,
+      { quiet: true },
     );
     if (result.ok) return;
     throw (
@@ -285,6 +302,7 @@ export class PrivacyService {
     ownerId: string,
     ownerName: string,
     mode: 'locked' | 'hidden' = 'locked',
+    opts: { quiet?: boolean } = {},
   ): Promise<PrivateCreation> {
     try {
       const row = await this.deps.secondaries.get(channelId);
@@ -292,7 +310,7 @@ export class PrivacyService {
       const read = await this.deps.secondaries.readAccess(channelId);
       if (!read) return { ok: true, applied: false };
       if (!read.readable) return { ok: false, reason: 'unreadable' };
-      if (roomMode({ state: row.state, access: read.access }) !== 'public') {
+      if (roomMode({ state: row.state, access: read }) !== 'public') {
         return { ok: true, applied: false };
       }
 
@@ -304,6 +322,7 @@ export class PrivacyService {
         to: mode,
         ownerId,
         joinName: () => Promise.resolve(`⇩ Join ${ownerName}`),
+        ...(opts.quiet ? { quiet: true } : {}),
       });
       switch (outcome.status) {
         case 'applied':
@@ -450,11 +469,21 @@ export class PrivacyService {
         from: mode,
         to: mode,
         ownerId: row.ownerId,
+        lists,
         joinName: () => this.ownerJoinName(guildId, row),
       });
       switch (outcome.status) {
         case 'applied':
         case 'unchanged':
+          if (outcome.droppedMemberIds.includes(memberId)) {
+            // Discord has nobody by that id in the server, so no overwrite was written
+            // for them. Said so, and taken back out of the record: a "done" would be
+            // false, and an id kept for somebody who cannot be let in is only clutter.
+            await this.deps.secondaries.mutateAccess(row.channelId, (current) =>
+              withoutMember(current, 'admitted', memberId),
+            );
+            return fail(admitNotInServer(memberId));
+          }
           return ok(admitted(memberId, mode));
         case 'failed':
           // The id stays recorded, which is the safe direction: the next apply for
@@ -481,7 +510,7 @@ export class PrivacyService {
    *
    * The creator is `access.creatorId` (the room's original creator, not whoever owns
    * it now), and a room whose record names none falls back to the `original_creator`
-   * column. It never grants or moves the room's current owner, and skips
+   * column. It never blocks or moves the room's current owner, and skips
    * Administrators and the server owner, whom no overwrite can stop.
    *
    * The block is persisted and the overwrite applied BEFORE anyone is moved: a move
@@ -512,7 +541,7 @@ export class PrivacyService {
         );
         return skipped('unreadable');
       }
-      const mode = roomMode({ state: row.state, access: read.access });
+      const mode = roomMode({ state: row.state, access: read });
       if (mode === 'unknown') return skipped('unreadable');
 
       // A public room that has never had an access record, made by somebody with
@@ -586,7 +615,10 @@ export class PrivacyService {
         withMember(current, 'kicked', targetId),
       );
       if (written.status !== 'written') return false;
-      const mode = roomMode({ state: row.state, access: written.access });
+      const mode = roomMode({
+        state: row.state,
+        access: { readable: true, access: written.access },
+      });
       if (mode === 'unknown') return false;
 
       const outcome = await this.changeAccess({
@@ -630,7 +662,7 @@ export class PrivacyService {
    */
   async refuseBlockedKnock(ctx: JoinChannelRow, requesterId: string): Promise<boolean> {
     try {
-      if (!(await this.isBarredFromRoom(ctx, requesterId))) return false;
+      if (!(await this.barredFromRoom(ctx, requesterId))) return false;
     } catch (err) {
       this.deps.logger.warn(
         { err, guildId: ctx.guildId, joinChannelId: ctx.channelId },
@@ -666,6 +698,21 @@ export class PrivacyService {
   ): Promise<CommandResult> {
     const ctx = await this.deps.joinChannels.get(joinChannelId);
     if (!ctx) return fail('That request has expired.');
+    // A card outlives the decision that made it stale: the owner blocks a knock, then
+    // approves the same person's second card, or the room votes them out in between.
+    // A grant here would replace the deny the block left, so a barred member is refused.
+    let barred: 'kicked' | 'blocked' | null = null;
+    try {
+      barred = await this.barredFromRoom(ctx, requesterId);
+    } catch (err) {
+      // Open, as a knock is: the owner pressed Approve, and the check is a safeguard.
+      this.deps.logger.warn(
+        { err, joinChannelId, requesterId },
+        'could not check the blocked list before admitting a requester',
+      );
+    }
+    if (barred)
+      return fail(barred === 'kicked' ? admitKicked(requesterId) : admitBlocked(requesterId));
     let saved = '';
     try {
       await this.deps.actions.setMemberConnect(
@@ -674,7 +721,7 @@ export class PrivacyService {
         requesterId,
         true,
       );
-      if (always) saved = await this.saveToList(ctx, requesterId, 'trusted');
+      if (always) saved = (await this.saveToList(ctx, requesterId, 'trusted')).note;
       await this.deps.actions.moveMember(ctx.guildId, requesterId, ctx.secondaryChannelId);
     } catch (err) {
       this.deps.logger.warn({ err, joinChannelId, requesterId }, 'failed to admit join requester');
@@ -691,7 +738,12 @@ export class PrivacyService {
    * the room through the same plan every list uses, and the join channel keeps the
    * Connect deny it has always had. The disconnect is last and best effort, because a
    * requester who already left voice would otherwise throw and lose the block that
-   * the owner just asked for.
+   * the owner just asked for. A failed deny on the join channel is a note when the
+   * block was saved (the knock check turns them away anyway) and a failure when it
+   * was the only block there was.
+   *
+   * Asked to block the bot or a member no overwrite can stop, it denies them and says
+   * it could not block them, and saves nothing.
    */
   async denyJoin(
     joinChannelId: string,
@@ -701,9 +753,21 @@ export class PrivacyService {
     const ctx = await this.deps.joinChannels.get(joinChannelId);
     if (!ctx) return fail('That request has expired.');
     let note = '';
-    if (block) {
+    // Nobody can block the bot or a member whose permissions override every overwrite,
+    // so asking to is a deny, and says why. They are never added to a list that could
+    // not keep them out.
+    const unblockable =
+      block &&
+      (requesterId === this.deps.botUserId?.() ||
+        this.bypassesOverwrites(ctx.guildId, requesterId));
+    if (unblockable) {
+      note = ' I could not block them, because they have permissions that override any block.';
+    }
+    const blocking = block && !unblockable;
+    if (blocking) {
       // Persisted first. Everything after it is allowed to fail without losing it.
-      note = await this.saveToList(ctx, requesterId, 'blocked');
+      const listed = await this.saveToList(ctx, requesterId, 'blocked');
+      note = listed.note;
       try {
         await this.deps.actions.setMemberConnect(ctx.guildId, joinChannelId, requesterId, false);
       } catch (err) {
@@ -711,7 +775,11 @@ export class PrivacyService {
           { err, joinChannelId, requesterId },
           'failed to block join requester',
         );
-        return fail(`Could not block <@${requesterId}>: ${describeError(err)}.`);
+        // With the block on the owner's list the knock check turns them away anyway, so
+        // this is a note and the disconnect still happens. With nothing saved it was the
+        // whole block, and it did not land.
+        if (!listed.saved) return fail(`Could not block <@${requesterId}>: ${describeError(err)}.`);
+        note += ' I could not stop them knocking on the **⇩ Join** channel again.';
       }
     }
     try {
@@ -725,10 +793,10 @@ export class PrivacyService {
         'failed to move a denied join requester out',
       );
       // A block is already saved and applied, and is not undone by this.
-      if (!block) return fail(`Could not deny <@${requesterId}>: ${describeError(err)}.`);
+      if (!blocking) return fail(`Could not deny <@${requesterId}>: ${describeError(err)}.`);
       note += ' I could not move them out of the voice channel.';
     }
-    return ok(block ? `Blocked <@${requesterId}>.${note}` : `Denied <@${requesterId}>.`);
+    return ok(`${blocking ? 'Blocked' : 'Denied'} <@${requesterId}>.${note}`);
   }
 
   /** Cleans up a private channel's companion when the channel goes away. */
@@ -745,8 +813,11 @@ export class PrivacyService {
    * ownerless room) and not the owner leaving. Only then do the room's saved lists
    * change hands: the repository has already re-pointed the record's creator (in the
    * same statement that moved the column), and this applies the new creator's lists,
-   * which revokes what the giver's put on the room. The owner leaving never gets
-   * here with it, so a caretaker cannot revoke the creator's guests or blocks.
+   * which takes back the saved trusted and blocked entries the giver's lists put on
+   * the room. It does not take back members the giver admitted to this room alone,
+   * nor the giver's own access as the owner: those stay until the room is deleted.
+   * The owner leaving never gets here with it, so a caretaker cannot revoke the
+   * creator's guests or blocks.
    */
   async handleOwnerChanged(
     guildId: string,
@@ -835,7 +906,7 @@ export class PrivacyService {
     const read = await this.deps.secondaries.readAccess(channelId);
     if (!read) return refused(say.notManaged);
     if (!read.readable) return refused(say.unreadable);
-    const mode = roomMode({ state: row.state, access: read.access });
+    const mode = roomMode({ state: row.state, access: read });
     // Only an unreadable record is `unknown`, and that was refused above.
     if (mode === 'unknown') return refused(say.unreadable);
     return { kind: 'open', row, access: read.access, mode };
@@ -871,7 +942,7 @@ export class PrivacyService {
         // Queued behind a rate limit, so it has not happened: never confirm it. The
         // intent is recorded and the write will land, and the name follows it.
         this.rerenderDetached(guildId, channelId, kind);
-        return fail(say.deferred);
+        return fail(deferredMessage(kind));
       default:
         return this.refusal(outcome);
     }
@@ -897,7 +968,7 @@ export class PrivacyService {
       case 'failed':
         return fail(accessFailed(describeError(outcome.error)));
       case 'deferred':
-        return fail(say.deferred);
+        return fail(deferredMessage('admit'));
       default:
         return fail(say.notReady);
     }
@@ -953,7 +1024,7 @@ export class PrivacyService {
       plan = planAccess(planned.input);
       viewerRoleId = planned.viewerRoleId;
     } catch (err) {
-      return this.failure(guildId, channelId, err);
+      return this.failure(guildId, channelId, err, input.quiet);
     }
     if (!plan.ok) {
       return plan.reason === 'role_defeats_hide'
@@ -977,6 +1048,7 @@ export class PrivacyService {
         plan,
         viewerRoleId: this.sees(plan, viewerRoleId),
         movedOut: [],
+        droppedMemberIds: [],
       };
     }
 
@@ -1012,22 +1084,34 @@ export class PrivacyService {
           );
         }
       }
-      return this.failure(guildId, channelId, err);
+      return this.failure(guildId, channelId, err, input.quiet);
     }
     if (applied.channelGone) return { status: 'gone' };
     const sees = this.sees(plan, viewerRoleId);
 
     // A lock gets its Join channel whether the write has landed or is only queued: it
     // is what the owner's guests knock on, and it does no harm ahead of the lock.
+    // Not when the room is leaving hidden and the write is only queued: it is still
+    // recorded hidden, and a channel naming the owner beside a room that has not been
+    // seen to open is the leak the hide exists to prevent. Asking again, once it has
+    // landed, makes it.
+    //
+    // A queued write is not watched: nothing finalises the record when it lands or
+    // reverts it when it fails, and the reply says what the owner can do (see
+    // `deferredMessage`). Until something does, a record that still says hidden or
+    // private after a queued OPENING describes the room as it was, and whatever derives
+    // the desired state from a record (a sweep) has to reconcile it with the channel
+    // first, or it will undo the opening.
     let joinError: unknown;
     const needsJoin = to === 'locked' && from !== 'locked' && input.ownerId !== null;
     if (applied.deferred) {
-      if (needsJoin) joinError = await this.joinForLock(input, botId, plan);
+      if (needsJoin && from !== 'hidden') joinError = await this.joinForLock(input, botId, plan);
       return {
         status: 'deferred',
         plan,
         viewerRoleId: sees,
         movedOut: [],
+        droppedMemberIds: applied.droppedMemberIds,
         ...(joinError !== undefined ? { joinError } : {}),
       };
     }
@@ -1045,7 +1129,7 @@ export class PrivacyService {
       });
       if (finalised.status !== 'written') return { status: finalised.status };
     } catch (err) {
-      return this.failure(guildId, channelId, err);
+      return this.failure(guildId, channelId, err, input.quiet);
     }
     this.deps.permissionProblems?.clear(guildId, channelId, ['access']);
 
@@ -1055,6 +1139,7 @@ export class PrivacyService {
       plan,
       viewerRoleId: sees,
       movedOut: [],
+      droppedMemberIds: applied.droppedMemberIds,
       ...(joinError !== undefined ? { joinError } : {}),
     };
   }
@@ -1118,8 +1203,18 @@ export class PrivacyService {
     return holds ? viewerRoleId : null;
   }
 
-  /** Records a failure the guild should hear about, and returns it. */
-  private failure(guildId: string, channelId: string, err: unknown): AccessOutcome {
+  /**
+   * Records a failure the guild should hear about, and returns it. `quiet` keeps a
+   * permission failure off the problem list and out of the server's log channel (it is
+   * still logged), for a caller that reports it itself, as the create path's rollback
+   * does.
+   */
+  private failure(
+    guildId: string,
+    channelId: string,
+    err: unknown,
+    quiet: boolean | undefined,
+  ): AccessOutcome {
     this.deps.logger.warn(
       { err, guildId, channelId },
       'could not change who can see or join a room',
@@ -1133,7 +1228,7 @@ export class PrivacyService {
         at: Date.now(),
       });
       this.deps.serverLog?.(guildId, 1, permissionProblemMessage(channelId));
-    } else if (isPermissionError(err)) {
+    } else if (isPermissionError(err) && !quiet) {
       // Missing Access and Missing Permissions are what the problem's wording is true
       // for. The limit, a deleted role and a role above the bot each need their own.
       this.deps.permissionProblems?.record(guildId, {
@@ -1284,8 +1379,8 @@ export class PrivacyService {
 
   /**
    * Puts a requester on the current owner's saved list, then makes the room agree.
-   * Returns what to add to the reply: nothing when it went as asked, and a plain
-   * sentence when it could not be saved.
+   * Answers whether it was saved, and what to add to the reply: nothing when it went
+   * as asked, and a plain sentence when it could not be saved.
    *
    * The list is written first, because the overwrite is derived from it, and a
    * failure to apply it leaves the entry saved, which is what the owner asked for.
@@ -1294,13 +1389,16 @@ export class PrivacyService {
     ctx: JoinChannelRow,
     memberId: string,
     kind: 'trusted' | 'blocked',
-  ): Promise<string> {
+  ): Promise<{ saved: boolean; note: string }> {
     const repo = this.deps.memberAccessLists;
-    if (!repo) return '';
+    if (!repo) return { saved: false, note: '' };
     try {
       const result = await repo.add(ctx.guildId, ctx.creatorId, memberId, kind);
       if (result.outcome === 'full') {
-        return ` Your ${kind} list is full (${result.limit}), so they were not added to it.`;
+        return {
+          saved: false,
+          note: ` Your ${kind} list is full (${result.limit}), so they were not added to it.`,
+        };
       }
       // Every outcome but `full` applies, `already` included: a retried add after a
       // crash answers `already` for a member whose overwrite was never written.
@@ -1311,35 +1409,43 @@ export class PrivacyService {
           'saved a knock decision but could not apply it to the room',
         );
       }
-      return '';
+      return { saved: true, note: '' };
     } catch (err) {
       // The decision itself still goes ahead: it is the saving that is lost.
       this.deps.logger.warn(
         { err, guildId: ctx.guildId, channelId: ctx.secondaryChannelId },
         'could not save a knock decision to the list',
       );
-      return ` I could not save them to your ${kind} list.`;
+      return { saved: false, note: ` I could not save them to your ${kind} list.` };
     }
   }
 
   /**
-   * Whether a knocking member is barred from the room: on the saved blocked list of
-   * the room's creator or of its current owner, or removed from it by a vote.
+   * Why a knocking member is barred from the room, or null when they are not: removed
+   * from it by a vote, or on the saved blocked list of the room's creator or of its
+   * current owner. Not a member whose permissions override every overwrite: nothing
+   * written for them keeps them out, so turning them away would only be a disconnect.
+   *
+   * Reads the room's row once. An access record this build cannot read reads as none
+   * here, which is the direction that lets a knock through.
    */
-  private async isBarredFromRoom(ctx: JoinChannelRow, requesterId: string): Promise<boolean> {
+  private async barredFromRoom(
+    ctx: JoinChannelRow,
+    requesterId: string,
+  ): Promise<'kicked' | 'blocked' | null> {
+    if (this.bypassesOverwrites(ctx.guildId, requesterId)) return null;
     const row = await this.deps.secondaries.get(ctx.secondaryChannelId);
-    const record = row ? await this.deps.secondaries.readAccess(row.channelId) : undefined;
-    const access = record?.readable ? record.access : null;
-    if ((access?.kicked ?? []).includes(requesterId)) return true;
+    const access = row?.access ?? null;
+    if ((access?.kicked ?? []).includes(requesterId)) return 'kicked';
     const repo = this.deps.memberAccessLists;
-    if (!repo) return (access?.blocked ?? []).includes(requesterId);
+    if (!repo) return (access?.blocked ?? []).includes(requesterId) ? 'blocked' : null;
     const owners = new Set<string>([ctx.creatorId]);
     const creator = access?.creatorId ?? row?.originalCreator;
     if (creator) owners.add(creator);
     for (const ownerId of owners) {
-      if ((await repo.get(ctx.guildId, ownerId)).blocked.includes(requesterId)) return true;
+      if ((await repo.get(ctx.guildId, ownerId)).blocked.includes(requesterId)) return 'blocked';
     }
-    return false;
+    return null;
   }
 
   /** The "⇩ Join {owner}" name, with the owner's `/nick` applied. */
@@ -1420,10 +1526,18 @@ export class PrivacyService {
     }
   }
 
+  /**
+   * Deletes the room's "⇩ Join" channel and its row. Every one it has: a replay or two
+   * racing creators can leave two, and deleting the oldest while forgetting all of
+   * them would leave a channel naming the owner that nothing tracks any more.
+   */
   private async removeJoinChannel(guildId: string, secondaryChannelId: string): Promise<void> {
-    const row = await this.deps.joinChannels.getBySecondary(secondaryChannelId);
-    if (!row) return;
-    await this.deps.actions.deleteChannel(guildId, row.channelId);
-    await this.deps.joinChannels.removeBySecondary(secondaryChannelId);
+    // Bounded: a row that would not go must not hold this in a loop.
+    for (let i = 0; i < 10; i++) {
+      const row = await this.deps.joinChannels.getBySecondary(secondaryChannelId);
+      if (!row) return;
+      await this.deps.actions.deleteChannel(guildId, row.channelId);
+      await this.deps.joinChannels.remove(row.channelId);
+    }
   }
 }

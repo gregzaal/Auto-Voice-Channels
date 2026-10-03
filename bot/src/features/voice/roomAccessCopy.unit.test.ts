@@ -6,7 +6,9 @@ import {
   admitBlocked,
   admitFailed,
   admitKicked,
+  admitNotInServer,
   admitted,
+  deferredMessage,
   hiddenMessage,
   lockedWithoutJoin,
   roleDefeatsHide,
@@ -41,10 +43,14 @@ function everyReply(): string[] {
     accessFailed('missing permissions'),
     admitBlocked('999999999999999999'),
     admitKicked('999999999999999999'),
+    admitNotInServer('999999999999999999'),
     admitFailed('999999999999999999', 'missing permissions'),
     admitted('999999999999999999', 'locked'),
     admitted('999999999999999999', 'hidden'),
   );
+  for (const command of ['private', 'public', 'hide', 'unhide', 'admit'] as const) {
+    replies.push(deferredMessage(command));
+  }
   return replies;
 }
 
@@ -87,7 +93,7 @@ describe('hiddenMessage', () => {
   it('says only Administrators see it when there is no moderator role', () => {
     const none = hiddenMessage({ viewerRoleId: null });
     expect(none).toContain('Administrators always see everything');
-    expect(none).toContain('nobody else sees it unless you let them in');
+    expect(none).toContain('Everyone else sees it only if you let them in');
     expect(none).not.toContain('<@&');
   });
 
@@ -122,5 +128,33 @@ describe('skippedRolesNote', () => {
   it('is empty for no roles, so a clean change says nothing extra', () => {
     expect(skippedRolesNote([])).toBe('');
     expect(withSkipped('Done.', [])).toBe('Done.');
+  });
+});
+
+describe('deferredMessage', () => {
+  it('never says the change has happened', () => {
+    for (const command of ['private', 'public', 'hide', 'unhide', 'admit'] as const) {
+      expect(deferredMessage(command)).toContain("hasn't taken effect yet");
+    }
+  });
+
+  /**
+   * Nothing watches a queued write land, so the reply has to say what to do next, and
+   * it differs by direction: a lock or a hide is on its way and is undone with /public
+   * if it never arrives, and an opening is only finished by asking for it again.
+   */
+  it('tells an exit to run the same command again, and an entry how to take it back', () => {
+    expect(deferredMessage('public')).toContain('run `/public` again to finish');
+    expect(deferredMessage('unhide')).toContain('run `/unhide` again to finish');
+    expect(deferredMessage('private')).toContain('run `/public` and try again');
+    expect(deferredMessage('hide')).toContain('run `/public` and try again');
+  });
+});
+
+describe('admitNotInServer', () => {
+  it('names the member and says they could not be let in', () => {
+    expect(admitNotInServer('999999999999999999')).toBe(
+      "<@999999999999999999> isn't in this server, so I couldn't let them in.",
+    );
   });
 });

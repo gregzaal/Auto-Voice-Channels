@@ -1,7 +1,7 @@
 import type { RoomAccess } from '@avc/core';
 import { describe, expect, it } from 'vitest';
 import type { AccessFacts } from './accessPlan.js';
-import { recordWithFacts, sameFacts, withMember } from './accessRecord.js';
+import { recordWithFacts, sameFacts, withMember, withoutMember } from './accessRecord.js';
 
 const facts = (over: Partial<AccessFacts> = {}): AccessFacts => ({
   baseline: null,
@@ -132,5 +132,32 @@ describe('withMember', () => {
       trusted: ['t'],
       admitted: ['a', 'u9'],
     });
+  });
+});
+
+describe('withoutMember', () => {
+  it('takes a member out of one list and leaves the rest of the record alone', () => {
+    expect(
+      withoutMember({ creatorId: 'u1', admitted: ['a', 'u9'], trusted: ['u9'] }, 'admitted', 'u9'),
+    ).toEqual({ creatorId: 'u1', admitted: ['a'], trusted: ['u9'] });
+  });
+
+  it('leaves a list out when it empties, as the merge does, so an emptied record equals a fresh one', () => {
+    expect(withoutMember({ creatorId: 'u1', admitted: ['u9'] }, 'admitted', 'u9')).toEqual({
+      creatorId: 'u1',
+    });
+    expect(withoutMember({ admitted: ['u9'] }, 'admitted', 'u9')).toEqual({});
+  });
+
+  it('changes nothing for a member who is not on the list, or a record that is not there', () => {
+    const record = { admitted: ['a'] };
+    expect(withoutMember(record, 'admitted', 'u9')).toBe(record);
+    expect(withoutMember({ trusted: ['u9'] }, 'admitted', 'u9')).toEqual({ trusted: ['u9'] });
+    expect(withoutMember(null, 'admitted', 'u9')).toBeNull();
+  });
+
+  it('undoes withMember', () => {
+    const before = { creatorId: 'u1', admitted: ['a'] };
+    expect(withoutMember(withMember(before, 'admitted', 'u9'), 'admitted', 'u9')).toEqual(before);
   });
 });

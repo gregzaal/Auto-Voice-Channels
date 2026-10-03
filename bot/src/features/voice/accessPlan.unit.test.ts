@@ -485,6 +485,24 @@ describe('locked or hidden to public', () => {
     expect(p.facts.baseline).toBeNull();
   });
 
+  /**
+   * The defect: a locked room whose `private` a stale whole-state write dropped reads as
+   * public, a plan for it was public to public, and it cleared the baseline the lock
+   * captured. The next lock then recorded its own `@everyone` deny as the original.
+   */
+  it('keeps the baseline of a room that reads as public but was never opened by an exit', () => {
+    const p = plan({
+      mode: 'public',
+      previousMode: 'public',
+      current: [everyone(0n, C), member(BOT, BOT_ACCESS)],
+      record: { baseline: { view: 'none', connect: 'allow' } },
+    });
+    expect(p.facts.baseline).toEqual({ view: 'none', connect: 'allow' });
+    expect(p.factsBeforeWrite.baseline).toEqual({ view: 'none', connect: 'allow' });
+    // Nothing about `@everyone` is written: only an exit restores it.
+    expect(find(p, r(GUILD))).toEqual({ allow: 0n, deny: C });
+  });
+
   /** `/public` used to write `Connect: null`, wiping an inherited deny from a role-gated creator channel. */
   it.each<[OverwriteBit, OverwriteBit, ResolvedOverwrite | undefined]>([
     ['deny', 'deny', everyone(0n, VC)],

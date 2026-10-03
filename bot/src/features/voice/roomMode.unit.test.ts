@@ -4,7 +4,7 @@ import { roomMode, type RoomMode } from './roomMode.js';
 
 const room = (isPrivate: boolean | undefined, access: RoomAccess | null) => ({
   state: isPrivate === undefined ? {} : { private: isPrivate },
-  access,
+  access: { readable: true, access } as const,
 });
 
 describe('roomMode', () => {
@@ -29,16 +29,19 @@ describe('roomMode', () => {
     expect(roomMode(room(false, { hidden: true }))).toBe('hidden');
   });
 
+  /**
+   * The read carries whether the record could be read, so there is no way to hand
+   * this a room's own `access` (null for an unreadable record too) and get a locked
+   * or public answer for what may be a hidden room.
+   */
   it('reads a record this build cannot read as unknown, never as a locked or public room', () => {
     for (const isPrivate of [true, false, undefined]) {
-      expect(roomMode(room(isPrivate, null), { accessReadable: false })).toBe('unknown');
+      expect(
+        roomMode({
+          state: isPrivate === undefined ? {} : { private: isPrivate },
+          access: { readable: false },
+        }),
+      ).toBe('unknown');
     }
-    // Even if something did parse: the caller's word that it could not read it stands.
-    expect(roomMode(room(true, { hidden: true }), { accessReadable: false })).toBe('unknown');
-  });
-
-  it('reads an explicitly readable record as the record says', () => {
-    expect(roomMode(room(true, null), { accessReadable: true })).toBe('locked');
-    expect(roomMode(room(undefined, null), { accessReadable: true })).toBe('public');
   });
 });

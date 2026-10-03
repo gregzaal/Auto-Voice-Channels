@@ -71,3 +71,21 @@ export function withMember(current: RoomAccess | null, field: MemberField, id: s
   if (have.includes(id)) return current ?? {};
   return { ...(current ?? {}), [field]: [...have, id] };
 }
+
+/**
+ * The record with `id` taken out of one of its lists, and the list left out when it
+ * empties (as {@link recordWithFacts} does). A member who is not on it changes nothing.
+ */
+export function withoutMember(
+  current: RoomAccess | null,
+  field: MemberField,
+  id: string,
+): RoomAccess | null {
+  const have = current?.[field];
+  if (!current || !have?.includes(id)) return current;
+  const left = have.filter((m) => m !== id);
+  const next: Record<string, unknown> = { ...current };
+  if (left.length > 0) next[field] = left;
+  else delete next[field];
+  return next as RoomAccess;
+}
