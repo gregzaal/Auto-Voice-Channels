@@ -1278,12 +1278,49 @@ describe('command_access', () => {
     }
   });
 
-  it('keeps an entry named __proto__ as an entry rather than as a prototype', () => {
-    const raw = JSON.parse(`{"__proto__":{"users":["${USER_A}"]}}`);
-    const plan = planOf(withAccess(raw));
-    const written = plan.settingsPatch.command_access as Record<string, unknown>;
-    expect(Object.keys(written)).toEqual(['__proto__']);
-    expect(Object.getPrototypeOf(written)).toBe(Object.prototype);
+  /**
+   * Not reachable through a file: the wire schema's record drops a `__proto__` key
+   * while parsing, so the validator's `fromEntries` is a precaution and this pins
+   * the path a file really takes, with the entry beside it surviving.
+   */
+  it('never sees an entry named __proto__, which the wire schema drops while parsing', () => {
+    const text = JSON.stringify(nativeFile()).replace(
+      '"command_access":null',
+      `"command_access":{"__proto__":{"users":["${USER_A}"]},"rename":{"users":["${USER_B}"]}}`,
+    );
+    expect(text).toContain('"__proto__"');
+    const parsed = parseNativeFile(JSON.parse(text));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const written = planOf(parsed.file).settingsPatch.command_access as Record<string, unknown>;
+    expect(written).toEqual({ rename: { users: [USER_B] } });
+    expect(Object.keys(written)).toEqual(['rename']);
+  });
+
+  /** The validator keeps a feature id of 40 characters, like `control_panel`, and no more. */
+  it('keeps a feature id of 40 characters and drops one of 41, with a note', () => {
+    const plan = planOf(
+      withAccess({
+        ['a'.repeat(40)]: { users: [USER_A] },
+        ['b'.repeat(41)]: { users: [USER_B] },
+        nick: { users: [USER_B] },
+      }),
+    );
+    expect(plan.settingsPatch.command_access).toEqual({
+      ['a'.repeat(40)]: { users: [USER_A] },
+      nick: { users: [USER_B] },
+    });
+    expect(noteCodes(plan).filter((c) => c === 'setting_invalid')).toHaveLength(1);
+  });
+
+  /**
+   * The writer copies an entry whole so a newer build's field survives another
+   * admin's edit, and the importer does not: it is the boundary that bounds what
+   * reaches the blob. Pinned so the difference is a decision, not a surprise.
+   */
+  it('rebuilds an entry as users and roles, so a field a newer build added is not carried', () => {
+    const plan = planOf(withAccess({ rename: { users: [USER_A], until: 1700000000 } }));
+    expect(plan.settingsPatch.command_access).toEqual({ rename: { users: [USER_A] } });
   });
 
   describe('caps', () => {
@@ -1349,6 +1386,28 @@ describe('command_access', () => {
           count: 3 * (IMPORT_LIMITS.commandAccessUsers + IMPORT_LIMITS.commandAccessRoles),
         }),
       );
+    });
+
+    /**
+     * Every stored entry holds an id, so a real map has no more entries than the
+     * total. A file of junk entries must be one note and not thousands, which would
+     * ride into the audit row's list of what was dropped.
+     */
+    it('drops the whole key past the total in entries, with one note and not one per entry', () => {
+      const junk = Object.fromEntries(
+        Array.from({ length: IMPORT_LIMITS.commandAccessTotal + 1 }, (_, i) => [`feature${i}`, 7]),
+      );
+      const plan = planOf(withAccess(junk));
+      expect(plan.settingsPatch.command_access).toBeUndefined();
+      expect(plan.notes).toContainEqual(
+        expect.objectContaining({
+          code: 'setting_over_limit',
+          subject: 'command_access',
+          limit: IMPORT_LIMITS.commandAccessTotal,
+          count: IMPORT_LIMITS.commandAccessTotal + 1,
+        }),
+      );
+      expect(noteCodes(plan)).not.toContain('setting_invalid');
     });
 
     it('counts an id once however often the file repeats it', () => {

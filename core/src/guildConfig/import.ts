@@ -1140,11 +1140,24 @@ function validateSetting(
      * that is what a normalised empty list looks like rather than a mistake.
      *
      * A count overrun drops the whole key, as `aliases` does: a silent partial
-     * list of who is restricted is harder to explain than an untouched one.
+     * list of who is restricted is harder to explain than an untouched one. So
+     * does more entries than the whole map may hold, which is also what keeps a
+     * file of thousands of junk entries from becoming thousands of notes: every
+     * stored entry holds at least one id, so a real map cannot have more.
+     *
+     * Each entry is rebuilt as `{ users, roles }` and nothing else, so a field a
+     * newer build adds to an entry is lost on import. That is deliberate and the
+     * writer's lossless copy is not the model here: the importer is the boundary
+     * that bounds what reaches the blob, and a field it cannot read it cannot
+     * bound. The pre-import snapshot is the way back.
      */
     case 'command_access': {
       const record = asRecord(value);
       if (!record) return drop('setting_invalid');
+      const keys = Object.keys(record).length;
+      if (keys > limits.commandAccessTotal) {
+        return drop('setting_over_limit', { limit: limits.commandAccessTotal, count: keys });
+      }
       const entries: [string, { users?: string[]; roles?: string[] }][] = [];
       let total = 0;
       for (const [feature, raw] of Object.entries(record)) {
@@ -1183,9 +1196,10 @@ function validateSetting(
       if (total > limits.commandAccessTotal) {
         return drop('setting_over_limit', { limit: limits.commandAccessTotal, count: total });
       }
-      // `fromEntries` rather than assigning into a literal: a feature id of
-      // `__proto__` is reachable through a hand-edited file, and an assignment
-      // would invoke the prototype setter and drop the entry instead of keeping it.
+      // `fromEntries` rather than assigning into a literal, as a precaution: a
+      // feature id of `__proto__` cannot arrive through a file (the wire schema's
+      // record drops it first), but an assignment would invoke the prototype
+      // setter and lose the entry if one ever did.
       return entries.length > 0 ? Object.fromEntries(entries) : drop('setting_invalid');
     }
   }

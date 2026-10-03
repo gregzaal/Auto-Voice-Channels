@@ -194,7 +194,7 @@ export async function handleExport(
     '',
     `Creator channels: ${file.creator_channels.length}. Adopted channels: ${file.adopted_channels.length}.`,
     'The file lists channel ids, your templates and game aliases, the recorded server contact, ' +
-      'and the names members chose for themselves with /nick.',
+      'the names members chose for themselves with /nick, and who is restricted from room commands.',
     'Anyone who gets the file gets all of that, so treat it the way you would treat a server backup.',
   ];
   if (otherFleets.length > 0) {
@@ -257,6 +257,28 @@ function importCeilingsExceeded(file: GuildConfigFile, text: string): string[] {
   const nicks = file.settings.custom_nicks;
   if (nicks && Object.keys(nicks).length > IMPORT_LIMITS.customNicks) {
     over.push(`more than ${IMPORT_LIMITS.customNicks} member nicknames`);
+  }
+  // The same whole-key drop as `custom_nicks`, so the same promise to keep. The
+  // writer's caps equal these today, which is why this is empty for every real
+  // guild, and a cap that moves on one fleet and not another is the day it is not.
+  const access = file.settings.command_access;
+  if (access) {
+    const widest = (field: 'users' | 'roles'): number =>
+      Math.max(
+        0,
+        ...Object.values(access).map((entry) => {
+          const list = (entry as Record<string, unknown> | null)?.[field];
+          return Array.isArray(list) ? list.length : 0;
+        }),
+      );
+    if (
+      Object.keys(access).length > IMPORT_LIMITS.commandAccessTotal ||
+      commandAccessCount(access) > IMPORT_LIMITS.commandAccessTotal ||
+      widest('users') > IMPORT_LIMITS.commandAccessUsers ||
+      widest('roles') > IMPORT_LIMITS.commandAccessRoles
+    ) {
+      over.push('too many restrictions on room commands');
+    }
   }
   return over;
 }

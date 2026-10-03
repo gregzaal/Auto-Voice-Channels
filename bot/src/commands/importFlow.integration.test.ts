@@ -133,6 +133,10 @@ function fakeButton(guild: ReturnType<typeof fakeGuild>, customId: string) {
 
 const text = (replies: Recorded[]): string => JSON.stringify(replies.map((r) => r.content));
 
+/** `count` distinct snowflakes, offset by `prefix` so two calls never collide. */
+const ids = (prefix: number, count: number): string[] =>
+  Array.from({ length: count }, (_, i) => `${prefix}${String(i).padStart(17, '0')}`);
+
 describe('import and export flow (integration)', () => {
   let env: PgTestEnv;
   let deps: ImportCommandDeps;
@@ -230,6 +234,67 @@ describe('import and export flow (integration)', () => {
       expect(file.adopted_channels).toHaveLength(1);
       // The disclosure has to be in the copy, not just in the design doc.
       expect(text(replies)).toContain('nick');
+    });
+
+    /**
+     * The file carries the ids of the members an admin restricted, so the reply has
+     * to say so in plain words: "anyone who gets the file gets all of that" is only
+     * true of what the sentence before it lists.
+     */
+    it('says the file lists who is restricted from room commands', async () => {
+      await configureGuild();
+      await guilds.updateSettings(GUILD, {
+        command_access: { rename: { users: ['555555555555555551'] } },
+      });
+      const { interaction, replies } = fakeCommand(fakeGuild());
+
+      await handleExport(interaction, deps);
+
+      const file = JSON.parse(replies.at(-1)!.files![0]!.attachment!.toString('utf8'));
+      expect(file.settings.command_access).toEqual({ rename: { users: ['555555555555555551'] } });
+      expect(text(replies)).toContain(
+        'the names members chose for themselves with /nick, and who is restricted from room commands.',
+      );
+      expect(text(replies)).toContain('Anyone who gets the file gets all of that');
+    });
+
+    /**
+     * `/export` must never produce a file `/import` refuses without saying so, and a
+     * map past the importer's caps is dropped whole, like the nickname map.
+     */
+    it.each([
+      ['users on one feature', { rename: { users: ids(1, 51) } }],
+      ['roles on one feature', { rename: { roles: ids(2, 26) } }],
+      [
+        'restrictions in all',
+        {
+          privacy: { users: ids(1, 50), roles: ids(2, 25) },
+          limit: { users: ids(3, 50), roles: ids(4, 25) },
+          rename: { users: ids(5, 1) },
+        },
+      ],
+    ])('warns that the file is past what /import accepts: %s', async (_name, access) => {
+      await configureGuild();
+      await guilds.updateSettings(GUILD, { command_access: access });
+      const { interaction, replies } = fakeCommand(fakeGuild());
+
+      await handleExport(interaction, deps);
+
+      expect(text(replies)).toContain(
+        'This server is past what /import accepts (too many restrictions on room commands)',
+      );
+    });
+
+    it('does not warn for a map inside the importer caps, at the caps', async () => {
+      await configureGuild();
+      await guilds.updateSettings(GUILD, {
+        command_access: { rename: { users: ids(1, 50), roles: ids(2, 25) } },
+      });
+      const { interaction, replies } = fakeCommand(fakeGuild());
+
+      await handleExport(interaction, deps);
+
+      expect(text(replies)).not.toContain('past what /import accepts');
     });
 
     it('works for a guild with nothing configured', async () => {
