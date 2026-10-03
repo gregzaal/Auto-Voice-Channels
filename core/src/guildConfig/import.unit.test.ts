@@ -903,40 +903,11 @@ describe('diffGuildConfig: legacy templates', () => {
    * structurally cannot emit `status` or `defaultPrivate`, and
    * `autoChannels.upsert` writes the whole column, so a wholesale write would
    * silently clear the voice-status template and `/alwaysprivate` on every
-   * creator channel the file names. Days later, with no way to tell why.
+   * creator channel the file names. Days later, with no way to tell why. `defaultHidden`
+   * is held to the same rule: a hidden creator channel that a legacy import turned into a
+   * locked one would show every room's name in the channel list again.
    */
-  it('leaves defaultHidden alone as well, because the legacy format cannot express it either', () => {
-    const incoming = fromLegacyPlan(
-      {
-        settings: {},
-        primaries: [{ channelId: CREATOR, template: { name: 'Legacy ##' } }],
-        droppedFields: [],
-        orphanedTextChannels: [],
-        orphanedRoles: [],
-      },
-      { wasMarkedLeft: false, filenameGuildId: GUILD },
-    );
-    const result = diffGuildConfig(
-      incoming,
-      currentConfig({
-        creatorChannels: [
-          {
-            channelId: CREATOR,
-            template: { name: 'Room ##', defaultPrivate: true, defaultHidden: true },
-          },
-        ],
-      }),
-      facts(),
-    );
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.plan.creatorWrites[0]?.template).toMatchObject({
-      defaultPrivate: true,
-      defaultHidden: true,
-    });
-  });
-
-  it('leaves status and defaultPrivate alone, because the legacy format cannot express them', () => {
+  it('leaves status, defaultPrivate and defaultHidden alone, because the legacy format cannot express them', () => {
     const incoming = fromLegacyPlan(
       {
         settings: {},
@@ -953,7 +924,12 @@ describe('diffGuildConfig: legacy templates', () => {
         creatorChannels: [
           {
             channelId: CREATOR,
-            template: { name: 'Room ##', status: 'Playing @@game_name@@', defaultPrivate: true },
+            template: {
+              name: 'Room ##',
+              status: 'Playing @@game_name@@',
+              defaultPrivate: true,
+              defaultHidden: true,
+            },
           },
         ],
       }),
@@ -965,6 +941,7 @@ describe('diffGuildConfig: legacy templates', () => {
       name: 'Legacy ##',
       status: 'Playing @@game_name@@',
       defaultPrivate: true,
+      defaultHidden: true,
       above: true,
     });
   });

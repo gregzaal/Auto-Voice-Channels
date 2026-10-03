@@ -55,7 +55,7 @@ interface FakeInteractionOpts {
   /** Modal text inputs by custom id (name/nameTemplate/statusTemplate). */
   textInputs?: Record<string, string>;
   /** The `privacy` string-select value. */
-  privacy?: 'open' | 'private';
+  privacy?: 'open' | 'private' | 'hidden';
   /** Any other modal string-select values, by custom id (e.g. logging's `level`). */
   selectValues?: Record<string, string[]>;
   /** The category chosen in the modal's channel-select. */
@@ -656,14 +656,17 @@ describe('registerInteractionHandler (router)', () => {
     expect(panel).toContain('Creator channels (2)');
   });
 
-  function submitFailingCreate(env: ReturnType<typeof setup>) {
+  function submitFailingCreate(
+    env: ReturnType<typeof setup>,
+    privacy: 'open' | 'private' | 'hidden' = 'private',
+  ) {
     const { interaction, reply } = fakeInteraction({
       kind: 'modal',
       customId: CREATE_MODAL_ID,
       manageChannels: true,
       id: 'modal-1',
       textInputs: { name: 'Lobby', nameTemplate: 'T', statusTemplate: 'S' },
-      privacy: 'private',
+      privacy,
       selectedChannelId: 'cat1',
       category: {
         id: 'cat1',
@@ -710,6 +713,33 @@ describe('registerInteractionHandler (router)', () => {
     const modal = JSON.stringify(btn.showModal.mock.calls[0]?.[0]);
     expect(modal).toContain('Lobby'); // saved channel name
     expect(modal).toContain('cat1'); // saved category re-selected
+  });
+
+  /**
+   * The modal's third privacy choice has to survive a failed create: the retry stash keeps
+   * what was picked, and a retry that re-opened on Private would quietly turn a hidden
+   * creator channel into a locked one on the admin's second try.
+   */
+  it('re-opens the modal on Hidden when a create that asked for it failed', async () => {
+    const env = setup({ settings: createSettings() as never });
+    dispose = env.dispose;
+    submitFailingCreate(env, 'hidden');
+    await flush();
+
+    const { interaction: btn } = fakeInteraction({
+      kind: 'button',
+      customId: 'avc:create:retry:modal-1',
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', btn);
+    await flush();
+
+    const modal = JSON.parse(JSON.stringify(btn.showModal.mock.calls[0]?.[0])) as {
+      components: { component: { custom_id?: string; options?: unknown[] } }[];
+    };
+    const privacy = modal.components.map((c) => c.component).find((c) => c.custom_id === 'privacy');
+    const options = privacy?.options as { value: string; default?: boolean }[];
+    expect(options.filter((o) => o.default).map((o) => o.value)).toEqual(['hidden']);
   });
 
   it('falls back to a blank modal when the saved create selections have expired', async () => {
@@ -2459,6 +2489,51 @@ describe('registerInteractionHandler (/setup panel)', () => {
     expect(editReply).not.toHaveBeenCalled();
     expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('avc:create:again');
   });
+
+  /**
+   * The modal's privacy choice reaches `createPrimary` as the stored pair. `parseCreateModal`
+   * and `createPrimary` are each tested on their own, and `handleCreateSubmit` hands the one
+   * to the other with nothing but a type between them, which does not cover a test file.
+   */
+  it.each([
+    ['open', {}],
+    ['private', { defaultPrivate: true }],
+    ['hidden', { defaultPrivate: true, defaultHidden: true }],
+  ] as const)(
+    'creates a creator channel from a %s choice in the /create modal',
+    async (privacy, stored) => {
+      const settings = {
+        getConfig: vi.fn().mockResolvedValue({
+          enabled: true,
+          primaries: [],
+          defaultTemplate: 'T',
+          defaultStatus: 'S',
+        }),
+        createPrimary: vi.fn().mockResolvedValue({ ok: true, message: 'Created <#new1>.' }),
+        recordContact: vi.fn().mockResolvedValue(undefined),
+      };
+      const env = setup({ settings: settings as never });
+      dispose = env.dispose;
+      const { interaction } = fakeInteraction({
+        kind: 'modal',
+        customId: CREATE_MODAL_ID,
+        manageChannels: true,
+        textInputs: { name: 'Lobby', nameTemplate: 'T', statusTemplate: 'S' },
+        selectedChannelId: 'cat1',
+        privacy,
+      });
+      env.client.emit('interactionCreate', interaction);
+      await flush();
+
+      expect(settings.createPrimary).toHaveBeenCalledTimes(1);
+      const sent = settings.createPrimary.mock.calls[0]![1] as Record<string, unknown>;
+      expect(sent).toMatchObject({ name: 'Lobby', parentId: 'cat1', ...stored });
+      // Only the keys the choice stores: a private choice carries no `defaultHidden` and an open
+      // one carries neither, so a stored `false` never stands in for an absent key.
+      expect('defaultPrivate' in sent).toBe(privacy !== 'open');
+      expect('defaultHidden' in sent).toBe(privacy === 'hidden');
+    },
+  );
 
   it('refreshes the panel after logging saved from it, and replies from /logging', async () => {
     const env = setup();
