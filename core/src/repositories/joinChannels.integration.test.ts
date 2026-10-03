@@ -61,4 +61,54 @@ describe('JoinChannelRepository (integration)', () => {
       expect((await repo.getBySecondary('room-2'))?.channelId).toBe('join-2');
     });
   });
+
+  /** One query for the converge pass, in the order `getBySecondary` would have answered. */
+  describe('listBySecondaries', () => {
+    it('answers every row of the rooms asked about, and nobody else', async () => {
+      await make('join-1', ROOM);
+      await make('join-2', 'room-2');
+      await make('join-3', 'room-3');
+
+      const rows = await repo.listBySecondaries([ROOM, 'room-3']);
+
+      expect(rows.map((r) => r.channelId).sort()).toEqual(['join-1', 'join-3']);
+    });
+
+    it('lists a room with two rows oldest first, which is the one getBySecondary keeps', async () => {
+      await make('join-b');
+      await env.handle.db.execute(
+        sql`UPDATE join_channels SET created_at = now() - interval '1 minute' WHERE channel_id = 'join-b'`,
+      );
+      await make('join-a');
+
+      const rows = await repo.listBySecondaries([ROOM]);
+
+      expect(rows.map((r) => r.channelId)).toEqual(['join-b', 'join-a']);
+      expect(rows[0]?.channelId).toBe((await repo.getBySecondary(ROOM))?.channelId);
+    });
+
+    it('puts them in creation order whatever order they were written or named in', async () => {
+      const insert = (id: string, createdAt: string) =>
+        env.handle.pool.query(
+          "INSERT INTO join_channels (channel_id, guild_id, fleet, secondary_channel_id, creator_id, created_at) VALUES ($1, $2, 'prod', $3, 'u1', $4)",
+          [id, GUILD, ROOM, createdAt],
+        );
+      await insert('join-m', '2026-01-03T00:00:00Z');
+      await insert('join-a', '2026-01-02T00:00:00Z');
+      await insert('join-z', '2026-01-01T00:00:00Z');
+
+      expect((await repo.listBySecondaries([ROOM])).map((r) => r.channelId)).toEqual([
+        'join-z',
+        'join-a',
+        'join-m',
+      ]);
+    });
+
+    it('asks nothing for no rooms, and is bound to the repository fleet', async () => {
+      await make('join-1');
+      const other = new JoinChannelRepository(env.handle.db, 'beta');
+      expect(await repo.listBySecondaries([])).toEqual([]);
+      expect(await other.listBySecondaries([ROOM])).toEqual([]);
+    });
+  });
 });

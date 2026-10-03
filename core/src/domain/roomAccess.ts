@@ -22,6 +22,9 @@ export const MAX_SAVED_BLOCKED = 25;
 /** What `@everyone` (or a role) had on one permission bit: an allow, a deny, or no explicit overwrite. */
 const overwriteBit = z.enum(['allow', 'deny', 'none']);
 
+/** The three modes a room can be in, as stored. A pending exit names the one it is going to. */
+const accessMode = z.enum(['public', 'locked', 'hidden']);
+
 /**
  * What a room's access column holds: who may see and enter it beyond the
  * creator channel's defaults, and everything the bot wrote to get there.
@@ -112,6 +115,30 @@ export const roomAccessSchema = z
      * removal is a diff against what we wrote. Dies with the room.
      */
     admitted: z.array(z.string()).optional(),
+    /**
+     * An EXIT the room is part way through: it is recorded as the mode it is leaving
+     * (hidden, or locked) while Discord holds a write that opens it, queued behind a
+     * rate limit and not yet seen to land.
+     *
+     * Without it a record that still says hidden cannot be told from a room that
+     * really is, and whatever re-derives a room from its record would re-hide it and
+     * fight the write that is about to land (or, once that write has been lost to a
+     * restart, undo an opening the owner asked for). With it, that pass carries the
+     * exit through to `mode`, which is also what a finished write leaves.
+     *
+     * Set only when a change out of a mode is queued, cleared by the write that
+     * finalises a change, and ignored (and cleared) once the room is already in `mode`.
+     * `at` is for the log, and optional so a build that wrote the marker without it
+     * is still read. A mode this build does not know fails the record, as every enum
+     * here does.
+     */
+    pending: z
+      .object({
+        mode: accessMode,
+        at: z.number().optional(),
+      })
+      .passthrough()
+      .optional(),
   })
   .passthrough();
 

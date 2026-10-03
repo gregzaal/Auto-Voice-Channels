@@ -1,4 +1,4 @@
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import type { SQL } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
@@ -94,6 +94,25 @@ export class JoinChannelRepository {
       .orderBy(asc(joinChannels.createdAt), asc(joinChannels.channelId))
       .limit(1);
     return row ? joinChannelRowSchema.parse(row) : undefined;
+  }
+
+  /**
+   * Every "⇩ Join" channel of the given rooms, oldest first within a room, in ONE query.
+   *
+   * For the converge pass, which has to know which locked and hidden rooms of a guild
+   * have one, and would otherwise ask {@link getBySecondary} once per room per sweep. By
+   * room id and not by guild so it is served by the index on `secondary_channel_id`:
+   * the table has none on the guild, and a scan of it per guild per sweep is what the
+   * index is there to avoid. Nothing is asked for an empty list.
+   */
+  async listBySecondaries(secondaryChannelIds: readonly string[]): Promise<JoinChannelRow[]> {
+    if (secondaryChannelIds.length === 0) return [];
+    const rows = await this.db
+      .select()
+      .from(joinChannels)
+      .where(this.scoped(inArray(joinChannels.secondaryChannelId, [...secondaryChannelIds])))
+      .orderBy(asc(joinChannels.createdAt), asc(joinChannels.channelId));
+    return rows.map((r) => joinChannelRowSchema.parse(r));
   }
 
   async remove(channelId: string): Promise<void> {

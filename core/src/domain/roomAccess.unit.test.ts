@@ -18,6 +18,7 @@ const full = {
   blocked: ['u3'],
   admitted: ['u4'],
   kicked: ['u5'],
+  pending: { mode: 'locked', at: 1_788_000_000_000 },
 } as const;
 
 describe('roomAccessSchema', () => {
@@ -47,6 +48,34 @@ describe('roomAccessSchema', () => {
     expect(roomAccessSchema.safeParse({ baseline: { view: 'maybe' } }).success).toBe(false);
     expect(roomAccessSchema.safeParse({ neutralised: [{ roleId: 'r' }] }).success).toBe(false);
     expect(roomAccessSchema.safeParse({ neutralised: [{ view: 'allow' }] }).success).toBe(false);
+  });
+
+  /**
+   * A pending exit is the one field the converge pass cannot act without a mode for, and
+   * the one a newer build might widen: a mode this build does not know fails the record,
+   * like every enum here, so a writer never replaces what it could not read.
+   */
+  describe('a pending exit', () => {
+    it('reads with or without a timestamp, and keeps an unknown key beside it', () => {
+      expect(parseRoomAccess({ pending: { mode: 'public' } })).toEqual({
+        pending: { mode: 'public' },
+      });
+      expect(parseRoomAccess({ pending: { mode: 'locked', at: 5, by: 'x' } })).toEqual({
+        pending: { mode: 'locked', at: 5, by: 'x' },
+      });
+    });
+
+    it('is not readable when it names no mode, or one this build does not know', () => {
+      for (const bad of [
+        { pending: {} },
+        { pending: { at: 5 } },
+        { pending: { mode: 'sealed' } },
+        { pending: { mode: 'locked', at: 'now' } },
+        { pending: 'locked' },
+      ]) {
+        expect(readRoomAccess(bad), JSON.stringify(bad)).toEqual({ readable: false });
+      }
+    });
   });
 });
 
