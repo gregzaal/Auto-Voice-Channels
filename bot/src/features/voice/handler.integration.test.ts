@@ -1515,6 +1515,27 @@ describe('VoiceFeature (integration)', () => {
     expect(pr.ownerId).toBeNull();
   });
 
+  /**
+   * The same first-room preview in the `/template` editor, which is the surface an admin
+   * writes a `{{HIDDEN ?? ...}}` name on, so it has to preview the name the room will have.
+   */
+  it.each([
+    ['public', {}, 'V-O'],
+    ['locked', { defaultPrivate: true }, 'V-P'],
+    ['hidden', { defaultPrivate: true, defaultHidden: true }, 'H-P'],
+  ] as const)(
+    'getEditorState previews a creator channel that starts rooms %s',
+    async (_mode, template, expected) => {
+      await autoChannels.upsert(GUILD, PRIMARY, {
+        name: '{{HIDDEN ?? H // V}}-{{PRIVATE ?? P // O}}',
+        ...template,
+      });
+      const pr = await feature.getEditorState('primary', GUILD, PRIMARY);
+      expect(pr.found).toBe(true);
+      expect(pr.name.preview.replace(/\s+/g, '')).toBe(expected);
+    },
+  );
+
   it('/name is NOT given the creator-channel fallback: it edits a secondary override', async () => {
     expect((await feature.getEditorState('channel', GUILD, PRIMARY)).found).toBe(false);
   });
@@ -1764,6 +1785,35 @@ describe('VoiceFeature (integration)', () => {
       await autoChannels.upsert(GUILD, PRIMARY, { name: 'Room', ...template });
       expect((await feature.channelInfo(GUILD, PRIMARY)).primary?.defaultMode).toBe(mode);
     });
+
+    /**
+     * The first-room preview is of a room born in the creator channel's own mode, so the
+     * conditions probed against it agree with the readout beside it. A preview that said
+     * "no" to `{{HIDDEN}}` under "New rooms start: hidden" would contradict its own panel.
+     */
+    it.each([
+      ['public', {}, 'V-O'],
+      ['locked', { defaultPrivate: true }, 'V-P'],
+      ['hidden', { defaultPrivate: true, defaultHidden: true }, 'H-P'],
+      // Leftover from an instance that predates the field: public, not hidden.
+      ['public', { defaultHidden: true }, 'V-O'],
+    ] as const)(
+      "previews a creator channel's first room as %s in /channelinfo",
+      async (mode, template, expected) => {
+        await autoChannels.upsert(GUILD, PRIMARY, {
+          name: '{{HIDDEN ?? H // V}}-{{PRIVATE ?? P // O}}',
+          ...template,
+        });
+        const info = await feature.channelInfo(GUILD, PRIMARY);
+        expect(info.render?.ctx).toMatchObject({
+          isPrivate: mode !== 'public',
+          isHidden: mode === 'hidden',
+        });
+        expect(
+          renderChannelName(info.render!.nameTemplate, info.render!.ctx).replace(/\s+/g, ''),
+        ).toBe(expected);
+      },
+    );
 
     it('resolves an adopted channel that debugChannel reports as unmanaged', async () => {
       const f = new VoiceFeature({

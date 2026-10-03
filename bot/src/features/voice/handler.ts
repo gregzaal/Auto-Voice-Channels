@@ -2555,6 +2555,7 @@ export class VoiceFeature {
        * not exist. `renderContextGuard.unit.test.ts` exempts the same shape in
        * `getEditorState`, under the name `previewCtx`.
        */
+      const startMode = startModeOf(own.template);
       const previewCtx: RenderContext = {
         index: 0,
         members: [],
@@ -2562,6 +2563,11 @@ export class VoiceFeature {
         general: settings.general,
         gameNameMode: settings.gameNameMode,
         numberOffset: own.template.startAt === undefined ? 0 : own.template.startAt - 1,
+        // The first room is born in the creator channel's own mode, so `{{PRIVATE}}` and
+        // `{{HIDDEN}}` preview as the room will name itself. The readout beside it says how
+        // new rooms start, and a probe that said "no" under it would contradict it.
+        isPrivate: startMode !== 'public',
+        isHidden: startMode === 'hidden',
       };
       return {
         ...base,
@@ -2788,6 +2794,10 @@ export class VoiceFeature {
       // from 4 previews `#4` here as well as in `/channelinfo`. Without it this
       // panel said `#1` for a first room that will be called `#4`, and the two
       // surfaces disagreed about the same channel.
+      //
+      // And in the mode that room is born in, so a `{{HIDDEN ?? ...}}` name previews as the
+      // room will be named and not as an open one.
+      const startMode = startModeOf(own.template);
       const previewCtx = {
         index: 0,
         members: [],
@@ -2795,6 +2805,8 @@ export class VoiceFeature {
         general: settings.general,
         gameNameMode: settings.gameNameMode,
         numberOffset: own.template.startAt === undefined ? 0 : own.template.startAt - 1,
+        isPrivate: startMode !== 'public',
+        isHidden: startMode === 'hidden',
       };
       const ownName = own.template.name ?? settings.channelNameTemplate;
       const ownStatus = own.template.status ?? settings.channelStatusTemplate;
