@@ -56,9 +56,37 @@ import type {
 } from './guildSettings.js';
 import type { GameNameMode } from './nameTemplate.js';
 import { type CommandResult } from './commands.js';
+import {
+  MAX_RESTRICTED_ROLES,
+  MAX_RESTRICTED_USERS,
+  MAX_RESTRICTIONS,
+  readCommandAccess,
+  readIds,
+  type CommandAccess,
+  type CommandFeature,
+  type RestrictTarget,
+} from './commandAccess.js';
+import {
+  RESTRICT_REFUSALS,
+  restrictAddedMessage,
+  restrictRemovedMessage,
+} from './commandAccessCopy.js';
 
 /** Logging verbosity levels (legacy parity): 1 lifecycle, 2 changes, 3 joins/leaves. */
 export type LogLevel = 1 | 2 | 3;
+
+/**
+ * What adding or removing a restriction reports.
+ *
+ * `changed` and `nicknameCleared` are the facts the caller needs and cannot get
+ * from the message: whether the stored map really moved, which decides whether
+ * there is anything to log, and whether a saved nickname went with it, which
+ * decides whether the owner's rooms need re-rendering.
+ */
+export interface RestrictionResult extends CommandResult {
+  changed: boolean;
+  nicknameCleared: boolean;
+}
 
 const ok = (message: string): CommandResult => ({ ok: true, message });
 const fail = (message: string): CommandResult => ({ ok: false, message });
@@ -119,6 +147,27 @@ const has = (map: Record<string, string>, key: string): boolean =>
 /** The same own-property test for the lists map, whose keys are admin-typed too. */
 const hasList = (map: Record<string, string[]>, key: string): boolean =>
   Object.prototype.hasOwnProperty.call(map, key);
+
+/** A restriction edit that wrote nothing, and said why. */
+const refused = (message: string): RestrictionResult => ({
+  ok: false,
+  message,
+  changed: false,
+  nicknameCleared: false,
+});
+
+/**
+ * A shallow copy of a stored map, or an empty map when the value is not one.
+ *
+ * `Object.fromEntries` rather than a spread or an assignment loop: a stored
+ * `__proto__` key is reachable through `/import`, and anything that assigns it
+ * onto a plain object invokes the prototype setter and drops the entry.
+ */
+function copyMap(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? Object.fromEntries(Object.entries(value as Record<string, unknown>))
+    : {};
+}
 
 /** The default name for a freshly-created creator channel. */
 export const DEFAULT_PRIMARY_NAME = '➕ New Session';
@@ -931,6 +980,149 @@ export class GuildSettingsService {
         return { patch: {}, remove: [SETTINGS_KEYS.controlPanelStyle], result };
       }
       return { patch: { [SETTINGS_KEYS.controlPanelStyle]: current }, result };
+    });
+  }
+
+  /**
+   * The restrictions on room commands, as a copy.
+   *
+   * Fresh on every call for `readCommandAccess`'s reason, and a plain `ensure`
+   * rather than `getConfig`, which also runs an uncached `listByGuild`.
+   */
+  async getCommandAccess(guildId: string): Promise<CommandAccess> {
+    const guild = await this.deps.guilds.ensure(guildId);
+    return readCommandAccess(guild.settings);
+  }
+
+  /**
+   * Stops a user or a role from using a feature. `/restrict add`.
+   *
+   * **A restriction on Nickname for a USER also removes their saved nickname, in
+   * the same write.** Denying `/nick` and leaving the name somebody already chose
+   * in every room they own would defeat the point of the rule, and one write
+   * means no window in which they are restricted and still named. It converges
+   * on a repeat, so adding a restriction that already exists still clears a name
+   * an older build let through.
+   *
+   * Refuses the everyone role, whose id is the guild id: it would restrict the
+   * whole server, and Discord's role picker offers it, so it is one click away
+   * and not only a hand-edited import. The caller refuses bots and anyone who can
+   * manage channels, which need Discord to answer and so cannot be decided here.
+   */
+  addCommandRestriction(
+    guildId: string,
+    feature: CommandFeature,
+    target: RestrictTarget,
+  ): Promise<RestrictionResult> {
+    if (target.kind === 'role' && target.id === guildId) {
+      return Promise.resolve(refused(RESTRICT_REFUSALS.everyone));
+    }
+    return this.editCommandAccess(guildId, feature, target, 'add');
+  }
+
+  /**
+   * Lets a user or a role use a feature again. `/restrict remove`.
+   *
+   * Never refuses on who the target is, since removing is the way out of a rule
+   * that no longer makes sense: the person may since have become a manager, or the
+   * role the everyone role. It reports a nothing-to-do as success.
+   */
+  removeCommandRestriction(
+    guildId: string,
+    feature: CommandFeature,
+    target: RestrictTarget,
+  ): Promise<RestrictionResult> {
+    return this.editCommandAccess(guildId, feature, target, 'remove');
+  }
+
+  /**
+   * One edit of the restriction map, under the row lock.
+   *
+   * **`mergeSettings`, not `updateSettings`, for the reason `setControlPanelEntry`
+   * documents**: the map is replaced wholesale by a top-level merge, so a
+   * read-then-write of it loses whatever landed in between, and two admins editing
+   * at once or an `/import` running against a live guild are both writers in that
+   * window.
+   *
+   * **Only the one id being added or removed is touched.** Every other entry is
+   * copied whole, values and all (golden rule 3): a feature id this build does not
+   * know, a field a newer build added to an entry and an element of a list this
+   * build cannot read all survive another admin's edit on an older instance.
+   * `Object.fromEntries` rather than assigning into a literal, because a stored
+   * `__proto__` key is reachable through `/import` and an assignment would invoke
+   * the prototype setter and drop the entry.
+   *
+   * A list that empties is removed from its entry, an entry that empties is
+   * removed from the map, and the key is removed once nothing is left, so "nobody
+   * is restricted" is the absence of the key on an export round trip. "Nothing
+   * left" counts what this build cannot read as something, so it is never swept
+   * away with the rest.
+   *
+   * The caps count what the reader would read, across every feature, including
+   * ones this build does not know, since the importer counts them too.
+   */
+  private editCommandAccess(
+    guildId: string,
+    feature: CommandFeature,
+    target: RestrictTarget,
+    op: 'add' | 'remove',
+  ): Promise<RestrictionResult> {
+    if (!isSnowflake(target.id)) return Promise.resolve(refused(RESTRICT_REFUSALS.unusable));
+    return this.deps.guilds.mergeSettings(guildId, (existing) => {
+      const settings = existing?.settings ?? {};
+      const current = copyMap(settings[SETTINGS_KEYS.commandAccess]);
+      const entry = copyMap(current[feature]);
+      const field = target.kind === 'role' ? 'roles' : 'users';
+      let list = Array.isArray(entry[field]) ? [...(entry[field] as unknown[])] : [];
+      const present = list.includes(target.id);
+
+      if (op === 'add' && !present) {
+        const held = (key: 'users' | 'roles'): number => readIds(entry[key]).length;
+        if (target.kind === 'user' && held('users') >= MAX_RESTRICTED_USERS) {
+          return { patch: {}, result: refused(RESTRICT_REFUSALS.tooManyUsers(feature)) };
+        }
+        if (target.kind === 'role' && held('roles') >= MAX_RESTRICTED_ROLES) {
+          return { patch: {}, result: refused(RESTRICT_REFUSALS.tooManyRoles(feature)) };
+        }
+        const total = Object.values(current).reduce<number>((sum, value) => {
+          const each = copyMap(value);
+          return sum + readIds(each.users).length + readIds(each.roles).length;
+        }, 0);
+        if (total >= MAX_RESTRICTIONS) {
+          return { patch: {}, result: refused(RESTRICT_REFUSALS.tooMany) };
+        }
+        list.push(target.id);
+      }
+      if (op === 'remove') list = list.filter((id) => id !== target.id);
+
+      const changed = op === 'add' ? !present : present;
+      const patch: Record<string, unknown> = {};
+      const remove: string[] = [];
+      if (changed) {
+        if (list.length > 0) entry[field] = list;
+        else delete entry[field];
+        if (Object.keys(entry).length > 0) current[feature] = entry;
+        else delete current[feature];
+        if (Object.keys(current).length > 0) patch[SETTINGS_KEYS.commandAccess] = current;
+        else remove.push(SETTINGS_KEYS.commandAccess);
+      }
+
+      let nicknameCleared = false;
+      if (op === 'add' && feature === 'nick' && target.kind === 'user') {
+        const nicks = settings[SETTINGS_KEYS.customNicks];
+        if (isStringMap(nicks) && has(nicks, target.id)) {
+          const next = { ...nicks };
+          delete next[target.id];
+          patch[SETTINGS_KEYS.customNicks] = next;
+          nicknameCleared = true;
+        }
+      }
+
+      const message =
+        op === 'add'
+          ? restrictAddedMessage(target, feature, { already: !changed, nicknameCleared })
+          : restrictRemovedMessage(target, feature, { was: changed });
+      return { patch, remove, result: { ok: true, message, changed, nicknameCleared } };
     });
   }
 

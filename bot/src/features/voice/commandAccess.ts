@@ -185,8 +185,21 @@ export interface FeatureDenials {
 /** Every feature somebody is denied. A feature that is absent is open to everyone. */
 export type CommandAccess = Partial<Record<CommandFeature, FeatureDenials>>;
 
-/** A list of snowflakes, deduplicated in the order stored. Anything else reads as none. */
-function readIds(value: unknown): string[] {
+/**
+ * Somebody a rule can name: a user, or a role. `/restrict` resolves which from
+ * the option Discord sent, since the two share one picker and one id space.
+ */
+export interface RestrictTarget {
+  kind: 'user' | 'role';
+  id: string;
+}
+
+/**
+ * A list of snowflakes, deduplicated in the order stored. Anything else reads as
+ * none. Exported for the writer, which counts against the caps with the same
+ * rule the reader enforces, so the two cannot disagree about what a rule holds.
+ */
+export function readIds(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   const ids = new Set<string>();
   for (const id of value) if (isSnowflake(id)) ids.add(id);

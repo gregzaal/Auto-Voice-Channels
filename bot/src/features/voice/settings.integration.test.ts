@@ -657,4 +657,92 @@ describe('GuildSettingsService (integration)', () => {
       expect(readContact(guildAfter.settings)).toBe(ADMIN);
     });
   });
+
+  /**
+   * The restriction map, against a real row lock. The unit tests cover what one
+   * edit decides, and these cover what only the database can: that two admins
+   * editing at once both land, and that the nickname goes in the same statement.
+   */
+  describe('command restrictions', () => {
+    const SERVER = '460459401086763010';
+    const user = (n: number) => ({ kind: 'user' as const, id: `7${String(n).padStart(17, '0')}` });
+
+    it('loses no restriction when concurrent admins edit the map at once', async () => {
+      await settings.addCommandRestriction(SERVER, 'rename', user(0));
+      await Promise.all([
+        settings.addCommandRestriction(SERVER, 'rename', user(1)),
+        settings.addCommandRestriction(SERVER, 'rename', user(2)),
+        settings.addCommandRestriction(SERVER, 'limit', user(3)),
+        settings.addCommandRestriction(SERVER, 'nick', { kind: 'role', id: '8'.repeat(18) }),
+        settings.addCommandRestriction(SERVER, 'rename', user(4)),
+      ]);
+      const access = await settings.getCommandAccess(SERVER);
+      expect([...(access.rename?.users ?? [])].sort()).toEqual(
+        [0, 1, 2, 4].map((n) => user(n).id).sort(),
+      );
+      expect(access.limit?.users).toEqual([user(3).id]);
+      expect(access.nick?.roles).toEqual(['8'.repeat(18)]);
+    });
+
+    it('does not let concurrent adds of one user stack', async () => {
+      await Promise.all([
+        settings.addCommandRestriction(SERVER, 'rename', user(1)),
+        settings.addCommandRestriction(SERVER, 'rename', user(1)),
+        settings.addCommandRestriction(SERVER, 'rename', user(1)),
+      ]);
+      expect((await settings.getCommandAccess(SERVER)).rename?.users).toEqual([user(1).id]);
+    });
+
+    it('enforces the per-feature cap under concurrency', async () => {
+      const results = await Promise.all(
+        Array.from({ length: 55 }, (_, n) =>
+          settings.addCommandRestriction(SERVER, 'rename', user(n)),
+        ),
+      );
+      expect(results.filter((r) => r.ok)).toHaveLength(50);
+      expect((await settings.getCommandAccess(SERVER)).rename?.users).toHaveLength(50);
+    });
+
+    /** Denying /nick and leaving the name in every room they own would defeat the rule. */
+    it('removes the saved nickname in the same write as the Nickname restriction', async () => {
+      const who = user(1);
+      const other = user(2);
+      await guilds.updateSettings(SERVER, { custom_nicks: { [who.id]: 'Kay', [other.id]: 'Sam' } });
+
+      const result = await settings.addCommandRestriction(SERVER, 'nick', who);
+
+      expect(result).toMatchObject({ ok: true, changed: true, nicknameCleared: true });
+      const row = await guilds.ensure(SERVER);
+      expect(row.settings.custom_nicks).toEqual({ [other.id]: 'Sam' });
+      expect(row.settings.command_access).toEqual({ nick: { users: [who.id] } });
+    });
+
+    it('takes the key off the blob when the last restriction goes, and keeps the rest', async () => {
+      await guilds.updateSettings(SERVER, { general: 'Voice rooms' });
+      await settings.addCommandRestriction(SERVER, 'rename', user(1));
+      await settings.removeCommandRestriction(SERVER, 'rename', user(1));
+      const row = await guilds.ensure(SERVER);
+      expect(row.settings).not.toHaveProperty('command_access');
+      expect(row.settings.general).toBe('Voice rooms');
+    });
+
+    it('keeps an entry a newer build wrote across an edit it knows nothing about', async () => {
+      await guilds.updateSettings(SERVER, {
+        command_access: { somethingnew: { users: [user(9).id], until: 1800000000 } },
+      });
+      await settings.addCommandRestriction(SERVER, 'rename', user(1));
+      await settings.removeCommandRestriction(SERVER, 'rename', user(1));
+      expect((await guilds.ensure(SERVER)).settings.command_access).toEqual({
+        somethingnew: { users: [user(9).id], until: 1800000000 },
+      });
+    });
+
+    it('writes a guild with no row yet', async () => {
+      const result = await settings.addCommandRestriction('999999999999999999', 'limit', user(1));
+      expect(result.ok).toBe(true);
+      expect((await settings.getCommandAccess('999999999999999999')).limit?.users).toEqual([
+        user(1).id,
+      ]);
+    });
+  });
 });
