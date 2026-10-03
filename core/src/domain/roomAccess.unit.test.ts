@@ -17,6 +17,7 @@ const full = {
   trusted: ['u1', 'u2'],
   blocked: ['u3'],
   admitted: ['u4'],
+  kicked: ['u5'],
 } as const;
 
 describe('roomAccessSchema', () => {
@@ -41,6 +42,7 @@ describe('roomAccessSchema', () => {
   it('rejects a value of the wrong shape', () => {
     expect(roomAccessSchema.safeParse({ hidden: 'yes' }).success).toBe(false);
     expect(roomAccessSchema.safeParse({ trusted: [1, 2] }).success).toBe(false);
+    expect(roomAccessSchema.safeParse({ kicked: 'u1' }).success).toBe(false);
     expect(roomAccessSchema.safeParse({ creatorId: 123 }).success).toBe(false);
     expect(roomAccessSchema.safeParse({ baseline: { view: 'maybe' } }).success).toBe(false);
     expect(roomAccessSchema.safeParse({ neutralised: [{ roleId: 'r' }] }).success).toBe(false);

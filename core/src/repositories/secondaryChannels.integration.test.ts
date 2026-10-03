@@ -56,6 +56,42 @@ describe('SecondaryChannelRepository access (integration)', () => {
       sql`UPDATE secondary_channels SET access = ${JSON.stringify(blob)}::jsonb WHERE channel_id = ${channelId}`,
     );
 
+  /**
+   * Counts row updates with a trigger, so "one statement" is the database's
+   * answer and not an assumption about how the repository is written. Two
+   * statements would be two row versions and two log rows.
+   */
+  const withUpdateLog = async (run: () => Promise<void>) => {
+    const exec = (statement: string) => env.handle.db.execute(sql.raw(statement));
+    await exec(
+      `CREATE TABLE update_log (n serial PRIMARY KEY, channel_id text, new_state jsonb, new_access jsonb)`,
+    );
+    await exec(`
+      CREATE FUNCTION log_secondary_update() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        INSERT INTO update_log (channel_id, new_state, new_access)
+          VALUES (NEW.channel_id, NEW.state, NEW.access);
+        RETURN NEW;
+      END $$`);
+    await exec(`
+      CREATE TRIGGER secondary_update_log AFTER UPDATE ON secondary_channels
+        FOR EACH ROW EXECUTE FUNCTION log_secondary_update()`);
+    try {
+      await run();
+      return (
+        await env.handle.db.execute<{
+          channel_id: string;
+          new_state: Record<string, unknown>;
+          new_access: unknown;
+        }>(sql`SELECT channel_id, new_state, new_access FROM update_log ORDER BY n`)
+      ).rows;
+    } finally {
+      await exec(`DROP TRIGGER secondary_update_log ON secondary_channels`);
+      await exec(`DROP FUNCTION log_secondary_update()`);
+      await exec(`DROP TABLE update_log`);
+    }
+  };
+
   describe('getAccess', () => {
     it('reads a new room as having no access record', async () => {
       const row = await make();
@@ -100,6 +136,51 @@ describe('SecondaryChannelRepository access (integration)', () => {
       await stageAccess({ hidden: true });
       await make();
       expect(await repo.getAccess(ROOM)).toEqual({ hidden: true });
+    });
+  });
+
+  /**
+   * What `getAccess` and the row schema cannot say: a blob this build cannot read
+   * is `null` to both, which is also what a room with no record is, and a caller
+   * that is about to decide from the record has to tell the two apart.
+   */
+  describe('readAccess', () => {
+    it('reads a room with no record as readable and empty', async () => {
+      await make();
+      expect(await repo.readAccess(ROOM)).toEqual({ readable: true, access: null });
+    });
+
+    it('reads a record, carrying a field this build does not know', async () => {
+      await make();
+      await stageAccess({ hidden: true, kicked: ['u9'], futureThing: 1 });
+      expect(await repo.readAccess(ROOM)).toEqual({
+        readable: true,
+        access: { hidden: true, kicked: ['u9'], futureThing: 1 },
+      });
+    });
+
+    it('says a blob it cannot parse is unreadable, where getAccess says null', async () => {
+      await make();
+      await stageAccess({ hidden: 'yes' });
+      expect(await repo.readAccess(ROOM)).toEqual({ readable: false });
+      expect(await repo.getAccess(ROOM)).toBeNull();
+    });
+
+    it('is undefined for a room that does not exist, or belongs to another fleet', async () => {
+      await make();
+      await stageAccess({ hidden: true });
+      expect(await repo.readAccess('ghost')).toBeUndefined();
+      const other = new SecondaryChannelRepository(env.handle.db, 'beta');
+      expect(await other.readAccess(ROOM)).toBeUndefined();
+    });
+
+    it('reads the record of a room whose state is corrupt', async () => {
+      await make();
+      await stageAccess({ hidden: true });
+      await env.handle.db.execute(
+        sql`UPDATE secondary_channels SET state = '{"controlPanelChannelId": 123}'::jsonb WHERE channel_id = ${ROOM}`,
+      );
+      expect(await repo.readAccess(ROOM)).toEqual({ readable: true, access: { hidden: true } });
     });
   });
 
@@ -288,21 +369,26 @@ describe('SecondaryChannelRepository access (integration)', () => {
       expect(await rawAccess()).toEqual({ blocked: ['u9'] });
     });
 
-    /** The defect: without the stamp the block follows the column to the new holder. */
-    it('keeps a block recorded before a /transfer with the creator it was recorded for', async () => {
+    /**
+     * The owner LEAVING is the caretaker flow: it moves the owner and nothing
+     * else, so the creator's guests and blocks stay theirs.
+     */
+    it('keeps a block with the creator it was recorded for when the owner merely leaves', async () => {
       await make(ROOM, { ownerId: 'u1', originalCreator: 'u1' });
       await repo.mutateAccess(ROOM, () => ({ blocked: ['u9'] }));
 
-      await repo.setOwnerAndCreator(ROOM, 'u2');
+      await repo.setOwner(ROOM, 'u2');
 
+      expect((await repo.get(ROOM))?.ownerId).toBe('u2');
+      expect(await rawAccess()).toEqual({ blocked: ['u9'], creatorId: 'u1' });
       expect(await roomsFor('u1')).toEqual([ROOM]);
       expect(await roomsFor('u2')).toEqual([]);
     });
 
     /**
-     * The other order, pinned so it is a decision and not an accident: a room
-     * with no record yet is not frozen, so a handover first gives it to the new
-     * creator and the first record then names THEM.
+     * A room with no record yet follows the column, so a handover first gives it
+     * to the new creator and the first record then names THEM. (With a record, the
+     * handover moves the record too: see the next block.)
      */
     it('gives a room handed over before its first record to the new creator', async () => {
       await make(ROOM, { ownerId: 'u1', originalCreator: 'u1' });
@@ -320,12 +406,16 @@ describe('SecondaryChannelRepository access (integration)', () => {
     /**
      * A writer that builds the record from scratch and does not spread the old one
      * must not hand the room over: the creator carries forward from what was
-     * stored, and the column (which has since moved) is not consulted.
+     * stored, and the column is not consulted.
      */
     it('carries the stored creator forward when a later write forgets to spread it', async () => {
       await make(ROOM, { ownerId: 'u1', originalCreator: 'u1' });
       await repo.mutateAccess(ROOM, () => ({ blocked: ['u9'] }));
-      await repo.setOwnerAndCreator(ROOM, 'u2');
+      // The column and the record differ only after a handover that skipped the
+      // record, which `setOwnerAndCreator` no longer does, so stage it directly.
+      await env.handle.db.execute(
+        sql`UPDATE secondary_channels SET original_creator = 'u2' WHERE channel_id = ${ROOM}`,
+      );
 
       await repo.mutateAccess(ROOM, () => ({ blocked: ['u9', 'u8'] }));
 
@@ -334,43 +424,112 @@ describe('SecondaryChannelRepository access (integration)', () => {
     });
   });
 
-  describe('transitionAccess', () => {
-    /**
-     * Counts row updates with a trigger, so "one statement" is the database's
-     * answer and not an assumption about how the repository is written. Two
-     * statements would be two row versions and two log rows.
-     */
-    const withUpdateLog = async (run: () => Promise<void>) => {
-      const exec = (statement: string) => env.handle.db.execute(sql.raw(statement));
-      await exec(
-        `CREATE TABLE update_log (n serial PRIMARY KEY, channel_id text, new_state jsonb, new_access jsonb)`,
-      );
-      await exec(`
-        CREATE FUNCTION log_secondary_update() RETURNS trigger LANGUAGE plpgsql AS $$
-        BEGIN
-          INSERT INTO update_log (channel_id, new_state, new_access)
-            VALUES (NEW.channel_id, NEW.state, NEW.access);
-          RETURN NEW;
-        END $$`);
-      await exec(`
-        CREATE TRIGGER secondary_update_log AFTER UPDATE ON secondary_channels
-          FOR EACH ROW EXECUTE FUNCTION log_secondary_update()`);
-      try {
-        await run();
-        return (
-          await env.handle.db.execute<{
-            channel_id: string;
-            new_state: Record<string, unknown>;
-            new_access: unknown;
-          }>(sql`SELECT channel_id, new_state, new_access FROM update_log ORDER BY n`)
-        ).rows;
-      } finally {
-        await exec(`DROP TRIGGER secondary_update_log ON secondary_channels`);
-        await exec(`DROP FUNCTION log_secondary_update()`);
-        await exec(`DROP TABLE update_log`);
-      }
-    };
+  /**
+   * A deliberate handover (`/transfer`, or a claim of an ownerless room) moves who
+   * the room's lists belong to. Left on the giver, they could keep adding and
+   * revoking guests on a room they gave away while the recipient's own lists never
+   * applied to it.
+   */
+  describe('a handover', () => {
+    const roomsFor = async (creatorId: string) =>
+      (await repo.listByOriginalCreator(GUILD, creatorId)).map((r) => r.channelId);
 
+    it('re-points the record at the new creator, keeping everything else in it', async () => {
+      await make(ROOM, { ownerId: 'u1', originalCreator: 'u1', state: { seed: 7 } });
+      await stageAccess({
+        creatorId: 'u1',
+        hidden: true,
+        baseline: { view: 'allow' },
+        trusted: ['u3'],
+        blocked: ['u9'],
+        futureThing: { a: 1 },
+      });
+
+      expect(await repo.setOwnerAndCreator(ROOM, 'u2', 'Two')).toEqual({ access: 'repointed' });
+
+      const row = await repo.get(ROOM);
+      expect(row).toMatchObject({ ownerId: 'u2', originalCreator: 'u2' });
+      expect(row?.state).toMatchObject({ seed: 7, originalCreatorName: 'Two' });
+      expect(await rawAccess()).toEqual({
+        creatorId: 'u2',
+        hidden: true,
+        baseline: { view: 'allow' },
+        trusted: ['u3'],
+        blocked: ['u9'],
+        futureThing: { a: 1 },
+      });
+      expect(await roomsFor('u2')).toEqual([ROOM]);
+      expect(await roomsFor('u1')).toEqual([]);
+    });
+
+    it('does it in the same statement as the owner, so nothing sees half a handover', async () => {
+      await make(ROOM, { ownerId: 'u1', originalCreator: 'u1' });
+      await stageAccess({ creatorId: 'u1', blocked: ['u9'] });
+
+      const log = await withUpdateLog(() =>
+        repo.setOwnerAndCreator(ROOM, 'u2', 'Two').then(() => undefined),
+      );
+
+      expect(log).toHaveLength(1);
+      expect(log[0]?.new_access).toEqual({ creatorId: 'u2', blocked: ['u9'] });
+    });
+
+    it('has nothing to re-point for a room with no record, and the column carries it', async () => {
+      await make(ROOM, { ownerId: 'u1', originalCreator: 'u1' });
+
+      expect(await repo.setOwnerAndCreator(ROOM, 'u2')).toEqual({ access: 'none' });
+
+      expect(await rawAccess()).toBeNull();
+      expect(await roomsFor('u2')).toEqual([ROOM]);
+    });
+
+    it('leaves a record it cannot read exactly as it was, and says so', async () => {
+      await make(ROOM, { ownerId: 'u1', originalCreator: 'u1' });
+      const blob = { creatorId: 'u1', hidden: 'sideways' };
+      await stageAccess(blob);
+
+      expect(await repo.setOwnerAndCreator(ROOM, 'u2')).toEqual({ access: 'unreadable' });
+
+      expect(await rawAccess()).toEqual(blob);
+      expect((await repo.get(ROOM))?.ownerId).toBe('u2');
+    });
+
+    it('does nothing for a room that does not exist, and for another fleet', async () => {
+      expect(await repo.setOwnerAndCreator('ghost', 'u2')).toEqual({ access: 'none' });
+
+      const other = new SecondaryChannelRepository(env.handle.db, 'beta');
+      await make(ROOM, { ownerId: 'u1', originalCreator: 'u1' });
+      await stageAccess({ creatorId: 'u1' });
+      await other.setOwnerAndCreator(ROOM, 'u2');
+      expect((await repo.get(ROOM))?.ownerId).toBe('u1');
+      expect(await rawAccess()).toEqual({ creatorId: 'u1' });
+    });
+
+    it('is replay safe: handing it to the same member twice changes nothing more', async () => {
+      await make(ROOM, { ownerId: 'u1', originalCreator: 'u1' });
+      await stageAccess({ creatorId: 'u1', blocked: ['u9'] });
+
+      await repo.setOwnerAndCreator(ROOM, 'u2');
+      await repo.setOwnerAndCreator(ROOM, 'u2');
+
+      expect(await rawAccess()).toEqual({ creatorId: 'u2', blocked: ['u9'] });
+    });
+
+    it('does not lose an entry a concurrent transition adds, nor the re-point', async () => {
+      await make(ROOM, { ownerId: 'u1', originalCreator: 'u1' });
+      await stageAccess({ creatorId: 'u1' });
+
+      await Promise.all([
+        repo.transitionAccess(ROOM, { access: (current) => ({ ...current, blocked: ['u9'] }) }),
+        repo.setOwnerAndCreator(ROOM, 'u2'),
+      ]);
+
+      // Either order, both writes survive: the lock makes the second read the first.
+      expect(await rawAccess()).toEqual({ creatorId: 'u2', blocked: ['u9'] });
+    });
+  });
+
+  describe('transitionAccess', () => {
     it('writes state and access in ONE statement, so a reader never sees half', async () => {
       await make(ROOM, { state: { seed: 7, roster: ['u1'] } });
 
@@ -751,26 +910,28 @@ describe('SecondaryChannelRepository access (integration)', () => {
     });
 
     /**
-     * `/transfer` moves the original-creator column on purpose. The room's
-     * guests and blocks are the creator's, named in the record when it was first
-     * written, and must not follow the column.
+     * The record's creator wins over the column, which is what keeps a caretaker
+     * (named by `setOwner`, which moves nothing else) from taking the creator's
+     * lists. A deliberate handover moves both, so they agree again.
      */
-    it('follows the creator frozen in the record, not the column, after a transfer', async () => {
-      await make(ROOM, { ownerId: 'u1', originalCreator: 'u1' });
+    it('follows the creator in the record, not the column, when the two differ', async () => {
+      await make(ROOM, { ownerId: 'u1', originalCreator: 'u2' });
       await stageAccess({ creatorId: 'u1', blocked: ['u9'] });
 
-      await repo.setOwnerAndCreator(ROOM, 'u2');
-
-      expect((await repo.get(ROOM))?.originalCreator).toBe('u2');
       expect(await roomsFor('u1')).toEqual([ROOM]);
       expect(await roomsFor('u2')).toEqual([]);
     });
 
-    it('follows the column for a room with no record, so a block reaches a public room', async () => {
+    it('follows a handover, whether or not the room has a record', async () => {
       await make(ROOM, { ownerId: 'u1', originalCreator: 'u1' });
       await repo.setOwnerAndCreator(ROOM, 'u2');
       expect(await roomsFor('u1')).toEqual([]);
       expect(await roomsFor('u2')).toEqual([ROOM]);
+
+      await stageAccess({ creatorId: 'u2', blocked: ['u9'] });
+      await repo.setOwnerAndCreator(ROOM, 'u3');
+      expect(await roomsFor('u2')).toEqual([]);
+      expect(await roomsFor('u3')).toEqual([ROOM]);
     });
 
     it('falls through to the column when the record is malformed or names no creator', async () => {

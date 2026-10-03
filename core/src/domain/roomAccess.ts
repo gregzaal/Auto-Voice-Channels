@@ -48,9 +48,16 @@ export const roomAccessSchema = z
     /**
      * The room's original creator, whose saved lists apply to it. Stamped by the
      * repository from the room's `original_creator` column the first time any
-     * record is written for the room (a block on a public room counts), and never
-     * rewritten by `/transfer`, `/reclaim` or the owner leaving, so a caretaker's
-     * edits cannot revoke the creator's guests or blocks.
+     * record is written for the room (a block on a public room counts).
+     *
+     * **The owner leaving never moves it** (the caretaker who inherits the room
+     * has no saved list of their own to apply), so a caretaker's edits cannot
+     * revoke the creator's guests or blocks. **A deliberate handover does**:
+     * `/transfer`, and a claim of an ownerless room, re-point it to the new owner
+     * in the same statement that moves the `original_creator` column
+     * (`setOwnerAndCreator`). Left alone there, the giver could keep adding and
+     * revoking guests on a room they gave away while the recipient's own lists
+     * never applied to it.
      */
     creatorId: z.string().optional(),
     /** The room is hidden from the channel list. `state.private` stays true for it. */
@@ -88,6 +95,18 @@ export const roomAccessSchema = z
     trusted: z.array(z.string()).optional(),
     /** Members whose saved-blocked overwrites we wrote on this room. */
     blocked: z.array(z.string()).optional(),
+    /**
+     * Members a votekick removed from this room: View and Connect denied, and the
+     * id recorded here so nothing undoes it.
+     *
+     * Not `blocked`, on purpose. `blocked` is the owner's saved list as it was
+     * applied, so a list edit takes an id off it and the diff takes the deny back.
+     * A votekick belongs to the room and not to any list, so it is never removed by
+     * one, beats a trusted or admitted grant for the same member, and dies with the
+     * room. Written in every mode: a grant for a trusted member would otherwise
+     * silently replace the deny and undo the kick.
+     */
+    kicked: z.array(z.string()).optional(),
     /**
      * Members admitted to this room only, whose overwrites we wrote. Kept so
      * removal is a diff against what we wrote. Dies with the room.

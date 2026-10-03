@@ -3,7 +3,12 @@ import { z } from 'zod';
 import type { SQL } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
 import { DEFAULT_FLEET, type Fleet } from '../domain/fleets.js';
-import { parseRoomAccess, readRoomAccess, type RoomAccess } from '../domain/roomAccess.js';
+import {
+  parseRoomAccess,
+  readRoomAccess,
+  type RoomAccess,
+  type RoomAccessRead,
+} from '../domain/roomAccess.js';
 import { secondaryChannels } from '../db/schema.js';
 
 /**
@@ -198,10 +203,12 @@ export interface AccessTransition {
  *
  * The creator carries forward from the stored record first, so a writer that
  * builds the new record from scratch and forgets to spread the old one does not
- * hand the room to whoever the column names after a `/transfer`. Only a record
+ * hand the room to whoever the column names after the owner left. Only a record
  * that has never named one is stamped from the column. That is the one place the
  * guarantee is kept: {@link SecondaryChannelRepository.listByOriginalCreator}
- * falls back to the column for a record without one, and the column moves.
+ * falls back to the column for a record without one, and the column moves. (A
+ * deliberate handover moves the record's creator too, in
+ * {@link SecondaryChannelRepository.setOwnerAndCreator}, so writes here never do.)
  */
 function keepCreator(
   next: RoomAccess | null,
@@ -340,13 +347,14 @@ export class SecondaryChannelRepository {
    *
    * The creator is `access.creatorId` where the room has one, which the
    * repository stamps the first time any record is written for the room, and the
-   * `original_creator` column otherwise. Not the column alone: `/transfer` moves
-   * the column on purpose, and a room's guests and blocks must not follow it.
-   * Not the access record alone: a room with none (never locked, never blocked
-   * against) still takes a block.
+   * `original_creator` column otherwise. Not the column alone: the column and the
+   * record are two stores, and a room's lists are read from the record once it
+   * has one. Not the access record alone: a room with none (never locked, never
+   * blocked against) still takes a block.
    *
-   * So a handover BEFORE a room's first record gives it to the new creator, and
-   * one after it does not.
+   * A deliberate handover (`/transfer`, a claim) moves both together, in one
+   * statement ({@link setOwnerAndCreator}), so the two always agree about who the
+   * creator is after one. The owner leaving moves neither.
    *
    * The predicate is in SQL, like {@link listByOwner}, and `->>` on a blob that
    * is not an object yields null rather than an error, so a malformed record
@@ -497,6 +505,26 @@ export class SecondaryChannelRepository {
   }
 
   /**
+   * The room's access record, with the one thing {@link getAccess} and the row
+   * schema cannot say: whether this build could read it. `undefined` for no such
+   * room.
+   *
+   * For a caller that has to DECIDE from the record before it writes: a hidden
+   * room whose record this build cannot read looks like a plain locked room
+   * everywhere else, and acting on that (creating a Join channel that names the
+   * owner, or `/public` restoring from a baseline nobody can read) is the harm.
+   * Reads the one column, as {@link getAccess} does.
+   */
+  async readAccess(channelId: string): Promise<RoomAccessRead | undefined> {
+    const [row] = await this.db
+      .select({ access: secondaryChannels.access })
+      .from(secondaryChannels)
+      .where(this.scoped(eq(secondaryChannels.channelId, channelId)))
+      .limit(1);
+    return row ? readRoomAccess(row.access) : undefined;
+  }
+
+  /**
    * The one place the access column is written: reads the record under a row
    * lock, lets `decide` change it, and writes the result (and `state`, when a
    * transition has a change for it) in one `UPDATE`.
@@ -613,12 +641,26 @@ export class SecondaryChannelRepository {
    * Hands the channel to `memberId` as both current owner AND original creator — a
    * deliberate takeover via `/transfer` or `/reclaim`. Moving `originalCreator` too
    * means the previous holder can't later `/reclaim` it back; the handover sticks.
+   *
+   * **The room's access record follows, in the same `UPDATE`.** Its `creatorId`
+   * names whose saved lists apply to the room, and the giver of a deliberate
+   * handover must not keep adding and revoking guests on a room they no longer
+   * own while the recipient's own lists never apply to it. So a record that names
+   * a creator is re-pointed at `memberId` under the row lock, with everything else
+   * in it (what `PrivacyService` has to take back, the baseline, the lists)
+   * carried over untouched: it is the caller that re-derives the lists afterwards.
+   * The owner merely LEAVING goes through {@link setOwner}, which does not do this.
+   *
+   * A room with no record has nothing to re-point (the column carries it), and a
+   * record this build cannot read is left byte for byte as it is, for the reason
+   * {@link AccessWriteResult} gives. The answer says which of the three it was, so
+   * a caller that is about to apply lists can tell the last one apart.
    */
   async setOwnerAndCreator(
     channelId: string,
     memberId: string,
     displayName?: string,
-  ): Promise<void> {
+  ): Promise<{ access: 'repointed' | 'none' | 'unreadable' }> {
     /**
      * The cached name moves with the creator, in ONE statement.
      *
@@ -629,20 +671,38 @@ export class SecondaryChannelRepository {
      * happen. `||` rather than `merge` so a row with no `state` yet still gets
      * the key.
      */
-    await this.db
-      .update(secondaryChannels)
-      .set({
-        ownerId: memberId,
-        originalCreator: memberId,
-        ...(displayName === undefined
-          ? {}
-          : {
-              state: sql`coalesce(${secondaryChannels.state}, '{}'::jsonb) || ${JSON.stringify({
-                originalCreatorName: displayName,
-              })}::jsonb`,
-            }),
-        updatedAt: new Date(),
-      })
-      .where(this.scoped(eq(secondaryChannels.channelId, channelId)));
+    return this.db.transaction(async (tx) => {
+      // The same lock `writeAccess` takes, so a transition running at this moment
+      // finishes first and this re-points the record it wrote.
+      const [row] = await tx
+        .select({ access: secondaryChannels.access })
+        .from(secondaryChannels)
+        .where(this.scoped(eq(secondaryChannels.channelId, channelId)))
+        .for('update');
+      const stored = readRoomAccess(row?.access);
+      // The record as parsed, which carries a field this build does not know,
+      // with the one key changed.
+      const repointed =
+        stored.readable && stored.access !== null
+          ? { ...stored.access, creatorId: memberId }
+          : undefined;
+      await tx
+        .update(secondaryChannels)
+        .set({
+          ownerId: memberId,
+          originalCreator: memberId,
+          ...(displayName === undefined
+            ? {}
+            : {
+                state: sql`coalesce(${secondaryChannels.state}, '{}'::jsonb) || ${JSON.stringify({
+                  originalCreatorName: displayName,
+                })}::jsonb`,
+              }),
+          ...(repointed ? { access: repointed } : {}),
+          updatedAt: new Date(),
+        })
+        .where(this.scoped(eq(secondaryChannels.channelId, channelId)));
+      return { access: repointed ? 'repointed' : stored.readable ? 'none' : 'unreadable' };
+    });
   }
 }

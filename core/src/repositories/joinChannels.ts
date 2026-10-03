@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import type { SQL } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
@@ -77,11 +77,21 @@ export class JoinChannelRepository {
     return row ? joinChannelRowSchema.parse(row) : undefined;
   }
 
+  /**
+   * The room's "⇩ Join" channel, if it has one.
+   *
+   * **Oldest first, then by id, and not left to Postgres's heap order.** The index
+   * on `secondary_channel_id` is not unique, so a replayed or racing lock can leave
+   * a room with two rows. Which one this answers has to be the same for everyone
+   * who asks, or two creators comparing "is mine the one that is kept" would each
+   * decide it was the other's and both delete theirs.
+   */
   async getBySecondary(secondaryChannelId: string): Promise<JoinChannelRow | undefined> {
     const [row] = await this.db
       .select()
       .from(joinChannels)
       .where(this.scoped(eq(joinChannels.secondaryChannelId, secondaryChannelId)))
+      .orderBy(asc(joinChannels.createdAt), asc(joinChannels.channelId))
       .limit(1);
     return row ? joinChannelRowSchema.parse(row) : undefined;
   }
