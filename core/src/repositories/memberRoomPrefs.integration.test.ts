@@ -17,7 +17,7 @@ const OTHER_PRIMARY = 'creator-2';
 const USER = 'user-1';
 const OTHER_USER = 'user-2';
 
-interface Row {
+type Row = {
   primary_channel_id: string;
   user_id: string;
   guild_id: string;
@@ -25,7 +25,7 @@ interface Row {
   user_limit: number | null;
   privacy: string | null;
   updated_at: string | Date;
-}
+};
 
 describe('MemberRoomPrefsRepository (integration)', () => {
   let env: PgTestEnv;
