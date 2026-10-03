@@ -9,11 +9,13 @@ import {
   sniffFormat,
   type GuildConfigFile,
 } from './format.js';
+import { DROPPED_FIELDS } from '../migrate/legacy.js';
 import {
   diffGuildConfig,
   fromLegacyPlan,
   fromNativeFile,
   IMPORT_LIMITS,
+  RESTRICTION_REPLACED_FIELDS,
   type ChannelFact,
   type CurrentConfig,
   type GuildFacts,
@@ -878,6 +880,42 @@ describe('diffGuildConfig: legacy templates', () => {
     expect(found).toContain('orphaned_role');
     // Recorded before the `left` key was stripped, which is the only way to know.
     expect(found).toContain('legacy_marked_left');
+  });
+
+  /**
+   * `restrictions` and `requiredrole` are old role rules for commands, and
+   * `/restrict` is what answers them now, so telling an admin only that they are
+   * "an old setting AVC no longer has" would be misleading. Every other dropped
+   * field keeps the generic note.
+   */
+  it('tells the old role rules apart from the other dropped fields, per field', () => {
+    const incoming = fromLegacyPlan(
+      {
+        settings: {},
+        primaries: [],
+        droppedFields: ['restrictions', 'requiredrole', 'sapphire'],
+        orphanedTextChannels: [],
+        orphanedRoles: [],
+      },
+      { wasMarkedLeft: false, filenameGuildId: GUILD },
+    );
+    const result = diffGuildConfig(incoming, currentConfig(), facts());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const bySubject = Object.fromEntries(
+      result.plan.notes.filter((n) => n.code.startsWith('legacy_')).map((n) => [n.subject, n.code]),
+    );
+    expect(bySubject).toEqual({
+      restrictions: 'legacy_restriction_replaced',
+      requiredrole: 'legacy_restriction_replaced',
+      sapphire: 'legacy_field_dropped',
+    });
+  });
+
+  it('only names a replaced field the importer reports as dropped', () => {
+    for (const field of RESTRICTION_REPLACED_FIELDS) {
+      expect(DROPPED_FIELDS as readonly string[]).toContain(field);
+    }
   });
 
   it('never carries adopted channels, which the legacy format has no concept of', () => {

@@ -284,6 +284,8 @@ const NOTE_LABELS: Record<ImportNoteCode, string> = {
   position_overwritten: 'Channel position is always rewritten by an old Python config',
   other_bot_may_be_present: 'Another AVC bot may still be managing these channels',
   legacy_field_dropped: 'is an old setting AVC no longer has',
+  legacy_restriction_replaced:
+    'was an old per-command role rule and was not carried over. /restrict is the replacement, and it stops a person or a role from using a room command',
   legacy_marked_left: 'This file was saved after the old bot was removed',
   orphaned_text_channel:
     'was left behind by the old bot and is not used. If you turn text channels back on with /textchannels, AVC makes its own',

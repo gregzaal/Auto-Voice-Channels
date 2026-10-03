@@ -245,9 +245,25 @@ export type ImportNoteCode =
   | 'position_overwritten'
   | 'other_bot_may_be_present'
   | 'legacy_field_dropped'
+  | 'legacy_restriction_replaced'
   | 'legacy_marked_left'
   | 'orphaned_text_channel'
   | 'orphaned_role';
+
+/**
+ * The old Python bot's fields that `/restrict` is now the answer to, which a
+ * legacy import tells the admin as such and not as "an old setting AVC no longer
+ * has".
+ *
+ * They were role rules for commands and were not carried over, and `/restrict`
+ * is a different model: it names who may NOT use a room command and everyone
+ * else keeps it. Saying only that the setting is gone leaves an admin who relied
+ * on them thinking nothing replaces them. Listed here, and not read from
+ * `DROPPED_FIELDS` in `migrate/legacy.ts`, because this module imports nothing
+ * that could reach the database (an allow-list test enforces it), so a test binds
+ * each entry to that list instead.
+ */
+export const RESTRICTION_REPLACED_FIELDS: readonly string[] = ['requiredrole', 'restrictions'];
 
 export type NoteSeverity = 'refusal' | 'dropped' | 'warning';
 
@@ -1615,7 +1631,14 @@ function addWarnings(
   if (incoming.source === 'legacy') {
     notes.push({ code: 'position_overwritten', severity: 'warning', subject: 'above' });
     for (const field of incoming.legacy?.droppedFields ?? []) {
-      notes.push({ code: 'legacy_field_dropped', severity: 'warning', subject: field });
+      // The two old role-rule fields have a replacement worth naming, so they get
+      // their own note rather than the generic "no longer has".
+      const replaced = RESTRICTION_REPLACED_FIELDS.includes(field);
+      notes.push({
+        code: replaced ? 'legacy_restriction_replaced' : 'legacy_field_dropped',
+        severity: 'warning',
+        subject: field,
+      });
     }
     if (incoming.legacy?.wasMarkedLeft) {
       notes.push({ code: 'legacy_marked_left', severity: 'warning', subject: facts.guildId });

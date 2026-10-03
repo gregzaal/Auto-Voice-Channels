@@ -327,6 +327,47 @@ describe('renderAnnouncement', () => {
   });
 });
 
+/**
+ * The two old role-rule fields have a replacement, so the admin is told what it is
+ * rather than only that the setting is gone, and every other dropped field keeps
+ * the generic wording.
+ */
+describe('a legacy import that drops the old role rules', () => {
+  const legacyPlan = (): ImportPlan =>
+    plan({
+      source: 'legacy',
+      notes: [
+        { code: 'legacy_restriction_replaced', severity: 'warning', subject: 'restrictions' },
+        { code: 'legacy_restriction_replaced', severity: 'warning', subject: 'requiredrole' },
+        { code: 'legacy_field_dropped', severity: 'warning', subject: 'prefix' },
+      ],
+    });
+
+  it('points at /restrict, and says the old rules were not carried over', () => {
+    const text = renderPreview(legacyPlan(), { ...ctx, source: 'legacy' });
+    expect(text).toContain(
+      'restrictions: was an old per-command role rule and was not carried over',
+    );
+    expect(text).toContain('requiredrole: was an old per-command role rule');
+    expect(text).toContain('/restrict is the replacement');
+  });
+
+  it('does not call them an old setting AVC no longer has, and leaves the rest alone', () => {
+    const lines = renderPreview(legacyPlan(), { ...ctx, source: 'legacy' }).split('\n');
+    const line = (subject: string) => lines.find((l) => l.includes(`${subject}: `)) ?? '';
+    expect(line('restrictions')).not.toContain('no longer has');
+    expect(line('requiredrole')).not.toContain('no longer has');
+    expect(line('prefix')).toContain('is an old setting AVC no longer has');
+  });
+
+  it('obeys the copy rules in the preview, the announcement and the attached plan', () => {
+    const c = { ...ctx, source: 'legacy' as const };
+    assertCopyRules(renderPreview(legacyPlan(), c));
+    assertCopyRules(renderAnnouncement(legacyPlan(), c));
+    assertCopyRules(renderPlanFile(legacyPlan(), c));
+  });
+});
+
 describe('renderLogEntry and renderPlanFile', () => {
   it('caps the log entry like everything else outbound', () => {
     const text = renderLogEntry(bigPlan(), ctx);
