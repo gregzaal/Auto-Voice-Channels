@@ -69,6 +69,7 @@ import {
 import {
   RESTRICT_REFUSALS,
   restrictAddedMessage,
+  restrictClearedMessage,
   restrictRemovedMessage,
 } from './commandAccessCopy.js';
 
@@ -156,17 +157,39 @@ const refused = (message: string): RestrictionResult => ({
   nicknameCleared: false,
 });
 
+/** A plain object, which is what a stored map is. Not an array, not null. */
+const isMap = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
 /**
  * A shallow copy of a stored map, or an empty map when the value is not one.
  *
- * `Object.fromEntries` rather than a spread or an assignment loop: a stored
- * `__proto__` key is reachable through `/import`, and anything that assigns it
- * onto a plain object invokes the prototype setter and drops the entry.
+ * `Object.fromEntries` rather than a spread or an assignment loop, as a
+ * precaution: a `__proto__` key cannot arrive through `/import` (the wire schema
+ * drops it), so only a value put in the database by hand could hold one, and
+ * anything that assigns it onto a plain object invokes the prototype setter and
+ * drops the entry.
  */
 function copyMap(value: unknown): Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? Object.fromEntries(Object.entries(value as Record<string, unknown>))
-    : {};
+  return isMap(value) ? Object.fromEntries(Object.entries(value)) : {};
+}
+
+/**
+ * The patch that stores `entry` under `feature` in `current`, dropping what
+ * empties: an entry with nothing left comes out of the map, and a map with
+ * nothing left comes out of the blob, so "nobody is restricted" is the absence of
+ * the key on an export round trip. Mutates `current`, which is the caller's copy.
+ */
+function storeEntry(
+  current: Record<string, unknown>,
+  feature: CommandFeature,
+  entry: Record<string, unknown>,
+): { patch: Record<string, unknown>; remove: string[] } {
+  if (Object.keys(entry).length > 0) current[feature] = entry;
+  else delete current[feature];
+  return Object.keys(current).length > 0
+    ? { patch: { [SETTINGS_KEYS.commandAccess]: current }, remove: [] }
+    : { patch: {}, remove: [SETTINGS_KEYS.commandAccess] };
 }
 
 /** The default name for a freshly-created creator channel. */
@@ -991,7 +1014,7 @@ export class GuildSettingsService {
    */
   async getCommandAccess(guildId: string): Promise<CommandAccess> {
     const guild = await this.deps.guilds.ensure(guildId);
-    return readCommandAccess(guild.settings);
+    return readCommandAccess(guild.settings, guildId);
   }
 
   /**
@@ -999,10 +1022,14 @@ export class GuildSettingsService {
    *
    * **A restriction on Nickname for a USER also removes their saved nickname, in
    * the same write.** Denying `/nick` and leaving the name somebody already chose
-   * in every room they own would defeat the point of the rule, and one write
-   * means no window in which they are restricted and still named. It converges
-   * on a repeat, so adding a restriction that already exists still clears a name
-   * an older build let through.
+   * in every room they own would defeat the point of the rule, and it is one
+   * write so this command never leaves them restricted and still named. A `/nick`
+   * already in flight is the exception: `setNick` replaces the whole map from a
+   * read it made earlier, outside the row lock, and can put the name back until
+   * the guard refuses `/nick` for them. It converges on a repeat, so adding a
+   * restriction that already exists still clears a name an older build let
+   * through. Only a USER: a role's members keep what they saved, since this
+   * command has no list of them to clear.
    *
    * Refuses the everyone role, whose id is the guild id: it would restrict the
    * whole server, and Discord's role picker offers it, so it is one click away
@@ -1036,6 +1063,43 @@ export class GuildSettingsService {
   }
 
   /**
+   * Takes every user and role off one feature. `/restrict clear`.
+   *
+   * **The way out of a list nobody can pick from.** `remove` needs the person or
+   * role in Discord's picker, and neither a member who has left the server nor a
+   * deleted role can be picked, but both still count toward the caps. A list that
+   * fills with them could otherwise never take another name.
+   *
+   * Takes the two lists this build reads and nothing else: a field it cannot read
+   * is a newer build's, and stays for the same reason an edit leaves it. Never
+   * refuses, and reports a nothing-to-do as success.
+   */
+  clearCommandRestrictions(guildId: string, feature: CommandFeature): Promise<RestrictionResult> {
+    return this.deps.guilds.mergeSettings(guildId, (existing) => {
+      const current = copyMap((existing?.settings ?? {})[SETTINGS_KEYS.commandAccess]);
+      const entry = copyMap(current[feature]);
+      let removed = 0;
+      for (const field of ['users', 'roles'] as const) {
+        if (!Array.isArray(entry[field])) continue;
+        removed += readIds(entry[field]).length;
+        delete entry[field];
+      }
+      const changed = removed > 0;
+      return {
+        // Nothing readable to take off leaves the stored value as it is, even if
+        // a list of ids this build cannot read was sitting there.
+        ...(changed ? storeEntry(current, feature, entry) : { patch: {}, remove: [] }),
+        result: {
+          ok: true,
+          message: restrictClearedMessage(feature, { removed }),
+          changed,
+          nicknameCleared: false,
+        },
+      };
+    });
+  }
+
+  /**
    * One edit of the restriction map, under the row lock.
    *
    * **`mergeSettings`, not `updateSettings`, for the reason `setControlPanelEntry`
@@ -1048,9 +1112,11 @@ export class GuildSettingsService {
    * copied whole, values and all (golden rule 3): a feature id this build does not
    * know, a field a newer build added to an entry and an element of a list this
    * build cannot read all survive another admin's edit on an older instance.
-   * `Object.fromEntries` rather than assigning into a literal, because a stored
-   * `__proto__` key is reachable through `/import` and an assignment would invoke
-   * the prototype setter and drop the entry.
+   *
+   * **An `add` onto a shape this build cannot read is refused, not rewritten.** A
+   * map, an entry or a list that is there and is not the shape this build writes
+   * can only have come from a newer build, and replacing it with this build's
+   * would destroy what that build stored. A `remove` has nothing to take off it.
    *
    * A list that empties is removed from its entry, an entry that empties is
    * removed from the map, and the key is removed once nothing is left, so "nobody
@@ -1077,6 +1143,18 @@ export class GuildSettingsService {
       const present = list.includes(target.id);
 
       if (op === 'add' && !present) {
+        // Absent and null are nothing stored. Anything else that is not the shape
+        // this build writes is somebody else's data, at the level the write would
+        // replace.
+        const absent = (value: unknown): boolean => value === undefined || value === null;
+        const stored = settings[SETTINGS_KEYS.commandAccess];
+        if (
+          !(absent(stored) || isMap(stored)) ||
+          !(absent(current[feature]) || isMap(current[feature])) ||
+          !(absent(entry[field]) || Array.isArray(entry[field]))
+        ) {
+          return { patch: {}, result: refused(RESTRICT_REFUSALS.unreadable(feature)) };
+        }
         const held = (key: 'users' | 'roles'): number => readIds(entry[key]).length;
         if (target.kind === 'user' && held('users') >= MAX_RESTRICTED_USERS) {
           return { patch: {}, result: refused(RESTRICT_REFUSALS.tooManyUsers(feature)) };
@@ -1096,15 +1174,12 @@ export class GuildSettingsService {
       if (op === 'remove') list = list.filter((id) => id !== target.id);
 
       const changed = op === 'add' ? !present : present;
-      const patch: Record<string, unknown> = {};
-      const remove: string[] = [];
+      let patch: Record<string, unknown> = {};
+      let remove: string[] = [];
       if (changed) {
         if (list.length > 0) entry[field] = list;
         else delete entry[field];
-        if (Object.keys(entry).length > 0) current[feature] = entry;
-        else delete current[feature];
-        if (Object.keys(current).length > 0) patch[SETTINGS_KEYS.commandAccess] = current;
-        else remove.push(SETTINGS_KEYS.commandAccess);
+        ({ patch, remove } = storeEntry(current, feature, entry));
       }
 
       let nicknameCleared = false;

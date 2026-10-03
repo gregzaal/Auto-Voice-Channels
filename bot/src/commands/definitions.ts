@@ -10,7 +10,11 @@ import {
 } from 'discord.js';
 import type { Logger } from '@avc/core';
 import { MAX_USER_LIMIT } from '../features/voice/index.js';
-import { AVAILABLE_FEATURES, FEATURE_LABELS } from '../features/voice/commandAccess.js';
+import {
+  AVAILABLE_FEATURES,
+  FEATURE_LABELS,
+  RESTRICT_ENFORCED,
+} from '../features/voice/commandAccess.js';
 
 /**
  * Slash-command surface. A hybrid: direct commands for
@@ -27,6 +31,12 @@ export interface CommandBuildOptions {
    * sees a command that could only apologise.
    */
   includeAssistant?: boolean;
+  /**
+   * Include `/restrict`. Defaults to `RESTRICT_ENFORCED`, which is false until a
+   * guard reads the restrictions, so a build whose guard has not landed never
+   * lists a command that promises what nothing does. Tests pass it explicitly.
+   */
+  includeRestrict?: boolean;
 }
 
 export function buildCommandDefinitions(
@@ -56,7 +66,7 @@ export function buildCommandDefinitions(
       PermissionFlagsBits.ManageGuild,
     ) as SlashCommandBuilder;
 
-  /** `/restrict add` and `remove` take the same two options, so they are built once. */
+  /** `/restrict add`, `remove` and `clear` take the same feature, and the first two the same who. */
   const restrictFeatureOption = (o: SlashCommandStringOption): SlashCommandStringOption =>
     o
       .setName('feature')
@@ -251,7 +261,11 @@ export function buildCommandDefinitions(
      * DEFAULT, and the in-code gate is also what keeps a role that Server Settings
      * > Integrations re-opened it to from rewriting who may use a room command.
      * The feature choices are `AVAILABLE_FEATURES`, so a feature whose command
-     * does not exist yet cannot be offered.
+     * does not exist yet cannot be offered. `clear` is the way out of a list that
+     * has filled with people who left and roles that were deleted, which `remove`
+     * cannot name because Discord's picker cannot offer them.
+     *
+     * Not registered until `RESTRICT_ENFORCED`: see the filter below.
      */
     adminOnly(
       new SlashCommandBuilder()
@@ -270,6 +284,12 @@ export function buildCommandDefinitions(
             .setDescription('Let a person or a role use a room command again.')
             .addStringOption(restrictFeatureOption)
             .addMentionableOption(restrictWhoOption),
+        )
+        .addSubcommand((s) =>
+          s
+            .setName('clear')
+            .setDescription('Let everyone use a room command again.')
+            .addStringOption(restrictFeatureOption),
         )
         .addSubcommand((s) =>
           s.setName('list').setDescription('See who is restricted from which room commands.'),
@@ -331,7 +351,11 @@ export function buildCommandDefinitions(
     );
   }
 
-  return commands.map((c) => c.toJSON());
+  // `/restrict` is built above so its shape is tested, and left out of what is
+  // registered until a guard reads the map. Its replies tell an admin a member
+  // "can no longer use" something, which no code makes true yet.
+  const includeRestrict = options.includeRestrict ?? RESTRICT_ENFORCED;
+  return commands.filter((c) => includeRestrict || c.name !== 'restrict').map((c) => c.toJSON());
 }
 
 /**

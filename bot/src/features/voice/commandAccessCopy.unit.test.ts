@@ -10,6 +10,7 @@ import {
   RESTRICT_REFUSALS,
   renderRestrictionList,
   restrictAddedMessage,
+  restrictClearedMessage,
   restrictMention,
   restrictRemovedMessage,
 } from './commandAccessCopy.js';
@@ -46,7 +47,12 @@ function everyReply(): string[] {
       for (const was of [false, true])
         replies.push(restrictRemovedMessage(target, feature, { was }));
     }
-    replies.push(RESTRICT_REFUSALS.tooManyUsers(feature), RESTRICT_REFUSALS.tooManyRoles(feature));
+    for (const removed of [0, 1, 7]) replies.push(restrictClearedMessage(feature, { removed }));
+    replies.push(
+      RESTRICT_REFUSALS.tooManyUsers(feature),
+      RESTRICT_REFUSALS.tooManyRoles(feature),
+      RESTRICT_REFUSALS.unreadable(feature),
+    );
   }
   replies.push(
     RESTRICT_REFUSALS.everyone,
@@ -136,6 +142,16 @@ describe('restrictAddedMessage', () => {
     }
   });
 
+  /** A repeat that removed a name did change something, so it cannot say it did not. */
+  it('does not say "nothing changed" in the same breath as a removed nickname', () => {
+    expect(restrictAddedMessage(USER, 'nick', { already: true, nicknameCleared: true })).toBe(
+      '<@111111111111111111> is already restricted from **Nickname**. Their saved nickname was removed.',
+    );
+    expect(restrictAddedMessage(USER, 'nick', { already: true, nicknameCleared: false })).toBe(
+      '<@111111111111111111> is already restricted from **Nickname**, so nothing changed.',
+    );
+  });
+
   it('does not mention a nickname when none was removed', () => {
     const text = restrictAddedMessage(USER, 'nick', { already: false, nicknameCleared: false });
     expect(text).not.toContain('nickname');
@@ -156,6 +172,23 @@ describe('restrictRemovedMessage', () => {
   });
 });
 
+describe('restrictClearedMessage', () => {
+  it('says how many restrictions came off and that everyone can use it again', () => {
+    expect(restrictClearedMessage('rename', { removed: 1 })).toBe(
+      'Removed 1 restriction on **Name**. Everyone can use it again.',
+    );
+    expect(restrictClearedMessage('rename', { removed: 7 })).toBe(
+      'Removed 7 restrictions on **Name**. Everyone can use it again.',
+    );
+  });
+
+  it('says there was nothing to clear', () => {
+    expect(restrictClearedMessage('limit', { removed: 0 })).toBe(
+      'Nobody was restricted from **Size**, so nothing changed.',
+    );
+  });
+});
+
 describe('the refusals', () => {
   it('say why, and what to do instead', () => {
     expect(RESTRICT_REFUSALS.everyone).toContain('everyone role');
@@ -168,6 +201,23 @@ describe('the refusals', () => {
     expect(RESTRICT_REFUSALS.tooMany).toContain('150 restrictions');
   });
 
+  /**
+   * A full list can be full of people who left and roles that were deleted, which
+   * Discord's picker cannot offer to `remove`, so a refusal that said only "remove
+   * someone" would send the admin to something that cannot work.
+   */
+  it('name /restrict clear as the way out of a full list', () => {
+    expect(RESTRICT_REFUSALS.tooManyUsers('rename')).toContain('/restrict clear');
+    expect(RESTRICT_REFUSALS.tooManyRoles('rename')).toContain('/restrict clear');
+    expect(RESTRICT_REFUSALS.tooMany).toContain('/restrict clear');
+  });
+
+  it('say a list of a shape this version cannot change was left alone', () => {
+    expect(RESTRICT_REFUSALS.unreadable('rename')).toBe(
+      'The saved restrictions for **Name** are in a form this version of AVC cannot change, so nothing was changed.',
+    );
+  });
+
   it('name the target as a mention, which nobody is pinged by', () => {
     expect(RESTRICT_REFUSALS.bot(USER)).toContain('<@111111111111111111>');
     expect(RESTRICT_REFUSALS.manager(ROLE)).toContain('<@&333333333333333333>');
@@ -175,6 +225,15 @@ describe('the refusals', () => {
 });
 
 describe('renderRestrictionList', () => {
+  /** The lists name who is DENIED, so a heading about who "can use" reads as the opposite. */
+  it('is headed by what the lists are, who is restricted, and never by who can use', () => {
+    for (const access of [{}, fullAccess()]) {
+      const first = renderRestrictionList(access).split('\n')[0];
+      expect(first).toBe('**Restricted from room commands**');
+    }
+    expect(renderRestrictionList({})).not.toContain('Who can use');
+  });
+
   it('says nobody is restricted for every feature when nothing is stored', () => {
     const text = renderRestrictionList({});
     for (const label of ['Private and Public', 'Size', 'Name', 'Transfer', 'Nickname']) {

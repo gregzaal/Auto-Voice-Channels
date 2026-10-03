@@ -194,7 +194,6 @@ import {
   RESTRICT_NOTE,
   RESTRICT_REFUSALS,
   renderRestrictionList,
-  restrictMention,
 } from '../features/voice/commandAccessCopy.js';
 import {
   buildAppearanceModal,
@@ -430,11 +429,11 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   function allowedWhileExpired(interaction: Interaction): boolean {
     if (interaction.isChatInputCommand()) {
       /**
-       * `/restrict list` and `remove` stay open and `add` is refused, which is
-       * `/botprofile`'s resets and sets over again: the hard gate stops writes
-       * and destroys nothing, so a gated admin can still see who is restricted
-       * and lift a restriction, and cannot put a new one up. Decided here and not
-       * in the list below because it is the subcommand that differs.
+       * `/restrict list`, `remove` and `clear` stay open and `add` is refused,
+       * which is `/botprofile`'s resets and sets over again: the hard gate stops
+       * writes and destroys nothing, so a gated admin can still see who is
+       * restricted and lift a restriction, and cannot put a new one up. Decided
+       * here and not in the list below because it is the subcommand that differs.
        */
       if (interaction.commandName === 'restrict') {
         return interaction.options.getSubcommand(false) !== 'add';
@@ -1205,7 +1204,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   // -- /restrict ------------------------------------------------------------
 
   /**
-   * `/restrict add`, `remove` and `list`: who may not use which room command.
+   * `/restrict add`, `remove`, `clear` and `list`: who may not use which room
+   * command.
    *
    * **Re-gated in code, not only by `default_member_permissions`.** That default
    * is a DEFAULT: a server admin can re-open any command to any role in Server
@@ -1221,6 +1221,12 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
    * reply for that reason: it spends rename budget, and an admin should not wait
    * on it or be told it failed when the restriction itself landed.
    *
+   * **The write has landed by the time the reply is sent, and the reply can
+   * still throw.** The write waits its turn in the guild's queue and the
+   * interaction token lasts three seconds, so a busy guild can expire it. The
+   * audit line is therefore posted BEFORE the reply, and the re-render runs in a
+   * `finally`, so neither is lost with the reply.
+   *
    * This only edits the map. Enforcing it is the guard's job, not this command's.
    */
   async function handleRestrict(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -1234,7 +1240,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       );
       return replyRestrict(interaction, renderRestrictionList(access));
     }
-    if (sub !== 'add' && sub !== 'remove') {
+    if (sub !== 'add' && sub !== 'remove' && sub !== 'clear') {
       await interaction.reply({ content: 'Unknown command.', ephemeral: true });
       return;
     }
@@ -1248,6 +1254,29 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         formatResult({ ok: false, message: RESTRICT_REFUSALS.unknownFeature }),
       );
     }
+
+    /**
+     * The audit trail, in the server's own `/logging` channel and only for a
+     * change that happened. Deliberately not an `ops_audit` row: that table is
+     * operator-facing and retained, and its one customer-written row is the
+     * import snapshot, so a member id from here would be a new kind of thing in it.
+     *
+     * **It names the admin and the feature, not the person or role.** The log
+     * channel is read by whoever the admin chose, often more people than the
+     * admins, and `/restrict list` already tells an admin who is restricted.
+     */
+    const audit = (line: string): void => deps.serverLog?.(guildId, 1, line);
+    const label = FEATURE_LABELS[feature];
+    const admin = `<@${interaction.user.id}>`;
+
+    if (sub === 'clear') {
+      const cleared = await run(guildId, 'cmd:restrict:clear', () =>
+        deps.settings.clearCommandRestrictions(guildId, feature),
+      );
+      if (cleared.changed) audit(`🔓 ${admin} lifted every restriction on **${label}**.`);
+      return replyRestrict(interaction, formatResult(cleared));
+    }
+
     const picked = pickedWho(interaction);
     if (!picked) {
       return replyRestrict(
@@ -1281,39 +1310,33 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         ? deps.settings.addCommandRestriction(guildId, feature, target)
         : deps.settings.removeCommandRestriction(guildId, feature, target),
     );
-    // The note rides on a successful add only: it is what an admin should hear
-    // before relying on a rule, and a refusal put nothing in place to rely on.
-    await replyRestrict(
-      interaction,
-      sub === 'add' && res.ok ? `${formatResult(res)}\n\n${RESTRICT_NOTE}` : formatResult(res),
-    );
-
-    /**
-     * The audit trail, in the server's own `/logging` channel and only for a
-     * change that happened. Deliberately not an `ops_audit` row: that table is
-     * operator-facing and retained, and its one customer-written row is the
-     * import snapshot, so a member id from here would be a new kind of thing in it.
-     */
-    if (res.changed) {
-      const label = FEATURE_LABELS[feature];
-      const who = restrictMention(target);
-      deps.serverLog?.(
-        guildId,
-        1,
+    // A repeat that still removed a saved nickname changed stored data, so it is
+    // logged too, as the same line.
+    if (res.changed || res.nicknameCleared) {
+      audit(
         sub === 'add'
-          ? `🔒 <@${interaction.user.id}> restricted ${who} from **${label}**.`
-          : `🔓 <@${interaction.user.id}> lifted the **${label}** restriction on ${who}.`,
+          ? `🔒 ${admin} added a restriction on **${label}**.`
+          : `🔓 ${admin} lifted a restriction on **${label}**.`,
       );
     }
-    if (res.nicknameCleared) {
-      // `/nick` re-renders the caller's rooms so `@@owner@@` picks up the change,
-      // and this removes a nickname, so the same rooms need the same re-render.
-      try {
-        await run(guildId, 'cmd:restrict:render', () =>
-          deps.feature.rerenderByOwner(guildId, target.id),
-        );
-      } catch (err) {
-        deps.logger.warn({ err, guildId }, 'could not re-render rooms after removing a nickname');
+    try {
+      // The note rides on a successful add only: it is what an admin should hear
+      // before relying on a rule, and a refusal put nothing in place to rely on.
+      await replyRestrict(
+        interaction,
+        sub === 'add' && res.ok ? `${formatResult(res)}\n\n${RESTRICT_NOTE}` : formatResult(res),
+      );
+    } finally {
+      if (res.nicknameCleared) {
+        // `/nick` re-renders the caller's rooms so `@@owner@@` picks up the change,
+        // and this removes a nickname, so the same rooms need the same re-render.
+        try {
+          await run(guildId, 'cmd:restrict:render', () =>
+            deps.feature.rerenderByOwner(guildId, target.id),
+          );
+        } catch (err) {
+          deps.logger.warn({ err, guildId }, 'could not re-render rooms after removing a nickname');
+        }
       }
     }
   }

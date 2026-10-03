@@ -737,6 +737,62 @@ describe('GuildSettingsService (integration)', () => {
       });
     });
 
+    /**
+     * A list full of people who left and roles that were deleted cannot be edited
+     * through the picker, so `clear` is the way out, and it has to leave the room
+     * for the next add and the rest of the blob alone.
+     */
+    it('clears one feature, leaves the rest of the blob, and frees the list for a new add', async () => {
+      await guilds.updateSettings(SERVER, { general: 'Voice rooms' });
+      for (let n = 0; n < 50; n++) await settings.addCommandRestriction(SERVER, 'rename', user(n));
+      await settings.addCommandRestriction(SERVER, 'limit', user(60));
+      expect((await settings.addCommandRestriction(SERVER, 'rename', user(70))).ok).toBe(false);
+
+      const cleared = await settings.clearCommandRestrictions(SERVER, 'rename');
+
+      expect(cleared).toMatchObject({ ok: true, changed: true });
+      expect(cleared.message).toContain('Removed 50 restrictions');
+      const row = await guilds.ensure(SERVER);
+      expect(row.settings.command_access).toEqual({ limit: { users: [user(60).id] } });
+      expect(row.settings.general).toBe('Voice rooms');
+      expect((await settings.addCommandRestriction(SERVER, 'rename', user(70))).ok).toBe(true);
+    });
+
+    it('takes the key off the blob when a clear leaves nothing', async () => {
+      await settings.addCommandRestriction(SERVER, 'rename', user(1));
+      await settings.clearCommandRestrictions(SERVER, 'rename');
+      expect((await guilds.ensure(SERVER)).settings).not.toHaveProperty('command_access');
+    });
+
+    it('does not lose a restriction added while another admin clears a different feature', async () => {
+      await settings.addCommandRestriction(SERVER, 'rename', user(1));
+      await Promise.all([
+        settings.clearCommandRestrictions(SERVER, 'rename'),
+        settings.addCommandRestriction(SERVER, 'limit', user(2)),
+        settings.addCommandRestriction(SERVER, 'nick', user(3)),
+      ]);
+      const access = await settings.getCommandAccess(SERVER);
+      expect(access.rename).toBeUndefined();
+      expect(access.limit?.users).toEqual([user(2).id]);
+      expect(access.nick?.users).toEqual([user(3).id]);
+    });
+
+    /**
+     * A shape this build does not write can only be a newer build's. Refused with
+     * nothing written, against the real jsonb round trip and not only a fake.
+     */
+    it('refuses an add onto a list of a shape it cannot read, and leaves it as it was', async () => {
+      const newer = { [user(9).id]: 1700000000 };
+      await guilds.updateSettings(SERVER, { command_access: { rename: { users: newer } } });
+
+      const result = await settings.addCommandRestriction(SERVER, 'rename', user(1));
+
+      expect(result).toMatchObject({ ok: false, changed: false });
+      expect((await guilds.ensure(SERVER)).settings.command_access).toEqual({
+        rename: { users: newer },
+      });
+    });
+
     it('writes a guild with no row yet', async () => {
       const result = await settings.addCommandRestriction('999999999999999999', 'limit', user(1));
       expect(result.ok).toBe(true);

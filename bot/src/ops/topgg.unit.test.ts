@@ -200,10 +200,13 @@ describe('toTopggCommands', () => {
    * proved against the real definition rather than only against a hand-written one.
    */
   it('maps /restrict: its subcommands, its mentionable and its choices', () => {
-    const restrict = toTopggCommands(buildCommandDefinitions()).find((c) => c.name === 'restrict');
+    const restrict = toTopggCommands(buildCommandDefinitions({ includeRestrict: true })).find(
+      (c) => c.name === 'restrict',
+    );
     expect(restrict?.options?.map((o) => [o.name, o.type])).toEqual([
       ['add', 'sub_command'],
       ['remove', 'sub_command'],
+      ['clear', 'sub_command'],
       ['list', 'sub_command'],
     ]);
     const add = restrict?.options?.[0];
@@ -218,7 +221,10 @@ describe('toTopggCommands', () => {
       'transfer',
       'nick',
     ]);
-    expect(restrict?.options?.[2]?.options).toBeUndefined();
+    expect(restrict?.options?.[2]?.options?.map((o) => [o.name, o.type, o.required])).toEqual([
+      ['feature', 'string', true],
+    ]);
+    expect(restrict?.options?.[3]?.options).toBeUndefined();
   });
 });
 

@@ -15,6 +15,7 @@ import {
   mayUse,
   PANEL_ACTION_FEATURE,
   readCommandAccess,
+  RESTRICT_ENFORCED,
   type CommandAccess,
   type CommandCaller,
 } from './commandAccess.js';
@@ -97,7 +98,48 @@ describe('the feature list', () => {
     expect(FEATURE_COVERS.rename).toContain('template editor');
     expect(FEATURE_COVERS.rename).toContain('voice status');
     expect(FEATURE_COVERS.privacy).toContain('stays open to everyone');
-    expect(FEATURE_COVERS.limit).toContain('stays open to everyone');
+    // Not "removing a limit": `/limit 0` and the Size button's modal remove one
+    // too and are the restricted paths. Only `/unlimit` is the open one.
+    expect(FEATURE_COVERS.limit).toContain('The /unlimit command stays open to everyone');
+    expect(FEATURE_COVERS.limit.toLowerCase()).not.toContain('removing a limit');
+  });
+
+  /**
+   * Offering a feature that no command or panel action maps to would let an admin
+   * restrict nothing and be told they had. The ids are pinned above, and this is
+   * what makes a new one fail here and not in a customer's server.
+   */
+  it('offers only a feature a command maps to, and a panel action too where there is a button', () => {
+    // Nickname is a command with no panel button, so it is the one that has no action.
+    const noPanelButton: readonly string[] = ['nick'];
+    for (const feature of AVAILABLE_FEATURES) {
+      expect(Object.values(COMMAND_FEATURE), feature).toContain(feature);
+      if (noPanelButton.includes(feature)) continue;
+      expect(Object.values(PANEL_ACTION_FEATURE), feature).toContain(feature);
+    }
+  });
+});
+
+/**
+ * `/restrict` tells an admin a member "can no longer use" something, so it is not
+ * registered until a guard stands behind that.
+ */
+describe('registering /restrict', () => {
+  const names = (options?: { includeRestrict?: boolean }): string[] =>
+    buildCommandDefinitions(options).map((d) => d.name);
+
+  it('follows RESTRICT_ENFORCED by default', () => {
+    expect(names().includes('restrict')).toBe(RESTRICT_ENFORCED);
+  });
+
+  it('can be asked for explicitly either way', () => {
+    expect(names({ includeRestrict: true })).toContain('restrict');
+    expect(names({ includeRestrict: false })).not.toContain('restrict');
+  });
+
+  it('leaves every other command alone', () => {
+    const without = names({ includeRestrict: false });
+    expect(names({ includeRestrict: true }).filter((n) => n !== 'restrict')).toEqual(without);
   });
 });
 
@@ -226,14 +268,15 @@ describe('which panel actions a rule can stop', () => {
 
 describe('readCommandAccess', () => {
   it('reads nobody denied from a blob with no key', () => {
-    expect(readCommandAccess({})).toEqual({});
-    expect(readCommandAccess({ command_access: undefined })).toEqual({});
+    expect(readCommandAccess({}, GUILD)).toEqual({});
+    expect(readCommandAccess({ command_access: undefined }, GUILD)).toEqual({});
   });
 
   it('reads the users and roles of each feature', () => {
     expect(
       readCommandAccess(
         settingsOf({ rename: { users: [USER], roles: [ROLE] }, nick: { users: [OTHER] } }),
+        GUILD,
       ),
     ).toEqual({
       rename: { users: [USER], roles: [ROLE] },
@@ -242,7 +285,10 @@ describe('readCommandAccess', () => {
   });
 
   it('keeps the order stored and removes a repeat', () => {
-    const read = readCommandAccess(settingsOf({ rename: { users: [OTHER, USER, OTHER, USER] } }));
+    const read = readCommandAccess(
+      settingsOf({ rename: { users: [OTHER, USER, OTHER, USER] } }),
+      GUILD,
+    );
     expect(read.rename?.users).toEqual([OTHER, USER]);
   });
 
@@ -254,12 +300,13 @@ describe('readCommandAccess', () => {
         claim: { users: [USER] },
         rename: { users: [OTHER] },
       }),
+      GUILD,
     );
     expect(Object.keys(read)).toEqual(['rename']);
   });
 
   it('reads a feature reserved for a later command, which nothing enforces yet', () => {
-    expect(readCommandAccess(settingsOf({ hide: { roles: [ROLE] } }))).toEqual({
+    expect(readCommandAccess(settingsOf({ hide: { roles: [ROLE] } }), GUILD)).toEqual({
       hide: { users: [], roles: [ROLE] },
     });
   });
@@ -269,6 +316,7 @@ describe('readCommandAccess', () => {
       settingsOf({
         rename: { users: [USER, 'not-an-id', 42, null, {}, '12', `${USER}\n`, `${USER}1234567`] },
       }),
+      GUILD,
     );
     expect(read.rename?.users).toEqual([USER]);
   });
@@ -284,26 +332,27 @@ describe('readCommandAccess', () => {
         nick: { users: 'nope', roles: { [ROLE]: true } },
         access: { users: [USER] },
       }),
+      GUILD,
     );
     expect(read).toEqual({ access: { users: [USER], roles: [] } });
   });
 
   it('reads nothing from a value that is not a map at all', () => {
     for (const value of ['rename', 7, true, ['rename'], null]) {
-      expect(readCommandAccess(settingsOf(value)), String(value)).toEqual({});
+      expect(readCommandAccess(settingsOf(value), GUILD), String(value)).toEqual({});
     }
   });
 
   /** An entry with nothing in it is absent, so it never shows as a restriction. */
   it('treats an entry with no users and no roles as absent', () => {
-    expect(readCommandAccess(settingsOf({ rename: {}, nick: { users: [], roles: [] } }))).toEqual(
-      {},
-    );
+    expect(
+      readCommandAccess(settingsOf({ rename: {}, nick: { users: [], roles: [] } }), GUILD),
+    ).toEqual({});
   });
 
   it('does not read a feature off the prototype', () => {
     const inherited = Object.create({ rename: { users: [USER] } });
-    expect(readCommandAccess({ command_access: inherited })).toEqual({});
+    expect(readCommandAccess({ command_access: inherited }, GUILD)).toEqual({});
   });
 
   /**
@@ -314,8 +363,8 @@ describe('readCommandAccess', () => {
   it('returns fresh objects every call, never the stored ones', () => {
     const stored = { rename: { users: [USER], roles: [ROLE] } };
     const settings = settingsOf(stored);
-    const first = readCommandAccess(settings);
-    const second = readCommandAccess(settings);
+    const first = readCommandAccess(settings, GUILD);
+    const second = readCommandAccess(settings, GUILD);
 
     expect(first).not.toBe(second);
     expect(first.rename).not.toBe(second.rename);
@@ -327,7 +376,7 @@ describe('readCommandAccess', () => {
     first.rename!.roles.length = 0;
     delete first.rename;
     expect(stored).toEqual({ rename: { users: [USER], roles: [ROLE] } });
-    expect(readCommandAccess(settings).rename).toEqual({ users: [USER], roles: [ROLE] });
+    expect(readCommandAccess(settings, GUILD).rename).toEqual({ users: [USER], roles: [ROLE] });
   });
 });
 
@@ -404,18 +453,35 @@ describe('mayUse', () => {
   });
 
   /**
-   * `@everyone` is a role whose id is the guild id. The writer and the importer
-   * refuse to store it, and a caller strips it from its role list, so a stored
-   * one (a hand edit) matches nobody.
+   * `@everyone` is a role whose id is the guild id, and `GuildMember.roles.cache`
+   * lists it for every member. The writer and the importer refuse to store it, and
+   * the READER drops it, so even a value put in the database by hand cannot deny
+   * the whole server, whatever role list the caller passes.
    */
-  it('does not deny a caller over a stored @everyone rule, because a caller strips that role', () => {
-    const everyone: CommandAccess = { rename: { users: [], roles: [GUILD] } };
-    expect(mayUse('rename', caller({ roleIds: [] }), everyone)).toBe(true);
+  it('does not deny a caller over a stored @everyone rule, even one that lists the guild id', () => {
+    const read = readCommandAccess(settingsOf({ rename: { roles: [GUILD] } }), GUILD);
+    expect(read).toEqual({});
+    expect(mayUse('rename', caller({ roleIds: [GUILD] }), read)).toBe(true);
+    expect(mayUse('rename', caller({ roleIds: [GUILD, ROLE] }), read)).toBe(true);
+  });
+
+  it('keeps the real roles beside a stored @everyone rule', () => {
+    const read = readCommandAccess(settingsOf({ rename: { roles: [GUILD, ROLE] } }), GUILD);
+    expect(read).toEqual({ rename: { users: [], roles: [ROLE] } });
+    expect(mayUse('rename', caller({ userId: OTHER, roleIds: [GUILD, ROLE] }), read)).toBe(false);
+    expect(mayUse('rename', caller({ userId: OTHER, roleIds: [GUILD] }), read)).toBe(true);
+  });
+
+  /** Another server's id is just an id here: only THIS guild's is `@everyone`. */
+  it('drops only this guild id from the roles', () => {
+    const read = readCommandAccess(settingsOf({ rename: { roles: [OTHER_ROLE] } }), GUILD);
+    expect(read.rename?.roles).toEqual([OTHER_ROLE]);
   });
 
   it('works on what the reader returns', () => {
     const read = readCommandAccess(
       settingsOf({ rename: { users: [USER] }, limit: { roles: [ROLE] } }),
+      GUILD,
     );
     expect(mayUse('rename', caller(), read)).toBe(false);
     expect(mayUse('limit', caller({ userId: OTHER, roleIds: [ROLE] }), read)).toBe(false);

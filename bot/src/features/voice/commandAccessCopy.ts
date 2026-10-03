@@ -37,17 +37,33 @@ export const RESTRICT_NOTE =
 
 const label = (feature: CommandFeature): string => `**${FEATURE_LABELS[feature]}**`;
 
-/** What a successful `add` says. `already` is a repeat, which changes nothing. */
+/**
+ * What a successful `add` says. `already` is a repeat, which changes nothing
+ * except that it still removes a saved nickname an older build let through, and
+ * then "so nothing changed" would be untrue in the same sentence.
+ */
 export function restrictAddedMessage(
   target: RestrictTarget,
   feature: CommandFeature,
   opts: { already: boolean; nicknameCleared: boolean },
 ): string {
   const who = restrictMention(target);
-  const lead = opts.already
-    ? `${who} is already restricted from ${label(feature)}, so nothing changed.`
-    : `${who} can no longer use ${label(feature)}. That covers ${FEATURE_COVERS[feature]}.`;
+  if (opts.already) {
+    const lead = `${who} is already restricted from ${label(feature)}`;
+    return opts.nicknameCleared
+      ? `${lead}. Their saved nickname was removed.`
+      : `${lead}, so nothing changed.`;
+  }
+  const lead = `${who} can no longer use ${label(feature)}. That covers ${FEATURE_COVERS[feature]}.`;
   return opts.nicknameCleared ? `${lead} Their saved nickname was removed.` : lead;
+}
+
+/** What a successful `clear` says. `removed` is how many restrictions it took off. */
+export function restrictClearedMessage(feature: CommandFeature, opts: { removed: number }): string {
+  if (opts.removed === 0)
+    return `Nobody was restricted from ${label(feature)}, so nothing changed.`;
+  const count = opts.removed === 1 ? '1 restriction' : `${opts.removed} restrictions`;
+  return `Removed ${count} on ${label(feature)}. Everyone can use it again.`;
 }
 
 /** What a successful `remove` says. `was` is whether there was anything to remove. */
@@ -77,13 +93,24 @@ export const RESTRICT_REFUSALS = {
   manager: (target: RestrictTarget): string =>
     `${restrictMention(target)} has the Manage Channels or Administrator permission, so a restriction would do nothing. ` +
     'People with either can always use every room command.',
+  /**
+   * The three full-list refusals name `/restrict clear` because a list can fill
+   * with people who have left the server and roles that were deleted, and neither
+   * can be picked again for `remove`.
+   */
   tooManyUsers: (feature: CommandFeature): string =>
     `${label(feature)} already restricts ${MAX_RESTRICTED_USERS} people, which is the most one feature can hold. ` +
-    'Remove someone before adding another.',
+    'Remove someone before adding another, or use /restrict clear to start its list again.',
   tooManyRoles: (feature: CommandFeature): string =>
     `${label(feature)} already restricts ${MAX_RESTRICTED_ROLES} roles, which is the most one feature can hold. ` +
-    'Remove a role before adding another.',
-  tooMany: `This server already has ${MAX_RESTRICTIONS} restrictions, which is the most it can hold. Remove some before adding more.`,
+    'Remove a role before adding another, or use /restrict clear to start its list again.',
+  tooMany: `This server already has ${MAX_RESTRICTIONS} restrictions, which is the most it can hold. Remove some before adding more, or use /restrict clear on a command to start its list again.`,
+  /**
+   * A list whose stored shape this version cannot change, which only a newer
+   * version writes. Refused rather than rewritten, so that version's data survives.
+   */
+  unreadable: (feature: CommandFeature): string =>
+    `The saved restrictions for ${label(feature)} are in a form this version of AVC cannot change, so nothing was changed.`,
 } as const;
 
 /** Most people and roles shown under one feature before the rest are counted. */
@@ -102,7 +129,9 @@ const LIST_CAP = 8;
  * leaves room for the two lines at the bottom that an admin must not miss.
  */
 export function renderRestrictionList(access: CommandAccess): string {
-  const lines = ['**Who can use room commands**'];
+  // Headed by what the lists ARE: they name who is denied, and a heading that
+  // reads "who can use" would be taken for the opposite.
+  const lines = ['**Restricted from room commands**'];
   for (const feature of AVAILABLE_FEATURES) {
     const denied = access[feature];
     const entries: string[] = [

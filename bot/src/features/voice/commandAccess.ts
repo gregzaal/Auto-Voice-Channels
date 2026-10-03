@@ -14,8 +14,10 @@ import { isSnowflake, SETTINGS_KEYS } from './guildSettings.js';
  * **Every failure direction is fail open**, on purpose. A role that was deleted
  * stops matching anybody, a rule this build cannot read is ignored, and the
  * `@everyone` role (whose id is the guild id) is refused at the writer and the
- * importer. The alternative failure, a rule that locks the people it was never
- * meant to, is the one an admin cannot diagnose from inside Discord.
+ * importer and dropped again by the reader, so even a value put in the database
+ * by hand cannot match every member. The alternative failure, a rule that locks
+ * the people it was never meant to, is the one an admin cannot diagnose from
+ * inside Discord.
  *
  * **Members who can manage channels are never restricted.** Manage Channels or
  * Administrator already lets them rename any room, so a rule could not stop
@@ -23,7 +25,8 @@ import { isSnowflake, SETTINGS_KEYS } from './guildSettings.js';
  * never lock themselves out.
  *
  * **Undo directions are never restricted.** Opening a room again, removing a
- * limit and (later) showing a room or removing a saved member must always work:
+ * limit with `/unlimit` and (later) showing a room or removing a saved member
+ * must always work:
  * a creator channel whose rooms start private has to leave its owner a way to
  * open one, and a saved list is something a member must be able to erase.
  */
@@ -52,6 +55,20 @@ export const COMMAND_FEATURES = [
 ] as const;
 
 export type CommandFeature = (typeof COMMAND_FEATURES)[number];
+
+/**
+ * Whether anything reads the restrictions yet, which decides whether `/restrict`
+ * is registered.
+ *
+ * **Flip this in the commit that makes the guard read the map, and not before.**
+ * `/restrict` tells an admin a member "can no longer use" something, and until a
+ * guard stands behind that it is a claim the code contradicts, in a command
+ * Discord would list for every server the day this build boots. The command and
+ * its handler exist and are tested, and `buildCommandDefinitions` takes an
+ * explicit `includeRestrict` for those tests, so the one thing this holds back is
+ * the registration.
+ */
+export const RESTRICT_ENFORCED = false;
 
 /**
  * The features `/restrict` offers today.
@@ -102,7 +119,7 @@ export const FEATURE_COVERS: Record<CommandFeature, string> = {
   privacy:
     'the /private command and the Private button. Opening a room again stays open to everyone',
   hide: 'the /hide command and the Hide button. Showing a room again stays open to everyone',
-  limit: 'the /limit command and the Size button. Removing a limit stays open to everyone',
+  limit: 'the /limit command and the Size button. The /unlimit command stays open to everyone',
   rename:
     'the /name command, the Name button, the template editor for their own room and the voice status',
   transfer: 'the /transfer command and the Transfer button',
@@ -216,12 +233,21 @@ export function readIds(value: unknown): string[] {
  * an id that is not a snowflake are skipped, so the rest of the map still holds:
  * losing every restriction over one bad entry would be worse than ignoring it.
  *
+ * **The guild id is dropped from every role list, and that is why this takes it.**
+ * The `@everyone` role's id IS the guild id, and `GuildMember.roles.cache`
+ * includes it for every member, so a stored one would deny the whole server. The
+ * writer and importer refuse to store it, and this makes the reader the one place
+ * that does not depend on them or on every caller stripping it from `roleIds`.
+ *
  * The returned object, its entries and their arrays are all fresh on every call.
  * `SettingsCache` serves the same row object to every caller on the instance, so
  * returning anything stored by reference would let one caller's mutation corrupt
  * every other read in the process with no write behind it.
  */
-export function readCommandAccess(settings: Record<string, unknown>): CommandAccess {
+export function readCommandAccess(
+  settings: Record<string, unknown>,
+  guildId: string,
+): CommandAccess {
   const access: CommandAccess = {};
   const raw = settings[SETTINGS_KEYS.commandAccess];
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return access;
@@ -230,7 +256,7 @@ export function readCommandAccess(settings: Record<string, unknown>): CommandAcc
     const entry = (raw as Record<string, unknown>)[feature];
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue;
     const users = readIds((entry as { users?: unknown }).users);
-    const roles = readIds((entry as { roles?: unknown }).roles);
+    const roles = readIds((entry as { roles?: unknown }).roles).filter((id) => id !== guildId);
     if (users.length + roles.length > 0) access[feature] = { users, roles };
   }
   return access;
@@ -240,10 +266,8 @@ export function readCommandAccess(settings: Record<string, unknown>): CommandAcc
 export interface CommandCaller {
   userId: string;
   /**
-   * The caller's role ids, WITHOUT the guild id. `@everyone` is a role whose id is
-   * the guild id, and a caller that left it in would match a stored `@everyone`
-   * rule that the writer and importer refuse to store, so stripping it is the
-   * caller's half of the contract.
+   * The caller's role ids. May include the guild id, which is `@everyone`:
+   * {@link readCommandAccess} never returns it as a denied role, so it cannot match.
    */
   roleIds: readonly string[];
   /** Manage Channels or Administrator, which no rule can restrict. */

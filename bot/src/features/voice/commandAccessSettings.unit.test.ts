@@ -89,7 +89,7 @@ describe('addCommandRestriction', () => {
   it('reads back through the same reader the guard will use', async () => {
     const { service, stored } = makeService();
     await service.addCommandRestriction(GUILD, 'transfer', user(USER));
-    expect(readCommandAccess(stored())).toEqual({ transfer: { users: [USER], roles: [] } });
+    expect(readCommandAccess(stored(), GUILD)).toEqual({ transfer: { users: [USER], roles: [] } });
   });
 
   it('says what the restriction covers', async () => {
@@ -161,7 +161,7 @@ describe('addCommandRestriction', () => {
       const almost = ids(1, MAX_RESTRICTED_USERS - 1);
       const { service, stored } = makeService({ command_access: { rename: { users: almost } } });
       expect((await service.addCommandRestriction(GUILD, 'rename', user(USER))).ok).toBe(true);
-      expect(readCommandAccess(stored()).rename?.users).toHaveLength(MAX_RESTRICTED_USERS);
+      expect(readCommandAccess(stored(), GUILD).rename?.users).toHaveLength(MAX_RESTRICTED_USERS);
     });
 
     it('refuses the 26th role of a feature, and still takes a user', async () => {
@@ -248,6 +248,79 @@ describe('addCommandRestriction', () => {
       expect(stored().command_access).toEqual({ ...others, rename: { users: [USER] } });
     });
 
+    /**
+     * A shape this build does not write can only have come from a newer build, and
+     * rewriting it would destroy what that build stored. So an add onto one is
+     * refused with nothing written, and the other list of the same entry is not
+     * the one in the way.
+     */
+    describe('a shape it cannot read', () => {
+      const newer = { [OTHER]: 1700000000 };
+
+      it('refuses to add a user to a list that is not a list, and writes nothing', async () => {
+        const { service, writes, stored } = makeService({
+          command_access: { rename: { users: newer } },
+        });
+        const result = await service.addCommandRestriction(GUILD, 'rename', user(USER));
+        expect(result).toMatchObject({ ok: false, changed: false, nicknameCleared: false });
+        expect(result.message).toContain('cannot change');
+        expect(writes).toEqual([{ patch: {}, remove: [] }]);
+        expect(stored().command_access).toEqual({ rename: { users: newer } });
+      });
+
+      it('refuses to add to an entry that is not a map', async () => {
+        for (const entry of ['nope', ['nope'], 7, true]) {
+          const { service, writes } = makeService({ command_access: { rename: entry } });
+          const result = await service.addCommandRestriction(GUILD, 'rename', user(USER));
+          expect(result.ok, JSON.stringify(entry)).toBe(false);
+          expect(writes[0]!.patch).toEqual({});
+        }
+      });
+
+      it('refuses to add when the whole stored value is not a map', async () => {
+        for (const stored of ['nope', ['rename'], 7, true]) {
+          const { service, writes } = makeService({ command_access: stored });
+          const result = await service.addCommandRestriction(GUILD, 'rename', user(USER));
+          expect(result.ok, JSON.stringify(stored)).toBe(false);
+          expect(writes[0]!.patch).toEqual({});
+        }
+      });
+
+      /** Null is the same as nothing stored, which is what a cleared key can look like. */
+      it('treats null as nothing stored, at each level', async () => {
+        for (const stored of [null, { rename: null }, { rename: { users: null } }]) {
+          const { service } = makeService({ command_access: stored });
+          const result = await service.addCommandRestriction(GUILD, 'rename', user(USER));
+          expect(result.ok, JSON.stringify(stored)).toBe(true);
+        }
+      });
+
+      it('does not refuse a role because the users of the same entry are unreadable', async () => {
+        const { service, stored } = makeService({ command_access: { rename: { users: newer } } });
+        const result = await service.addCommandRestriction(GUILD, 'rename', role(ROLE));
+        expect(result.ok).toBe(true);
+        expect(stored().command_access).toEqual({ rename: { users: newer, roles: [ROLE] } });
+      });
+
+      it('does not refuse another feature because one entry is unreadable', async () => {
+        const { service, stored } = makeService({ command_access: { nick: 'unreadable' } });
+        const result = await service.addCommandRestriction(GUILD, 'rename', user(USER));
+        expect(result.ok).toBe(true);
+        expect(stored().command_access).toEqual({ nick: 'unreadable', rename: { users: [USER] } });
+      });
+
+      it('has nothing to remove from it, and leaves it alone', async () => {
+        const { service, writes } = makeService({ command_access: { rename: { users: newer } } });
+        const result = await service.removeCommandRestriction(GUILD, 'rename', user(OTHER));
+        expect(result).toMatchObject({ ok: true, changed: false });
+        expect(writes[0]).toEqual({ patch: {}, remove: [] });
+      });
+    });
+
+    /**
+     * Only a value put in the database by hand can hold a `__proto__` key: the
+     * importer's wire schema drops it. So this pins the precaution, not a path.
+     */
     it('keeps a __proto__ entry as an entry, not as a prototype', async () => {
       const raw = JSON.parse(`{"__proto__":{"users":["${OTHER}"]}}`);
       const { service, writes } = makeService({ command_access: raw });
@@ -433,7 +506,105 @@ describe('removeCommandRestriction', () => {
   });
 });
 
+/**
+ * The way out of a list that has filled with people who left and roles that were
+ * deleted: neither can be picked for `remove`, and both count toward the caps.
+ */
+describe('clearCommandRestrictions', () => {
+  it('takes every user and role off the one feature, and says how many', async () => {
+    const { service, stored } = makeService({
+      command_access: {
+        rename: { users: [USER, OTHER], roles: [ROLE] },
+        limit: { users: [USER] },
+      },
+    });
+    const result = await service.clearCommandRestrictions(GUILD, 'rename');
+    expect(result).toMatchObject({ ok: true, changed: true, nicknameCleared: false });
+    expect(result.message).toBe('Removed 3 restrictions on **Name**. Everyone can use it again.');
+    expect(stored().command_access).toEqual({ limit: { users: [USER] } });
+  });
+
+  it('takes the key off the blob when it was the last feature', async () => {
+    const { service, stored, writes } = makeService({
+      command_access: { rename: { users: [USER] } },
+    });
+    await service.clearCommandRestrictions(GUILD, 'rename');
+    expect(stored()).not.toHaveProperty('command_access');
+    expect(writes[0]).toEqual({ patch: {}, remove: ['command_access'] });
+  });
+
+  it('is what lets a full list take another name', async () => {
+    const full = ids(1, MAX_RESTRICTED_USERS);
+    const { service } = makeService({ command_access: { rename: { users: full } } });
+    expect((await service.addCommandRestriction(GUILD, 'rename', user(USER))).ok).toBe(false);
+    await service.clearCommandRestrictions(GUILD, 'rename');
+    expect((await service.addCommandRestriction(GUILD, 'rename', user(USER))).ok).toBe(true);
+  });
+
+  it('keeps a field a newer build put on the entry, and a feature this build does not know', async () => {
+    const { service, stored } = makeService({
+      command_access: {
+        rename: { users: [USER], until: 1800000000 },
+        somethingnew: { users: [OTHER] },
+      },
+    });
+    await service.clearCommandRestrictions(GUILD, 'rename');
+    expect(stored().command_access).toEqual({
+      rename: { until: 1800000000 },
+      somethingnew: { users: [OTHER] },
+    });
+  });
+
+  it('reports success and writes nothing when the feature had nobody on it', async () => {
+    const { service, writes } = makeService({ command_access: { limit: { users: [USER] } } });
+    const result = await service.clearCommandRestrictions(GUILD, 'rename');
+    expect(result).toMatchObject({ ok: true, changed: false });
+    expect(result.message).toBe('Nobody was restricted from **Name**, so nothing changed.');
+    expect(writes[0]).toEqual({ patch: {}, remove: [] });
+  });
+
+  it('reports the same for a guild with nothing stored, or no row yet', async () => {
+    for (const make of [() => makeService(), () => makeService({}, { noRow: true })]) {
+      const { service, writes } = make();
+      const result = await service.clearCommandRestrictions(GUILD, 'nick');
+      expect(result).toMatchObject({ ok: true, changed: false });
+      expect(writes[0]).toEqual({ patch: {}, remove: [] });
+    }
+  });
+
+  /** A list this build cannot read is a newer build's, so a clear leaves it where it is. */
+  it('leaves a list it cannot read alone', async () => {
+    const newer = { [OTHER]: 1700000000 };
+    const { service, stored, writes } = makeService({
+      command_access: { rename: { users: newer, roles: [ROLE] } },
+    });
+    const result = await service.clearCommandRestrictions(GUILD, 'rename');
+    expect(result.message).toContain('Removed 1 restriction on **Name**');
+    expect(stored().command_access).toEqual({ rename: { users: newer } });
+    expect(writes).toHaveLength(1);
+  });
+
+  it('never touches the nickname map', async () => {
+    const { service, writes } = makeService({
+      command_access: { nick: { users: [USER] } },
+      custom_nicks: { [OTHER]: 'Sam' },
+    });
+    await service.clearCommandRestrictions(GUILD, 'nick');
+    expect(writes[0]!.patch.custom_nicks).toBeUndefined();
+  });
+});
+
 describe('getCommandAccess', () => {
+  /** The reader is given the guild id so a stored `@everyone` can never deny a member. */
+  it('drops the guild id from the roles it reads', async () => {
+    const { service } = makeService({
+      command_access: { rename: { users: [USER], roles: [GUILD, ROLE] } },
+    });
+    expect(await service.getCommandAccess(GUILD)).toEqual({
+      rename: { users: [USER], roles: [ROLE] },
+    });
+  });
+
   it('reads what is stored, as fresh objects', async () => {
     const stored = { rename: { users: [USER], roles: [ROLE] } };
     const { service } = makeService({ command_access: stored });

@@ -4,7 +4,9 @@ import { AVAILABLE_FEATURES } from '../features/voice/commandAccess.js';
 import { buildCommandDefinitions } from './definitions.js';
 
 describe('buildCommandDefinitions', () => {
-  const defs = buildCommandDefinitions();
+  // `/restrict` is asked for explicitly: it is not registered by default until a
+  // guard reads the restrictions (see `RESTRICT_ENFORCED`), and its shape is tested.
+  const defs = buildCommandDefinitions({ includeRestrict: true });
   const byName = new Map(defs.map((d) => [d.name, d]));
 
   it('exposes the full hybrid command surface', () => {
@@ -161,12 +163,24 @@ describe('buildCommandDefinitions', () => {
     const STRING = 3;
     const MENTIONABLE = 9;
 
-    it('has an add, a remove and a list subcommand, and nothing else', () => {
+    it('has an add, a remove, a clear and a list subcommand, and nothing else', () => {
       expect(subs.map((s) => [s.name, s.type])).toEqual([
         ['add', SUBCOMMAND],
         ['remove', SUBCOMMAND],
+        ['clear', SUBCOMMAND],
         ['list', SUBCOMMAND],
       ]);
+    });
+
+    /**
+     * `clear` is the way out of a list full of members who left and roles that were
+     * deleted, which the picker cannot offer to `remove`, so it must not ask who.
+     */
+    it('takes only a required feature on clear, the same one add takes', () => {
+      expect(sub('clear').options, 'clear').toMatchObject([
+        { name: 'feature', type: STRING, required: true },
+      ]);
+      expect(sub('clear').options).toEqual([sub('add').options![0]]);
     });
 
     it('takes a required feature and a required person or role on add and remove', () => {

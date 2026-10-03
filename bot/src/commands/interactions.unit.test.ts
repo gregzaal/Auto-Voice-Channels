@@ -3729,14 +3729,55 @@ describe('registerInteractionHandler (/restrict)', () => {
     expect(content).toContain(`<@&${ROLE}> can no longer use **Size**`);
   });
 
-  it('posts a line to the server log naming the admin, the person and the feature', async () => {
+  /**
+   * The log channel is read by whoever the admin chose, so the line names the admin
+   * and the feature, as planned, and never the person or the role: `/restrict list`
+   * is where an admin looks that up.
+   */
+  it('posts a line to the server log naming the admin and the feature, and nobody else', async () => {
+    for (const [initial, opts] of [
+      [{}, addUser('transfer')],
+      [{}, addRole('transfer', ROLE)],
+    ] as const) {
+      const e = restrictEnv(initial);
+      await restrict(e, opts);
+      expect(e.serverLog).toHaveBeenCalledOnce();
+      expect(e.serverLog).toHaveBeenCalledWith(
+        GUILD,
+        1,
+        `🔒 <@${ADMIN}> added a restriction on **Transfer**.`,
+      );
+      const line = e.serverLog.mock.calls[0]![2] as string;
+      expect(line).not.toContain(TARGET);
+      expect(line).not.toContain(ROLE);
+      dispose?.();
+    }
+  });
+
+  /**
+   * The write has landed by the time the reply goes out, and the reply can still
+   * throw: the write waits in the guild's queue and the token lasts three seconds.
+   * The audit line is the only record of who changed the rules, so it must not
+   * depend on the reply.
+   */
+  it('posts the audit line even when the reply throws, since the write already landed', async () => {
     const e = restrictEnv();
-    await restrict(e, addUser('transfer'));
-    expect(e.serverLog).toHaveBeenCalledOnce();
+    const fake = fakeInteraction({
+      kind: 'command',
+      commandName: 'restrict',
+      guildId: GUILD,
+      manageChannels: true,
+      ...addUser('transfer'),
+    });
+    fake.reply.mockRejectedValue(new Error('Unknown interaction'));
+    e.env.client.emit('interactionCreate', fake.interaction);
+    await flush();
+
+    expect(e.blob().command_access).toEqual({ transfer: { users: [TARGET] } });
     expect(e.serverLog).toHaveBeenCalledWith(
       GUILD,
       1,
-      `🔒 <@${ADMIN}> restricted <@${TARGET}> from **Transfer**.`,
+      `🔒 <@${ADMIN}> added a restriction on **Transfer**.`,
     );
   });
 
@@ -3845,8 +3886,9 @@ describe('registerInteractionHandler (/restrict)', () => {
       expect(e.serverLog).toHaveBeenCalledWith(
         GUILD,
         1,
-        `🔓 <@${ADMIN}> lifted the **Name** restriction on <@${TARGET}>.`,
+        `🔓 <@${ADMIN}> lifted a restriction on **Name**.`,
       );
+      expect(e.serverLog.mock.calls[0]![2]).not.toContain(TARGET);
     });
 
     it('takes the key off the blob when the last restriction goes', async () => {
@@ -3877,6 +3919,60 @@ describe('registerInteractionHandler (/restrict)', () => {
       const e = restrictEnv();
       await restrict(e, removeUser('rename'));
       expect(e.serverLog).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * The way out of a list that has filled with people who left and roles that were
+   * deleted: `remove` needs the picker, and the picker cannot offer either.
+   */
+  describe('clear', () => {
+    const clear = (feature: string) => ({ subcommand: 'clear', optionFeature: feature });
+    const stored = {
+      command_access: {
+        rename: { users: [TARGET, OTHER], roles: [ROLE] },
+        limit: { users: [TARGET] },
+      },
+    };
+
+    it('takes everyone off the one feature, says how many, and takes no who', async () => {
+      const e = restrictEnv(stored);
+      const { content, payload } = await restrict(e, clear('rename'));
+      expect(content).toBe('✅ Removed 3 restrictions on **Name**. Everyone can use it again.');
+      expect(e.blob().command_access).toEqual({ limit: { users: [TARGET] } });
+      expect(payload?.flags).toBe(EPHEMERAL);
+      expect(payload?.allowedMentions).toEqual({ parse: [] });
+    });
+
+    it('logs the admin and the feature, and not who was on the list', async () => {
+      const e = restrictEnv(stored);
+      await restrict(e, clear('rename'));
+      expect(e.serverLog).toHaveBeenCalledOnce();
+      expect(e.serverLog).toHaveBeenCalledWith(
+        GUILD,
+        1,
+        `🔓 <@${ADMIN}> lifted every restriction on **Name**.`,
+      );
+    });
+
+    it('reports success and logs nothing when the feature had nobody on it', async () => {
+      const e = restrictEnv(stored);
+      const { content } = await restrict(e, clear('transfer'));
+      expect(content).toBe('✅ Nobody was restricted from **Transfer**, so nothing changed.');
+      expect(e.serverLog).not.toHaveBeenCalled();
+      expect(e.blob()).toEqual(stored);
+    });
+
+    it('refuses anyone who cannot manage channels, and a feature it does not offer', async () => {
+      const denied = restrictEnv(stored);
+      const { content } = await restrict(denied, { ...clear('rename'), manageChannels: false });
+      expect(content).toContain('Manage Channels');
+      expect(denied.blob()).toEqual(stored);
+
+      const hand = restrictEnv(stored);
+      const refused = await restrict(hand, clear('hide'));
+      expect(refused.content).toContain('Pick one of the room commands from the list.');
+      expect(hand.blob()).toEqual(stored);
     });
   });
 
@@ -4005,6 +4101,46 @@ describe('registerInteractionHandler (/restrict)', () => {
       expect(e.env.reportError).not.toHaveBeenCalled();
     });
 
+    /**
+     * A repeat add that still removed a saved nickname changed stored data, so it
+     * is told so in one sentence that does not contradict itself, and it is logged.
+     */
+    it('says so, and logs it, on a repeat that still removed a saved nickname', async () => {
+      const e = restrictEnv({
+        command_access: { nick: { users: [TARGET] } },
+        custom_nicks: { [TARGET]: 'Kay' },
+      });
+      const { content } = await restrict(e, addUser('nick'));
+      expect(content).toContain(
+        `<@${TARGET}> is already restricted from **Nickname**. Their saved nickname was removed.`,
+      );
+      expect(content).not.toContain('nothing changed');
+      expect(e.blob().custom_nicks).toEqual({});
+      expect(e.serverLog).toHaveBeenCalledOnce();
+      expect(e.rerenderByOwner).toHaveBeenCalledWith(GUILD, TARGET);
+    });
+
+    /**
+     * The re-render is what makes the removed name stop showing in the person's
+     * rooms, and it follows the write, not the reply.
+     */
+    it('still re-renders their rooms when the reply throws', async () => {
+      const e = restrictEnv({ custom_nicks: { [TARGET]: 'Kay' } });
+      const fake = fakeInteraction({
+        kind: 'command',
+        commandName: 'restrict',
+        guildId: GUILD,
+        manageChannels: true,
+        ...addUser('nick'),
+      });
+      fake.reply.mockRejectedValue(new Error('Unknown interaction'));
+      e.env.client.emit('interactionCreate', fake.interaction);
+      await flush();
+
+      expect(e.blob().custom_nicks).toEqual({});
+      expect(e.rerenderByOwner).toHaveBeenCalledWith(GUILD, TARGET);
+    });
+
     it('does not re-render when there was no nickname to remove', async () => {
       const e = restrictEnv({ custom_nicks: { [OTHER]: 'Sam' } });
       await restrict(e, addUser('nick'));
@@ -4054,6 +4190,14 @@ describe('registerInteractionHandler (/restrict)', () => {
       expect(content).toBe(`✅ <@${TARGET}> can use **Name** again.`);
       expect(e.blob()).not.toHaveProperty('command_access');
     });
+
+    it('still clears, which is a removal too', async () => {
+      const e = restrictEnv({ command_access: { rename: { users: [TARGET] } } }, gated());
+      const { content } = await restrict(e, { subcommand: 'clear', optionFeature: 'rename' });
+      expect(content).not.toContain('auto-voice.io');
+      expect(content).toContain('Removed 1 restriction on **Name**');
+      expect(e.blob()).not.toHaveProperty('command_access');
+    });
   });
 
   /**
@@ -4080,18 +4224,34 @@ describe('registerInteractionHandler (/restrict)', () => {
       [stored, addUser('rename')],
       [stored, removeUser('rename')],
       [{}, removeUser('rename')],
+      [
+        { command_access: { rename: { roles: [ROLE] } } },
+        removeUser('rename', { role: { id: ROLE, permissions: '0' } }),
+      ],
+      [stored, { subcommand: 'clear', optionFeature: 'rename' }],
+      [{}, { subcommand: 'clear', optionFeature: 'rename' }],
+      [
+        { command_access: { nick: { users: [TARGET] } }, custom_nicks: { [TARGET]: 'Kay' } },
+        addUser('nick'),
+      ],
       [{}, { subcommand: 'list' }],
       [{ command_access: { rename: { users: [TARGET], roles: [ROLE] } } }, { subcommand: 'list' }],
       [{}, { ...addUser('rename'), manageChannels: false }],
     ];
     const replies: string[] = [];
+    const logLines: string[] = [];
     for (const [initial, opts] of scenarios) {
       const e = restrictEnv(initial);
       replies.push((await restrict(e, opts)).content);
+      logLines.push(...e.serverLog.mock.calls.map((call) => call[2] as string));
       dispose?.();
     }
     expect(replies.every((r) => r.length > 0)).toBe(true);
-    for (const text of replies) {
+    // Add, remove and clear, for a person and for a role: the lines go to a channel
+    // other people read, so they are held to the same rules as the replies.
+    expect(logLines.length).toBeGreaterThanOrEqual(8);
+    expect(new Set(logLines.map((l) => l.replace(/\*\*.*\*\*/, '**X**'))).size).toBe(3);
+    for (const text of [...replies, ...logLines]) {
       expect(text, 'no em or en dashes').not.toMatch(/[—–]/);
       expect(text, 'straight quotes only').not.toMatch(/[‘’“”]/);
       expect(text, 'no prose semicolons').not.toContain(';');
