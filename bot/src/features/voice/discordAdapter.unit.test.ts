@@ -2,9 +2,12 @@ import { DiscordAPIError, OverwriteType, PermissionFlagsBits } from 'discord.js'
 import type { Client, GuildMember, VoiceState } from 'discord.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  CHANNEL_OBFUSCATED,
+  ChannelObfuscatedError,
   DiscordVoiceActions,
   DiscordVoiceView,
   everyoneViewDenied,
+  isPermissionError,
   maskOverwrites,
   normalizeVoiceState,
   withBotAccess,
@@ -646,6 +649,66 @@ describe('DiscordVoiceActions.setPrivacy', () => {
     await expect(
       new DiscordVoiceActions(client).setPrivacy('g1', 'c1', true),
     ).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * Discord's CHANNEL_OBFUSCATED flag becomes mandatory on 2026-11-16: a channel the
+ * bot cannot View arrives named `___hidden___` with this flag set and a single
+ * `@everyone` View deny as its overwrites. Acting on it would target a name that
+ * is not real and merge an edit onto an overwrite cache that is a falsehood.
+ */
+describe('DiscordVoiceActions on an obfuscated channel', () => {
+  const obfuscated = (extra: Record<string, unknown> = {}) => ({
+    isVoiceBased: () => true,
+    flags: { bitfield: CHANNEL_OBFUSCATED },
+    name: '___hidden___',
+    guild: { roles: { everyone: { id: 'g1' } } },
+    ...extra,
+  });
+
+  it('counts as a permission error, so lost access is reported not retried', () => {
+    expect(isPermissionError(new ChannelObfuscatedError('c1'))).toBe(true);
+    expect(isPermissionError(new Error('anything else'))).toBe(false);
+  });
+
+  it('refuses to rename it and never calls setName', async () => {
+    const setName = vi.fn();
+    const actions = new DiscordVoiceActions(clientWith(obfuscated({ setName })));
+    await expect(actions.renameChannel('g1', 'c1', 'x')).rejects.toBeInstanceOf(
+      ChannelObfuscatedError,
+    );
+    expect(setName).not.toHaveBeenCalled();
+  });
+
+  it('refuses to edit its limit or its overwrites', async () => {
+    const edit = vi.fn();
+    const setUserLimit = vi.fn();
+    const channel = obfuscated({ permissionOverwrites: { edit }, setUserLimit });
+    const client = {
+      user: { id: BOT },
+      channels: { fetch: vi.fn().mockResolvedValue(channel) },
+    } as unknown as Client;
+    const actions = new DiscordVoiceActions(client);
+    await expect(actions.setUserLimit('g1', 'c1', 4)).rejects.toBeInstanceOf(
+      ChannelObfuscatedError,
+    );
+    await expect(actions.setPrivacy('g1', 'c1', true)).rejects.toBeInstanceOf(
+      ChannelObfuscatedError,
+    );
+    await expect(actions.setMemberConnect('g1', 'c1', 'u1', true)).rejects.toBeInstanceOf(
+      ChannelObfuscatedError,
+    );
+    expect(edit).not.toHaveBeenCalled();
+    expect(setUserLimit).not.toHaveBeenCalled();
+  });
+
+  it('leaves an ordinary channel alone', async () => {
+    const setName = vi.fn().mockResolvedValue(undefined);
+    const channel = { isVoiceBased: () => true, flags: { bitfield: 0 }, setName };
+    const actions = new DiscordVoiceActions(clientWith(channel));
+    await expect(actions.renameChannel('g1', 'c1', 'x')).resolves.toEqual({ rateLimited: false });
+    expect(setName).toHaveBeenCalledWith('x');
   });
 });
 

@@ -41,9 +41,44 @@ function isApiError(err: unknown, code: number): boolean {
   return err instanceof DiscordAPIError && err.code === code;
 }
 
+/**
+ * Discord's `CHANNEL_OBFUSCATED` channel flag (`1 << 17`), mandatory for every
+ * bot from 2026-11-16. The gateway still dispatches a channel the bot cannot
+ * View, but with its name replaced by `___hidden___`, this flag set, and its
+ * overwrites reduced to a single `@everyone` View deny. discord.js builds its
+ * overwrite cache from that payload, so the cache holds a falsehood about a
+ * channel we may still own, and an edit merged onto it would write the falsehood
+ * back. Declared here because the installed `discord-api-types` predates it.
+ */
+export const CHANNEL_OBFUSCATED = 1 << 17;
+
+/**
+ * Thrown instead of acting on a channel the bot can no longer see.
+ *
+ * Counts as a permission error ({@link isPermissionError}), so every existing
+ * recovery path applies unchanged: the room is recorded as a lost-access problem
+ * and given up on, rather than retried every sweep. It is deliberately NOT "the
+ * channel is gone", which is a different problem with a different fix.
+ */
+export class ChannelObfuscatedError extends Error {
+  constructor(readonly channelId: string) {
+    super(`channel ${channelId} is obfuscated: the bot can no longer view it`);
+    this.name = 'ChannelObfuscatedError';
+  }
+}
+
+/** Whether Discord is showing us only the obfuscated shell of this channel. */
+function isObfuscated(channel: { flags?: { bitfield: number } | null }): boolean {
+  return ((channel.flags?.bitfield ?? 0) & CHANNEL_OBFUSCATED) !== 0;
+}
+
 /** Whether `err` is a Discord permission/visibility failure (the bot lacks access). */
 export function isPermissionError(err: unknown): boolean {
-  return isApiError(err, MISSING_ACCESS) || isApiError(err, MISSING_PERMISSIONS);
+  return (
+    isApiError(err, MISSING_ACCESS) ||
+    isApiError(err, MISSING_PERMISSIONS) ||
+    err instanceof ChannelObfuscatedError
+  );
 }
 
 /**
@@ -714,6 +749,8 @@ export class DiscordVoiceActions implements VoiceActions {
       throw err;
     }
     if (!channel?.isVoiceBased()) return { rateLimited: false };
+    // Renaming the shell would target `___hidden___` and could never succeed.
+    if (isObfuscated(channel)) throw new ChannelObfuscatedError(channelId);
 
     // discord.js queues a rate-limited edit rather than throwing, which could
     // otherwise block the per-guild work queue for up to 10 minutes. Race the
@@ -761,7 +798,9 @@ export class DiscordVoiceActions implements VoiceActions {
   async setUserLimit(_guildId: string, channelId: string, limit: number): Promise<void> {
     try {
       const channel = await this.client.channels.fetch(channelId);
-      if (channel?.isVoiceBased()) await channel.setUserLimit(limit);
+      if (!channel?.isVoiceBased()) return;
+      if (isObfuscated(channel)) throw new ChannelObfuscatedError(channelId);
+      await channel.setUserLimit(limit);
     } catch (err) {
       if (isApiError(err, UNKNOWN_CHANNEL)) return;
       throw err;
@@ -772,6 +811,9 @@ export class DiscordVoiceActions implements VoiceActions {
     try {
       const channel = await this.client.channels.fetch(channelId);
       if (!channel?.isVoiceBased()) return;
+      // The overwrite cache of an obfuscated channel is a single `@everyone`
+      // View deny, and `edit` merges onto the cache before it PUTs.
+      if (isObfuscated(channel)) throw new ChannelObfuscatedError(channelId);
       const everyone = channel.guild.roles.everyone;
       if (isPrivate) {
         // Same lockout `withBotAccess` guards against at create time, reached
@@ -809,6 +851,7 @@ export class DiscordVoiceActions implements VoiceActions {
     try {
       const channel = await this.client.channels.fetch(channelId);
       if (!channel?.isVoiceBased()) return;
+      if (isObfuscated(channel)) throw new ChannelObfuscatedError(channelId);
       // Pass the overwrite type explicitly: with the user cache disabled,
       // discord.js can't resolve a bare member id to a User to infer the type
       // (it would throw InvalidType). Given the type, it uses the id directly.
