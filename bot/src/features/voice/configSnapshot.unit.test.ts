@@ -9,6 +9,7 @@ import {
   type GuildFacts,
   type ImportPlan,
   EXPORT_SETTINGS_KEYS,
+  primaryTemplateSchema,
 } from '@avc/core';
 import { buildExportFile, type BuildExportOptions } from './configSnapshot.js';
 
@@ -159,16 +160,10 @@ describe('buildExportFile', () => {
   it('emits every template field, using null for the ones the row omits', () => {
     const file = buildExportFile(configured(), options());
     const template = file.creator_channels[0]!.template;
-    expect(Object.keys(template).sort()).toEqual([
-      'above',
-      'defaultPrivate',
-      'inheritperms',
-      'limit',
-      'name',
-      'startAt',
-      'status',
-      'textChannel',
-    ]);
+    // Bound to the stored schema rather than hand copied, so the next field added to a
+    // creator channel's template cannot reach the database and miss the file: this is the
+    // one place the snapshot's own pick list is checked against it.
+    expect(Object.keys(template).sort()).toEqual(Object.keys(primaryTemplateSchema.shape).sort());
     // Stored row has no `status`, so the wire value is null, not `''`.
     expect(template.status).toBeNull();
     expect(template.inheritperms).toBeNull();
@@ -283,6 +278,27 @@ describe('the round trip', () => {
     expect(plan.settingsRemove.sort()).toEqual(['general', 'log_level', 'logging']);
     expect(plan.settingsPatch).toEqual({});
     expect(apply(after, plan).settings).toEqual({});
+  });
+
+  /**
+   * `defaultHidden` is the first template field to arrive after the file format shipped, and
+   * it travels beside `defaultPrivate`: a creator channel exported as hidden and imported
+   * into a wiped guild must come back hidden, not locked.
+   */
+  it('carries a hidden creator channel through the file and back', () => {
+    const before = configured();
+    before.creatorChannels[0]!.template = {
+      name: '@@game_name@@ ##',
+      defaultPrivate: true,
+      defaultHidden: true,
+    };
+    const file = buildExportFile(before, options());
+    expect(file.creator_channels[0]!.template).toMatchObject({
+      defaultPrivate: true,
+      defaultHidden: true,
+    });
+    const restored = apply(empty(), planFor(before, empty()));
+    expect(restored.creatorChannels[0]!.template).toEqual(before.creatorChannels[0]!.template);
   });
 
   it('survives two round trips unchanged', () => {

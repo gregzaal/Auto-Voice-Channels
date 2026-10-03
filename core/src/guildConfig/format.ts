@@ -207,6 +207,15 @@ export const exportedPrimaryTemplateSchema = z
     startAt: z.number().int().nullable(),
     above: z.boolean().nullable(),
     defaultPrivate: z.boolean().nullable(),
+    /**
+     * OPTIONAL as well as nullable, unlike the keys above, and every field added after
+     * them has to be. A key the file merely omits is a file written before the key shipped,
+     * which is every export and pre-import snapshot a previous release made, and a required
+     * key refuses all of them, naming a field the admin has never heard of. The snapshot is
+     * the documented undo, so that refusal lands on the one file somebody reaches for after
+     * a mistake. See `settingsReadSchema` for the same rule on the settings keys.
+     */
+    defaultHidden: z.boolean().nullable().optional(),
     inheritperms: z.string().nullable(),
     textChannel: z.boolean().nullable(),
   })

@@ -105,6 +105,7 @@ export function buildExportFile(
         startAt: pick(row.template, 'startAt'),
         above: pick(row.template, 'above'),
         defaultPrivate: pick(row.template, 'defaultPrivate'),
+        defaultHidden: pick(row.template, 'defaultHidden'),
         inheritperms: pick(row.template, 'inheritperms'),
         textChannel: pick(row.template, 'textChannel'),
         // Unknown keys carried through, for the rolling-deploy case above.
@@ -115,6 +116,7 @@ export function buildExportFile(
           'startAt',
           'above',
           'defaultPrivate',
+          'defaultHidden',
           'inheritperms',
           'textChannel',
         ]),

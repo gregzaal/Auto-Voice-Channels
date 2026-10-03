@@ -347,14 +347,18 @@ export interface ImportPlan {
 
 export type DiffResult = { ok: true; plan: ImportPlan } | { ok: false; refusals: ImportNote[] };
 
-/** Every field of `primaryTemplateSchema`. */
-const PRIMARY_FIELDS = [
+/**
+ * Every field of `primaryTemplateSchema`. Exported so a test can bind it to the schema:
+ * a field missing here is not carried by `/import` at all, and nothing else fails.
+ */
+export const PRIMARY_FIELDS = [
   'name',
   'status',
   'limit',
   'startAt',
   'above',
   'defaultPrivate',
+  'defaultHidden',
   'inheritperms',
   'textChannel',
 ] as const;
@@ -1555,6 +1559,7 @@ function validateTemplateField(
       return value < 0 || value > limits.startAt ? drop() : value;
     case 'above':
     case 'defaultPrivate':
+    case 'defaultHidden':
     case 'textChannel':
       return typeof value === 'boolean' ? value : drop();
     case 'inheritperms': {

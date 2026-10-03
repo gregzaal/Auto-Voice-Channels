@@ -7,6 +7,7 @@ import {
   exportedManagedTemplateSchema,
   exportedPrimaryTemplateSchema,
 } from './format.js';
+import { PRIMARY_FIELDS } from './import.js';
 
 /**
  * Binds the three stored jsonb schemas to the wire schemas mechanically, so
@@ -43,6 +44,50 @@ const NOT_CARRIED: Record<string, string> = {
 describe('the export format carries every stored field', () => {
   it('covers every field of a creator channel template', () => {
     expect(keysOf(exportedPrimaryTemplateSchema)).toEqual(keysOf(primaryTemplateSchema));
+  });
+
+  /**
+   * The third of the five places a creator channel template field has to be added, and the
+   * one nothing else checked. `PRIMARY_FIELDS` is the list `/import` writes from: a stored
+   * field missing there is simply never imported, and the file still round trips as if it
+   * were absent, so nothing fails and the setting is lost on every restore.
+   */
+  it('imports every field of a creator channel template, and no other', () => {
+    expect([...PRIMARY_FIELDS].sort()).toEqual(keysOf(primaryTemplateSchema));
+  });
+
+  /**
+   * The keys the first export format wrote, which are REQUIRED on the wire. Every key added
+   * since has to be optional there, because a file a previous release wrote (every export,
+   * and the pre-import snapshot that is the documented undo) does not have it, and a
+   * required key refuses the whole file. Written as the list of the old keys rather than the
+   * new ones so the next field added is held to the rule without editing this test.
+   */
+  const REQUIRED_SINCE_THE_FIRST_FORMAT = [
+    'above',
+    'defaultPrivate',
+    'inheritperms',
+    'limit',
+    'name',
+    'startAt',
+    'status',
+    'textChannel',
+  ];
+
+  it('refuses no file for lacking a creator channel template field added later', () => {
+    const shape = (
+      exportedPrimaryTemplateSchema as unknown as { shape: Record<string, z.ZodTypeAny> }
+    ).shape;
+    const later = Object.keys(shape).filter(
+      (key) => !REQUIRED_SINCE_THE_FIRST_FORMAT.includes(key),
+    );
+    expect(later.length).toBeGreaterThan(0);
+    for (const key of later) {
+      expect(
+        shape[key]!.safeParse(undefined).success,
+        `${key} is required on the wire, which refuses every file written before it existed`,
+      ).toBe(true);
+    }
   });
 
   it('covers every field of an adopted channel template', () => {

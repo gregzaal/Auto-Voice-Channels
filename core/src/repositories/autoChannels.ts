@@ -42,6 +42,19 @@ export const primaryTemplateSchema = z
      */
     defaultPrivate: z.boolean().optional(),
     /**
+     * Narrows `defaultPrivate` from locked to hidden: spawned secondaries are hidden from
+     * the channel list (`/hide`) instead of locked behind a "⇩ Join" channel. Toggled via
+     * `/alwayshidden` or the `/create` modal.
+     *
+     * **Only means anything beside `defaultPrivate: true`.** Hidden is a kind of private, so
+     * a creator channel is hidden by default only when both are set, and `defaultHidden`
+     * alone is the same nonsense shape as a hidden room whose `private` was dropped: it reads
+     * as public. Setting hidden writes `defaultPrivate: true` too, so an instance that
+     * predates this field still starts the room locked rather than public, and during a
+     * rolling deploy that is the closest thing it can do.
+     */
+    defaultHidden: z.boolean().optional(),
+    /**
      * Permission inheritance for spawned secondaries: `primary` (copy the primary
      * channel's overwrites), `category` (copy the primary's category), or a
      * specific channel id to copy. Unset → defaults to `primary` (the legacy
@@ -60,6 +73,24 @@ export const primaryTemplateSchema = z
   .passthrough();
 
 export type PrimaryTemplate = z.infer<typeof primaryTemplateSchema>;
+
+/** How a creator channel's new rooms start: open, locked behind a "⇩ Join" channel, or hidden. */
+export type StartMode = 'public' | 'locked' | 'hidden';
+
+/**
+ * How a creator channel's new rooms start, from its stored template.
+ *
+ * Hidden only when `defaultPrivate` AND `defaultHidden` are both set. `defaultHidden` on
+ * its own is a leftover, not an instruction (an instance that predates the field can
+ * toggle `defaultPrivate` off and leave it behind), and honouring it would hide rooms an
+ * admin switched back to public.
+ */
+export function startModeOf(
+  template: Pick<PrimaryTemplate, 'defaultPrivate' | 'defaultHidden'>,
+): StartMode {
+  if (template.defaultPrivate !== true) return 'public';
+  return template.defaultHidden === true ? 'hidden' : 'locked';
+}
 
 export const autoChannelRowSchema = z.object({
   channelId: z.string(),
@@ -230,6 +261,44 @@ export class AutoChannelRepository {
       )
       .returning({ channelId: autoChannels.channelId });
     return rows.map((r) => r.channelId);
+  }
+
+  /**
+   * Sets how a creator channel's new rooms start, leaving every other template field alone.
+   *
+   * One DB-side statement that writes `defaultPrivate` and `defaultHidden` together, for
+   * two reasons. {@link upsert} replaces `template` wholesale, so a toggle that read the
+   * row and wrote it back lost any `/template` edit that landed in between. And the pair
+   * has to move as one: a statement per key would leave a window where a reader sees
+   * hidden without private (which reads as public) or private left over from hidden.
+   *
+   * Public removes both keys rather than storing `false`, as `/alwaysprivate` always has,
+   * so a creator channel that was never changed stays lean. Locked drops `defaultHidden`
+   * and hidden sets both, because an instance that predates this field reads only
+   * `defaultPrivate` and must see a locked creator channel rather than a public one.
+   *
+   * Guild-bound like every other write here, and returns the row as stored afterwards, or
+   * `undefined` when this guild has no such creator channel on this fleet.
+   */
+  async setDefaultPrivacy(
+    guildId: string,
+    channelId: string,
+    mode: StartMode,
+  ): Promise<AutoChannelRow | undefined> {
+    const template =
+      mode === 'public'
+        ? sql`${autoChannels.template} - 'defaultPrivate' - 'defaultHidden'`
+        : mode === 'locked'
+          ? sql`(${autoChannels.template} - 'defaultHidden') || '{"defaultPrivate":true}'::jsonb`
+          : sql`${autoChannels.template} || '{"defaultPrivate":true,"defaultHidden":true}'::jsonb`;
+    const [row] = await this.db
+      .update(autoChannels)
+      .set({ template, updatedAt: new Date() })
+      .where(
+        this.scoped(and(eq(autoChannels.guildId, guildId), eq(autoChannels.channelId, channelId))),
+      )
+      .returning();
+    return row ? autoChannelRowSchema.parse(row) : undefined;
   }
 
   /** Count of primaries in a guild (cheap existence/aggregate check). */

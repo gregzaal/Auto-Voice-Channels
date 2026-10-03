@@ -187,6 +187,32 @@ describe('parseNativeFile', () => {
     expect(parseNativeFile(file).ok).toBe(true);
   });
 
+  /**
+   * The same rule for a creator channel's template, and the reason `defaultHidden` is
+   * optional on the wire while the keys before it are not. A file a previous release wrote
+   * (every export and every pre-import snapshot) has no such key, and refusing it would
+   * refuse the documented undo.
+   */
+  it('accepts a creator channel template written before defaultHidden existed', () => {
+    const fromPreviousRelease = {
+      name: 'Room ##',
+      status: null,
+      limit: null,
+      startAt: null,
+      above: null,
+      defaultPrivate: true,
+      inheritperms: null,
+      textChannel: null,
+    };
+    const file = nativeFile({
+      creator_channels: [
+        { channel_id: CREATOR, channel_name: null, template: fromPreviousRelease },
+      ],
+    });
+    const result = parseNativeFile(JSON.parse(JSON.stringify(file)));
+    expect(result.ok, result.ok ? '' : result.reason).toBe(true);
+  });
+
   /** A reason may name the path and the problem. It may never carry a value. */
   it('never puts a file value in the failure reason', () => {
     const file = nativeFile() as unknown as Record<string, Record<string, unknown>>;
@@ -737,6 +763,73 @@ describe('diffGuildConfig: creator channels', () => {
     expect(noteCodes(plan)).toContain('template_field_invalid');
   });
 
+  describe('defaultHidden', () => {
+    it('is carried beside defaultPrivate, and a re-import of the same file changes nothing', () => {
+      const file = nativeFile({
+        creator_channels: [creatorEntry({ defaultPrivate: true, defaultHidden: true })] as never,
+      });
+      const plan = planOf(file);
+      expect(plan.creatorWrites[0]?.template).toEqual({
+        name: 'Room ##',
+        limit: 4,
+        defaultPrivate: true,
+        defaultHidden: true,
+      });
+      const again = planOf(
+        file,
+        currentConfig({
+          creatorChannels: [{ channelId: CREATOR, template: plan.creatorWrites[0]!.template }],
+        }),
+      );
+      expect(again.creatorWrites).toEqual([]);
+      expect(again.changed).toBe(false);
+    });
+
+    it('is dropped with a note when it is not a boolean, and the rest of the template stays', () => {
+      const plan = planOf(
+        nativeFile({
+          creator_channels: [creatorEntry({ defaultPrivate: true, defaultHidden: 'yes' })] as never,
+        }),
+      );
+      expect(plan.creatorWrites[0]?.template).toEqual({
+        name: 'Room ##',
+        limit: 4,
+        defaultPrivate: true,
+      });
+      expect(plan.notes).toContainEqual(
+        expect.objectContaining({
+          code: 'template_field_invalid',
+          subject: `${CREATOR}.defaultHidden`,
+        }),
+      );
+    });
+
+    /** `null` on the wire means the key is absent from the stored blob, so it clears. */
+    it('is cleared by a null, which is how a file says the key is absent', () => {
+      const plan = planOf(
+        nativeFile({
+          creator_channels: [creatorEntry({ defaultPrivate: true, defaultHidden: null })] as never,
+        }),
+        currentConfig({
+          creatorChannels: [
+            {
+              channelId: CREATOR,
+              template: { name: 'Room ##', limit: 4, defaultPrivate: true, defaultHidden: true },
+            },
+          ],
+        }),
+      );
+      expect(plan.creatorWrites[0]?.template).toEqual({
+        name: 'Room ##',
+        limit: 4,
+        defaultPrivate: true,
+      });
+      expect(plan.creatorChanges[0]?.fields).toContainEqual(
+        expect.objectContaining({ field: 'defaultHidden', before: true, after: undefined }),
+      );
+    });
+  });
+
   it('drops an inheritperms id that does not resolve, and keeps the two keywords', () => {
     const bad = planOf(
       nativeFile({
@@ -812,6 +905,37 @@ describe('diffGuildConfig: legacy templates', () => {
    * silently clear the voice-status template and `/alwaysprivate` on every
    * creator channel the file names. Days later, with no way to tell why.
    */
+  it('leaves defaultHidden alone as well, because the legacy format cannot express it either', () => {
+    const incoming = fromLegacyPlan(
+      {
+        settings: {},
+        primaries: [{ channelId: CREATOR, template: { name: 'Legacy ##' } }],
+        droppedFields: [],
+        orphanedTextChannels: [],
+        orphanedRoles: [],
+      },
+      { wasMarkedLeft: false, filenameGuildId: GUILD },
+    );
+    const result = diffGuildConfig(
+      incoming,
+      currentConfig({
+        creatorChannels: [
+          {
+            channelId: CREATOR,
+            template: { name: 'Room ##', defaultPrivate: true, defaultHidden: true },
+          },
+        ],
+      }),
+      facts(),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.creatorWrites[0]?.template).toMatchObject({
+      defaultPrivate: true,
+      defaultHidden: true,
+    });
+  });
+
   it('leaves status and defaultPrivate alone, because the legacy format cannot express them', () => {
     const incoming = fromLegacyPlan(
       {
