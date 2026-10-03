@@ -20,6 +20,7 @@ import {
   PANEL_ACTION_FEATURE,
   readCommandAccess,
   RESTRICT_ENFORCED,
+  savedListsInert,
   type CommandAccess,
   type CommandCaller,
 } from './commandAccess.js';
@@ -600,5 +601,39 @@ describe('mayUse', () => {
     expect(mayUse('limit', caller({ userId: OTHER, roleIds: [ROLE] }), read)).toBe(false);
     expect(mayUse('limit', caller({ userId: OTHER }), read)).toBe(true);
     expect(mayUse('transfer', caller(), read)).toBe(true);
+  });
+});
+
+/**
+ * A restricted feature is inert for a denied member, saved data included. One predicate
+ * answers it for every place a saved list is applied, and what it cannot tell fails open.
+ */
+describe('savedListsInert', () => {
+  const access: CommandAccess = {
+    access: { users: [USER], roles: [ROLE] },
+    rename: { users: [OTHER], roles: [] },
+  };
+
+  it('is inert for a member the Saved lists rule names, by id or by role', () => {
+    expect(savedListsInert(access, caller())).toBe(true);
+    expect(savedListsInert(access, caller({ userId: OTHER, roleIds: [ROLE] }))).toBe(true);
+  });
+
+  it('is not inert for anybody else, or when no rule names the feature', () => {
+    expect(savedListsInert(access, caller({ userId: OTHER }))).toBe(false);
+    expect(savedListsInert(access, caller({ userId: OTHER, roleIds: [OTHER_ROLE] }))).toBe(false);
+    // A rule on another feature says nothing about this one.
+    expect(savedListsInert({ rename: { users: [USER], roles: [] } }, caller())).toBe(false);
+    expect(savedListsInert({}, caller())).toBe(false);
+  });
+
+  it('is not inert for a member who can manage channels, whom no rule can restrict', () => {
+    expect(savedListsInert(access, caller({ canManage: true }))).toBe(false);
+  });
+
+  /** A saved block protects the people it names, so the direction we cannot see applies it. */
+  it('is not inert when who they are could not be resolved', () => {
+    expect(savedListsInert(access, undefined)).toBe(false);
+    expect(savedListsInert({}, undefined)).toBe(false);
   });
 });

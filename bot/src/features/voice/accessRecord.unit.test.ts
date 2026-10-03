@@ -1,7 +1,14 @@
 import type { RoomAccess } from '@avc/core';
 import { describe, expect, it } from 'vitest';
 import type { AccessFacts } from './accessPlan.js';
-import { recordWithFacts, sameFacts, withMember, withoutMember } from './accessRecord.js';
+import {
+  recordWithFacts,
+  sameFacts,
+  withMember,
+  withoutMember,
+  withoutPending,
+  withPending,
+} from './accessRecord.js';
 
 const facts = (over: Partial<AccessFacts> = {}): AccessFacts => ({
   baseline: null,
@@ -159,5 +166,39 @@ describe('withoutMember', () => {
   it('undoes withMember', () => {
     const before = { creatorId: 'u1', admitted: ['a'] };
     expect(withoutMember(withMember(before, 'admitted', 'u9'), 'admitted', 'u9')).toEqual(before);
+  });
+});
+
+/**
+ * A queued exit is marked beside the facts and never inside them: a plan's merge must
+ * neither drop it nor write it, and only the write that finalises a change takes it off.
+ */
+describe('a pending exit', () => {
+  it('is added to a record, creating one when there is none, and replaces an earlier one', () => {
+    expect(withPending(null, 'public', 7)).toEqual({ pending: { mode: 'public', at: 7 } });
+    expect(withPending({ hidden: true, creatorId: 'u1' }, 'locked', 9)).toEqual({
+      hidden: true,
+      creatorId: 'u1',
+      pending: { mode: 'locked', at: 9 },
+    });
+    expect(withPending({ pending: { mode: 'locked', at: 1 } }, 'public', 2)).toEqual({
+      pending: { mode: 'public', at: 2 },
+    });
+  });
+
+  it('is carried through a plan, which neither writes nor drops it', () => {
+    const stored = { hidden: true, pending: { mode: 'locked' as const, at: 4 } };
+    expect(recordWithFacts(stored, facts({ hidden: true })).pending).toEqual(stored.pending);
+    expect(sameFacts(stored, facts({ hidden: true }))).toBe(true);
+  });
+
+  it('comes off without touching anything else, and is the same object when there is none', () => {
+    expect(
+      withoutPending({ hidden: true, creatorId: 'u1', pending: { mode: 'locked', at: 4 } }),
+    ).toEqual({ hidden: true, creatorId: 'u1' });
+    expect(withoutPending({ pending: { mode: 'public' } })).toEqual({});
+    const plain = { hidden: true };
+    expect(withoutPending(plain)).toBe(plain);
+    expect(withoutPending(null)).toBeNull();
   });
 });

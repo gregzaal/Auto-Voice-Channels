@@ -354,3 +354,26 @@ export function mayUse(
   if (denied.users.includes(caller.userId)) return false;
   return !caller.roleIds.some((roleId) => denied.roles.includes(roleId));
 }
+
+/**
+ * Whether a member's SAVED lists are inert: they are denied Saved lists, so what they
+ * saved applies to nothing until the rule is lifted.
+ *
+ * A restricted feature is inert for a denied member, saved data included, and this is the
+ * one rule every place that applies a saved list asks (a room being made, a sweep, a
+ * lock or a hide, a knock, the card's Block), so they cannot disagree. Inert is not
+ * erased: the rows stay, and the lists apply again the moment the rule goes.
+ *
+ * **`standing` is who the list's owner is right now, and `undefined` means it could not
+ * be resolved, which is NOT inert.** A cold cache or a member who has left says nothing
+ * about their roles, and a saved block is protection for the people it names, so the
+ * unknown direction keeps applying it: the same fail-open every other part of this file
+ * takes, with the saved list as the thing it protects. The cost is that a denied member
+ * whose standing the cache cannot show keeps their lists in force until it can.
+ */
+export function savedListsInert(
+  access: CommandAccess,
+  standing: CommandCaller | undefined,
+): boolean {
+  return standing !== undefined && !mayUse('access', standing, access);
+}

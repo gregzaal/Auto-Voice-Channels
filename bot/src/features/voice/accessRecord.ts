@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import type { RoomAccess } from '@avc/core';
-import type { AccessFacts } from './accessPlan.js';
+import type { AccessFacts, AccessMode } from './accessPlan.js';
 
 /**
  * The fields a plan decides, so a merge knows which keys of the stored record are
@@ -60,6 +60,28 @@ export function sameFacts(current: RoomAccess | null, facts: AccessFacts): boole
     if (value === false || (Array.isArray(value) && value.length === 0)) delete stored[key];
   }
   return isDeepStrictEqual(stored, recordWithFacts(current, facts));
+}
+
+/**
+ * The record with an exit marked as queued: the room is still recorded as the mode it is
+ * leaving, and `mode` is where a write Discord has only queued will take it. Written
+ * apart from the planner's facts (see {@link PLANNED}), so a plan never rebuilds it.
+ */
+export function withPending(current: RoomAccess | null, mode: AccessMode, at: number): RoomAccess {
+  return { ...(current ?? {}), pending: { mode, at } };
+}
+
+/**
+ * The record without its pending exit, because the change it described has been
+ * finalised or the room has been seen to be in that mode. The same object when there
+ * is none, so a caller can tell nothing changed.
+ */
+export function withoutPending(current: RoomAccess): RoomAccess;
+export function withoutPending(current: RoomAccess | null): RoomAccess | null;
+export function withoutPending(current: RoomAccess | null): RoomAccess | null {
+  if (!current || current.pending === undefined) return current;
+  const { pending: _pending, ...rest } = current;
+  return rest;
 }
 
 /** The member lists a caller adds to by hand. */
