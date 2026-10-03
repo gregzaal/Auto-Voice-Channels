@@ -46,6 +46,7 @@ export class RuntimeCreationGate implements CreationGate {
         companionTextDisabled: boolean;
         controlPanelDisabled: boolean;
         commandAccessDisabled: boolean;
+        roomAccessDisabled: boolean;
       }
     | undefined;
 
@@ -147,6 +148,26 @@ export class RuntimeCreationGate implements CreationGate {
     }
   }
 
+  /**
+   * The room access lever alone, for the commands that hide a room or save who may
+   * be let in, the knock card's Always allow and the code that applies a saved list.
+   * None of them is a room create, and none may spend a throttle slot to ask.
+   *
+   * Fails OPEN like the three above, and for their reason: a database blip must not
+   * quietly withdraw a feature that is on by default, so a failed read counts as NOT
+   * disabled. Shares the cached snapshot, so asking costs no extra query. This is NOT
+   * `deps.flags.getBool`, which is an uncached SELECT per call, and a command or a
+   * knock card can run in a busy room.
+   */
+  async roomAccessDisabled(): Promise<boolean> {
+    try {
+      return (await this.readFlags()).roomAccessDisabled;
+    } catch (err) {
+      this.opts.logger.warn({ err }, 'room access flag read failed; treating as enabled');
+      return false;
+    }
+  }
+
   private async readFlags(): Promise<{
     paused: boolean;
     limit: number;
@@ -154,6 +175,7 @@ export class RuntimeCreationGate implements CreationGate {
     companionTextDisabled: boolean;
     controlPanelDisabled: boolean;
     commandAccessDisabled: boolean;
+    roomAccessDisabled: boolean;
   }> {
     const now = Date.now();
     if (this.flagCache && now - this.flagCache.at < this.flagCacheMs) {
@@ -164,6 +186,7 @@ export class RuntimeCreationGate implements CreationGate {
         companionTextDisabled,
         controlPanelDisabled,
         commandAccessDisabled,
+        roomAccessDisabled,
       } = this.flagCache;
       return {
         paused,
@@ -172,6 +195,7 @@ export class RuntimeCreationGate implements CreationGate {
         companionTextDisabled,
         controlPanelDisabled,
         commandAccessDisabled,
+        roomAccessDisabled,
       };
     }
     const all = await this.opts.flags.getAll();
@@ -182,6 +206,7 @@ export class RuntimeCreationGate implements CreationGate {
     const companionTextDisabled = all[RUNTIME_FLAGS.COMPANION_TEXT_DISABLED] === true;
     const controlPanelDisabled = all[RUNTIME_FLAGS.CONTROL_PANEL_DISABLED] === true;
     const commandAccessDisabled = all[RUNTIME_FLAGS.COMMAND_ACCESS_DISABLED] === true;
+    const roomAccessDisabled = all[RUNTIME_FLAGS.ROOM_ACCESS_DISABLED] === true;
     this.flagCache = {
       at: now,
       paused,
@@ -190,6 +215,7 @@ export class RuntimeCreationGate implements CreationGate {
       companionTextDisabled,
       controlPanelDisabled,
       commandAccessDisabled,
+      roomAccessDisabled,
     };
     return {
       paused,
@@ -198,6 +224,7 @@ export class RuntimeCreationGate implements CreationGate {
       companionTextDisabled,
       controlPanelDisabled,
       commandAccessDisabled,
+      roomAccessDisabled,
     };
   }
 }

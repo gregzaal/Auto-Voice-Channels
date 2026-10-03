@@ -109,6 +109,17 @@ export interface DiagnosticsReport {
    * shards and so enforces nothing.
    */
   commandAccess?: { disabled: boolean };
+  /**
+   * Room access: hiding rooms and saved trusted and blocked lists. Only the lever,
+   * for the reason `commandAccess` gives, and because a refusal ("switched off for
+   * now") is seen from a member's side alone.
+   *
+   * `disabled` true means `/hide`, `/access trust|block|admit`, the knock card's
+   * Always allow and every application of a saved list are refusing on this fleet,
+   * while every undo still works. Per fleet, like the flag. Absent on an idling
+   * instance, which holds no shards and so serves no rooms.
+   */
+  roomAccess?: { disabled: boolean };
 }
 
 export interface HealthServerOptions {

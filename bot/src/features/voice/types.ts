@@ -47,6 +47,15 @@ export interface MemberFacts {
   guildOwner: boolean;
 }
 
+/** What {@link GuildVoiceView.botPermissionsIn} says of the bot's standing in a channel. */
+export interface BotChannelPermissions {
+  /**
+   * Whether the bot can edit the channel's permission overwrites (Manage Roles, which
+   * Discord calls Manage Permissions at channel level), as the cache resolves it.
+   */
+  manageRoles: boolean;
+}
+
 /** What {@link GuildVoiceView.botRoleAccess} says of a set of roles. */
 export interface BotRoleAccess {
   /** The bot's own managed role, whose overwrite is left exactly as it is, or null. */
@@ -143,6 +152,17 @@ export interface GuildVoiceView {
    * `accessPlan.ts`.
    */
   botRoleAccess?(guildId: string, roleIds: readonly string[]): BotRoleAccess | undefined;
+  /**
+   * What the bot itself may do in a channel, from the cache: today only whether it can
+   * edit the channel's overwrites. `undefined` when the channel or the bot's own member
+   * is not cached, which a caller reads as "cannot say" and so goes ahead.
+   *
+   * Optional and read like {@link memberFacts}. A refusal here is a preflight and not
+   * the authority (Discord is), so it is asked only before a change that would
+   * otherwise delete something before a write that was bound to fail, and it is never
+   * asked before an undo: a stale cache must not be able to stop somebody opening a room.
+   */
+  botPermissionsIn?(channelId: string): BotChannelPermissions | undefined;
   /**
    * Whether Discord has actually given us this guild's data, i.e. whether
    * {@link channelExists} means anything for it.

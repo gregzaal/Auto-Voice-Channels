@@ -26,6 +26,7 @@ import { recordWithFacts, sameFacts, withMember, withoutMember } from './accessR
 import { ChannelObfuscatedError, isPermissionError } from './discordAdapter.js';
 import { permissionProblemMessage, type PermissionProblemTracker } from './permissionProblems.js';
 import {
+  BLOCK_NOT_SAVED_PAUSED,
   ROOM_ACCESS_REPLIES as say,
   TOO_MANY_OVERWRITES,
   accessFailed,
@@ -38,6 +39,7 @@ import {
   hiddenMessage,
   lockedWithoutJoin,
   roleDefeatsHide,
+  savedNote,
   unhiddenMessage,
   unhiddenWithoutJoin,
   withSkipped,
@@ -87,6 +89,19 @@ export interface PrivacyServiceDeps {
   /** Where an access change the bot lacks the permission for is recorded. */
   permissionProblems?: PermissionProblemTracker;
   serverLog?: (guildId: string, level: 1 | 2 | 3, message: string) => void;
+  /**
+   * Whether `room_access.disabled` is on (the creation gate's cached snapshot, never an
+   * uncached flag read). Absent means not disabled. It never throws: a failed read counts
+   * as not disabled.
+   *
+   * While it is on the ENTRY directions refuse: `hide`, `admit`, the knock card's Always
+   * allow, and applying a saved list to a room. Every undo is untouched: `unhide`,
+   * `makePublic`, taking a saved entry back off a live room, and a block's own deny and
+   * move on the card. It is deliberately not consulted by `makePrivate`, a vote's kick or
+   * a creation: those are existing features whose rollback is a deploy, and a switch that
+   * quietly stopped locking a room would be a worse fault than the one it was thrown for.
+   */
+  roomAccessDisabled?: () => Promise<boolean>;
 }
 
 /** A room as a command finds it, or the reply that says it cannot be acted on. */
@@ -130,7 +145,7 @@ export interface AccessApplyResult {
    * decided (see `reason`), and `failed` that something went wrong (see `error`).
    */
   status: 'applied' | 'unchanged' | 'deferred' | 'skipped' | 'failed';
-  reason?: 'no_lists' | 'no_room' | 'unreadable' | 'not_ready' | 'gone' | 'refused';
+  reason?: 'no_lists' | 'no_room' | 'unreadable' | 'not_ready' | 'gone' | 'refused' | 'disabled';
   /** Blocked members who were in the room and were asked to leave it. */
   movedOut: string[];
   /** Roles the plan could not edit and left as they were. */
@@ -192,6 +207,22 @@ function recordableFacts(
     trusted: keep(facts.trusted, stored?.trusted),
     admitted: keep(facts.admitted, stored?.admitted),
     blocked: keep(facts.blocked, stored?.blocked),
+  };
+}
+
+/**
+ * The lists, less every entry the room does not already record: what a caller that is
+ * only taking entries away may apply. A recorded entry that is still listed is kept (it
+ * is wanted, and dropping it would revoke it), and one the lists no longer hold is simply
+ * absent, which is what makes the plan take it back.
+ */
+function onlyRecorded(wanted: RoomLists, record: RoomAccess | null): RoomLists {
+  const trusted = new Set(record?.trusted ?? []);
+  const blocked = new Set(record?.blocked ?? []);
+  return {
+    ...wanted,
+    trusted: wanted.trusted.filter((id) => trusted.has(id)),
+    blocked: wanted.blocked.filter((id) => blocked.has(id)),
   };
 }
 
@@ -386,10 +417,14 @@ export class PrivacyService {
     userId: string,
   ): Promise<CommandResult> {
     return this.guarded('hide', guildId, channelId, async () => {
+      if (await this.accessPaused()) return fail(say.paused);
       const opened = await this.open(guildId, channelId, userId, say.notOwnerHide);
       if (opened.kind === 'refused') return opened.result;
       const { row, access, mode } = opened;
       if (mode === 'hidden') return fail(say.alreadyHidden);
+      // Before the Join channel goes: a hide from a locked room deletes it, and a write
+      // the bot has no permission for would then have to put it back under a new id.
+      if (this.lacksManageRoles(guildId, row.channelId)) return fail(say.needsManageRoles);
 
       const outcome = await this.changeAccess({
         guildId,
@@ -445,10 +480,12 @@ export class PrivacyService {
     memberId: string,
   ): Promise<CommandResult> {
     return this.guarded('admit', guildId, channelId, async () => {
+      if (await this.accessPaused()) return fail(say.paused);
       const opened = await this.open(guildId, channelId, ownerId, say.notOwnerAdmit);
       if (opened.kind === 'refused') return opened.result;
       const { row, access, mode } = opened;
       if (mode === 'public') return fail(say.openToEveryone);
+      if (this.lacksManageRoles(guildId, row.channelId)) return fail(say.needsManageRoles);
       if (memberId === ownerId) return fail(say.admitSelf);
       if (memberId === this.deps.botUserId?.()) return fail(say.admitBot);
       if ((access?.kicked ?? []).includes(memberId)) return fail(admitKicked(memberId));
@@ -519,8 +556,19 @@ export class PrivacyService {
    *
    * Idempotent: a second run reads the channel as the first left it, plans no change
    * and writes nothing.
+   *
+   * **`room_access.disabled` skips it** (`reason: 'disabled'`), which is what keeps a
+   * handover, a knock card's Block and the sweep from applying lists while the lever is
+   * on. `revokeOnly` is for the caller that is TAKING ENTRIES AWAY (`/access remove` and
+   * `clear`): it is never skipped, and it applies only what the room already records, so
+   * an entry the lists hold but the room does not is not added by it. The lever never
+   * stands between a member and the removal of something they put there.
    */
-  async applyAccessLists(guildId: string, roomChannelId: string): Promise<AccessApplyResult> {
+  async applyAccessLists(
+    guildId: string,
+    roomChannelId: string,
+    opts: { revokeOnly?: boolean } = {},
+  ): Promise<AccessApplyResult> {
     const skipped = (reason: NonNullable<AccessApplyResult['reason']>): AccessApplyResult => ({
       status: 'skipped',
       reason,
@@ -530,6 +578,7 @@ export class PrivacyService {
     try {
       // Without the repository, "no entries" would read as "everything was removed".
       if (!this.deps.memberAccessLists) return skipped('no_lists');
+      if (!opts.revokeOnly && (await this.accessPaused())) return skipped('disabled');
       const row = await this.deps.secondaries.get(roomChannelId);
       if (!row || row.guildId !== guildId) return skipped('no_room');
       const read = await this.deps.secondaries.readAccess(roomChannelId);
@@ -548,7 +597,8 @@ export class PrivacyService {
       // nothing saved: there is nothing for a list to change, and it costs no call to
       // Discord at all. Any other room is planned, which also repairs what an
       // interrupted change or a stale write left behind.
-      const lists = await this.listsFor(guildId, row, read.access);
+      const wanted = await this.listsFor(guildId, row, read.access);
+      const lists = opts.revokeOnly ? onlyRecorded(wanted, read.access) : wanted;
       if (
         mode === 'public' &&
         read.access === null &&
@@ -698,6 +748,9 @@ export class PrivacyService {
   ): Promise<CommandResult> {
     const ctx = await this.deps.joinChannels.get(joinChannelId);
     if (!ctx) return fail('That request has expired.');
+    // A new entry on a saved list, so the lever stops it. A plain approval is not an
+    // entry direction (it is one person, this room, and dies with it) and goes ahead.
+    if (always && (await this.accessPaused())) return fail(say.alwaysPaused);
     // A card outlives the decision that made it stale: the owner blocks a knock, then
     // approves the same person's second card, or the room votes them out in between.
     // A grant here would replace the deny the block left, so a barred member is refused.
@@ -881,6 +934,32 @@ export class PrivacyService {
       this.deps.logger.warn({ err, guildId, channelId, what }, 'a room access command failed');
       return fail(accessFailed(describeError(err)));
     }
+  }
+
+  /** Whether `room_access.disabled` is on. Never throws: a failed read counts as not disabled. */
+  private async accessPaused(): Promise<boolean> {
+    try {
+      return (await this.deps.roomAccessDisabled?.()) === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Whether the cache says the bot cannot edit this room's overwrites, which is a
+   * preflight and not the authority: "cannot say" goes ahead, and Discord answers.
+   * Records the access problem the failed write would have, so an admin still hears
+   * about a bot that is missing the permission.
+   */
+  private lacksManageRoles(guildId: string, channelId: string): boolean {
+    if (this.deps.voice.botPermissionsIn?.(channelId)?.manageRoles !== false) return false;
+    this.deps.permissionProblems?.record(guildId, {
+      channelId,
+      operation: 'access',
+      at: Date.now(),
+    });
+    this.deps.serverLog?.(guildId, 1, permissionProblemMessage(channelId, 'access'));
+    return true;
   }
 
   /**
@@ -1392,6 +1471,9 @@ export class PrivacyService {
   ): Promise<{ saved: boolean; note: string }> {
     const repo = this.deps.memberAccessLists;
     if (!repo) return { saved: false, note: '' };
+    // The lever stops the saving and nothing else: a Block still turns the requester
+    // away, and says that it did not save them.
+    if (await this.accessPaused()) return { saved: false, note: BLOCK_NOT_SAVED_PAUSED };
     try {
       const result = await repo.add(ctx.guildId, ctx.creatorId, memberId, kind);
       if (result.outcome === 'full') {
@@ -1409,7 +1491,7 @@ export class PrivacyService {
           'saved a knock decision but could not apply it to the room',
         );
       }
-      return { saved: true, note: '' };
+      return { saved: true, note: savedNote(kind) };
     } catch (err) {
       // The decision itself still goes ahead: it is the saving that is lost.
       this.deps.logger.warn(

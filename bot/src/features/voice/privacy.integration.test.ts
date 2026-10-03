@@ -21,6 +21,7 @@ import { RecordingVoiceActions, type VoiceActions } from './actions.js';
 import type { CommandResult } from './commands.js';
 import { PermissionProblemTracker } from './permissionProblems.js';
 import { PrivacyService, type PrivacyServiceDeps } from './privacy.js';
+import { BLOCK_NOT_SAVED_PAUSED, ROOM_ACCESS_REPLIES, savedNote } from './roomAccessCopy.js';
 import { FakeVoiceView, fakeMember as member } from './voiceTestUtils.js';
 
 const GUILD = 'guild-privacy-test';
@@ -1923,7 +1924,10 @@ describe('PrivacyService (integration)', () => {
 
         const res = await privacy.denyJoin(joinId, 'carol', true);
 
-        expect(res).toEqual({ ok: true, message: 'Blocked <@carol>.' });
+        // Says what was saved and where it applies, and how to undo it.
+        expect(res).toEqual({ ok: true, message: `Blocked <@carol>.${savedNote('blocked')}` });
+        expect(res.message).toContain('rooms you create in this server');
+        expect(res.message).toContain('`/access remove`');
         expect((await lists.get(GUILD, 'alice')).blocked).toEqual(['carol']);
         expect(bits(held('carol'))).toEqual({ allow: 0n, deny: VC });
         expect(actions.ofType('connect')).toContainEqual(
@@ -2087,7 +2091,9 @@ describe('PrivacyService (integration)', () => {
 
         const res = await privacy.approveJoin(joinId, 'bob', true);
 
-        expect(res).toEqual({ ok: true, message: 'Admitted <@bob>.' });
+        expect(res).toEqual({ ok: true, message: `Admitted <@bob>.${savedNote('trusted')}` });
+        expect(res.message).toContain('rooms you create in this server');
+        expect(res.message).toContain('`/access remove`');
         expect((await lists.get(GUILD, 'alice')).trusted).toEqual(['bob']);
         expect(bits(held('bob'))).toEqual({ allow: C, deny: 0n });
         expect((await access())?.trusted).toEqual(['bob']);
@@ -2800,6 +2806,296 @@ describe('PrivacyService (integration)', () => {
 
       expect(held('carol')).toBeUndefined();
       expect((await access())?.creatorId).toBe('bob');
+    });
+  });
+
+  // -- the room_access.disabled lever ----------------------------------------------------------
+
+  /**
+   * The lever stops the ENTRY directions and never an undo, and says which. Each test
+   * builds its own service so the flag is whatever the test says it is.
+   */
+  describe('room_access.disabled', () => {
+    let off: boolean | 'throws';
+    beforeEach(() => {
+      off = true;
+      privacy = build({
+        roomAccessDisabled: () =>
+          off === 'throws' ? Promise.reject(new Error('db down')) : Promise.resolve(off),
+      });
+    });
+    /** Runs `body` with the lever off, for the setup a test needs before it throws it. */
+    const withLeverOff = async (body: () => Promise<unknown>): Promise<void> => {
+      const was = off;
+      off = false;
+      await body();
+      off = was;
+    };
+
+    it('refuses /hide with nothing read, written or recorded', async () => {
+      const res = await privacy.hide(GUILD, SEC, 'alice');
+
+      expect(res).toEqual({ ok: false, message: ROOM_ACCESS_REPLIES.paused });
+      expect(actions.actions).toEqual([]);
+      expect(await access()).toBeNull();
+      expect((await row()).state.private).toBeUndefined();
+    });
+
+    it('refuses admit, for the same reason', async () => {
+      await withLeverOff(() => privacy.makePrivate(GUILD, SEC, 'alice'));
+      const before = actions.actions.length;
+
+      const res = await privacy.admit(GUILD, SEC, 'alice', 'carol');
+
+      expect(res).toEqual({ ok: false, message: ROOM_ACCESS_REPLIES.paused });
+      expect(actions.actions).toHaveLength(before);
+      expect((await access())?.admitted).toBeUndefined();
+    });
+
+    it('refuses Always allow, admits nobody and saves nobody, and says to use Approve', async () => {
+      await withLeverOff(() => privacy.makePrivate(GUILD, SEC, 'alice'));
+      const joinId = actions.ofType('joinChannel')[0]!.channelId;
+      const before = actions.actions.length;
+
+      const res = await privacy.approveJoin(joinId, 'bob', true);
+
+      expect(res).toEqual({ ok: false, message: ROOM_ACCESS_REPLIES.alwaysPaused });
+      expect(res.message).toContain('Approve');
+      expect(actions.actions).toHaveLength(before);
+      expect((await lists.get(GUILD, 'alice')).trusted).toEqual([]);
+    });
+
+    it('leaves a plain Approve alone: one person, this room, and it dies with the room', async () => {
+      await withLeverOff(() => privacy.makePrivate(GUILD, SEC, 'alice'));
+      const joinId = actions.ofType('joinChannel')[0]!.channelId;
+
+      const res = await privacy.approveJoin(joinId, 'bob');
+
+      expect(res).toEqual({ ok: true, message: 'Admitted <@bob>.' });
+      expect(actions.ofType('connect')).toContainEqual(
+        expect.objectContaining({ channelId: SEC, memberId: 'bob', allow: true }),
+      );
+      expect(actions.ofType('move')).toContainEqual(
+        expect.objectContaining({ memberId: 'bob', channelId: SEC }),
+      );
+    });
+
+    it('still turns a blocked requester away, and says it saved nothing', async () => {
+      await withLeverOff(() => privacy.makePrivate(GUILD, SEC, 'alice'));
+      const joinId = actions.ofType('joinChannel')[0]!.channelId;
+
+      const res = await privacy.denyJoin(joinId, 'carol', true);
+
+      expect(res).toEqual({ ok: true, message: `Blocked <@carol>.${BLOCK_NOT_SAVED_PAUSED}` });
+      expect(await lists.get(GUILD, 'alice')).toEqual({ trusted: [], blocked: [] });
+      // What a block did before saved lists existed: the join channel deny and the move.
+      expect(actions.ofType('connect')).toContainEqual(
+        expect.objectContaining({ channelId: joinId, memberId: 'carol', allow: false }),
+      );
+      expect(actions.ofType('move')).toContainEqual(
+        expect.objectContaining({ memberId: 'carol', channelId: null, onlyFrom: joinId }),
+      );
+      expect(held('carol')).toBeUndefined();
+    });
+
+    it('applies no saved list to a room, whoever asks', async () => {
+      await withLeverOff(() => privacy.makePrivate(GUILD, SEC, 'alice'));
+      await lists.add(GUILD, 'alice', 'mallory', 'blocked');
+      const before = actions.actions.length;
+
+      const res = await privacy.applyAccessLists(GUILD, SEC);
+
+      expect(res).toEqual({
+        status: 'skipped',
+        reason: 'disabled',
+        movedOut: [],
+        skippedRoleIds: [],
+      });
+      expect(actions.actions).toHaveLength(before);
+      expect(held('mallory')).toBeUndefined();
+    });
+
+    it('applies no list on a handover either, so the giver’s entries stay until the lever is lifted', async () => {
+      await withLeverOff(async () => {
+        await privacy.makePrivate(GUILD, SEC, 'alice');
+        await lists.add(GUILD, 'alice', 'carol', 'trusted');
+        await privacy.applyAccessLists(GUILD, SEC);
+      });
+      await secondaries.setOwnerAndCreator(SEC, 'bob', 'Bob');
+
+      await privacy.handleOwnerChanged(GUILD, SEC, 'bob', 'Bob', { handover: true });
+
+      expect(held('carol')).toBeDefined();
+    });
+
+    describe('never stands between a member and an undo', () => {
+      it('/unhide still works', async () => {
+        await withLeverOff(() => privacy.hide(GUILD, SEC, 'alice'));
+
+        const res = await privacy.unhide(GUILD, SEC, 'alice');
+
+        expect(res.ok).toBe(true);
+        expect((await access())?.hidden).toBeUndefined();
+        expect(await joinRow()).toBeDefined();
+      });
+
+      it('/public still works, from a hidden room and from a locked one', async () => {
+        await withLeverOff(() => privacy.hide(GUILD, SEC, 'alice'));
+        expect((await privacy.makePublic(GUILD, SEC, 'alice')).ok).toBe(true);
+        await withLeverOff(() => privacy.makePrivate(GUILD, SEC, 'alice'));
+        expect((await privacy.makePublic(GUILD, SEC, 'alice')).ok).toBe(true);
+        expect((await row()).state.private).toBeUndefined();
+      });
+
+      /**
+       * Taking an entry back off a live room is `revokeOnly`: it is never skipped, and
+       * it adds nothing, so the lever never makes an undo apply a list.
+       */
+      it('takes an entry back off a live room, and adds none that the room does not hold', async () => {
+        await withLeverOff(async () => {
+          await privacy.makePrivate(GUILD, SEC, 'alice');
+          await lists.add(GUILD, 'alice', 'carol', 'trusted');
+          await lists.add(GUILD, 'alice', 'mallory', 'blocked');
+          await privacy.applyAccessLists(GUILD, SEC);
+        });
+        await lists.add(GUILD, 'alice', 'dave', 'trusted');
+        await lists.remove(GUILD, 'alice', 'carol');
+
+        const res = await privacy.applyAccessLists(GUILD, SEC, { revokeOnly: true });
+
+        expect(res.status).toBe('applied');
+        expect(held('carol')).toBeUndefined();
+        // Still listed and still recorded: kept, not revoked.
+        expect(bits(held('mallory'))).toEqual({ allow: 0n, deny: VC });
+        // Listed but never applied: the lever keeps it that way.
+        expect(held('dave')).toBeUndefined();
+        expect((await access())?.trusted).toBeUndefined();
+        expect((await access())?.blocked).toEqual(['mallory']);
+      });
+
+      it('takes a block back off a live room', async () => {
+        await withLeverOff(async () => {
+          await lists.add(GUILD, 'alice', 'mallory', 'blocked');
+          await privacy.applyAccessLists(GUILD, SEC);
+        });
+        expect(bits(held('mallory'))).toEqual({ allow: 0n, deny: VC });
+        await lists.remove(GUILD, 'alice', 'mallory');
+
+        await privacy.applyAccessLists(GUILD, SEC, { revokeOnly: true });
+
+        expect(held('mallory')).toBeUndefined();
+      });
+
+      it('costs a public room with no record and nothing recorded no call to Discord', async () => {
+        const res = await privacy.applyAccessLists(GUILD, SEC, { revokeOnly: true });
+        expect(res.status).toBe('unchanged');
+        expect(actions.actions).toEqual([]);
+      });
+    });
+
+    /**
+     * Existing features that now run through the planner. The lever cannot route them
+     * around it, and the doc says the rollback for them is a deploy.
+     */
+    describe('does not stop /private, /public, votekick or a creation', () => {
+      it('still locks a room, and still opens it', async () => {
+        expect((await privacy.makePrivate(GUILD, SEC, 'alice')).ok).toBe(true);
+        expect(bits(everyone())).toEqual({ allow: 0n, deny: C });
+        expect((await privacy.makePublic(GUILD, SEC, 'alice')).ok).toBe(true);
+      });
+
+      it('still records a vote’s kick', async () => {
+        expect(await privacy.denyKicked(GUILD, SEC, 'mallory')).toBe(true);
+        expect(bits(held('mallory'))).toEqual({ allow: 0n, deny: VC });
+      });
+
+      it('still makes a room private as it is created, hidden or locked', async () => {
+        const result = await privacy.tryMakePrivateForCreation(GUILD, SEC, 'alice', 'Alice');
+        expect(result).toEqual({ ok: true, applied: true });
+      });
+    });
+
+    it('treats a failed flag read as not disabled', async () => {
+      off = 'throws';
+      expect((await privacy.hide(GUILD, SEC, 'alice')).ok).toBe(true);
+    });
+
+    it('is not asked at all by the commands it does not stop', async () => {
+      const asked = vi.fn().mockResolvedValue(true);
+      const watched = build({ roomAccessDisabled: asked });
+      await watched.makePrivate(GUILD, SEC, 'alice');
+      await watched.makePublic(GUILD, SEC, 'alice');
+      await watched.unhide(GUILD, SEC, 'alice');
+      await watched.denyKicked(GUILD, SEC, 'mallory');
+      expect(asked).not.toHaveBeenCalled();
+    });
+  });
+
+  // -- the Manage Roles preflight --------------------------------------------------------------
+
+  /**
+   * A hide from a locked room deletes the Join channel before its write, and a write the
+   * bot cannot make would put it back under a new id, which expires every open knock
+   * card. A cache check up front refuses before any of that, and it is a preflight and
+   * not the authority: "cannot say" goes ahead.
+   */
+  describe('the Manage Roles preflight', () => {
+    const noManageRoles = () => voice.setBotPermissions(SEC, { manageRoles: false });
+
+    it('refuses a hide from a locked room with the Join channel and everything else untouched', async () => {
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      const joinBefore = await joinRow();
+      const before = actions.actions.length;
+      noManageRoles();
+
+      const res = await privacy.hide(GUILD, SEC, 'alice');
+
+      expect(res).toEqual({ ok: false, message: ROOM_ACCESS_REPLIES.needsManageRoles });
+      expect(res.message).toContain('**Manage Roles**');
+      expect(actions.actions).toHaveLength(before);
+      expect(await joinRow()).toEqual(joinBefore);
+      expect((await access())?.hidden).toBeUndefined();
+    });
+
+    it('still tells the admin, as the write that was bound to fail would have', async () => {
+      noManageRoles();
+      await privacy.hide(GUILD, SEC, 'alice');
+      expect(problems.recent(GUILD)).toEqual([
+        expect.objectContaining({ channelId: SEC, operation: 'access' }),
+      ]);
+      expect(serverLogs).toHaveLength(1);
+    });
+
+    it('refuses an admit too, since it writes the same overwrites', async () => {
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      noManageRoles();
+      const res = await privacy.admit(GUILD, SEC, 'alice', 'carol');
+      expect(res).toEqual({ ok: false, message: ROOM_ACCESS_REPLIES.needsManageRoles });
+      expect((await access())?.admitted).toBeUndefined();
+    });
+
+    it('goes ahead when the cache cannot say, or says the bot can', async () => {
+      expect((await privacy.hide(GUILD, SEC, 'alice')).ok).toBe(true);
+      await privacy.unhide(GUILD, SEC, 'alice');
+      await privacy.makePublic(GUILD, SEC, 'alice');
+      voice.setBotPermissions(SEC, { manageRoles: true });
+      expect((await privacy.hide(GUILD, SEC, 'alice')).ok).toBe(true);
+    });
+
+    it('is never asked before an undo, so a stale cache cannot keep somebody’s room hidden', async () => {
+      await privacy.hide(GUILD, SEC, 'alice');
+      noManageRoles();
+      expect((await privacy.unhide(GUILD, SEC, 'alice')).ok).toBe(true);
+      expect((await privacy.makePublic(GUILD, SEC, 'alice')).ok).toBe(true);
+    });
+
+    it('never gets in the way of a room that is already as asked', async () => {
+      await privacy.hide(GUILD, SEC, 'alice');
+      noManageRoles();
+      expect(await privacy.hide(GUILD, SEC, 'alice')).toEqual({
+        ok: false,
+        message: ROOM_ACCESS_REPLIES.alreadyHidden,
+      });
     });
   });
 

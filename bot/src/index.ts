@@ -488,6 +488,8 @@ async function main(): Promise<void> {
     ownerName: (gid: string, member): Promise<string> => voiceFeature.nameFor(gid, member),
     permissionProblems,
     serverLog: (gid, level, message) => serverLogger.log(gid, level, message),
+    // The `room_access.disabled` lever, through the creation gate's cached snapshot.
+    roomAccessDisabled: () => creationGate.roomAccessDisabled(),
   });
   /**
    * Per-room companion text channels. Constructed before the feature because
@@ -1433,6 +1435,15 @@ async function main(): Promise<void> {
          */
         commandAccess: {
           disabled: runtimeFlags[RUNTIME_FLAGS.COMMAND_ACCESS_DISABLED] === true,
+        },
+        /**
+         * Whether hiding and saved lists are switched off. A refusal here is only
+         * ever seen from a member's side, so the lever is reported per fleet, for
+         * the reason the one above is: a freeze switch is dangerous when it is
+         * left on after the thing it was thrown for has been fixed.
+         */
+        roomAccess: {
+          disabled: runtimeFlags[RUNTIME_FLAGS.ROOM_ACCESS_DISABLED] === true,
         },
       };
     },

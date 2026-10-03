@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BLOCK_NOT_SAVED_PAUSED,
   ROOM_ACCESS_REPLIES,
   TOO_MANY_OVERWRITES,
   accessFailed,
@@ -13,6 +14,7 @@ import {
   lockedWithoutJoin,
   roleDefeatsHide,
   roleMentions,
+  savedNote,
   skippedRolesNote,
   unhiddenMessage,
   unhiddenWithoutJoin,
@@ -47,6 +49,9 @@ function everyReply(): string[] {
     admitFailed('999999999999999999', 'missing permissions'),
     admitted('999999999999999999', 'locked'),
     admitted('999999999999999999', 'hidden'),
+    savedNote('blocked'),
+    savedNote('trusted'),
+    BLOCK_NOT_SAVED_PAUSED,
   );
   for (const command of ['private', 'public', 'hide', 'unhide', 'admit'] as const) {
     replies.push(deferredMessage(command));
@@ -148,6 +153,34 @@ describe('deferredMessage', () => {
     expect(deferredMessage('unhide')).toContain('run `/unhide` again to finish');
     expect(deferredMessage('private')).toContain('run `/public` and try again');
     expect(deferredMessage('hide')).toContain('run `/public` and try again');
+  });
+});
+
+describe('savedNote', () => {
+  /**
+   * A saved entry outlives the room it was made in, so the reply has to say whose rooms
+   * it applies to, and how to take it back.
+   */
+  it('says the entry applies to rooms the member creates in this server, and how to undo it', () => {
+    for (const kind of ['blocked', 'trusted'] as const) {
+      expect(savedNote(kind)).toContain('rooms you create in this server');
+      expect(savedNote(kind)).toContain('`/access remove`');
+    }
+    expect(savedNote('blocked')).toContain('blocked list');
+    expect(savedNote('trusted')).toContain('trusted list');
+  });
+});
+
+describe('the lever and the preflight', () => {
+  it('says what is off, and never that an undo is', () => {
+    expect(ROOM_ACCESS_REPLIES.paused).toContain('switched off for now');
+    expect(ROOM_ACCESS_REPLIES.alwaysPaused).toContain('Approve');
+    expect(BLOCK_NOT_SAVED_PAUSED).toContain('only turned them away this time');
+  });
+
+  it('names the permission the bot is missing and who can fix it', () => {
+    expect(ROOM_ACCESS_REPLIES.needsManageRoles).toContain('**Manage Roles**');
+    expect(ROOM_ACCESS_REPLIES.needsManageRoles).toContain('Ask an admin');
   });
 });
 

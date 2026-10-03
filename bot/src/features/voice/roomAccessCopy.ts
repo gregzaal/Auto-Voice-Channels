@@ -62,6 +62,13 @@ export const ROOM_ACCESS_REPLIES = {
     'It is open to everyone, so there is no need to let anyone in. Lock or hide the room first if you want a guest list.',
   admitSelf: 'You already have access to your own room.',
   admitBot: 'I always have access to this room.',
+  /** `room_access.disabled` is on: the entry directions refuse, and the undo ones never do. */
+  paused:
+    'Hiding rooms, guest lists and block lists are switched off for now. Try again a bit later.',
+  alwaysPaused: 'Always allow is switched off for now. Use **Approve** to let them in this time.',
+  /** The cache says the bot cannot edit this room's overwrites, so nothing was touched. */
+  needsManageRoles:
+    "I need the **Manage Roles** permission in this room to change who can see it, and I don't have it. Ask an admin to give it to me, then try again.",
 } as const;
 
 const QUEUED = "Discord is slowing down changes to this room, so I've queued this one.";
@@ -87,6 +94,22 @@ export function deferredMessage(
       return `${QUEUED} It hasn't taken effect yet. Give it a minute, then try again to check.`;
   }
 }
+
+/**
+ * What a saved list entry means, said where it is made, because it outlives the room.
+ *
+ * Lists belong to the member who made them and apply to rooms THEY create in this
+ * server. An Administrator is the exception to a block: nothing a room can say stops one.
+ */
+export function savedNote(kind: 'trusted' | 'blocked'): string {
+  return kind === 'blocked'
+    ? ' They are on your blocked list, so they cannot join the rooms you create in this server. Undo it with `/access remove`.'
+    : ' They are on your trusted list, so they can join the locked or hidden rooms you create in this server. Undo it with `/access remove`.';
+}
+
+/** Said when a block turned a requester away and could not be saved because the lever is on. */
+export const BLOCK_NOT_SAVED_PAUSED =
+  ' Block lists are switched off for now, so I only turned them away this time.';
 
 /** What a refused hide says: which roles still show the room, and how to fix that. */
 export function roleDefeatsHide(roleIds: readonly string[]): string {

@@ -74,6 +74,33 @@ export const RUNTIME_FLAGS = {
    * database blip must not quietly withdraw a rule an admin wrote.
    */
   COMMAND_ACCESS_DISABLED: 'command_access.disabled',
+  /**
+   * Stops the entry directions of room access on **this fleet**: hiding a room, and
+   * every saved or one-off list of who may be let in or kept out.
+   *
+   * While it is on, `/hide` and the panel's Hide button refuse, `/access trust`,
+   * `block` and `admit` refuse, the knock card's Always allow refuses, a saved
+   * list is not applied to a room (a handover, the card's Block, and the converge
+   * pass that keeps rooms in step with the lists), and a card's Block still turns
+   * the requester away but saves nothing. A refusal says the feature is switched
+   * off for now, and a list keeps whatever it already holds.
+   *
+   * **It never blocks an undo.** `/unhide`, `/public`, and `/access remove`, `clear`
+   * and `list` always work, and so does taking a saved entry back off a live room,
+   * because a switch that left somebody hidden or blocked with no way out would be
+   * worse than the fault it was thrown for. Nor does it take anything back by
+   * itself: what is already written to a room stays, and a saved block still turns
+   * a member away when they knock.
+   *
+   * **It does NOT stop `/private`, `/public`, votekick or a creator channel whose
+   * rooms start private.** Those are existing features that now run through the
+   * same planner, and the lever cannot route them around it. A fault in the planner
+   * itself is a deploy rollback, not this switch.
+   *
+   * A failed flag read is treated as NOT disabled, matching `command_access.disabled`:
+   * a database blip must not quietly withdraw a feature that is on by default.
+   */
+  ROOM_ACCESS_DISABLED: 'room_access.disabled',
   /** Throttle: max secondary creations per guild per minute (number; 0 = unlimited). */
   CREATE_RATE_LIMIT: 'create.rate_limit_per_min',
   /**

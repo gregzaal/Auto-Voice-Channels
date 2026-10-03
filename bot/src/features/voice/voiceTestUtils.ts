@@ -1,5 +1,6 @@
 import type { CommandCaller } from './commandAccess.js';
 import type {
+  BotChannelPermissions,
   BotRoleAccess,
   GuildVoiceView,
   MemberFacts,
@@ -29,6 +30,8 @@ export class FakeVoiceView implements GuildVoiceView {
   private readonly facts = new Map<string, MemberFacts>();
   /** The bot's role standing. Unset → "cannot say". */
   private roleAccess: { leaveRoleId: string | null; uneditableRoleIds: string[] } | undefined;
+  /** channelId → what the bot may do in it. Unset → "cannot say". */
+  private readonly botPermissions = new Map<string, BotChannelPermissions>();
   /** Whether Discord has handed us this guild. True unless a test says otherwise. */
   private available = true;
 
@@ -139,6 +142,19 @@ export class FakeVoiceView implements GuildVoiceView {
       leaveRoleId: access.leaveRoleId ?? null,
       uneditableRoleIds: access.uneditableRoleIds ?? [],
     };
+  }
+
+  /**
+   * Opt-in as well: a test that never describes the bot's permissions gets "cannot
+   * say", which a caller goes ahead on, so no test that predates the preflight changes.
+   */
+  botPermissionsIn(channelId: string): BotChannelPermissions | undefined {
+    return this.botPermissions.get(channelId);
+  }
+
+  /** Says what the bot may do in a channel, which is how a test withdraws its Manage Roles. */
+  setBotPermissions(channelId: string, permissions: BotChannelPermissions): void {
+    this.botPermissions.set(channelId, permissions);
   }
 
   voicePropertiesOf(channelId: string): VoiceChannelProperties | undefined {

@@ -34,6 +34,7 @@ import type {
 } from './actions.js';
 import type { CommandCaller } from './commandAccess.js';
 import type {
+  BotChannelPermissions,
   BotRoleAccess,
   GuildVoiceView,
   MemberActivity,
@@ -1906,6 +1907,33 @@ export class DiscordVoiceView implements GuildVoiceView {
         return role !== undefined && role.comparePositionTo(top) >= 0;
       }),
     };
+  }
+
+  /**
+   * Whether the bot can edit a room's overwrites, from the channel and member caches:
+   * the permissions Discord would judge a write by, the room's own overwrites and its
+   * category's included. `undefined` when the room or the bot's own member is not
+   * cached, or when the channel cannot answer, which is "cannot say" and not "no".
+   *
+   * Never throws, like {@link managesChannels}: it sits in front of a change and a
+   * throw would fail a command that Discord might well have allowed.
+   */
+  botPermissionsIn(channelId: string): BotChannelPermissions | undefined {
+    try {
+      const channel = this.client.channels.cache.get(channelId);
+      if (!channel || !channel.isVoiceBased()) return undefined;
+      const me = (channel as VoiceBasedChannel).guild.members.me;
+      if (!me) return undefined;
+      const permissions = (channel as VoiceBasedChannel).permissionsFor(me);
+      if (!permissions) return undefined;
+      return {
+        manageRoles:
+          permissions.has(PermissionFlagsBits.ManageRoles) ||
+          permissions.has(PermissionFlagsBits.Administrator),
+      };
+    } catch {
+      return undefined;
+    }
   }
 
   displayOrderOf(channelIds: string[]): string[] | undefined {

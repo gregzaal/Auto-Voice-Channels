@@ -1490,6 +1490,62 @@ describe('DiscordVoiceView.botRoleAccess', () => {
   });
 });
 
+describe('DiscordVoiceView.botPermissionsIn', () => {
+  const me = { id: 'bot' };
+  /** A room whose `permissionsFor` answers what the bot holds there, or null when it cannot. */
+  const viewWith = (bits: bigint | null, opts: { voice?: boolean; hasMe?: boolean } = {}) => {
+    const room = {
+      id: 'room',
+      isVoiceBased: () => opts.voice ?? true,
+      guild: { members: { me: opts.hasMe === false ? null : me } },
+      permissionsFor: (member: unknown) =>
+        member === me && bits !== null ? new PermissionsBitField(bits) : null,
+    };
+    return new DiscordVoiceView({
+      channels: { cache: new Map<string, unknown>([['room', room]]) },
+    } as unknown as Client);
+  };
+
+  it('says whether the bot can edit the room overwrites, as the room resolves it', () => {
+    expect(viewWith(VIEW | MANAGE_ROLES).botPermissionsIn('room')).toEqual({ manageRoles: true });
+    expect(viewWith(VIEW | MANAGE).botPermissionsIn('room')).toEqual({ manageRoles: false });
+  });
+
+  /** Administrator holds every permission, so the check cannot hinge on the bit alone. */
+  it('counts Administrator as able to', () => {
+    expect(viewWith(PermissionFlagsBits.Administrator).botPermissionsIn('room')).toEqual({
+      manageRoles: true,
+    });
+  });
+
+  it('answers undefined, which is "cannot say", rather than a no it does not know', () => {
+    expect(viewWith(null).botPermissionsIn('room')).toBeUndefined();
+    expect(viewWith(MANAGE_ROLES, { hasMe: false }).botPermissionsIn('room')).toBeUndefined();
+    expect(viewWith(MANAGE_ROLES, { voice: false }).botPermissionsIn('room')).toBeUndefined();
+    expect(viewWith(MANAGE_ROLES).botPermissionsIn('missing')).toBeUndefined();
+  });
+
+  it('never throws, because it sits in front of a command', () => {
+    const throwing = new DiscordVoiceView({
+      channels: {
+        cache: new Map<string, unknown>([
+          [
+            'room',
+            {
+              isVoiceBased: () => true,
+              guild: { members: { me } },
+              permissionsFor: () => {
+                throw new Error('boom');
+              },
+            },
+          ],
+        ]),
+      },
+    } as unknown as Client);
+    expect(throwing.botPermissionsIn('room')).toBeUndefined();
+  });
+});
+
 describe('DiscordVoiceActions.createVoiceChannel bitrate/region/video-quality/nsfw', () => {
   function makeClient(maximumBitrate = 384_000) {
     const created = { id: 'new', setPosition: vi.fn() };
