@@ -782,7 +782,10 @@ export class GuildSettingsService {
    *
    * The decision reads the row, but the WRITE does not replace it. `setDefaultPrivacy`
    * is a DB-side merge of the two keys in one statement, because the read-modify-write
-   * this replaced lost a `/template` edit made between its read and its write.
+   * this replaced lost a `/template` edit made between its read and its write. That
+   * protects a `/template` edit from this write, not this write from the other whole-row
+   * writers (see {@link AutoChannelRepository.setDefaultPrivacy}), and two toggles racing
+   * each other are last writer wins, each replying with the mode its own write stored.
    */
   private async toggleStartMode(
     guildId: string,

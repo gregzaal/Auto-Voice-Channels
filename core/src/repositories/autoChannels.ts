@@ -277,6 +277,12 @@ export class AutoChannelRepository {
    * and hidden sets both, because an instance that predates this field reads only
    * `defaultPrivate` and must see a locked creator channel rather than a public one.
    *
+   * **The guarantee runs one way.** This write cannot lose a concurrent edit to another
+   * field, but the other template writers (`/position`, `/defaultlimit`, `/inheritpermissions`
+   * and the rest) still read the template and {@link upsert} it whole, so one that read
+   * before this ran and writes after it puts the old pair back. The window is the length of
+   * one of their reads, and closing it means giving each of them a DB-side merge too.
+   *
    * Guild-bound like every other write here, and returns the row as stored afterwards, or
    * `undefined` when this guild has no such creator channel on this fleet.
    */
