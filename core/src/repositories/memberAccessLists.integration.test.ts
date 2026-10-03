@@ -103,6 +103,23 @@ describe('MemberAccessListRepository (integration)', () => {
       expect(await rowsFor('m-1')).toEqual([{ kind: 'blocked' }]);
     });
 
+    /**
+     * The column is plain text, and `from` is typed as one of our two lists, so a
+     * member sitting on a newer build's kind must not come back as `flipped` from
+     * a list they were never on: the caller would take back a grant that list
+     * never made.
+     */
+    it('counts a member on a kind it does not know as a new entry and not a flip', async () => {
+      await env.handle.db.execute(
+        sql`INSERT INTO member_access_lists (guild_id, owner_id, member_id, kind)
+            VALUES (${GUILD}, ${OWNER}, 'm-future', 'muted')`,
+      );
+
+      expect(await repo.add(GUILD, OWNER, 'm-future', 'blocked')).toEqual({ outcome: 'added' });
+
+      expect(await rowsFor('m-future')).toEqual([{ kind: 'blocked' }]);
+    });
+
     it('moves a member back from blocked to trusted', async () => {
       await repo.add(GUILD, OWNER, 'm-1', 'blocked');
       expect(await repo.add(GUILD, OWNER, 'm-1', 'trusted')).toEqual({
@@ -142,13 +159,28 @@ describe('MemberAccessListRepository (integration)', () => {
       expect(await repo.get(GUILD, OWNER)).toEqual({ trusted: ['m-1'], blocked: [] });
     });
 
-    it('ends on exactly one list when both are added at the same moment', async () => {
+    /**
+     * The primary key alone leaves one row whatever happens, so a row count would
+     * pass without the advisory lock. What the lock decides is what each caller is
+     * TOLD: unserialised, both read an empty table and both answer `added`, and the
+     * caller of the loser then applies an overwrite for a list the table says the
+     * member is no longer on. Serialised, the second sees the first and flips.
+     */
+    it('tells exactly one of two racing adds that it flipped the other, and ends on one list', async () => {
       for (const id of members(12)) {
-        await Promise.all([
+        const [asTrusted, asBlocked] = await Promise.all([
           repo.add(GUILD, OWNER, id, 'trusted'),
           repo.add(GUILD, OWNER, id, 'blocked'),
         ]);
-        expect(await rowsFor(id), id).toHaveLength(1);
+
+        const trustedFirst = asTrusted.outcome === 'added';
+        expect(trustedFirst ? asTrusted : asBlocked, id).toEqual({ outcome: 'added' });
+        expect(trustedFirst ? asBlocked : asTrusted, id).toEqual({
+          outcome: 'flipped',
+          from: trustedFirst ? 'trusted' : 'blocked',
+        });
+        // The one that ran second is the one the table kept.
+        expect(await rowsFor(id), id).toEqual([{ kind: trustedFirst ? 'blocked' : 'trusted' }]);
       }
       const lists = await repo.get(GUILD, OWNER);
       expect(lists.trusted.length + lists.blocked.length).toBe(12);
@@ -245,7 +277,7 @@ describe('MemberAccessListRepository (integration)', () => {
       expect(await repo.counts(GUILD, OWNER)).toEqual({ trusted: MAX_SAVED_TRUSTED, blocked: 0 });
     });
 
-    it('serialises per owner, so one owner at the cap does not hold up another', async () => {
+    it('holds each owner to the cap independently when two owners race at once', async () => {
       const results = await Promise.all([
         ...members(MAX_SAVED_TRUSTED + 5, 'a').map((id) =>
           repo.add(GUILD, 'owner-a', id, 'trusted'),
@@ -281,6 +313,17 @@ describe('MemberAccessListRepository (integration)', () => {
       await repo.add(GUILD, OWNER, 'm-1', 'trusted');
       expect(await repo.remove(GUILD, OWNER, 'm-1')).toBe('trusted');
       expect(await repo.remove(GUILD, OWNER, 'm-1')).toBeNull();
+    });
+
+    it('deletes a row of a kind it does not know when asked by name, and says it was on neither list', async () => {
+      await env.handle.db.execute(
+        sql`INSERT INTO member_access_lists (guild_id, owner_id, member_id, kind)
+            VALUES (${GUILD}, ${OWNER}, 'm-future', 'muted')`,
+      );
+
+      expect(await repo.remove(GUILD, OWNER, 'm-future')).toBeNull();
+
+      expect(await rowsFor('m-future')).toEqual([]);
     });
 
     it('removes only that owner in that server', async () => {

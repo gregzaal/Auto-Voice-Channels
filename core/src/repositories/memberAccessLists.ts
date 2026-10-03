@@ -28,13 +28,25 @@ export interface MemberAccessLists {
 /**
  * What {@link MemberAccessListRepository.add} did.
  *
- * - `added`: a new entry.
+ * - `added`: a new entry. This includes a member whose row holds a kind this
+ *   build does not know: it is theirs to read around, so they count as new here
+ *   and there is no list of ours to take anything back from.
  * - `flipped`: the member was on the other list and moved, which is how
  *   "trusted or blocked, never both" is kept; `from` is the list they left, so
  *   the caller can take back what that list had granted.
- * - `already`: already on this list, so a retried add is a no-op.
+ * - `already`: already on this list, so the table is unchanged and a retried add
+ *   is a no-op for it.
  * - `full`: this list is at its cap and nothing changed, including for a member
  *   who was on the other list.
+ *
+ * **The Discord half is not the table's to say is done.** The table commits
+ * before the caller touches Discord, so a caller that died after a flip and
+ * retries gets `already`, with no `from`, for a member whose old overwrite was
+ * never taken back and whose new one was never written. A caller therefore
+ * applies its Discord side for every outcome except `full`, `already` included,
+ * as an idempotent set of the overwrite this list implies, and takes back the
+ * other list's grant whenever it is told `from`. The converge pass repairs what a
+ * caller that skipped it leaves, but only later.
  */
 export type AddMemberAccessResult =
   | { outcome: 'added' }
@@ -149,6 +161,8 @@ export class MemberAccessListRepository {
         .where(and(eq(memberAccessLists.guildId, guildId), eq(memberAccessLists.ownerId, ownerId)));
       const existing = rows.find((row) => row.memberId === memberId);
       if (existing?.kind === kind) return { outcome: 'already' };
+      // A kind this build does not know is not a list it can flip them off.
+      const previous = existing && isKind(existing.kind) ? existing.kind : undefined;
 
       const limit = kind === 'trusted' ? MAX_SAVED_TRUSTED : MAX_SAVED_BLOCKED;
       if (rows.filter((row) => row.kind === kind).length >= limit) {
@@ -168,13 +182,16 @@ export class MemberAccessListRepository {
           // `created_at` and `updated_at` defaults the first insert took.
           set: { kind, updatedAt: sql`now()` },
         });
-      return existing ? { outcome: 'flipped', from: existing.kind } : { outcome: 'added' };
+      return previous ? { outcome: 'flipped', from: previous } : { outcome: 'added' };
     });
   }
 
   /**
    * Takes a member off whichever list they are on. Resolves to that list, or
    * `null` if they were on neither, so a retried remove is a harmless no-op.
+   *
+   * A row holding a kind this build does not know is deleted all the same (it was
+   * asked for by name) and answers `null`, since it was on neither list of ours.
    */
   async remove(
     guildId: string,
