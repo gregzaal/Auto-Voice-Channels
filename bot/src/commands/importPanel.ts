@@ -285,7 +285,7 @@ const NOTE_LABELS: Record<ImportNoteCode, string> = {
   other_bot_may_be_present: 'Another AVC bot may still be managing these channels',
   legacy_field_dropped: 'is an old setting AVC no longer has',
   legacy_restriction_replaced:
-    'was an old per-command role rule and was not carried over. /restrict is the replacement, and it stops a person or a role from using a room command',
+    'was an old rule that let only certain roles use a command, and it was not carried over. /restrict works the other way round: it names a person or a role that may not use a room command',
   legacy_marked_left: 'This file was saved after the old bot was removed',
   orphaned_text_channel:
     'was left behind by the old bot and is not used. If you turn text channels back on with /textchannels, AVC makes its own',

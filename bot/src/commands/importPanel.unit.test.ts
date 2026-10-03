@@ -328,35 +328,42 @@ describe('renderAnnouncement', () => {
 });
 
 /**
- * The two old role-rule fields have a replacement, so the admin is told what it is
+ * The old per-command role rule has an answer, so the admin is told what it is
  * rather than only that the setting is gone, and every other dropped field keeps
- * the generic wording.
+ * the generic wording. That includes `requiredrole`, which the old bot never read
+ * and which sits, empty, in nearly every legacy file.
  */
-describe('a legacy import that drops the old role rules', () => {
+describe('a legacy import that drops the old role rule', () => {
   const legacyPlan = (): ImportPlan =>
     plan({
       source: 'legacy',
       notes: [
         { code: 'legacy_restriction_replaced', severity: 'warning', subject: 'restrictions' },
-        { code: 'legacy_restriction_replaced', severity: 'warning', subject: 'requiredrole' },
+        { code: 'legacy_field_dropped', severity: 'warning', subject: 'requiredrole' },
         { code: 'legacy_field_dropped', severity: 'warning', subject: 'prefix' },
       ],
     });
 
-  it('points at /restrict, and says the old rules were not carried over', () => {
+  /**
+   * The old rule was an allow list (only these roles may use a command) and
+   * `/restrict` is the opposite, so the sentence must not call it a like-for-like
+   * replacement or an admin who relied on it is left believing nothing changed.
+   */
+  it('points at /restrict, says it works the other way round, and says the rule was not carried over', () => {
     const text = renderPreview(legacyPlan(), { ...ctx, source: 'legacy' });
     expect(text).toContain(
-      'restrictions: was an old per-command role rule and was not carried over',
+      'restrictions: was an old rule that let only certain roles use a command, and it was not carried over',
     );
-    expect(text).toContain('requiredrole: was an old per-command role rule');
-    expect(text).toContain('/restrict is the replacement');
+    expect(text).toContain('/restrict works the other way round');
+    expect(text).not.toContain('is the replacement');
   });
 
-  it('does not call them an old setting AVC no longer has, and leaves the rest alone', () => {
+  it('does not call it an old setting AVC no longer has, and leaves the rest alone', () => {
     const lines = renderPreview(legacyPlan(), { ...ctx, source: 'legacy' }).split('\n');
     const line = (subject: string) => lines.find((l) => l.includes(`${subject}: `)) ?? '';
     expect(line('restrictions')).not.toContain('no longer has');
-    expect(line('requiredrole')).not.toContain('no longer has');
+    expect(line('requiredrole')).toContain('is an old setting AVC no longer has');
+    expect(line('requiredrole')).not.toContain('/restrict');
     expect(line('prefix')).toContain('is an old setting AVC no longer has');
   });
 

@@ -255,15 +255,18 @@ export type ImportNoteCode =
  * legacy import tells the admin as such and not as "an old setting AVC no longer
  * has".
  *
- * They were role rules for commands and were not carried over, and `/restrict`
- * is a different model: it names who may NOT use a room command and everyone
- * else keeps it. Saying only that the setting is gone leaves an admin who relied
- * on them thinking nothing replaces them. Listed here, and not read from
- * `DROPPED_FIELDS` in `migrate/legacy.ts`, because this module imports nothing
- * that could reach the database (an allow-list test enforces it), so a test binds
- * each entry to that list instead.
+ * Only `restrictions`: the old `restrict` command's per-command map of the roles
+ * that MAY use a command. It was not carried over, and `/restrict` is the
+ * opposite model (it names who may NOT use a room command and everyone else
+ * keeps it), so the note says both. `requiredrole` is deliberately not here: the
+ * old bot never read it, it is only an empty default in `default_settings.json`
+ * and sits in nearly every legacy file, so it keeps the generic note.
+ *
+ * Listed here, and not read from `DROPPED_FIELDS` in `migrate/legacy.ts`, because
+ * this module imports nothing that could reach the database (an allow-list test
+ * enforces it), so a test binds each entry to that list instead.
  */
-export const RESTRICTION_REPLACED_FIELDS: readonly string[] = ['requiredrole', 'restrictions'];
+export const RESTRICTION_REPLACED_FIELDS: readonly string[] = ['restrictions'];
 
 export type NoteSeverity = 'refusal' | 'dropped' | 'warning';
 
@@ -1631,8 +1634,8 @@ function addWarnings(
   if (incoming.source === 'legacy') {
     notes.push({ code: 'position_overwritten', severity: 'warning', subject: 'above' });
     for (const field of incoming.legacy?.droppedFields ?? []) {
-      // The two old role-rule fields have a replacement worth naming, so they get
-      // their own note rather than the generic "no longer has".
+      // The old role rule has an answer worth naming, so it gets its own note
+      // rather than the generic "no longer has".
       const replaced = RESTRICTION_REPLACED_FIELDS.includes(field);
       notes.push({
         code: replaced ? 'legacy_restriction_replaced' : 'legacy_field_dropped',

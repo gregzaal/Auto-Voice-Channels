@@ -9,7 +9,7 @@ import {
   sniffFormat,
   type GuildConfigFile,
 } from './format.js';
-import { DROPPED_FIELDS } from '../migrate/legacy.js';
+import { DROPPED_FIELDS, planGuild } from '../migrate/legacy.js';
 import {
   diffGuildConfig,
   fromLegacyPlan,
@@ -883,12 +883,12 @@ describe('diffGuildConfig: legacy templates', () => {
   });
 
   /**
-   * `restrictions` and `requiredrole` are old role rules for commands, and
-   * `/restrict` is what answers them now, so telling an admin only that they are
-   * "an old setting AVC no longer has" would be misleading. Every other dropped
-   * field keeps the generic note.
+   * `restrictions` is the old per-command role rule, and `/restrict` is what
+   * answers it now, so telling an admin only that it is "an old setting AVC no
+   * longer has" would be misleading. Every other dropped field keeps the generic
+   * note, `requiredrole` included: the old bot never read it.
    */
-  it('tells the old role rules apart from the other dropped fields, per field', () => {
+  it('tells the old role rule apart from the other dropped fields, per field', () => {
     const incoming = fromLegacyPlan(
       {
         settings: {},
@@ -907,8 +907,52 @@ describe('diffGuildConfig: legacy templates', () => {
     );
     expect(bySubject).toEqual({
       restrictions: 'legacy_restriction_replaced',
-      requiredrole: 'legacy_restriction_replaced',
+      requiredrole: 'legacy_field_dropped',
       sapphire: 'legacy_field_dropped',
+    });
+  });
+
+  /**
+   * What the old bot actually wrote to almost every server: `requiredrole` as an
+   * empty default (73,692 of 73,861 files in the dump, 44 with a value) and no
+   * `restrictions` at all. Read through the real planner, so the test fails if the
+   * planner's own list and this note ever disagree again.
+   */
+  it('does not tell a default legacy server it had a role rule', () => {
+    const planned = planGuild(GUILD, {
+      aliases: {},
+      enabled: true,
+      requiredrole: '',
+      auto_channels: {},
+      channel_name_template: '## [@@game_name@@]',
+    });
+    const incoming = fromLegacyPlan(planned, { wasMarkedLeft: false, filenameGuildId: GUILD });
+    const result = diffGuildConfig(incoming, currentConfig(), facts());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const legacy = result.plan.notes.filter((n) => n.code.startsWith('legacy_'));
+    expect(legacy.map((n) => [n.subject, n.code])).toEqual([
+      ['requiredrole', 'legacy_field_dropped'],
+    ]);
+  });
+
+  it('tells a server that had a restrictions map, which is the one old role rule', () => {
+    const planned = planGuild(GUILD, {
+      enabled: true,
+      requiredrole: '',
+      restrictions: { name: ['123456789012345678'] },
+      auto_channels: {},
+    });
+    const incoming = fromLegacyPlan(planned, { wasMarkedLeft: false, filenameGuildId: GUILD });
+    const result = diffGuildConfig(incoming, currentConfig(), facts());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const bySubject = Object.fromEntries(
+      result.plan.notes.filter((n) => n.code.startsWith('legacy_')).map((n) => [n.subject, n.code]),
+    );
+    expect(bySubject).toEqual({
+      restrictions: 'legacy_restriction_replaced',
+      requiredrole: 'legacy_field_dropped',
     });
   });
 
