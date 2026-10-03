@@ -21,6 +21,13 @@ export type PermissionOperation =
   /**
    * Who can see or join a room could not be changed: hiding it, or applying a saved
    * list. Not "lost access", which is the catch-all for every operation not named.
+   *
+   * Its copy names a missing permission or a role above the bot's own as the cause,
+   * which is right for Missing Access and Missing Permissions and wrong for the
+   * rest. Record it for those, and say the other causes in their own words: a room
+   * that has hit the limit of 1000 overrides, a role that has been deleted, a hide
+   * that a role the bot cannot edit would defeat. An obfuscated channel IS lost
+   * access, and is recorded as that.
    */
   | 'access';
 
@@ -266,10 +273,11 @@ export function permissionProblemMessage(
      * is not a cosmetic failure.
      */
     return (
-      `⚠️ I could not change who can see or join <#${channelId}>. I need **Manage Roles** (to ` +
-      'set permission overrides) on the category the rooms are made in, or on my role. The room ' +
-      'itself is working, but hiding it, saved blocks and saved trusted members may not be in ' +
-      'effect until this is fixed.'
+      `⚠️ I could not change who can see or join <#${channelId}>. This is usually because I am ` +
+      'missing **Manage Roles** (to set permission overrides) on the category the rooms are made ' +
+      'in, or on my role, or because a role that has an override on the room sits above mine. ' +
+      'The room itself is working, but hiding it, saved blocks and saved trusted members may ' +
+      'not be in effect until this is fixed.'
     );
   }
   if (operation === 'companion') {
@@ -431,10 +439,11 @@ export function permissionProblemSummary(problems: readonly ProblemLike[]): stri
    */
   if (accessChanges.length > 0) {
     lines.push(
-      `I could not change who can see or join ${list(accessChanges)}. I need **Manage Roles** ` +
-        '(to set permission overrides) on the category the rooms are made in, or on my role. ' +
-        'The rooms are working, but hiding a room, saved blocks and saved trusted members may ' +
-        'not be in effect until this is fixed.',
+      `I could not change who can see or join ${list(accessChanges)}. This is usually because I ` +
+        'am missing **Manage Roles** (to set permission overrides) on the category the rooms are ' +
+        'made in, or on my role, or because a role that has an override on a room sits above ' +
+        'mine. The rooms are working, but hiding a room, saved blocks and saved trusted members ' +
+        'may not be in effect until this is fixed.',
     );
   }
   if (access.length > 0) {

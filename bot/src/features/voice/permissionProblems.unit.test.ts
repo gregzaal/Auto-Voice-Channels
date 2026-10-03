@@ -131,6 +131,10 @@ describe('permissionProblemMessage', () => {
     expect(msg).toContain('who can see or join');
     expect(msg).toContain('Manage Roles');
     expect(msg).toContain('The room itself is working');
+    // The same operation covers a role above the bot and the limit on overrides, so
+    // a missing permission is the usual cause and not the only one it names.
+    expect(msg).toContain('usually because');
+    expect(msg).toContain('sits above mine');
     // The room is fine, so neither the create copy nor the lost-access copy is true.
     expect(msg).not.toContain('lost access');
     expect(msg).not.toContain('could not create');
@@ -224,6 +228,7 @@ describe('permissionProblemSummary', () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain('could not change who can see or join <#a>');
     expect(lines[0]).toContain('Manage Roles');
+    expect(lines[0]).toContain('usually because');
     expect(lines[0]).toContain('The rooms are working');
     expect(lines[0]).not.toContain('lost access');
     expect(lines[0]).not.toContain('stopped managing');
