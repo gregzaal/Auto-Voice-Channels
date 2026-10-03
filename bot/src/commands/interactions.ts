@@ -3314,10 +3314,10 @@ Already subscribed? Add the new server ` +
     if (interaction.customId === CREATE_AGAIN_ID) return openCreateModal(interaction);
     if (interaction.customId.startsWith(CREATE_RETRY_PREFIX)) return handleCreateRetry(interaction);
     if (interaction.customId.startsWith(KICK_PREFIX)) return handleKickVote(interaction);
-    if (interaction.customId.startsWith(JOIN_PREFIX)) {
-      return handleJoinDecision(interaction, settings);
-    }
-    if (interaction.customId.startsWith(ALWAYS_PREFIX)) {
+    if (
+      interaction.customId.startsWith(JOIN_PREFIX) ||
+      interaction.customId.startsWith(ALWAYS_PREFIX)
+    ) {
       return handleJoinDecision(interaction, settings);
     }
     if (interaction.customId.startsWith(ADOPT_PREFIX)) return handleAdoptButton(interaction);

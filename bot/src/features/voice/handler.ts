@@ -1003,8 +1003,8 @@ export class VoiceFeature {
           // may not carry it yet, and a create is the one moment we know the
           // answer for certain.
           isPrivate: primary?.template.defaultPrivate === true,
-          // A room that has just been made is never hidden: that arrives with the
-          // creator channel default, and the row says so for a replay that finds a live one.
+          // A room that has just been made is not hidden. On a replay that finds a live
+          // room the row says whether it is, as it does for the settings above.
           isHidden: roomRow?.access?.hidden === true,
           userLimit: primary?.template.limit ?? 0,
           ownerAccess: this.panelOwnerAccess(newChannelId, member.id),
@@ -2294,6 +2294,7 @@ export class VoiceFeature {
         access: secondary.access,
       };
       const viewerRoleId = access.readable ? access.access?.viewerRoleId : undefined;
+      const accessMode = roomMode({ state: secondary.state, access });
       const renderCtx = this.buildRenderContext({
         channelId,
         settings,
@@ -2311,10 +2312,8 @@ export class VoiceFeature {
         kind: 'room',
         ownerId: secondary.ownerId,
         originalCreator: secondary.originalCreator,
-        isPrivate:
-          secondary.state.private === true ||
-          roomMode({ state: secondary.state, access }) === 'hidden',
-        accessMode: roomMode({ state: secondary.state, access }),
+        isPrivate: secondary.state.private === true || accessMode === 'hidden',
+        accessMode,
         ...(viewerRoleId ? { viewerRoleId } : {}),
         render: {
           ctx: renderCtx,
