@@ -80,10 +80,12 @@ export const RUNTIME_FLAGS = {
    *
    * While it is on, `/hide` and the panel's Hide button refuse, `/access trust`,
    * `block` and `admit` refuse, the knock card's Always allow refuses, a saved
-   * list is not applied to a room by `/access`, a card's Block or the converge
-   * pass that keeps rooms in step with the lists, and a card's Block still turns
-   * the requester away but saves nothing. A refusal says the feature is switched
-   * off for now, and a list keeps whatever it already holds.
+   * list is not applied to a room by `/access`, a card's Block, the creator's room
+   * being made, or the sweep that keeps rooms in step with the lists (the whole
+   * pass is off: no overwrite is repaired, no queued opening is carried through and
+   * no Join channel is settled), and a card's Block still turns the requester away
+   * but saves nothing. A refusal says the feature is switched off for now, and a
+   * list keeps whatever it already holds.
    *
    * **It never blocks an undo.** `/unhide`, `/public`, and `/access remove`, `clear`
    * and `list` always work, and so does taking a saved entry back off a live room

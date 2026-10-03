@@ -19,6 +19,7 @@ import {
 } from './accessPlan.js';
 import { RecordingVoiceActions, type VoiceActions } from './actions.js';
 import type { CommandResult } from './commands.js';
+import type { CommandAccess } from './commandAccess.js';
 import { PermissionProblemTracker } from './permissionProblems.js';
 import { PrivacyService, type PrivacyServiceDeps } from './privacy.js';
 import { BLOCK_NOT_SAVED_PAUSED, ROOM_ACCESS_REPLIES, savedNote } from './roomAccessCopy.js';
@@ -989,6 +990,70 @@ describe('PrivacyService (integration)', () => {
       expect((await access())?.hidden).toBeUndefined();
       // The repeat makes it, once the write is known to have landed.
       expect(liveJoinChannels()).toHaveLength(1);
+    });
+
+    /**
+     * The record of a room whose opening is queued still names the mode it is leaving, so
+     * the sweep needs to be told the opening is on its way, or it would close the room again.
+     */
+    describe('is marked pending, for the sweep to carry through', () => {
+      it('when an unhide is queued, naming the mode it is heading for', async () => {
+        await privacy.hide(GUILD, SEC, 'alice');
+        actions.simulateOverwriteRateLimit = true;
+        const before = Date.now();
+
+        await privacy.unhide(GUILD, SEC, 'alice');
+
+        const pending = (await access())?.pending;
+        expect(pending?.mode).toBe('locked');
+        expect(pending?.at).toBeGreaterThanOrEqual(before);
+        // Still recorded as hidden, because the write has not been seen to land.
+        expect((await access())?.hidden).toBe(true);
+      });
+
+      it('when a /public is queued', async () => {
+        await privacy.makePrivate(GUILD, SEC, 'alice');
+        actions.simulateOverwriteRateLimit = true;
+
+        await privacy.makePublic(GUILD, SEC, 'alice');
+
+        expect((await access())?.pending?.mode).toBe('public');
+        expect((await row()).state.private).toBe(true);
+      });
+
+      it('and not when an entry is queued, whose record already says where it is going', async () => {
+        actions.simulateOverwriteRateLimit = true;
+
+        await privacy.hide(GUILD, SEC, 'alice');
+
+        expect((await access())?.hidden).toBe(true);
+        expect((await access())?.pending).toBeUndefined();
+      });
+
+      it('and the repeat that lands takes the marker off with the rest of what it settles', async () => {
+        await privacy.hide(GUILD, SEC, 'alice');
+        actions.simulateOverwriteRateLimit = true;
+        await privacy.unhide(GUILD, SEC, 'alice');
+        expect((await access())?.pending).toBeDefined();
+        actions.simulateOverwriteRateLimit = false;
+
+        expect((await privacy.unhide(GUILD, SEC, 'alice')).ok).toBe(true);
+
+        expect((await access())?.pending).toBeUndefined();
+        expect((await access())?.hidden).toBeUndefined();
+      });
+
+      it('and a different change made meanwhile settles it, whichever way that goes', async () => {
+        await privacy.hide(GUILD, SEC, 'alice');
+        actions.simulateOverwriteRateLimit = true;
+        await privacy.unhide(GUILD, SEC, 'alice');
+        actions.simulateOverwriteRateLimit = false;
+
+        expect((await privacy.makePublic(GUILD, SEC, 'alice')).ok).toBe(true);
+
+        expect((await access())?.pending).toBeUndefined();
+        expect((await row()).state.private).toBeUndefined();
+      });
     });
 
     it('says to run /public again, not that it is on its way, for a queued opening', async () => {
@@ -3098,6 +3163,118 @@ describe('PrivacyService (integration)', () => {
       await watched.unhide(GUILD, SEC, 'alice');
       await watched.denyKicked(GUILD, SEC, 'mallory');
       expect(asked).not.toHaveBeenCalled();
+    });
+  });
+
+  // -- a creator who is denied saved lists ---------------------------------------------------------
+
+  /**
+   * A restricted feature is inert for a denied member, saved data included, and the one
+   * rule is asked wherever a list is applied. The rows stay (the rule can be lifted), and
+   * a member the cache cannot show is not restricted: a saved block protects the people it
+   * names, so the unknown direction keeps it.
+   */
+  describe('a creator who is denied Saved lists', () => {
+    const DENIED = { access: { users: ['alice'], roles: [] } };
+    let rules: CommandAccess;
+
+    beforeEach(async () => {
+      rules = DENIED;
+      privacy = build({ commandAccess: () => Promise.resolve(rules) });
+      voice.setOwnerAccess('alice', { roleIds: [] });
+      await lists.add(GUILD, 'alice', 'carol', 'trusted');
+      await lists.add(GUILD, 'alice', 'mallory', 'blocked');
+    });
+
+    it('locks a room without their trusted or blocked entries, and keeps the rows', async () => {
+      expect((await privacy.makePrivate(GUILD, SEC, 'alice')).ok).toBe(true);
+
+      expect(held('carol')).toBeUndefined();
+      expect(held('mallory')).toBeUndefined();
+      expect(bits(everyone())).toEqual({ allow: 0n, deny: C });
+      expect(await lists.get(GUILD, 'alice')).toEqual({ trusted: ['carol'], blocked: ['mallory'] });
+    });
+
+    it('hides a room the same way, and the entries return once the rule is lifted', async () => {
+      await privacy.hide(GUILD, SEC, 'alice');
+      expect(held('carol')).toBeUndefined();
+
+      rules = {};
+      await privacy.applyAccessLists(GUILD, SEC);
+
+      expect(bits(held('carol'))).toEqual({ allow: VC, deny: 0n });
+      expect(bits(held('mallory'))).toEqual({ allow: 0n, deny: VC });
+    });
+
+    it('takes back what an earlier plan wrote for them, when the rule arrives', async () => {
+      rules = {};
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      expect(held('carol')).toBeDefined();
+      expect(held('mallory')).toBeDefined();
+
+      rules = DENIED;
+      const applied = await privacy.applyAccessLists(GUILD, SEC);
+
+      expect(applied.status).toBe('applied');
+      expect(held('carol')).toBeUndefined();
+      expect(held('mallory')).toBeUndefined();
+    });
+
+    it('turns nobody away at the door: their blocked list bars no knocker', async () => {
+      rules = {};
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      const ctx = (await privacy.getJoinContext(actions.ofType('joinChannel')[0]!.channelId))!;
+      expect(await privacy.refuseBlockedKnock(ctx, 'mallory')).toBe(true);
+
+      rules = DENIED;
+
+      expect(await privacy.refuseBlockedKnock(ctx, 'mallory')).toBe(false);
+      // A vote's removal is the room's, and no rule about a member's lists reaches it.
+      await privacy.denyKicked(GUILD, SEC, 'eve');
+      expect(await privacy.refuseBlockedKnock(ctx, 'eve')).toBe(true);
+    });
+
+    it('saves nothing from the card’s Block, which still turns the requester away', async () => {
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      const joinId = actions.ofType('joinChannel')[0]!.channelId;
+
+      const res = await privacy.denyJoin(joinId, 'dave', true);
+
+      expect(res).toEqual({ ok: true, message: 'Blocked <@dave>.' });
+      expect((await lists.get(GUILD, 'alice')).blocked).toEqual(['mallory']);
+      expect(actions.ofType('connect')).toContainEqual(
+        expect.objectContaining({ channelId: joinId, memberId: 'dave', allow: false }),
+      );
+      expect(actions.ofType('move')).toContainEqual(
+        expect.objectContaining({ memberId: 'dave', channelId: null, onlyFrom: joinId }),
+      );
+    });
+
+    it('is not restricted when the cache cannot say who they are, or when they can manage channels', async () => {
+      voice.clearOwnerAccess('alice');
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      expect(held('carol')).toBeDefined();
+
+      await privacy.makePublic(GUILD, SEC, 'alice');
+      voice.setOwnerAccess('alice', { roleIds: [], canManage: true });
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      expect(held('mallory')).toBeDefined();
+    });
+
+    it('is not restricted for anybody the rule does not name', async () => {
+      rules = { access: { users: ['bob'], roles: [] } };
+
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+
+      expect(bits(held('carol'))).toEqual({ allow: C, deny: 0n });
+    });
+
+    it('fails open when the rules cannot be read', async () => {
+      privacy = build({ commandAccess: () => Promise.reject(new Error('settings down')) });
+
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+
+      expect(bits(held('carol'))).toEqual({ allow: C, deny: 0n });
     });
   });
 

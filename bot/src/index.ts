@@ -93,6 +93,7 @@ import {
   registerGuildOnboarding,
 } from './features/billing/index.js';
 import { backfillGuildIdentities, registerGuildIdentity } from './features/guildIdentity.js';
+import { readCommandAccess } from './features/voice/commandAccess.js';
 import { readTextChannelRole } from './features/voice/guildSettings.js';
 import { COMMIT, VERSION } from './version.js';
 
@@ -492,6 +493,14 @@ async function main(): Promise<void> {
     serverLog: (gid, level, message) => serverLogger.log(gid, level, message),
     // The `room_access.disabled` lever, through the creation gate's cached snapshot.
     roomAccessDisabled: () => creationGate.roomAccessDisabled(),
+    // The one `/restrict` rule that reaches saved lists: a member denied Saved lists has
+    // lists that apply to nothing. Withdrawn while `command_access.disabled` is on, and the
+    // lever is only asked when a rule names the feature, so a server with none pays nothing.
+    commandAccess: async (gid: string) => {
+      const rules = readCommandAccess((await settingsCache.ensure(gid)).settings, gid);
+      if (rules.access === undefined) return {};
+      return (await creationGate.commandAccessDisabled()) ? {} : rules;
+    },
   });
   /**
    * Per-room companion text channels. Constructed before the feature because
@@ -602,6 +611,10 @@ async function main(): Promise<void> {
       (await joinChannelsRepo.getBySecondary(cid))?.channelId ?? undefined,
     makePrivateOnCreate: (gid, cid, ownerId, ownerName) =>
       privacy.makePrivateForCreation(gid, cid, ownerId, ownerName),
+    // The creator's saved lists on the room they just made, and the sweep's pass that keeps
+    // every room in line with them. Both are the privacy service's, and neither throws.
+    applyAccessLists: (gid, cid, creator) => privacy.applyAccessLists(gid, cid, { creator }),
+    roomAccess: privacy,
     serverLog: (gid, level, message) => serverLogger.log(gid, level, message),
     permissionProblems,
     countRoom: (event, guildId) => {

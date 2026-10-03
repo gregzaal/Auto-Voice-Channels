@@ -116,10 +116,11 @@ export interface DiagnosticsReport {
    *
    * `disabled` true means `/hide`, `/access trust|block|admit`, the knock card's
    * Always allow and the saved-list apply of `/access` and the card's Block are
-   * refusing on this fleet, while every undo still works. A lock, an open, a vote's
-   * kick and a creation still write the creator's saved lists as part of their own
-   * change. Per fleet, like the flag. Absent on an idling instance, which holds no
-   * shards and so serves no rooms.
+   * refusing on this fleet, a new room gets no saved list and the sweep's pass over
+   * saved lists and hidden rooms is off, while every undo still works. A lock, an
+   * open, a vote's kick and a creation that starts private still write the creator's
+   * saved lists as part of their own change. Per fleet, like the flag. Absent on an
+   * idling instance, which holds no shards and so serves no rooms.
    */
   roomAccess?: { disabled: boolean };
 }

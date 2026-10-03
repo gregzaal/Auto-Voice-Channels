@@ -2,6 +2,7 @@ import type {
   JoinChannelRepository,
   JoinChannelRow,
   Logger,
+  MemberAccessLists,
   MemberAccessListRepository,
   RoomAccess,
   SecondaryChannelRepository,
@@ -23,7 +24,15 @@ import {
   type AccessPlanInput,
   type ResolvedOverwrite,
 } from './accessPlan.js';
-import { recordWithFacts, sameFacts, withMember, withoutMember } from './accessRecord.js';
+import {
+  recordWithFacts,
+  sameFacts,
+  withMember,
+  withoutMember,
+  withoutPending,
+  withPending,
+} from './accessRecord.js';
+import { savedListsInert, type CommandAccess, type CommandCaller } from './commandAccess.js';
 import { ChannelObfuscatedError, isPermissionError } from './discordAdapter.js';
 import { permissionProblemMessage, type PermissionProblemTracker } from './permissionProblems.js';
 import {
@@ -96,15 +105,24 @@ export interface PrivacyServiceDeps {
    * as not disabled.
    *
    * While it is on the ENTRY directions refuse: `hide`, `admit`, the knock card's Always
-   * allow, and applying a saved list to a room. Every undo is untouched: `unhide`,
-   * `makePublic`, taking a saved entry back off a live room, and a block's own deny and
-   * move on the card. It is deliberately not consulted by `makePrivate`, a vote's kick or
+   * allow, and applying a saved list to a room, which is also what a new room's creator's
+   * lists and the sweep's whole pass over a guild are (`convergeGuild` does nothing while
+   * it is on). Every undo is untouched: `unhide`, `makePublic`, taking a saved entry back
+   * off a live room, and a block's own deny and move on the card. It is deliberately not
+   * consulted by `makePrivate`, a vote's kick or
    * a creation: those are existing features whose rollback is a deploy, and a switch that
    * quietly stopped locking a room would be a worse fault than the one it was thrown for.
    * They, `makePublic` and `unhide` therefore still write the creator's saved lists as
    * part of their own change, so this does not stop every write of a saved list.
    */
   roomAccessDisabled?: () => Promise<boolean>;
+  /**
+   * The guild's `/restrict` rules as they stand now, empty while `command_access.disabled`
+   * is on. Asked so a member who is denied Saved lists has lists that apply to nothing
+   * (see {@link savedListsInert}). Optional: absent means nobody is restricted. It never
+   * throws: a failed read counts as no rules, which keeps every saved list applying.
+   */
+  commandAccess?: (guildId: string) => Promise<CommandAccess>;
 }
 
 /** A room as a command finds it, or the reply that says it cannot be acted on. */
@@ -167,7 +185,57 @@ export interface AccessApplyResult {
    * room that is open to everyone has no overwrite at all.
    */
   changedMemberIds?: string[];
+  /** The mode a queued exit was carried through to, when this run finished one. */
+  completed?: AccessMode;
+  /** The room's "⇩ Join" channel was made, taken away or trimmed to one (converge only). */
+  joinChanged?: boolean;
   error?: unknown;
+}
+
+/** What {@link PrivacyService.applyAccessLists} may be told beyond the room. */
+export interface AccessApplyOptions {
+  /**
+   * The caller only takes entries away (`/access remove` and `clear`, a handover while the
+   * lever is on): it is never skipped, and it adds nothing.
+   */
+  revokeOnly?: boolean;
+  /**
+   * Set only by the create path: the room has just been made and `id` made it. It means
+   * the room is new, so a creator who has blocked nobody ends the run before the room is
+   * read at all. `standing` is who they are from the member's own snapshot, which is truer than
+   * a cache that may not have them yet, and absent when the snapshot carried no roles.
+   * Without a standing the cache says, and a creator it cannot show is not restricted.
+   */
+  creator?: { id: string; standing?: CommandCaller | undefined } | undefined;
+  /**
+   * The creator's saved lists, when the caller has already read them. The sweep reads
+   * every owner's in one query for the guild and hands each room its own, instead of one
+   * read per room.
+   */
+  saved?: MemberAccessLists | undefined;
+  /**
+   * Set only by the sweep, with the room's "⇩ Join" rows as it found them. It is what makes
+   * the run also settle the Join channel (a hidden room has none, a locked one exactly one)
+   * and what keeps a problem the guild has already been told about from being told again.
+   * Without it a run touches the Join channel only when the room changes mode.
+   */
+  sweep?: { joins: readonly JoinChannelRow[] } | undefined;
+}
+
+/** What one pass of {@link PrivacyService.convergeGuild} did, for the log and for tests. */
+export interface AccessConvergeResult {
+  /** Rooms the pass had something to do for, whether or not they needed anything. */
+  considered: number;
+  /** Rooms whose overwrites or record were written. */
+  repaired: number;
+  /** Queued exits carried through to the mode they were heading for. */
+  completed: number;
+  /** Rooms whose "⇩ Join" channel was made, taken away or trimmed to one. */
+  joinsFixed: number;
+  /** Rooms left alone because their access record is one this build cannot read. */
+  unreadable: string[];
+  /** Rooms that could not be brought in line this time. */
+  failed: number;
 }
 
 /** What {@link PrivacyService.tryMakePrivateForCreation} did. */
@@ -212,6 +280,12 @@ interface ChangeInput {
    * about to delete the room and report the problem against another channel itself.
    */
   quiet?: boolean;
+  /**
+   * Run by the sweep, which comes back every few minutes: a problem the guild has already
+   * been told about is not recorded or logged again, so one room the bot cannot edit is one
+   * incident and not one per sweep. It is still logged for the operator.
+   */
+  sweep?: boolean;
 }
 
 /** The facts, less members Discord does not have in the server, unless they were already recorded. */
@@ -249,6 +323,44 @@ function onlyRecorded(wanted: RoomLists, record: RoomAccess | null): RoomLists {
 }
 
 /**
+ * Whether going from one mode to another OPENS the room: out of hidden or locked, to a mode
+ * with fewer restrictions. The only direction whose queued write leaves the record naming
+ * the mode the room is leaving, which is what a pending marker is for. An entry records the
+ * mode it is entering ahead of its write, so a sweep that re-asserts it fights nothing.
+ */
+function isExit(from: AccessMode, to: AccessMode): boolean {
+  return (from !== 'public' && to === 'public') || (from === 'hidden' && to === 'locked');
+}
+
+/**
+ * Whether a record holds anything the sweep has to look after: a mode, a marker, or an
+ * entry. A record that names only its creator (what an emptied list leaves) does not, so
+ * a room whose lists are all gone costs the sweep nothing.
+ */
+function recordsAccess(record: RoomAccess | null): boolean {
+  if (!record) return false;
+  return (
+    record.hidden === true ||
+    record.pending !== undefined ||
+    record.baseline !== undefined ||
+    record.viewerRoleId !== undefined ||
+    (record.neutralised?.length ?? 0) > 0 ||
+    (record.trusted?.length ?? 0) > 0 ||
+    (record.blocked?.length ?? 0) > 0 ||
+    (record.admitted?.length ?? 0) > 0 ||
+    (record.kicked?.length ?? 0) > 0
+  );
+}
+
+/**
+ * How long the sweep leaves a room alone after Discord showed it only the obfuscated shell
+ * of the channel (the bot can no longer see it). The incident is recorded once, and asking
+ * again every sweep would only repeat it, so the sweep asks again rarely, which is also how
+ * it notices the access has been given back.
+ */
+const LOST_ACCESS_RETRY_MS = 6 * 60 * 60 * 1000;
+
+/**
  * The full private-channel + "⇩ Join {owner}" mechanism, ported from the
  * legacy `private`/`public` commands and join-request handling, and the modes
  * built on it: a room is public, locked, or hidden from the channel list.
@@ -274,6 +386,12 @@ function onlyRecorded(wanted: RoomLists, record: RoomAccess | null): RoomLists {
  */
 export class PrivacyService {
   constructor(private readonly deps: PrivacyServiceDeps) {}
+
+  /**
+   * Rooms the sweep found it could no longer see, and when. In memory and per process, like
+   * the problem tracker it sits beside: a restart asks once more, which is one more request.
+   */
+  private readonly lostAccess = new Map<string, number>();
 
   // -- the four commands --------------------------------------------------------
 
@@ -579,6 +697,11 @@ export class PrivacyService {
    * Idempotent: a second run reads the channel as the first left it, plans no change
    * and writes nothing.
    *
+   * A queued OPENING (`record.pending`) is carried through to the mode it was heading
+   * for instead of being re-asserted as the mode the record still names. A creator who is
+   * denied Saved lists has no lists (see {@link listsFor}). {@link convergeGuild} is this,
+   * run for every room of a guild with `sweep` set.
+   *
    * **`room_access.disabled` skips it** (`reason: 'disabled'`), which is what keeps a
    * knock card's Block and the sweep from applying lists while the lever is on.
    * `revokeOnly` is for the caller that is TAKING ENTRIES AWAY (`/access remove` and
@@ -591,7 +714,7 @@ export class PrivacyService {
   async applyAccessLists(
     guildId: string,
     roomChannelId: string,
-    opts: { revokeOnly?: boolean } = {},
+    opts: AccessApplyOptions = {},
   ): Promise<AccessApplyResult> {
     const skipped = (reason: NonNullable<AccessApplyResult['reason']>): AccessApplyResult => ({
       status: 'skipped',
@@ -600,9 +723,23 @@ export class PrivacyService {
       skippedRoleIds: [],
     });
     try {
+      const repo = this.deps.memberAccessLists;
       // Without the repository, "no entries" would read as "everything was removed".
-      if (!this.deps.memberAccessLists) return skipped('no_lists');
+      if (!repo) return skipped('no_lists');
       if (!opts.revokeOnly && (await this.accessPaused())) return skipped('disabled');
+
+      // A room that has just been made is not read when its creator has blocked nobody.
+      // Only a block can matter to it: a room that started locked or hidden was planned
+      // from these same lists a moment ago, and in an open room a trusted entry grants
+      // nothing. One indexed read, and it ends the run for nearly every room.
+      let saved = opts.saved;
+      if (opts.creator && !opts.revokeOnly && saved === undefined) {
+        saved = await repo.get(guildId, opts.creator.id);
+        if (saved.blocked.length === 0) {
+          return { status: 'unchanged', movedOut: [], skippedRoleIds: [] };
+        }
+      }
+
       const row = await this.deps.secondaries.get(roomChannelId);
       if (!row || row.guildId !== guildId) return skipped('no_room');
       const read = await this.deps.secondaries.readAccess(roomChannelId);
@@ -617,15 +754,41 @@ export class PrivacyService {
       const mode = roomMode({ state: row.state, access: read });
       if (mode === 'unknown') return skipped('unreadable');
 
+      /**
+       * A queued exit is carried through, not undone.
+       *
+       * The record of a room whose opening Discord has only queued still says hidden or
+       * locked, and planning it as that would re-close it and fight the write that is
+       * about to land (or, once a restart has lost that write, undo what the owner asked
+       * for). So the room is planned as the mode it is heading for, which finalises the
+       * record. A marker for a mode the room is already in, or for a way IN, is stale (the
+       * queued write landed, or something else wrote it) and is only cleared.
+       */
+      let record = read.access;
+      let target: AccessMode = mode;
+      if (record?.pending !== undefined) {
+        if (isExit(mode, record.pending.mode)) {
+          target = record.pending.mode;
+        } else {
+          const cleared = await this.deps.secondaries.mutateAccess(roomChannelId, (current) =>
+            withoutPending(current),
+          );
+          if (cleared.status === 'written') record = cleared.access;
+        }
+      }
+
+      const wanted = await this.listsFor(guildId, row, record, {
+        saved,
+        standing: opts.creator?.standing,
+      });
+      const lists = opts.revokeOnly ? onlyRecorded(wanted, record) : wanted;
       // A public room that has never had an access record, made by somebody with
       // nothing saved: there is nothing for a list to change, and it costs no call to
       // Discord at all. Any other room is planned, which also repairs what an
       // interrupted change or a stale write left behind.
-      const wanted = await this.listsFor(guildId, row, read.access);
-      const lists = opts.revokeOnly ? onlyRecorded(wanted, read.access) : wanted;
       if (
         mode === 'public' &&
-        read.access === null &&
+        record === null &&
         lists.trusted.length === 0 &&
         lists.blocked.length === 0
       ) {
@@ -635,17 +798,22 @@ export class PrivacyService {
       const outcome = await this.changeAccess({
         guildId,
         row,
-        record: read.access,
+        record,
         from: mode,
-        to: mode,
+        to: target,
         ownerId: row.ownerId,
         lists,
         joinName: () => this.ownerJoinName(guildId, row),
         ...(opts.revokeOnly ? { revokeOnly: true } : {}),
+        ...(opts.sweep ? { sweep: true } : {}),
       });
       switch (outcome.status) {
         case 'applied':
-        case 'unchanged':
+        case 'unchanged': {
+          // Only after the write has landed: a queued one says nothing about the Join channel.
+          const joinChanged = opts.sweep
+            ? await this.settleJoinChannel(guildId, row, target, opts.sweep.joins, outcome.plan)
+            : false;
           return {
             status: outcome.status,
             movedOut: outcome.movedOut,
@@ -654,7 +822,10 @@ export class PrivacyService {
               ...outcome.plan.diff.upserts.filter((o) => o.type === OVERWRITE_MEMBER),
               ...outcome.plan.diff.deletes.filter((o) => o.type === OVERWRITE_MEMBER),
             ].map((o) => o.id),
+            ...(target !== mode && outcome.status === 'applied' ? { completed: target } : {}),
+            ...(joinChanged ? { joinChanged: true } : {}),
           };
+        }
         case 'deferred':
           return { status: 'deferred', movedOut: [], skippedRoleIds: outcome.plan.skippedRoleIds };
         case 'failed':
@@ -673,6 +844,150 @@ export class PrivacyService {
       );
       return { status: 'failed', movedOut: [], skippedRoleIds: [], error: err };
     }
+  }
+
+  /**
+   * The sweep's pass over one guild's rooms: brings every room that has something
+   * recorded, or whose creator has saved a list, in line with what the lists and the
+   * record say. This is the correctness mechanism for saved lists and hidden rooms, and
+   * everything that applies one live (a create, a command, a card) is an early
+   * application of what this guarantees.
+   *
+   * **It is {@link applyAccessLists} run over a guild, so it repairs what that plans:** an
+   * entry missing from Discord is added, a recorded entry the lists no longer name is taken
+   * back, blocked occupants are asked to leave, a hidden room keeps the bot's allow and
+   * the full `@everyone` deny, a lost `private` comes back, and the moderator role is
+   * revoked and granted as the setting changes (a deleted role is simply dropped). **A
+   * queued opening is carried through** to the mode it was heading for. And it settles the
+   * Join channel: a hidden room has none and a locked one exactly one.
+   *
+   * **What it never does.** It never deletes an overwrite no record names (a human's, a
+   * knocker an owner approved, a vote's older deny), never touches the current owner's
+   * overwrite beyond granting what they need, and writes nothing a second run would write.
+   * It DOES override a hand edit of a hidden room's `@everyone` overwrite, within one
+   * sweep: a hidden room is meant to be hidden, as the companion text channel is meant to
+   * be private. A record this build cannot read is skipped and reported, never repaired.
+   *
+   * **Cheap when there is nothing to do:** one query for the guild's saved lists, and a
+   * room with no record whose creator has no saved entries costs nothing else.
+   * `room_access.disabled` turns the whole pass off. It never throws: each room has its
+   * own try and catch, so one room the bot cannot edit costs that room, not the guild's
+   * other passes, and nothing here counts against the breaker.
+   */
+  async convergeGuild(
+    guildId: string,
+    rooms: readonly SecondaryChannelRow[],
+  ): Promise<AccessConvergeResult> {
+    const result: AccessConvergeResult = {
+      considered: 0,
+      repaired: 0,
+      completed: 0,
+      joinsFixed: 0,
+      unreadable: [],
+      failed: 0,
+    };
+    try {
+      const repo = this.deps.memberAccessLists;
+      if (!repo || rooms.length === 0 || (await this.accessPaused())) return result;
+
+      let byOwner: Map<string, MemberAccessLists>;
+      try {
+        byOwner = await repo.listByGuild(guildId);
+      } catch (err) {
+        // Never read as "nobody has saved anything": that would take every saved entry
+        // off every room.
+        this.deps.logger.warn({ err, guildId }, 'could not read the saved lists; skipping');
+        return result;
+      }
+
+      const none: MemberAccessLists = { trusted: [], blocked: [] };
+      const work = rooms.flatMap((room) => {
+        const creatorId = room.access?.creatorId ?? room.originalCreator;
+        const saved = (creatorId ? byOwner.get(creatorId) : undefined) ?? none;
+        const locked = room.state.private === true;
+        return recordsAccess(room.access) ||
+          saved.blocked.length > 0 ||
+          (locked && saved.trusted.length > 0)
+          ? [{ room, saved }]
+          : [];
+      });
+      if (work.length === 0) return result;
+
+      // One read for the Join rows of every room that is not open.
+      const closed = work
+        .filter(({ room }) => room.state.private === true || room.access?.hidden === true)
+        .map(({ room }) => room.channelId);
+      const joinsByRoom = new Map<string, JoinChannelRow[]>();
+      try {
+        for (const join of await this.deps.joinChannels.listBySecondaries(closed)) {
+          const rows = joinsByRoom.get(join.secondaryChannelId) ?? [];
+          rows.push(join);
+          joinsByRoom.set(join.secondaryChannelId, rows);
+        }
+      } catch (err) {
+        this.deps.logger.warn({ err, guildId }, 'could not read the join channels; skipping');
+        return result;
+      }
+
+      for (const { room, saved } of work) {
+        const lostAt = this.lostAccess.get(room.channelId);
+        if (lostAt !== undefined) {
+          if (Date.now() - lostAt < LOST_ACCESS_RETRY_MS) continue;
+          this.lostAccess.delete(room.channelId);
+        }
+        result.considered += 1;
+        try {
+          const applied = await this.applyAccessLists(guildId, room.channelId, {
+            saved,
+            sweep: { joins: joinsByRoom.get(room.channelId) ?? [] },
+          });
+          if (applied.status === 'skipped' && applied.reason === 'disabled') break;
+          this.tally(result, room.channelId, applied);
+        } catch (err) {
+          result.failed += 1;
+          this.deps.logger.warn(
+            { err, guildId, channelId: room.channelId },
+            'could not converge a room access',
+          );
+        }
+      }
+
+      if (
+        result.repaired + result.completed + result.joinsFixed + result.failed > 0 ||
+        result.unreadable.length > 0
+      ) {
+        this.deps.logger.info(
+          { guildId, ...result, unreadable: result.unreadable.length },
+          'converged room access',
+        );
+      }
+    } catch (err) {
+      this.deps.logger.warn({ err, guildId }, 'the room access pass failed');
+    }
+    return result;
+  }
+
+  /** Counts what one room's run did, and remembers a room the bot can no longer see. */
+  private tally(result: AccessConvergeResult, channelId: string, applied: AccessApplyResult): void {
+    switch (applied.status) {
+      case 'applied':
+        result.repaired += 1;
+        if (applied.completed !== undefined) result.completed += 1;
+        break;
+      case 'failed':
+        result.failed += 1;
+        if (applied.error instanceof ChannelObfuscatedError) {
+          this.lostAccess.set(channelId, Date.now());
+        }
+        break;
+      case 'skipped':
+        if (applied.reason === 'unreadable') result.unreadable.push(channelId);
+        else if (applied.reason === 'refused') result.failed += 1;
+        break;
+      default:
+        break;
+    }
+    if (applied.joinChanged) result.joinsFixed += 1;
   }
 
   /**
@@ -1142,7 +1457,7 @@ export class PrivacyService {
       plan = planAccess(planned.input);
       viewerRoleId = planned.viewerRoleId;
     } catch (err) {
-      return this.failure(guildId, channelId, err, input.quiet);
+      return this.failure(guildId, channelId, err, input.quiet, input.sweep);
     }
     if (!plan.ok) {
       return plan.reason === 'role_defeats_hide'
@@ -1202,7 +1517,7 @@ export class PrivacyService {
           );
         }
       }
-      return this.failure(guildId, channelId, err, input.quiet);
+      return this.failure(guildId, channelId, err, input.quiet, input.sweep);
     }
     if (applied.channelGone) return { status: 'gone' };
     const sees = this.sees(plan, viewerRoleId);
@@ -1217,12 +1532,13 @@ export class PrivacyService {
     // A queued write is not watched: nothing finalises the record when it lands or
     // reverts it when it fails, and the reply says what the owner can do (see
     // `deferredMessage`). Until something does, a record that still says hidden or
-    // private after a queued OPENING describes the room as it was, and whatever derives
-    // the desired state from a record (a sweep) has to reconcile it with the channel
-    // first, or it will undo the opening.
+    // private after a queued OPENING describes the room as it was, and the sweep that
+    // derives the desired state from a record would undo the opening. So an opening is
+    // marked pending, which tells the sweep to carry it through (see `applyAccessLists`).
     let joinError: unknown;
     const needsJoin = to === 'locked' && from !== 'locked' && input.ownerId !== null;
     if (applied.deferred) {
+      if (isExit(from, to)) await this.markPending(channelId, to);
       if (needsJoin && from !== 'hidden') joinError = await this.joinForLock(input, botId, plan);
       return {
         status: 'deferred',
@@ -1242,12 +1558,16 @@ export class PrivacyService {
 
       const finalised = await this.deps.secondaries.transitionAccess(channelId, {
         ...(to !== 'public' ? { statePatch: { private: true } } : { stateRemove: ['private'] }),
+        // Whatever was queued is settled, whether it was this change or an earlier one
+        // that this change carried through.
         access: (stored) =>
-          recordWithFacts(stored, recordableFacts(plan.facts, applied.droppedMemberIds, record)),
+          withoutPending(
+            recordWithFacts(stored, recordableFacts(plan.facts, applied.droppedMemberIds, record)),
+          ),
       });
       if (finalised.status !== 'written') return { status: finalised.status };
     } catch (err) {
-      return this.failure(guildId, channelId, err, input.quiet);
+      return this.failure(guildId, channelId, err, input.quiet, input.sweep);
     }
     this.deps.permissionProblems?.clear(guildId, channelId, ['access']);
 
@@ -1312,6 +1632,28 @@ export class PrivacyService {
     }
   }
 
+  /**
+   * Marks an opening Discord has only queued, so the sweep carries it through and does not
+   * re-assert the mode the record still names. Never throws: the opening is already queued
+   * and will land, and the marker is only what lets a lost one be finished.
+   */
+  private async markPending(channelId: string, mode: AccessMode): Promise<void> {
+    const at = Date.now();
+    try {
+      const written = await this.deps.secondaries.mutateAccess(channelId, (current) =>
+        withPending(current, mode, at),
+      );
+      if (written.status !== 'written') {
+        this.deps.logger.warn(
+          { channelId, status: written.status },
+          'could not mark a queued opening as pending',
+        );
+      }
+    } catch (err) {
+      this.deps.logger.warn({ err, channelId }, 'could not mark a queued opening as pending');
+    }
+  }
+
   /** The moderator role, if the plan leaves it able to see the room. */
   private sees(plan: OkPlan, viewerRoleId: string | null): string | null {
     if (!viewerRoleId) return null;
@@ -1325,28 +1667,40 @@ export class PrivacyService {
    * Records a failure the guild should hear about, and returns it. `quiet` keeps a
    * permission failure off the problem list and out of the server's log channel (it is
    * still logged), for a caller that reports it itself, as the create path's rollback
-   * does.
+   * does. `sweep` is for the periodic pass, which fails on the same room every time it
+   * comes round until somebody fixes it: an incident the guild already has is neither
+   * recorded again (which would restart the notifier's backoff) nor logged to the server's
+   * log channel again.
    */
   private failure(
     guildId: string,
     channelId: string,
     err: unknown,
     quiet: boolean | undefined,
+    sweep?: boolean,
   ): AccessOutcome {
     this.deps.logger.warn(
       { err, guildId, channelId },
       'could not change who can see or join a room',
     );
+    const told = (operation: 'delete' | 'access'): boolean =>
+      sweep === true &&
+      (this.deps.permissionProblems
+        ?.recent(guildId)
+        .some((p) => p.channelId === channelId && p.operation === operation) ??
+        false);
     if (err instanceof ChannelObfuscatedError) {
       // A channel the bot can no longer see is lost access, not an access change that
       // failed: recorded with no operation of its own, as everywhere else it is.
-      this.deps.permissionProblems?.record(guildId, {
-        channelId,
-        operation: 'delete',
-        at: Date.now(),
-      });
-      this.deps.serverLog?.(guildId, 1, permissionProblemMessage(channelId));
-    } else if (isPermissionError(err) && !quiet) {
+      if (!told('delete')) {
+        this.deps.permissionProblems?.record(guildId, {
+          channelId,
+          operation: 'delete',
+          at: Date.now(),
+        });
+        this.deps.serverLog?.(guildId, 1, permissionProblemMessage(channelId));
+      }
+    } else if (isPermissionError(err) && !quiet && !told('access')) {
       // Missing Access and Missing Permissions are what the problem's wording is true
       // for. The limit, a deleted role and a role above the bot each need their own.
       this.deps.permissionProblems?.record(guildId, {
@@ -1436,11 +1790,17 @@ export class PrivacyService {
    * left out here and not only at the moment someone is added: a member can become
    * an Administrator after they were listed. Without the repository the entries the
    * room already records are returned as they are, so nothing is revoked.
+   *
+   * **A creator who is denied Saved lists has none**: their lists are inert, so the room
+   * is planned as if nothing were saved, which also takes back what an earlier plan wrote
+   * for them. `saved` is for a caller that has read them already, and `standing` for one
+   * that knows who the creator is better than the cache does.
    */
   private async listsFor(
     guildId: string,
     row: SecondaryChannelRow,
     record: RoomAccess | null,
+    known: { saved?: MemberAccessLists | undefined; standing?: CommandCaller | undefined } = {},
   ): Promise<RoomLists> {
     const creatorId = record?.creatorId ?? row.originalCreator;
     const repo = this.deps.memberAccessLists;
@@ -1448,12 +1808,49 @@ export class PrivacyService {
       return { creatorId, trusted: record?.trusted ?? [], blocked: record?.blocked ?? [] };
     }
     if (!creatorId) return { creatorId, trusted: [], blocked: [] };
-    const lists = await repo.get(guildId, creatorId);
+    const lists = known.saved ?? (await repo.get(guildId, creatorId));
+    // The rules are asked only when there is something they could make inert.
+    if (
+      lists.trusted.length + lists.blocked.length > 0 &&
+      (await this.listsInert(guildId, row.channelId, creatorId, known.standing))
+    ) {
+      return { creatorId, trusted: [], blocked: [] };
+    }
     return {
       creatorId,
       trusted: lists.trusted,
       blocked: lists.blocked.filter((id) => !this.bypassesOverwrites(guildId, id)),
     };
+  }
+
+  /**
+   * Whether this member's saved lists are inert: they are denied Saved lists (see
+   * {@link savedListsInert}). `standing` is who they are when the caller knows, else the
+   * cache says, and a member the cache cannot show is not inert. The settings are asked
+   * first and the cache only when a rule names the feature, so a guild with no rule pays
+   * one cached settings read. Never throws: a failed read counts as not inert, which keeps
+   * the list applying.
+   */
+  private async listsInert(
+    guildId: string,
+    roomChannelId: string,
+    ownerId: string,
+    standing?: CommandCaller,
+  ): Promise<boolean> {
+    try {
+      const rules = (await this.deps.commandAccess?.(guildId)) ?? {};
+      if (rules.access === undefined) return false;
+      return savedListsInert(
+        rules,
+        standing ?? this.deps.voice.ownerAccessOf?.(roomChannelId, ownerId),
+      );
+    } catch (err) {
+      this.deps.logger.warn(
+        { err, guildId, channelId: roomChannelId },
+        'could not read the restrictions for a saved list; applying it',
+      );
+      return false;
+    }
   }
 
   /** Whether no overwrite can stop this member: an Administrator, or the server's owner. */
@@ -1517,6 +1914,12 @@ export class PrivacyService {
     // The lever stops the saving and nothing else: a Block still turns the requester
     // away, and says that it did not save them.
     if (await this.accessPaused()) return { saved: false, note: BLOCK_NOT_SAVED_PAUSED };
+    // A member who is denied Saved lists has lists that apply to nothing. Saving to one
+    // would leave an entry that springs to life the day the rule goes, and a reply that
+    // says it is in force would be untrue now, so the decision stands without it.
+    if (await this.listsInert(ctx.guildId, ctx.secondaryChannelId, ctx.creatorId)) {
+      return { saved: false, note: '' };
+    }
     try {
       const result = await repo.add(ctx.guildId, ctx.creatorId, memberId, kind);
       if (result.outcome === 'full') {
@@ -1568,7 +1971,13 @@ export class PrivacyService {
     const creator = access?.creatorId ?? row?.originalCreator;
     if (creator) owners.add(creator);
     for (const ownerId of owners) {
-      if ((await repo.get(ctx.guildId, ownerId)).blocked.includes(requesterId)) return 'blocked';
+      // An owner who is denied Saved lists has lists that bar nobody.
+      if (
+        (await repo.get(ctx.guildId, ownerId)).blocked.includes(requesterId) &&
+        !(await this.listsInert(ctx.guildId, ctx.secondaryChannelId, ownerId))
+      ) {
+        return 'blocked';
+      }
     }
     return null;
   }
@@ -1620,6 +2029,56 @@ export class PrivacyService {
       return { channelId: kept.channelId, created: false };
     }
     return { channelId, created: true };
+  }
+
+  /**
+   * Makes the room's "⇩ Join" channel agree with its mode, for the sweep: a hidden room has
+   * none (it would name the owner beside a room that is meant to be gone from the list) and
+   * a locked one exactly one. Resolves to whether it changed anything.
+   *
+   * `joins` is what the sweep found before this run, which this run's own write may have
+   * changed (a queued opening it carried through makes one), so every step is idempotent:
+   * the create looks first, and the removal reads what is there. Never throws: a failure is
+   * recorded like any other access problem the sweep meets, once.
+   */
+  private async settleJoinChannel(
+    guildId: string,
+    row: SecondaryChannelRow,
+    mode: AccessMode,
+    joins: readonly JoinChannelRow[],
+    plan: OkPlan,
+  ): Promise<boolean> {
+    try {
+      if (mode === 'hidden') {
+        if (joins.length === 0) return false;
+        await this.removeJoinChannel(guildId, row.channelId);
+        return true;
+      }
+      const botId = this.deps.botUserId?.();
+      // An ownerless room has nobody for the channel to name.
+      if (mode !== 'locked' || row.ownerId === null || !botId) return false;
+      if (joins.length > 1) {
+        // Everything beyond the oldest, which is the one the knock and the rest keep.
+        for (const extra of joins.slice(1)) {
+          await this.deps.actions.deleteChannel(guildId, extra.channelId);
+          await this.deps.joinChannels.remove(extra.channelId);
+        }
+        return true;
+      }
+      if (joins.length === 1) return false;
+      const made = await this.ensureJoinChannel(
+        guildId,
+        row.channelId,
+        row.ownerId,
+        await this.ownerJoinName(guildId, row),
+      );
+      if (!made.created) return false;
+      await this.denyBlockedOnJoin(guildId, made.channelId, botId, plan);
+      return true;
+    } catch (err) {
+      this.failure(guildId, row.channelId, err, false, true);
+      return false;
+    }
   }
 
   /**

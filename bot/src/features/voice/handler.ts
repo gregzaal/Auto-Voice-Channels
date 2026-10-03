@@ -35,6 +35,7 @@ import type { CommandResult } from './commands.js';
 import type { PanelOwnerAccess, RoomPanelView } from './controlPanel.js';
 import type { PanelRoomRow } from './controlPanelPoster.js';
 import { roomMode, type RoomMode } from './roomMode.js';
+import { savedListsInert, type CommandAccess, type CommandCaller } from './commandAccess.js';
 
 /** A fresh 31-bit random seed for a channel's `[[random]]` picks. */
 function randomSeed(): number {
@@ -158,6 +159,16 @@ export interface CreationGate {
    * disabled, which keeps the rules in force.
    */
   commandAccessDisabled?(): Promise<boolean>;
+  /**
+   * The room access lever alone (`room_access.disabled`), for the one thing a room create
+   * does with it: skip applying the creator's saved lists to the room it just made.
+   *
+   * Its own method, and not a field of the decision, because the lever is not a creation
+   * lever and a room is created whatever it says. Asked through the gate's cached snapshot
+   * and failing open, so it costs no query and a blip lets the lists apply. Absent means
+   * not disabled.
+   */
+  roomAccessDisabled?(): Promise<boolean>;
 }
 
 export interface VoiceFeatureDeps {
@@ -277,6 +288,27 @@ export interface VoiceFeatureDeps {
     ownerId: string,
     ownerName: string,
   ) => Promise<void>;
+  /**
+   * Applies the creator's saved trusted and blocked lists to a just-made room (the privacy
+   * service's `applyAccessLists`), after the owner's move and any default-private step.
+   * `creator.standing` is who they are from the member's own snapshot, absent when it
+   * carries no roles. Optional so the feature runs without saved lists, and it never
+   * throws: a room whose lists could not be applied is a working room, and the sweep
+   * applies them within one interval.
+   */
+  applyAccessLists?: (
+    guildId: string,
+    roomChannelId: string,
+    creator: { id: string; standing?: CommandCaller | undefined },
+  ) => Promise<{ status: string; error?: unknown }>;
+  /**
+   * The sweep's pass over a guild's saved lists and hidden rooms (the privacy service's
+   * `convergeGuild`), given the guild's live rooms. Gated by `room_access.disabled` inside,
+   * and never throws.
+   */
+  roomAccess?: {
+    convergeGuild(guildId: string, rooms: readonly SecondaryChannelRow[]): Promise<unknown>;
+  };
   /**
    * Optional sink for per-guild event logging (`/logging`). Level 1 = channels
    * created/deleted, 2 = + renames & ownership changes, 3 = + members
@@ -959,6 +991,16 @@ export class VoiceFeature {
     this.deps.permissionProblems?.clear(guildId, channelId, ['create', 'move', 'privacy']);
 
     /**
+     * The creator's saved trusted and blocked lists, applied to the room they just made.
+     *
+     * AFTER the move and after any default-private step, never before them: both
+     * rollbacks above delete the room, and this must not be something they have to
+     * unwind. By here the room is committed, and what this adds is a block that has to
+     * be in place before anyone else can join it.
+     */
+    await this.applySavedLists(guildId, newChannelId, member, settings.commandAccess);
+
+    /**
      * The companion text channel, for a creator channel that opted in.
      *
      * AFTER the move, not after the row insert: both rollbacks above delete the
@@ -1076,6 +1118,62 @@ export class VoiceFeature {
     );
     this.deps.serverLog?.(guildId, 1, `➕ <@${member.id}> created <#${newChannelId}>`);
     return { action: 'created', channelId: newChannelId };
+  }
+
+  /**
+   * Applies the creator's saved lists to a room that has just been made, so a block they
+   * saved reaches the public room they create tomorrow and a trusted friend is let into a
+   * locked or hidden one.
+   *
+   * **Never throws, and never fails the room.** The room exists and the member is in it,
+   * and the sweep applies the same lists to every room within one interval, so a failure
+   * here costs a few minutes and nothing else. It is also contained for the breaker's
+   * sake: an error out of the create path counts against the guild. The service records an
+   * access problem for a permission failure (Missing Access or Missing Permissions), and
+   * anything else is only logged, with ids and never a name.
+   *
+   * Skipped while `room_access.disabled` is on, read through the gate's cached snapshot
+   * (no query, failing open), and skipped for a creator who is denied Saved lists, whose
+   * lists are inert. The creator's standing is the member's own
+   * snapshot, which is truer than the cache while they are still moving into the room; a
+   * snapshot that carries no roles says nothing about them, and the service falls back to
+   * the cache and, failing that, to applying the lists.
+   *
+   * Cheap when there is nothing to do: a creator who has blocked nobody costs one indexed
+   * read and no call to Discord (a trusted entry grants nothing in an open room, and a room
+   * made private by default was planned from the lists already). Replay-safe: it is a
+   * converge, so a second run writes nothing.
+   */
+  private async applySavedLists(
+    guildId: string,
+    roomId: string,
+    member: VoiceMember,
+    commandAccess: CommandAccess,
+  ): Promise<void> {
+    const apply = this.deps.applyAccessLists;
+    if (!apply) return;
+    try {
+      // The real gate fails open itself; a gate that throws must not take the lists with it.
+      const disabled = await this.deps.gate?.roomAccessDisabled?.().catch(() => false);
+      if (disabled) return;
+      const standing: CommandCaller | undefined =
+        member.roleIds === undefined
+          ? undefined
+          : { userId: member.id, roleIds: member.roleIds, canManage: member.canManage === true };
+      if (savedListsInert(commandAccess, standing)) return;
+      const result = await apply(guildId, roomId, { id: member.id, standing });
+      if (result.status === 'failed') {
+        this.deps.logger.warn(
+          { err: result.error, guildId, roomId, creatorId: member.id },
+          'could not apply the creator saved lists to a new room',
+        );
+      }
+    } catch (err) {
+      this.deps.logger.warn(
+        { err, guildId, roomId, creatorId: member.id },
+        'could not apply the creator saved lists to a new room',
+      );
+    }
   }
 
   /**
@@ -2685,6 +2783,8 @@ export class VoiceFeature {
    * - a tracked secondary whose channel vanished from Discord → drop the stale
    *   record (no Discord action);
    * - a tracked secondary that has emptied → delete it (missed leave event);
+   * - a surviving secondary whose saved lists or hidden state drifted → bring its
+   *   overwrites and Join channel back in line (see `roomAccess`);
    * - a surviving secondary whose name drifted → rename it;
    * - a member still sitting in a primary → spawn their secondary and move them
    *   (missed join event).
@@ -2744,6 +2844,26 @@ export class VoiceFeature {
         continue;
       }
       survivors.push(secondary);
+    }
+
+    /**
+     * Saved lists and hidden rooms: converge each live room's overwrites and Join channel
+     * on what its creator's lists and its own access record say.
+     *
+     * Here, ahead of the renumber pass, for two reasons. A hidden room is the one thing
+     * in this sweep that is a privacy fault when it is wrong, so it must not wait behind
+     * a rename that throws (the loops below have no per-room catch, and one 50013 aborts
+     * everything after it). And a repaired `private` flag is what the re-render below
+     * reads for `{{PRIVATE}}`. Skipped under a dry run, which reports and never acts.
+     * Everything behind it is contained inside, per room, so nothing here can abort the
+     * passes that follow, and `room_access.disabled` turns it off.
+     */
+    if (this.deps.roomAccess && !dryRun) {
+      try {
+        await this.deps.roomAccess.convergeGuild(guildId, survivors);
+      } catch (err) {
+        this.deps.logger.warn({ err, guildId }, 'room access pass failed; continuing the sweep');
+      }
     }
 
     // Second pass: renumber survivors so `##` compacts after a deletion and a
