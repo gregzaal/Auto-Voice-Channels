@@ -16,11 +16,13 @@ import {
   roleMentions,
   savedNote,
   skippedRolesNote,
+  startModeMessage,
   unhiddenMessage,
   unhiddenWithoutJoin,
   withSkipped,
 } from './roomAccessCopy.js';
 
+const MODES = ['public', 'locked', 'hidden'] as const;
 const ONE = ['111111111111111111'];
 const MANY = ['111111111111111111', '222222222222222222', '333333333333333333'];
 
@@ -56,6 +58,8 @@ function everyReply(): string[] {
   for (const command of ['private', 'public', 'hide', 'unhide', 'admit'] as const) {
     replies.push(deferredMessage(command));
   }
+  for (const after of MODES)
+    for (const before of MODES) replies.push(startModeMessage(after, before));
   return replies;
 }
 
@@ -107,6 +111,28 @@ describe('hiddenMessage', () => {
     expect(text.split(`<@&${ONE[0]}>`)).toHaveLength(2);
     expect(text).toContain('sits above my role');
     expect(text).toContain('Move my role above it');
+  });
+});
+
+describe('startModeMessage', () => {
+  /** Each reply says where the creator channel ended up, in the words the commands use. */
+  it('states the mode the creator channel ended in, in plain words', () => {
+    expect(startModeMessage('locked', 'public')).toContain('**private**');
+    expect(startModeMessage('hidden', 'public')).toContain('**hidden** from the channel list');
+    expect(startModeMessage('public', 'locked')).toContain('**public**');
+    // Only the mode it ended in is named in bold, so a reader cannot take the old one for the new.
+    expect(startModeMessage('locked', 'hidden').match(/\*\*\w+\*\*/g)).toEqual(['**private**']);
+  });
+
+  it('says what a switch between the two kinds of privacy replaced', () => {
+    expect(startModeMessage('locked', 'hidden')).toContain('instead of hidden');
+    expect(startModeMessage('hidden', 'locked')).toContain('instead of private');
+    expect(startModeMessage('locked', 'public')).not.toContain('instead');
+    expect(startModeMessage('hidden', 'public')).not.toContain('instead');
+  });
+
+  it('tells the owners of hidden rooms how to let people in', () => {
+    expect(startModeMessage('hidden', 'public')).toContain('`/access trust`');
   });
 });
 

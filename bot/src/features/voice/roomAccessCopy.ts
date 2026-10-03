@@ -1,3 +1,5 @@
+import type { StartMode } from '@avc/core';
+
 /**
  * What `/hide`, `/unhide`, `/access` and the lock and open commands say about who
  * can see and join a room, kept out of the service so every reply is worded once
@@ -197,4 +199,31 @@ export function admitted(memberId: string, mode: 'locked' | 'hidden'): string {
 
 export function admitFailed(memberId: string, reason: string): string {
   return `I couldn't let <@${memberId}> in: ${reason}.`;
+}
+
+/**
+ * What `/alwaysprivate` and `/alwayshidden` say once they have set how a creator channel's
+ * new rooms start.
+ *
+ * Each command toggles its own mode, so one press can land on a mode the member did not
+ * name (`/alwaysprivate` on a hidden creator channel makes it private), and every reply
+ * therefore says where it ended up in plain words, and what it replaced when that was the
+ * other kind of privacy. It speaks only of rooms made from now on: rooms that already
+ * exist keep the mode they are in.
+ */
+export function startModeMessage(after: StartMode, before: StartMode): string {
+  switch (after) {
+    case 'locked':
+      return before === 'hidden'
+        ? '🔒 New rooms from this creator channel will be created **private** automatically, instead of hidden.'
+        : '🔒 New rooms from this creator channel will be created **private** automatically.';
+    case 'hidden':
+      return (
+        '🙈 New rooms from this creator channel will be created **hidden** from the channel list ' +
+        `automatically${before === 'locked' ? ', instead of private' : ''}. ` +
+        'Their owners can let people in with `/access trust` or `/access admit`.'
+      );
+    default:
+      return '🔓 New rooms from this creator channel will be created **public** (the default).';
+  }
 }

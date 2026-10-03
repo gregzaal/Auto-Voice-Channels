@@ -364,6 +364,22 @@ describe('GuildSettingsService (integration)', () => {
     });
   });
 
+  it.each([
+    ['public', {}, {}],
+    ['private', { defaultPrivate: true }, { defaultPrivate: true }],
+    [
+      'hidden',
+      { defaultPrivate: true, defaultHidden: true },
+      { defaultPrivate: true, defaultHidden: true },
+    ],
+    // Hidden is a kind of private, so it is never stored alone, where it would read as public.
+    ['hidden without private', { defaultHidden: true }, {}],
+  ])('creates a primary that starts rooms %s', async (_name, options, stored) => {
+    await settings.createPrimary(GUILD, options);
+    const created = actions.ofType('create')[0]!;
+    expect((await autoChannels.get(created.channelId))!.template).toEqual(stored);
+  });
+
   it('sets and resets a custom nick', async () => {
     await settings.setNick(GUILD, 'user-1', 'Big G');
     expect((await guilds.get(GUILD))!.settings.custom_nicks).toEqual({ 'user-1': 'Big G' });
@@ -511,6 +527,152 @@ describe('GuildSettingsService (integration)', () => {
     expect((await autoChannels.get(primaryId))!.template.defaultPrivate).toBeUndefined();
 
     expect((await settings.toggleDefaultPrivate(GUILD, 'not-a-channel')).ok).toBe(false);
+  });
+
+  /**
+   * `/alwaysprivate` and `/alwayshidden` toggle one stored mode between them, and each
+   * toggles its OWN: already in that mode goes to public, anywhere else goes to it.
+   */
+  describe('how new rooms start (/alwaysprivate and /alwayshidden)', () => {
+    type Mode = 'public' | 'locked' | 'hidden';
+    const STORED: Record<Mode, Record<string, unknown>> = {
+      public: {},
+      locked: { defaultPrivate: true },
+      hidden: { defaultPrivate: true, defaultHidden: true },
+    };
+    const WORDS: Record<Mode, string> = {
+      public: '**public**',
+      locked: '**private**',
+      hidden: '**hidden**',
+    };
+
+    /** A creator channel with a template, and the room the command is run from. */
+    async function creatorWith(template: Record<string, unknown>): Promise<string> {
+      const primaryId = 'creator-mode';
+      await autoChannels.upsert(GUILD, primaryId, template);
+      await secondaries.create({
+        channelId: 'sec-mode',
+        guildId: GUILD,
+        primaryChannelId: primaryId,
+        state: {},
+      });
+      return primaryId;
+    }
+
+    /**
+     * A service whose creator channel read runs a hook once the row has been read and before
+     * it is returned: the window a concurrent edit has to land in.
+     */
+    function racingService() {
+      const racy = new (class extends AutoChannelRepository {
+        after: (() => Promise<unknown>) | undefined;
+        override async get(channelId: string) {
+          const row = await super.get(channelId);
+          const hook = this.after;
+          this.after = undefined;
+          await hook?.();
+          return row;
+        }
+      })(env.handle.db);
+      const racing = new GuildSettingsService({
+        guilds,
+        autoChannels: racy,
+        secondaries,
+        actions,
+        logger: fakeLogger(),
+      });
+      return { racing, racy };
+    }
+
+    const press = (command: 'private' | 'hidden') =>
+      command === 'private'
+        ? settings.toggleDefaultPrivate(GUILD, 'sec-mode')
+        : settings.toggleDefaultHidden(GUILD, 'sec-mode');
+
+    const matrix: [Mode, 'private' | 'hidden', Mode][] = [
+      ['public', 'private', 'locked'],
+      ['public', 'hidden', 'hidden'],
+      ['locked', 'private', 'public'],
+      ['locked', 'hidden', 'hidden'],
+      ['hidden', 'private', 'locked'],
+      ['hidden', 'hidden', 'public'],
+    ];
+
+    it.each(matrix)('from %s, /always%s leaves it %s', async (start, command, after) => {
+      const primaryId = await creatorWith({ name: 'Room ##', ...STORED[start] });
+
+      const res = await press(command);
+
+      expect(res.ok).toBe(true);
+      // Each reply states the mode it ended in, in plain words.
+      expect(res.message).toContain(WORDS[after]);
+      // And the stored pair is exactly that mode, with nothing else disturbed.
+      expect((await autoChannels.get(primaryId))!.template).toEqual({
+        name: 'Room ##',
+        ...STORED[after],
+      });
+    });
+
+    it('says what a switch replaced when it was the other kind of privacy', async () => {
+      await creatorWith({ ...STORED.hidden });
+      expect((await press('private')).message).toContain('instead of hidden');
+      expect((await press('hidden')).message).toContain('instead of private');
+    });
+
+    /**
+     * `defaultHidden` beside no `defaultPrivate` is public (an older instance's toggle can
+     * leave exactly that), so `/alwaysprivate` has to make the room private and NOT hidden,
+     * which means the leftover key has to go.
+     */
+    it('treats a leftover defaultHidden as public, and never revives it', async () => {
+      const primaryId = await creatorWith({ defaultHidden: true });
+      const res = await press('private');
+      expect(res.message).toContain('**private**');
+      expect((await autoChannels.get(primaryId))!.template).toEqual({ defaultPrivate: true });
+    });
+
+    it('refuses outside a managed channel, for both commands', async () => {
+      expect((await settings.toggleDefaultPrivate(GUILD, 'not-a-channel')).ok).toBe(false);
+      expect((await settings.toggleDefaultHidden(GUILD, 'not-a-channel')).ok).toBe(false);
+    });
+
+    /**
+     * The defect the DB-side merge fixes. The toggle reads the template, decides, and
+     * writes, and a `/template` or `/defaultlimit` edit that lands between the read and
+     * the write was thrown away when the write replaced the whole template from the
+     * stale read. The edit here lands exactly there.
+     */
+    it.each(['private', 'hidden'] as const)(
+      'keeps a template edit made while /always%s was deciding',
+      async (command) => {
+        const { racing, racy } = racingService();
+        const primaryId = await creatorWith({ name: 'Old name', limit: 2 });
+        racy.after = () => autoChannels.upsert(GUILD, primaryId, { name: 'Edited name', limit: 7 });
+
+        const res =
+          command === 'private'
+            ? await racing.toggleDefaultPrivate(GUILD, 'sec-mode')
+            : await racing.toggleDefaultHidden(GUILD, 'sec-mode');
+
+        expect(res.ok).toBe(true);
+        expect((await autoChannels.get(primaryId))!.template).toMatchObject({
+          name: 'Edited name',
+          limit: 7,
+          defaultPrivate: true,
+        });
+      },
+    );
+
+    it('answers a refusal, not a mode, when the creator channel was removed while it decided', async () => {
+      const { racing, racy } = racingService();
+      const primaryId = await creatorWith({});
+      racy.after = () => autoChannels.remove(GUILD, primaryId);
+
+      const res = await racing.toggleDefaultHidden(GUILD, 'sec-mode');
+
+      expect(res.ok).toBe(false);
+      expect(res.message).not.toContain('hidden');
+    });
   });
 
   /**

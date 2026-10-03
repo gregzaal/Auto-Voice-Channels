@@ -1,4 +1,4 @@
-import { sameSettingsValue } from '@avc/core';
+import { sameSettingsValue, startModeOf } from '@avc/core';
 import type {
   AutoChannelRepository,
   AutoChannelRow,
@@ -73,6 +73,7 @@ import {
   restrictClearedMessage,
   restrictRemovedMessage,
 } from './commandAccessCopy.js';
+import { startModeMessage } from './roomAccessCopy.js';
 
 /** Logging verbosity levels (legacy parity): 1 lifecycle, 2 changes, 3 joins/leaves. */
 export type LogLevel = 1 | 2 | 3;
@@ -206,6 +207,8 @@ export interface CreatePrimaryOptions {
   above?: boolean;
   /** Make spawned secondaries private on creation; default (false/unset) is public. */
   defaultPrivate?: boolean;
+  /** Make them hidden from the channel list instead of locked. Only means anything with `defaultPrivate`. */
+  defaultHidden?: boolean;
 }
 
 /** A normalized read-model of a guild's voice configuration, for the panel. */
@@ -600,6 +603,10 @@ export class GuildSettingsService {
       ...(opts.statusTemplate ? { status: opts.statusTemplate } : {}),
       ...(opts.above === true ? { above: true } : {}),
       ...(opts.defaultPrivate === true ? { defaultPrivate: true } : {}),
+      // Hidden is a kind of private, so it is stored only beside it: alone it reads as public.
+      ...(opts.defaultPrivate === true && opts.defaultHidden === true
+        ? { defaultHidden: true }
+        : {}),
     };
     await this.deps.autoChannels.upsert(guildId, channelId, template);
     this.deps.logger.info({ guildId, channelId, name }, 'created primary channel');
@@ -751,20 +758,45 @@ export class GuildSettingsService {
    * Toggles whether new secondaries of the primary you're in are made private on
    * creation (legacy had no equivalent; `/alwaysprivate`). Returns the new state
    * in its reply. Stores nothing for the default (public) so primaries stay lean.
+   *
+   * Each command toggles its OWN mode, so a hidden creator channel switches to private
+   * here, not to public.
    */
-  async toggleDefaultPrivate(guildId: string, secondaryChannelId: string): Promise<CommandResult> {
+  toggleDefaultPrivate(guildId: string, secondaryChannelId: string): Promise<CommandResult> {
+    return this.toggleStartMode(guildId, secondaryChannelId, 'locked');
+  }
+
+  /**
+   * Toggles whether new secondaries of the primary you're in are hidden from the channel
+   * list on creation (`/alwayshidden`). The same toggle as {@link toggleDefaultPrivate}
+   * for the other mode: a private creator channel switches to hidden, and a hidden one
+   * goes back to public.
+   */
+  toggleDefaultHidden(guildId: string, secondaryChannelId: string): Promise<CommandResult> {
+    return this.toggleStartMode(guildId, secondaryChannelId, 'hidden');
+  }
+
+  /**
+   * The one writer of a creator channel's starting mode: already in `mode` goes to
+   * public, anywhere else goes to `mode`.
+   *
+   * The decision reads the row, but the WRITE does not replace it. `setDefaultPrivacy`
+   * is a DB-side merge of the two keys in one statement, because the read-modify-write
+   * this replaced lost a `/template` edit made between its read and its write.
+   */
+  private async toggleStartMode(
+    guildId: string,
+    secondaryChannelId: string,
+    mode: 'locked' | 'hidden',
+  ): Promise<CommandResult> {
     const primary = await this.primaryFor(guildId, secondaryChannelId);
     if (!primary) return fail('You need to be in a bot-managed voice channel.');
-    const enabled = primary.template.defaultPrivate !== true;
-    const next = { ...primary.template };
-    if (enabled) next.defaultPrivate = true;
-    else delete next.defaultPrivate;
-    await this.deps.autoChannels.upsert(guildId, primary.channelId, next);
-    return ok(
-      enabled
-        ? '🔒 New rooms from this creator channel will be created **private** automatically.'
-        : '🔓 New rooms from this creator channel will be created **public** (the default).',
-    );
+    const before = startModeOf(primary.template);
+    const after = before === mode ? 'public' : mode;
+    const row = await this.deps.autoChannels.setDefaultPrivacy(guildId, primary.channelId, after);
+    // Removed between the read and the write: there is no creator channel left to report on.
+    if (!row) return fail('You need to be in a bot-managed voice channel.');
+    return ok(startModeMessage(after, before));
   }
 
   /**
