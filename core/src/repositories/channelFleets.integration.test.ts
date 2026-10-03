@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AutoChannelRepository } from './autoChannels.js';
 import { SecondaryChannelRepository } from './secondaryChannels.js';
 import { ManagedChannelRepository } from './managedChannels.js';
@@ -120,6 +120,52 @@ describe('channel repositories: fleet isolation (integration)', () => {
     expect(row).toBeDefined();
     expect(row?.ownerId).toBe('user-1');
     expect(row?.state.name).toBeUndefined();
+  });
+
+  /**
+   * The access record decides who can see and enter a room, so the other fleet
+   * writing to it, or clearing it, is a permission change on a channel it does
+   * not own. Every access method goes through the same `scoped` helper.
+   */
+  it("cannot read, write or clear the other fleet's access record", async () => {
+    await prodSecondaries.create({
+      channelId: 'sec-prod',
+      guildId: GUILD,
+      primaryChannelId: 'chan-prod',
+      ownerId: 'user-1',
+      state: { private: true },
+    });
+    await prodSecondaries.setAccess('sec-prod', { creatorId: 'user-1', hidden: true });
+    const decide = vi.fn(() => ({ hidden: false }));
+
+    expect(await betaSecondaries.getAccess('sec-prod')).toBeNull();
+    await betaSecondaries.setAccess('sec-prod', { blocked: ['user-hijack'] });
+    expect(await betaSecondaries.mutateAccess('sec-prod', decide)).toBeNull();
+    await betaSecondaries.transitionAccess('sec-prod', {
+      statePatch: { name: 'hijacked' },
+      stateRemove: ['private'],
+      access: null,
+    });
+    await betaSecondaries.transitionAccess('sec-prod', { access: decide });
+    await betaSecondaries.clearAccess('sec-prod');
+
+    // The callbacks are not even run: the room is not this fleet's to decide for.
+    expect(decide).not.toHaveBeenCalled();
+    const row = await prodSecondaries.get('sec-prod');
+    expect(row?.access).toEqual({ creatorId: 'user-1', hidden: true });
+    expect(row?.state).toEqual({ private: true });
+  });
+
+  it("does not list the other fleet's rooms by original creator", async () => {
+    await prodSecondaries.create({
+      channelId: 'sec-prod',
+      guildId: GUILD,
+      primaryChannelId: 'chan-prod',
+      ownerId: 'user-1',
+    });
+
+    expect(await betaSecondaries.listByOriginalCreator(GUILD, 'user-1')).toEqual([]);
+    expect(await prodSecondaries.listByOriginalCreator(GUILD, 'user-1')).toHaveLength(1);
   });
 
   it('keeps managed and join channels apart too', async () => {

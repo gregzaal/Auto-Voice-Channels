@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { SQL } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
 import { DEFAULT_FLEET, type Fleet } from '../domain/fleets.js';
+import { parseRoomAccess, type RoomAccess } from '../domain/roomAccess.js';
 import { secondaryChannels } from '../db/schema.js';
 
 /**
@@ -115,11 +116,42 @@ export const secondaryChannelRowSchema = z.object({
   ownerId: z.string().nullable(),
   originalCreator: z.string().nullable(),
   state: secondaryStateSchema,
+  /**
+   * `null` when none was written OR when the stored blob does not parse, and it
+   * never throws. This schema runs on every row of {@link
+   * SecondaryChannelRepository.listByGuild}, so a throw here would fail the
+   * listing for the whole guild over one room's blob, and a newer build's shape
+   * this one cannot read is exactly how that would happen during a rolling deploy.
+   */
+  access: z.unknown().transform((raw) => parseRoomAccess(raw)),
   createdAt: z.date(),
   updatedAt: z.date(),
 });
 
 export type SecondaryChannelRow = z.infer<typeof secondaryChannelRowSchema>;
+
+/**
+ * A change to a room's `state` and `access` that must land as one write.
+ *
+ * `private` lives in `state` (older builds read it) and `hidden` lives in
+ * `access`, and the two must never disagree: a crash between two statements
+ * would leave a room that reads as locked to one reader and hidden to another.
+ */
+export interface AccessTransition {
+  /** Keys merged into `state` server side (`state || patch`). Everything else in it is left alone. */
+  statePatch?: Record<string, unknown>;
+  /** Keys taken out of `state` (`state - key`), after the patch is applied. */
+  stateRemove?: readonly string[];
+  /**
+   * The new access record, or `null` to clear it.
+   *
+   * A function decides from the record as it stands under a row lock, for a
+   * transition that must keep what a concurrent writer just added (the lists,
+   * a baseline already captured). It runs synchronously inside the lock, so keep
+   * it pure: no Discord call, no await.
+   */
+  access: RoomAccess | null | ((current: RoomAccess | null) => RoomAccess | null);
+}
 
 export interface CreateSecondaryInput {
   channelId: string;
@@ -242,6 +274,35 @@ export class SecondaryChannelRepository {
     return rows.map((r) => secondaryChannelRowSchema.parse(r));
   }
 
+  /**
+   * Rooms whose saved lists belong to `creatorId`: the ones to apply a change to
+   * a list to, live.
+   *
+   * The creator is `access.creatorId` where the room has one, which is frozen
+   * when the room first leaves public, and the `original_creator` column
+   * otherwise. Not the column alone: `/transfer` moves the column on purpose,
+   * and a room's guests and blocks must not follow it. Not the access record
+   * alone: a public room has none, and a block applies to every room.
+   *
+   * The predicate is in SQL, like {@link listByOwner}, and `->>` on a blob that
+   * is not an object yields null rather than an error, so a malformed record
+   * falls through to the column.
+   */
+  async listByOriginalCreator(guildId: string, creatorId: string): Promise<SecondaryChannelRow[]> {
+    const rows = await this.db
+      .select()
+      .from(secondaryChannels)
+      .where(
+        this.scoped(
+          and(
+            eq(secondaryChannels.guildId, guildId),
+            sql`coalesce(${secondaryChannels.access}->>'creatorId', ${secondaryChannels.originalCreator}) = ${creatorId}`,
+          ),
+        ),
+      );
+    return rows.map((r) => secondaryChannelRowSchema.parse(r));
+  }
+
   /** Distinct guild ids that currently have at least one tracked secondary. */
   async listGuildIds(): Promise<string[]> {
     const rows = await this.db
@@ -290,6 +351,11 @@ export class SecondaryChannelRepository {
       .where(this.scoped(eq(secondaryChannels.channelId, channelId)));
   }
 
+  /**
+   * Replaces the whole `state` column. It does not touch `access`: a stale
+   * snapshot written back here cannot revert an access change, which is why
+   * access is a column of its own and not a key in this blob.
+   */
   async updateState(channelId: string, state: SecondaryState): Promise<void> {
     await this.db
       .update(secondaryChannels)
@@ -346,6 +412,147 @@ export class SecondaryChannelRepository {
         state: sql`coalesce(${secondaryChannels.state}, '{}'::jsonb)
           - 'controlPanelMessageId' - 'controlPanelChannelId' - 'controlPanelHash'`,
       })
+      .where(this.scoped(eq(secondaryChannels.channelId, channelId)));
+  }
+
+  /**
+   * The room's access record, or `null`: it has none, it does not parse, or
+   * there is no such room (this does not tell those apart; {@link get} does).
+   *
+   * Reads the one column, so it does not carry the room's `state` over the wire
+   * or parse it, and one corrupt `state` cannot make this fail.
+   */
+  async getAccess(channelId: string): Promise<RoomAccess | null> {
+    const [row] = await this.db
+      .select({ access: secondaryChannels.access })
+      .from(secondaryChannels)
+      .where(this.scoped(eq(secondaryChannels.channelId, channelId)))
+      .limit(1);
+    return row ? parseRoomAccess(row.access) : null;
+  }
+
+  /**
+   * Replaces the access record outright.
+   *
+   * Last writer wins, so use it only for a value that does not depend on the old
+   * one. A change that adds to or removes from what is there goes through
+   * {@link mutateAccess}, which holds the row while it decides.
+   */
+  async setAccess(channelId: string, access: RoomAccess): Promise<void> {
+    await this.db
+      .update(secondaryChannels)
+      .set({ access, updatedAt: new Date() })
+      .where(this.scoped(eq(secondaryChannels.channelId, channelId)));
+  }
+
+  /**
+   * Changes the access record from what it is now, under a row lock.
+   *
+   * **A read-modify-write that cannot lose a concurrent writer.** `trusted`,
+   * `blocked` and `admitted` are arrays inside one blob, so two callers each
+   * reading it, adding a member and writing it back would drop one of the two,
+   * and an entry lost here is an overwrite that no later removal will ever
+   * revoke (removal only takes back what is recorded). `SELECT ... FOR UPDATE`
+   * makes the second caller wait for the first and read what it wrote.
+   *
+   * `mutate` runs inside the lock, so it must be synchronous and pure: a Discord
+   * call in it would hold the row for the length of a round trip. Throwing from
+   * it rolls the write back. Return `null` to clear the record.
+   *
+   * Resolves to what was stored, or `null` if the room has no row, in which case
+   * `mutate` is never called. A blob that does not parse reaches `mutate` as
+   * `null`, so what it writes replaces it.
+   *
+   * `updatedAt` is bumped, unlike {@link setControlPanelMessage}: this records
+   * something about the channel's permissions, not about a message.
+   */
+  async mutateAccess(
+    channelId: string,
+    mutate: (current: RoomAccess | null) => RoomAccess | null,
+  ): Promise<RoomAccess | null> {
+    return this.db.transaction(async (tx) => {
+      const [row] = await tx
+        .select({ access: secondaryChannels.access })
+        .from(secondaryChannels)
+        .where(this.scoped(eq(secondaryChannels.channelId, channelId)))
+        .for('update');
+      if (!row) return null;
+      const next = mutate(parseRoomAccess(row.access));
+      await tx
+        .update(secondaryChannels)
+        .set({ access: next, updatedAt: new Date() })
+        .where(this.scoped(eq(secondaryChannels.channelId, channelId)));
+      return next;
+    });
+  }
+
+  /**
+   * Writes `state` and `access` in ONE `UPDATE`, which is the whole reason this
+   * exists.
+   *
+   * `private` stays in `state` for older builds and `hidden` is in `access`, so
+   * a hide, a lock and a return to public change both. Two statements would let
+   * a crash, or a reader between them, see a locked room that is not hidden or a
+   * hidden room that is not locked, and the hide would then be re-run or
+   * "repaired" from the wrong half. One statement is one row version: a reader
+   * sees both changes or neither.
+   *
+   * The `state` half is a server-side merge (`||`, then `- key`), never the
+   * whole-column replace {@link updateState} does from an earlier snapshot, so
+   * whatever else landed in `state` meanwhile (the roster, the panel keys)
+   * survives. A transition that leaves `state` alone passes neither key and
+   * touches only `access`.
+   *
+   * When `access` is a function the statement runs in a transaction that holds
+   * the row first (see {@link mutateAccess}). A room with no row is not an error
+   * and writes nothing.
+   */
+  async transitionAccess(channelId: string, transition: AccessTransition): Promise<void> {
+    const patch = transition.statePatch;
+    const remove = transition.stateRemove ?? [];
+    const touchesState =
+      (patch !== undefined && Object.keys(patch).length > 0) || remove.length > 0;
+
+    const write = async (db: Database, access: RoomAccess | null): Promise<void> => {
+      let state = sql`coalesce(${secondaryChannels.state}, '{}'::jsonb)`;
+      if (patch !== undefined && Object.keys(patch).length > 0) {
+        state = sql`${state} || ${JSON.stringify(patch)}::jsonb`;
+      }
+      // One `- key` per key, as `GuildRepository.mergeSettings` does: drizzle
+      // expands a JS array into a tuple of placeholders, which Postgres reads as
+      // a record and will not cast to `text[]`. Applied after the merge, so a key
+      // named in both is removed.
+      for (const key of remove) state = sql`(${state}) - ${key}::text`;
+      await db
+        .update(secondaryChannels)
+        .set({ ...(touchesState ? { state } : {}), access, updatedAt: new Date() })
+        .where(this.scoped(eq(secondaryChannels.channelId, channelId)));
+    };
+
+    const decide = transition.access;
+    if (typeof decide !== 'function') {
+      await write(this.db, decide);
+      return;
+    }
+    await this.db.transaction(async (tx) => {
+      const [row] = await tx
+        .select({ access: secondaryChannels.access })
+        .from(secondaryChannels)
+        .where(this.scoped(eq(secondaryChannels.channelId, channelId)))
+        .for('update');
+      if (!row) return;
+      await write(tx, decide(parseRoomAccess(row.access)));
+    });
+  }
+
+  /**
+   * Forgets the room's access record. A single statement that touches nothing
+   * else, and the one access write that names no value.
+   */
+  async clearAccess(channelId: string): Promise<void> {
+    await this.db
+      .update(secondaryChannels)
+      .set({ access: null, updatedAt: new Date() })
       .where(this.scoped(eq(secondaryChannels.channelId, channelId)));
   }
 

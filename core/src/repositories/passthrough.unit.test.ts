@@ -49,6 +49,30 @@ describe('template and state schemas preserve unknown fields', () => {
     expect(row.state).toMatchObject({ futureThing: 'x' });
   });
 
+  /**
+   * The access column is the fifth jsonb blob, and it is a column of its own so
+   * that whole-state writers cannot revert it. It keeps unknown fields for the
+   * same reason the other four do, at the top level and in what it nests.
+   */
+  it('keeps an unknown field on a room access record through a whole row parse', () => {
+    const row = secondaryChannelRowSchema.parse({
+      channelId: 'c',
+      guildId: 'g',
+      primaryChannelId: 'p',
+      ownerId: null,
+      originalCreator: null,
+      state: {},
+      access: { hidden: true, baseline: { view: 'allow', speak: 'deny' }, futureThing: 'x' },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    expect(row.access).toEqual({
+      hidden: true,
+      baseline: { view: 'allow', speak: 'deny' },
+      futureThing: 'x',
+    });
+  });
+
   it('keeps an unknown field on an adopted template and its state', () => {
     expect(managedTemplateSchema.parse({ name: 'Lobby', futureThing: 1 })).toMatchObject({
       futureThing: 1,

@@ -35,11 +35,15 @@ const HERE = dirname(fileURLToPath(import.meta.url));
  * Tables whose channel ids can arrive from outside the gateway, so a write on
  * them must bind the guild itself.
  *
- * `/import` writes exactly these two (never the ephemeral channel tables), and they are also the
+ * `/import` writes the first two (never the ephemeral channel tables), and they are also the
  * two a native export
  * carries, so an id in them can have come from a file.
+ *
+ * `memberAccessLists.ts` is here for its own reason: it holds no channel id, but its owner and
+ * member ids come from a slash command, its rows are keyed by guild, and an owner in one server
+ * must never write another server's list. Its two erasure-on-request deletes are exempt below.
  */
-const USER_SUPPLIED = ['autoChannels.ts', 'managedChannels.ts'];
+const USER_SUPPLIED = ['autoChannels.ts', 'managedChannels.ts', 'memberAccessLists.ts'];
 
 /**
  * The ephemeral tables. Enumerated so this file records the distinction rather
@@ -63,6 +67,10 @@ const WRITE_CALLS = ['.update(', '.delete(', '.insert('];
 const EXEMPT: Record<string, string> = {
   'managedChannels.ts:create':
     'an insert sets the guild rather than filtering on it, so the binding is `guildId: input.guildId` in the values plus an `existing.guildId !== input.guildId` throw on the conflict path. Checked explicitly below.',
+  'memberAccessLists.ts:deleteByMember':
+    'erasure on request for the listed person spans every server by design, so it filters on the member instead. An operator tool, not reachable from a command. Checked explicitly below.',
+  'memberAccessLists.ts:deleteByOwner':
+    'erasure on request for an owner spans every server by design, so it filters on the owner instead. An operator tool, not reachable from a command. Checked explicitly below.',
 };
 
 interface Method {
@@ -164,6 +172,34 @@ describe('channel repository guards', () => {
     expect(create, 'ManagedChannelRepository.create has gone or changed shape').toBeDefined();
     expect(create!.body).toMatch(/guildId:\s*input\.guildId/);
     expect(create!.body).toMatch(/existing\.guildId\s*!==\s*input\.guildId/);
+  });
+
+  /**
+   * The two erasure exemptions, checked rather than trusted. Each drops the
+   * guild only because it is keyed on something wider, and an unkeyed delete
+   * here would wipe the whole table, so each has to bind the key it exists for.
+   * They are also the only writes on that table that are exempt.
+   */
+  it('binds each erasure delete to the person it erases, and exempts nothing else on that table', () => {
+    const writes = writesOf(read('memberAccessLists.ts'));
+    const byMember = writes.find((m) => m.name === 'deleteByMember');
+    const byOwner = writes.find((m) => m.name === 'deleteByOwner');
+    expect(
+      byMember,
+      'MemberAccessListRepository.deleteByMember has gone or changed shape',
+    ).toBeDefined();
+    expect(
+      byOwner,
+      'MemberAccessListRepository.deleteByOwner has gone or changed shape',
+    ).toBeDefined();
+    expect(byMember!.body).toMatch(/\.memberId,\s*memberId/);
+    expect(byOwner!.body).toMatch(/\.ownerId,\s*ownerId/);
+
+    const exempt = Object.keys(EXEMPT).filter((key) => key.startsWith('memberAccessLists.ts:'));
+    expect(exempt.sort()).toEqual([
+      'memberAccessLists.ts:deleteByMember',
+      'memberAccessLists.ts:deleteByOwner',
+    ]);
   });
 
   /** Every exemption names a real method, so a stale one cannot hide a gap. */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { secondaryStateSchema } from './secondaryChannels.js';
+import { secondaryChannelRowSchema, secondaryStateSchema } from './secondaryChannels.js';
 
 describe('secondaryStateSchema', () => {
   it('accepts an empty state and a fully-populated valid one', () => {
@@ -30,5 +30,43 @@ describe('secondaryStateSchema', () => {
     // would block the whole list rather than the one room it belongs to.
     expect(secondaryStateSchema.safeParse({ controlPanelMessageId: 123 }).success).toBe(false);
     expect(secondaryStateSchema.safeParse({ controlPanelChannelId: 123 }).success).toBe(false); // boolean
+  });
+});
+
+describe('secondaryChannelRowSchema access', () => {
+  const row = {
+    channelId: 'c',
+    guildId: 'g',
+    primaryChannelId: 'p',
+    ownerId: 'u1',
+    originalCreator: 'u1',
+    state: {},
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+
+  it('reads a room with no access record as null', () => {
+    expect(secondaryChannelRowSchema.parse({ ...row, access: null }).access).toBeNull();
+    // A row from before the column existed, or a hand-built fixture, omits it.
+    expect(secondaryChannelRowSchema.parse(row).access).toBeNull();
+  });
+
+  it('reads a valid access record', () => {
+    const access = { creatorId: 'u1', hidden: true, trusted: ['u2'] };
+    expect(secondaryChannelRowSchema.parse({ ...row, access }).access).toEqual(access);
+  });
+
+  /**
+   * The one that matters. This schema runs on every row of a guild listing, so
+   * a throw here fails the whole guild over one room's blob. A newer build's
+   * shape this one cannot read degrades to null and the rest of the row still
+   * parses, state included.
+   */
+  it('reads a blob it cannot parse as null and still parses the rest of the row', () => {
+    for (const access of ['hidden', 42, [], { hidden: 'yes' }, { trusted: [1] }]) {
+      const parsed = secondaryChannelRowSchema.parse({ ...row, state: { seed: 3 }, access });
+      expect(parsed.access, JSON.stringify(access)).toBeNull();
+      expect(parsed.state.seed).toBe(3);
+    }
   });
 });
