@@ -48,6 +48,26 @@ export const RUNTIME_FLAGS = {
    * feature that is on by default.
    */
   CONTROL_PANEL_DISABLED: 'control_panel.disabled',
+  /**
+   * Stops enforcing `/restrict` rules on **this fleet**.
+   *
+   * It **freezes rather than strips**: no stored rule changes, so lifting it
+   * makes every rule bite again at once. While it is on, the guard on the room
+   * commands, the panel buttons and the `/template` channel editor lets
+   * everybody through, and a room's panel shows every control again once it next
+   * re-renders. A saved nickname of a restricted member renders as well, which is
+   * the one place a rule is read outside a guard.
+   *
+   * It never blocks `/restrict` itself, so an admin can still add, list and lift
+   * rules while it is on, and `/restrict list` says that nothing is being
+   * enforced. It also holds nothing open that was closed: the undo directions
+   * (`/public`, `/unlimit`, a limit of 0) are never restricted anyway.
+   *
+   * Reach for it when a rule is refusing people it was never meant to. A failed
+   * flag read is treated as NOT disabled, matching `control_panel.disabled`: a
+   * database blip must not quietly withdraw a rule an admin wrote.
+   */
+  COMMAND_ACCESS_DISABLED: 'command_access.disabled',
   /** Throttle: max secondary creations per guild per minute (number; 0 = unlimited). */
   CREATE_RATE_LIMIT: 'create.rate_limit_per_min',
   /**

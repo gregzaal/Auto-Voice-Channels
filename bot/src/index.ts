@@ -1403,6 +1403,15 @@ async function main(): Promise<void> {
         controlPanel: {
           disabled: runtimeFlags[RUNTIME_FLAGS.CONTROL_PANEL_DISABLED] === true,
         },
+        /**
+         * Whether `/restrict` rules are being enforced. A rule that refuses
+         * somebody is only ever seen from their side, so the lever is reported
+         * here, per fleet, because the failure mode of a freeze switch is being
+         * left on after the thing it was thrown for has been fixed.
+         */
+        commandAccess: {
+          disabled: runtimeFlags[RUNTIME_FLAGS.COMMAND_ACCESS_DISABLED] === true,
+        },
       };
     },
   });

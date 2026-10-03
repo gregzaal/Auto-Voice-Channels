@@ -226,4 +226,72 @@ describe('RuntimeCreationGate', () => {
       expect(await gate.controlPanelDisabled()).toBe(false);
     });
   });
+
+  describe('the command access lever', () => {
+    it('is off unless the flag is exactly true', async () => {
+      const unset = new RuntimeCreationGate({ flags: fakeFlags(), logger: fakeLogger() });
+      expect(await unset.commandAccessDisabled()).toBe(false);
+      const truthy = new RuntimeCreationGate({
+        flags: fakeFlags({ [RUNTIME_FLAGS.COMMAND_ACCESS_DISABLED]: 'yes' }),
+        logger: fakeLogger(),
+      });
+      expect(await truthy.commandAccessDisabled()).toBe(false);
+    });
+
+    /**
+     * Its own flag: freezing the panel or the companions must not quietly switch
+     * restrictions off, and the reverse. Each decision is read from one snapshot.
+     */
+    it('is independent of the other levers, and never rides a creation decision', async () => {
+      const gate = new RuntimeCreationGate({
+        flags: fakeFlags({ [RUNTIME_FLAGS.COMMAND_ACCESS_DISABLED]: true }),
+        logger: fakeLogger(),
+      });
+      expect(await gate.commandAccessDisabled()).toBe(true);
+      expect(await gate.controlPanelDisabled()).toBe(false);
+      expect(await gate.companionTextDisabled()).toBe(false);
+      const other = new RuntimeCreationGate({
+        flags: fakeFlags({ [RUNTIME_FLAGS.CONTROL_PANEL_DISABLED]: true }),
+        logger: fakeLogger(),
+      });
+      expect(await other.commandAccessDisabled()).toBe(false);
+    });
+
+    /**
+     * The whole point of reading it through the snapshot: a guard asks on every
+     * interaction that would otherwise be refused, and `getAll` is a SELECT.
+     */
+    it('reads through the cached snapshot, one query for many asks', async () => {
+      const getAll = vi.fn().mockResolvedValue({ [RUNTIME_FLAGS.COMMAND_ACCESS_DISABLED]: true });
+      const gate = new RuntimeCreationGate({
+        flags: { getAll } as unknown as RuntimeFlagsRepository,
+        logger: fakeLogger(),
+      });
+      for (let i = 0; i < 5; i += 1) expect(await gate.commandAccessDisabled()).toBe(true);
+      expect(getAll).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not spend a throttle slot to answer', async () => {
+      const gate = new RuntimeCreationGate({
+        flags: fakeFlags({
+          [RUNTIME_FLAGS.COMMAND_ACCESS_DISABLED]: true,
+          [RUNTIME_FLAGS.CREATE_RATE_LIMIT]: 1,
+        }),
+        logger: fakeLogger(),
+      });
+      expect(await gate.commandAccessDisabled()).toBe(true);
+      expect(await gate.commandAccessDisabled()).toBe(true);
+      expect((await gate.allowCreate('g1')).allowed).toBe(true);
+    });
+
+    /** A blip must not quietly withdraw a rule an admin wrote. */
+    it('treats a failed flag read as not disabled, so the rules stay in force', async () => {
+      const flags = { getAll: () => Promise.reject(new Error('db down')) };
+      const gate = new RuntimeCreationGate({
+        flags: flags as unknown as RuntimeFlagsRepository,
+        logger: fakeLogger(),
+      });
+      expect(await gate.commandAccessDisabled()).toBe(false);
+    });
+  });
 });

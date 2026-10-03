@@ -45,6 +45,7 @@ export class RuntimeCreationGate implements CreationGate {
         orderRepairDisabled: boolean;
         companionTextDisabled: boolean;
         controlPanelDisabled: boolean;
+        commandAccessDisabled: boolean;
       }
     | undefined;
 
@@ -126,18 +127,52 @@ export class RuntimeCreationGate implements CreationGate {
     }
   }
 
+  /**
+   * The restriction lever alone, for the guards, the panel poster and
+   * `/restrict list`, none of which is a room create and none of which may spend
+   * a throttle slot to ask.
+   *
+   * Fails OPEN like the two above, and for their reason: a database blip must
+   * not quietly withdraw a rule an admin wrote, so a failed read counts as NOT
+   * disabled and the rules stay in force. Shares the cached snapshot, so asking
+   * costs no extra query. This is NOT `deps.flags.getBool`, which is an uncached
+   * SELECT per call, and a guard can run on every interaction.
+   */
+  async commandAccessDisabled(): Promise<boolean> {
+    try {
+      return (await this.readFlags()).commandAccessDisabled;
+    } catch (err) {
+      this.opts.logger.warn({ err }, 'command access flag read failed; treating as enforced');
+      return false;
+    }
+  }
+
   private async readFlags(): Promise<{
     paused: boolean;
     limit: number;
     orderRepairDisabled: boolean;
     companionTextDisabled: boolean;
     controlPanelDisabled: boolean;
+    commandAccessDisabled: boolean;
   }> {
     const now = Date.now();
     if (this.flagCache && now - this.flagCache.at < this.flagCacheMs) {
-      const { paused, limit, orderRepairDisabled, companionTextDisabled, controlPanelDisabled } =
-        this.flagCache;
-      return { paused, limit, orderRepairDisabled, companionTextDisabled, controlPanelDisabled };
+      const {
+        paused,
+        limit,
+        orderRepairDisabled,
+        companionTextDisabled,
+        controlPanelDisabled,
+        commandAccessDisabled,
+      } = this.flagCache;
+      return {
+        paused,
+        limit,
+        orderRepairDisabled,
+        companionTextDisabled,
+        controlPanelDisabled,
+        commandAccessDisabled,
+      };
     }
     const all = await this.opts.flags.getAll();
     const paused = all[RUNTIME_FLAGS.GLOBAL_PAUSE] === true;
@@ -146,6 +181,7 @@ export class RuntimeCreationGate implements CreationGate {
     const orderRepairDisabled = all[RUNTIME_FLAGS.VOICE_ORDER_REPAIR_DISABLED] === true;
     const companionTextDisabled = all[RUNTIME_FLAGS.COMPANION_TEXT_DISABLED] === true;
     const controlPanelDisabled = all[RUNTIME_FLAGS.CONTROL_PANEL_DISABLED] === true;
+    const commandAccessDisabled = all[RUNTIME_FLAGS.COMMAND_ACCESS_DISABLED] === true;
     this.flagCache = {
       at: now,
       paused,
@@ -153,7 +189,15 @@ export class RuntimeCreationGate implements CreationGate {
       orderRepairDisabled,
       companionTextDisabled,
       controlPanelDisabled,
+      commandAccessDisabled,
     };
-    return { paused, limit, orderRepairDisabled, companionTextDisabled, controlPanelDisabled };
+    return {
+      paused,
+      limit,
+      orderRepairDisabled,
+      companionTextDisabled,
+      controlPanelDisabled,
+      commandAccessDisabled,
+    };
   }
 }

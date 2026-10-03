@@ -99,6 +99,16 @@ export interface DiagnosticsReport {
    * switched off.
    */
   supporterRoles: Record<string, unknown>;
+  /**
+   * `/restrict` enforcement. Only the lever, because the rules themselves live in
+   * each server's settings and are neither a table to count nor a job to watch.
+   *
+   * `disabled` true means every guard on this fleet is letting everyone through,
+   * which is invisible from a member's side, so it has to be answerable from
+   * here. Per fleet, like the flag. Absent on an idling instance, which holds no
+   * shards and so enforces nothing.
+   */
+  commandAccess?: { disabled: boolean };
 }
 
 export interface HealthServerOptions {
