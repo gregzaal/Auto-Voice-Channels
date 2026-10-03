@@ -5,9 +5,12 @@ import {
   Routes,
   SlashCommandBuilder,
   type RESTPostAPIApplicationCommandsJSONBody,
+  type SlashCommandMentionableOption,
+  type SlashCommandStringOption,
 } from 'discord.js';
 import type { Logger } from '@avc/core';
 import { MAX_USER_LIMIT } from '../features/voice/index.js';
+import { AVAILABLE_FEATURES, FEATURE_LABELS } from '../features/voice/commandAccess.js';
 
 /**
  * Slash-command surface. A hybrid: direct commands for
@@ -52,6 +55,16 @@ export function buildCommandDefinitions(
     guildOnly(b).setDefaultMemberPermissions(
       PermissionFlagsBits.ManageGuild,
     ) as SlashCommandBuilder;
+
+  /** `/restrict add` and `remove` take the same two options, so they are built once. */
+  const restrictFeatureOption = (o: SlashCommandStringOption): SlashCommandStringOption =>
+    o
+      .setName('feature')
+      .setDescription('Which room command.')
+      .setRequired(true)
+      .addChoices(...AVAILABLE_FEATURES.map((f) => ({ name: FEATURE_LABELS[f], value: f })));
+  const restrictWhoOption = (o: SlashCommandMentionableOption): SlashCommandMentionableOption =>
+    o.setName('who').setDescription('The person, or the role.').setRequired(true);
 
   const commands: SlashCommandBuilder[] = [
     guildOnly(
@@ -229,6 +242,38 @@ export function buildCommandDefinitions(
       new SlashCommandBuilder()
         .setName('logging')
         .setDescription('Configure event logging to a text channel (or turn it off).'),
+    ),
+    /**
+     * The first command here with subcommands, and the first to take an option
+     * Discord resolves to either a user or a role (the mentionable picker).
+     *
+     * Enforced again in code (`requireManageChannels`), since the default is a
+     * DEFAULT, and the in-code gate is also what keeps a role that Server Settings
+     * > Integrations re-opened it to from rewriting who may use a room command.
+     * The feature choices are `AVAILABLE_FEATURES`, so a feature whose command
+     * does not exist yet cannot be offered.
+     */
+    adminOnly(
+      new SlashCommandBuilder()
+        .setName('restrict')
+        .setDescription('Stop a person, or everyone with a role, from using some room commands.')
+        .addSubcommand((s) =>
+          s
+            .setName('add')
+            .setDescription('Stop a person or a role from using a room command.')
+            .addStringOption(restrictFeatureOption)
+            .addMentionableOption(restrictWhoOption),
+        )
+        .addSubcommand((s) =>
+          s
+            .setName('remove')
+            .setDescription('Let a person or a role use a room command again.')
+            .addStringOption(restrictFeatureOption)
+            .addMentionableOption(restrictWhoOption),
+        )
+        .addSubcommand((s) =>
+          s.setName('list').setDescription('See who is restricted from which room commands.'),
+        ) as unknown as SlashCommandBuilder,
     ),
     /**
      * Manage Server rather than Manage Channels: this changes how the bot looks

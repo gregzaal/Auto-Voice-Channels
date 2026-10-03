@@ -732,6 +732,7 @@ async function main(): Promise<void> {
           metricsCollector.increment(METRICS.CONFIG_IMPORTS, `refused:${reason}`),
       },
     },
+    serverLog: (guildId, level, message) => serverLogger.log(guildId, level, message),
     selfHosted: config.selfHosted,
     clientId: config.clientId,
     // Its own kind: interaction failures are the one of these that can storm.

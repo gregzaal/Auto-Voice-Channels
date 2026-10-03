@@ -193,6 +193,33 @@ describe('toTopggCommands', () => {
       walk(command.options);
     }
   });
+
+  /**
+   * `/restrict` is the first real command with subcommands and the first with a
+   * mentionable option, so the two enums nothing else here has ever sent are
+   * proved against the real definition rather than only against a hand-written one.
+   */
+  it('maps /restrict: its subcommands, its mentionable and its choices', () => {
+    const restrict = toTopggCommands(buildCommandDefinitions()).find((c) => c.name === 'restrict');
+    expect(restrict?.options?.map((o) => [o.name, o.type])).toEqual([
+      ['add', 'sub_command'],
+      ['remove', 'sub_command'],
+      ['list', 'sub_command'],
+    ]);
+    const add = restrict?.options?.[0];
+    expect(add?.options?.map((o) => [o.name, o.type, o.required])).toEqual([
+      ['feature', 'string', true],
+      ['who', 'mentionable', true],
+    ]);
+    expect(add?.options?.[0]?.choices?.map((c) => c.value)).toEqual([
+      'privacy',
+      'limit',
+      'rename',
+      'transfer',
+      'nick',
+    ]);
+    expect(restrict?.options?.[2]?.options).toBeUndefined();
+  });
 });
 
 describe('isPermanentTopggFailure', () => {

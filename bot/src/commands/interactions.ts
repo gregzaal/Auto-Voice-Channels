@@ -7,6 +7,7 @@ import {
   GuildMember,
   MessageFlags,
   PermissionFlagsBits,
+  PermissionsBitField,
   type ButtonInteraction,
   type ChannelSelectMenuInteraction,
   type ChatInputCommandInteraction,
@@ -185,6 +186,17 @@ import {
   parseControlPanelId,
 } from '../features/voice/controlPanel.js';
 import {
+  FEATURE_LABELS,
+  isAvailableFeature,
+  type RestrictTarget,
+} from '../features/voice/commandAccess.js';
+import {
+  RESTRICT_NOTE,
+  RESTRICT_REFUSALS,
+  renderRestrictionList,
+  restrictMention,
+} from '../features/voice/commandAccessCopy.js';
+import {
   buildAppearanceModal,
   buildControlSettingsPanel,
   CONTROL_APPEARANCE_INPUT_ID,
@@ -265,6 +277,15 @@ export interface InteractionDeps {
     membersInChannel: (channelId: string) => string[];
     counters?: ImportCounters;
   };
+  /**
+   * Posts a line to the server's own `/logging` channel, where it has one.
+   *
+   * Top level rather than read out of {@link configTransfer}'s bundle, for the
+   * reason {@link flags} gives: a line hidden behind another feature's optional
+   * dependency silently goes unposted in any deployment without that feature.
+   * Optional so a test fixture stays small, and absent means nothing is posted.
+   */
+  serverLog?: (guildId: string, level: 1 | 2 | 3, message: string) => void;
   selfHosted: boolean;
   /** Discord application id, for building the `/invite` link. */
   clientId: string;
@@ -408,6 +429,16 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
    */
   function allowedWhileExpired(interaction: Interaction): boolean {
     if (interaction.isChatInputCommand()) {
+      /**
+       * `/restrict list` and `remove` stay open and `add` is refused, which is
+       * `/botprofile`'s resets and sets over again: the hard gate stops writes
+       * and destroys nothing, so a gated admin can still see who is restricted
+       * and lift a restriction, and cannot put a new one up. Decided here and not
+       * in the list below because it is the subcommand that differs.
+       */
+      if (interaction.commandName === 'restrict') {
+        return interaction.options.getSubcommand(false) !== 'add';
+      }
       /**
        * `/export` is on this list and `/import` deliberately is not.
        *
@@ -628,6 +659,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return handleTextChannels(interaction);
       case 'defaultlimit':
         return handleDefaultLimit(interaction);
+      case 'restrict':
+        return handleRestrict(interaction);
       case 'group':
         return openGroupPanel(interaction);
       case 'inheritpermissions':
@@ -1167,6 +1200,122 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       deps.settings.setDefaultLimit(guildId, channelId, limit),
     );
     await respond(interaction, { content: formatResult(res), ephemeral: true });
+  }
+
+  // -- /restrict ------------------------------------------------------------
+
+  /**
+   * `/restrict add`, `remove` and `list`: who may not use which room command.
+   *
+   * **Re-gated in code, not only by `default_member_permissions`.** That default
+   * is a DEFAULT: a server admin can re-open any command to any role in Server
+   * Settings > Integrations, and this one decides who may use every owner-level
+   * room command in the server.
+   *
+   * **Ephemeral, and no mention pings anyone.** A reply names the people and
+   * roles the admin asked about and nobody else, and `allowedMentions` is empty
+   * so looking at a list can never notify the people on it.
+   *
+   * **Not deferred**, since it is a settings write and no Discord call. The one
+   * exception is the re-render after a nickname is removed, which runs AFTER the
+   * reply for that reason: it spends rename budget, and an admin should not wait
+   * on it or be told it failed when the restriction itself landed.
+   *
+   * This only edits the map. Enforcing it is the guard's job, not this command's.
+   */
+  async function handleRestrict(interaction: ChatInputCommandInteraction): Promise<void> {
+    if (!(await requireManageChannels(interaction))) return;
+    const guildId = interaction.guildId!;
+    const sub = interaction.options.getSubcommand(false);
+
+    if (sub === 'list') {
+      const access = await run(guildId, 'cmd:restrict:list', () =>
+        deps.settings.getCommandAccess(guildId),
+      );
+      return replyRestrict(interaction, renderRestrictionList(access));
+    }
+    if (sub !== 'add' && sub !== 'remove') {
+      await interaction.reply({ content: 'Unknown command.', ephemeral: true });
+      return;
+    }
+
+    // Client input even though Discord offers choices: a hand-built request can
+    // send anything, and `hide` has an id but no command yet.
+    const feature = interaction.options.getString('feature', true);
+    if (!isAvailableFeature(feature)) {
+      return replyRestrict(
+        interaction,
+        formatResult({ ok: false, message: RESTRICT_REFUSALS.unknownFeature }),
+      );
+    }
+    const picked = pickedWho(interaction);
+    if (!picked) {
+      return replyRestrict(
+        interaction,
+        formatResult({ ok: false, message: RESTRICT_REFUSALS.unusable }),
+      );
+    }
+    const { target } = picked;
+
+    /**
+     * Only `add` is refused on who the target is. Removing is the way out of a
+     * rule that no longer makes sense, and the person may since have become a
+     * manager, so it must never be blocked by a check that only applies going in.
+     */
+    if (sub === 'add') {
+      const refusal =
+        target.kind === 'role' && target.id === guildId
+          ? RESTRICT_REFUSALS.everyone
+          : picked.isBot
+            ? RESTRICT_REFUSALS.bot(target)
+            : carriesManageChannels(picked.permissions)
+              ? RESTRICT_REFUSALS.manager(target)
+              : null;
+      if (refusal) {
+        return replyRestrict(interaction, formatResult({ ok: false, message: refusal }));
+      }
+    }
+
+    const res = await run(guildId, `cmd:restrict:${sub}`, () =>
+      sub === 'add'
+        ? deps.settings.addCommandRestriction(guildId, feature, target)
+        : deps.settings.removeCommandRestriction(guildId, feature, target),
+    );
+    // The note rides on a successful add only: it is what an admin should hear
+    // before relying on a rule, and a refusal put nothing in place to rely on.
+    await replyRestrict(
+      interaction,
+      sub === 'add' && res.ok ? `${formatResult(res)}\n\n${RESTRICT_NOTE}` : formatResult(res),
+    );
+
+    /**
+     * The audit trail, in the server's own `/logging` channel and only for a
+     * change that happened. Deliberately not an `ops_audit` row: that table is
+     * operator-facing and retained, and its one customer-written row is the
+     * import snapshot, so a member id from here would be a new kind of thing in it.
+     */
+    if (res.changed) {
+      const label = FEATURE_LABELS[feature];
+      const who = restrictMention(target);
+      deps.serverLog?.(
+        guildId,
+        1,
+        sub === 'add'
+          ? `🔒 <@${interaction.user.id}> restricted ${who} from **${label}**.`
+          : `🔓 <@${interaction.user.id}> lifted the **${label}** restriction on ${who}.`,
+      );
+    }
+    if (res.nicknameCleared) {
+      // `/nick` re-renders the caller's rooms so `@@owner@@` picks up the change,
+      // and this removes a nickname, so the same rooms need the same re-render.
+      try {
+        await run(guildId, 'cmd:restrict:render', () =>
+          deps.feature.rerenderByOwner(guildId, target.id),
+        );
+      } catch (err) {
+        deps.logger.warn({ err, guildId }, 'could not re-render rooms after removing a nickname');
+      }
+    }
   }
 
   /** `/group` → explain + confirm grouping (or offer to turn it off) for this category. */
@@ -4122,6 +4271,76 @@ async function resolveOrPick(
 /** Standard `✅/⚠️ message` formatting for a CommandResult reply. */
 function formatResult(result: CommandResult): string {
   return `${result.ok ? '✅' : '⚠️'} ${result.message}`;
+}
+
+/**
+ * An ephemeral `/restrict` reply that pings nobody.
+ *
+ * Not `replyResult`: that one has no `allowedMentions`, and these replies are
+ * made of mentions of the very people an admin is restricting.
+ */
+async function replyRestrict(
+  interaction: ChatInputCommandInteraction,
+  content: string,
+): Promise<void> {
+  await interaction.reply({
+    content,
+    flags: MessageFlags.Ephemeral,
+    allowedMentions: { parse: [] },
+  });
+}
+
+/**
+ * Who `/restrict` was pointed at, resolved to a user or a role.
+ *
+ * The mentionable picker hands back either, and the option's own `user`, `member`
+ * and `role` say which, so a role id is never mistaken for a user id (the two
+ * share one id space and one picker). `permissions` is whatever Discord or the
+ * cache can say about what they hold: a role carries its own, and a member is the
+ * resolved one, which is a `GuildMember` when the guild is cached and the raw API
+ * shape when it is not. Absent when neither is known, which reads as "cannot tell"
+ * and is allowed through, since a rule on a manager is harmless (`mayUse` skips
+ * them) and refusing on a guess would not be.
+ */
+function pickedWho(
+  interaction: ChatInputCommandInteraction,
+): { target: RestrictTarget; isBot: boolean; permissions: unknown } | null {
+  const option = interaction.options.get('who', true);
+  if (option.role) {
+    return {
+      target: { kind: 'role', id: option.role.id },
+      isBot: false,
+      permissions: option.role.permissions,
+    };
+  }
+  if (option.user) {
+    const member = option.member ?? interaction.guild?.members.cache.get(option.user.id);
+    return {
+      target: { kind: 'user', id: option.user.id },
+      isBot: option.user.bot === true,
+      permissions: member && 'permissions' in member ? member.permissions : undefined,
+    };
+  }
+  return null;
+}
+
+/**
+ * Whether a resolved permission set holds Manage Channels or Administrator, the
+ * two things a restriction cannot stop.
+ *
+ * Takes a `PermissionsBitField`, or the decimal string the raw API sends, and
+ * checks Administrator explicitly rather than trusting `has` to imply it, so a
+ * wrapper that does not behaves the same as one that does.
+ */
+function carriesManageChannels(permissions: unknown): boolean {
+  if (permissions === undefined || permissions === null) return false;
+  const bits =
+    typeof permissions === 'object' && 'has' in permissions
+      ? (permissions as { has: (permission: bigint) => boolean })
+      : new PermissionsBitField(permissions as never);
+  return (
+    bits.has(PermissionFlagsBits.ManageChannels) || bits.has(PermissionFlagsBits.Administrator)
+  );
 }
 
 /** Renders a human-readable `/debug` summary (full detail goes to the logs). */

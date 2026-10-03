@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fakeLogger } from '../runtime/testUtils.js';
 import { GuildDispatcher } from '../runtime/dispatcher.js';
 import { readControlPanel } from '../features/voice/guildSettings.js';
+import { GuildSettingsService } from '../features/voice/settings.js';
 import { registerInteractionHandler, type InteractionDeps } from './interactions.js';
 import { LOGGING_MODAL_ID } from './loggingModal.js';
 import { CREATE_FROM_SETUP_MODAL_ID, CREATE_MODAL_ID } from './createModal.js';
@@ -74,6 +75,19 @@ interface FakeInteractionOpts {
   optionUserId?: string;
   /** The `channel` option's value, for `/channelinfo` and `/debug`. */
   optionChannelId?: string;
+  /** The subcommand a command with subcommands was invoked with. */
+  subcommand?: string;
+  /** `/restrict`'s `feature` choice. */
+  optionFeature?: string;
+  /**
+   * `/restrict`'s `who` option, as the mentionable picker resolves it: the
+   * `role`, or the `user` and the `member` the guild cache would add to it.
+   */
+  optionWho?: {
+    role?: { id: string; permissions: unknown };
+    user?: { id: string; bot?: boolean };
+    member?: { permissions: unknown };
+  };
   /**
    * Voice channels in the guild cache, and whether the CALLER can see each.
    *
@@ -206,7 +220,12 @@ function fakeInteraction(opts: FakeInteractionOpts) {
     values: opts.values ?? [],
     options: {
       getInteger: () => opts.optionInteger ?? 2,
-      getString: () => opts.optionString ?? 'x',
+      getString: (name?: string) =>
+        name === 'feature' && opts.optionFeature ? opts.optionFeature : (opts.optionString ?? 'x'),
+      // `null` when there is none, which is what discord.js answers for `false`.
+      getSubcommand: () => opts.subcommand ?? null,
+      get: (name: string) =>
+        name === 'who' && opts.optionWho ? { name, ...opts.optionWho } : null,
       getUser: () => ({ id: opts.optionUserId ?? 'u2' }),
       getChannel: () => (opts.optionChannelId ? { id: opts.optionChannelId } : null),
       getBoolean: () => null,
@@ -3577,5 +3596,507 @@ describe('registerInteractionHandler (/botprofile)', () => {
     env.client.emit('interactionCreate', modal.interaction);
     await flush();
     expect(editMe).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * `/restrict`: who may not use which room command.
+ *
+ * Driven through the real `GuildSettingsService` over an in-memory settings store,
+ * so what an admin reads and what lands in the blob are both the real thing, and
+ * the router around them is the real router. Nothing here is enforced yet: this
+ * command only edits the map.
+ */
+describe('registerInteractionHandler (/restrict)', () => {
+  let dispose: (() => void) | undefined;
+  afterEach(() => dispose?.());
+
+  const GUILD = '460459401086763010';
+  const TARGET = '111111111111111111';
+  const OTHER = '222222222222222222';
+  const ROLE = '333333333333333333';
+  const ADMIN = 'u1';
+  const MANAGE = PermissionFlagsBits.ManageChannels;
+  const ADMINISTRATOR = PermissionFlagsBits.Administrator;
+  const EPHEMERAL = 64;
+
+  /** What `PermissionsBitField` answers, for the two permissions the check asks about. */
+  const holds = (...flags: bigint[]) => ({ has: (p: bigint) => flags.includes(p) });
+
+  /** A real service over a store that applies `mergeSettings` the way the database does. */
+  function restrictEnv(
+    initial: Record<string, unknown> = {},
+    overrides: Partial<InteractionDeps> = {},
+  ) {
+    let blob: Record<string, unknown> = initial;
+    const serverLog = vi.fn();
+    const rerenderByOwner = vi
+      .fn()
+      .mockResolvedValue({ considered: 1, renamed: 1, rateLimited: 0 });
+    const warn = vi.fn();
+    const mergeSettings = vi.fn(
+      (
+        _g: string,
+        decide: (existing: unknown) => {
+          patch: Record<string, unknown>;
+          remove?: readonly string[];
+          result: unknown;
+        },
+      ) => {
+        const decided = decide({ authStatus: 'active', settings: blob });
+        blob = { ...blob, ...decided.patch };
+        for (const key of decided.remove ?? []) delete blob[key];
+        return Promise.resolve(decided.result);
+      },
+    );
+    const settings = new GuildSettingsService({
+      guilds: { ensure: () => Promise.resolve({ settings: blob }), mergeSettings } as never,
+      autoChannels: {} as never,
+      secondaries: {} as never,
+      actions: {} as never,
+      logger: fakeLogger(),
+    });
+    const env = setup({
+      settings: settings as never,
+      serverLog,
+      feature: { rerenderByOwner } as never,
+      logger: { ...fakeLogger(), warn } as never,
+      ...overrides,
+    });
+    dispose = env.dispose;
+    return { env, blob: () => blob, serverLog, rerenderByOwner, warn, mergeSettings };
+  }
+
+  /** Runs one `/restrict` interaction and returns what the admin was sent. */
+  async function restrict(
+    e: ReturnType<typeof restrictEnv>,
+    opts: Partial<FakeInteractionOpts> & { subcommand: string },
+  ) {
+    const fake = fakeInteraction({
+      kind: 'command',
+      commandName: 'restrict',
+      guildId: GUILD,
+      manageChannels: true,
+      ...opts,
+    });
+    e.env.client.emit('interactionCreate', fake.interaction);
+    await flush();
+    const payload = fake.reply.mock.calls[0]?.[0] as Record<string, unknown> | undefined;
+    return { ...fake, payload, content: (payload?.content as string | undefined) ?? '' };
+  }
+
+  const addUser = (feature: string, id = TARGET, extra: Record<string, unknown> = {}) => ({
+    subcommand: 'add',
+    optionFeature: feature,
+    optionWho: { user: { id }, ...extra },
+  });
+  const addRole = (feature: string, id: string, permissions: unknown = '0') => ({
+    subcommand: 'add',
+    optionFeature: feature,
+    optionWho: { role: { id, permissions } },
+  });
+  const removeUser = (
+    feature: string,
+    optionWho: FakeInteractionOpts['optionWho'] = {
+      user: { id: TARGET },
+    },
+  ) => ({ subcommand: 'remove', optionFeature: feature, optionWho });
+
+  it('adds a restriction, and answers only the admin and pings nobody', async () => {
+    const e = restrictEnv();
+    const { content, payload, interaction } = await restrict(e, addUser('rename'));
+
+    expect(e.blob().command_access).toEqual({ rename: { users: [TARGET] } });
+    expect(content).toContain(`✅ <@${TARGET}> can no longer use **Name**`);
+    expect(payload?.flags).toBe(EPHEMERAL);
+    expect(payload?.allowedMentions).toEqual({ parse: [] });
+    // A settings write, so no acknowledgement first: it is not on the deferred list.
+    expect(interaction.deferReply).not.toHaveBeenCalled();
+  });
+
+  it('tells an admin what a restriction does not cover, on add', async () => {
+    const e = restrictEnv();
+    const { content } = await restrict(e, addUser('rename'));
+    expect(content).toContain('Restrictions only apply on versions of AVC that include them.');
+    expect(content).toContain("Discord's own Integrations settings still apply to slash commands");
+    expect(content).toContain('room panel buttons ignore those settings');
+  });
+
+  it('resolves a picked role as a role, and stores it as one', async () => {
+    const e = restrictEnv();
+    const { content } = await restrict(e, addRole('limit', ROLE));
+    expect(e.blob().command_access).toEqual({ limit: { roles: [ROLE] } });
+    expect(content).toContain(`<@&${ROLE}> can no longer use **Size**`);
+  });
+
+  it('posts a line to the server log naming the admin, the person and the feature', async () => {
+    const e = restrictEnv();
+    await restrict(e, addUser('transfer'));
+    expect(e.serverLog).toHaveBeenCalledOnce();
+    expect(e.serverLog).toHaveBeenCalledWith(
+      GUILD,
+      1,
+      `🔒 <@${ADMIN}> restricted <@${TARGET}> from **Transfer**.`,
+    );
+  });
+
+  it('writes no ops_audit row, which this command has no way to reach', async () => {
+    const record = vi.fn();
+    const e = restrictEnv({}, { configTransfer: { opsAudit: { record } } as never });
+    await restrict(e, addUser('rename'));
+    expect(record).not.toHaveBeenCalled();
+  });
+
+  describe('refuses anyone who cannot manage channels', () => {
+    /**
+     * The registration default is a DEFAULT: a server admin can re-open this
+     * command to any role in Server Settings > Integrations, so the in-code check
+     * is what stops a role that was handed the command from deciding who may use
+     * every room command.
+     */
+    it.each([
+      ['add', addUser('rename')],
+      ['remove', removeUser('rename')],
+      ['list', { subcommand: 'list' }],
+    ])('on %s', async (_name, opts) => {
+      const e = restrictEnv({ command_access: { rename: { users: [OTHER] } } });
+      const { content } = await restrict(e, { ...opts, manageChannels: false });
+      expect(content).toBe('You need the Manage Channels permission.');
+      expect(e.mergeSettings).not.toHaveBeenCalled();
+      expect(e.serverLog).not.toHaveBeenCalled();
+      expect(e.blob().command_access).toEqual({ rename: { users: [OTHER] } });
+    });
+  });
+
+  describe('refuses a target that would do nothing, or everything', () => {
+    it('refuses the everyone role, whose id is the guild id', async () => {
+      const e = restrictEnv();
+      const { content } = await restrict(e, addRole('rename', GUILD));
+      expect(content).toContain('⚠️ That is the everyone role');
+      expect(e.blob()).not.toHaveProperty('command_access');
+      expect(e.serverLog).not.toHaveBeenCalled();
+    });
+
+    it('refuses a bot', async () => {
+      const e = restrictEnv();
+      const { content } = await restrict(
+        e,
+        addUser('rename', TARGET, { user: { id: TARGET, bot: true } }),
+      );
+      expect(content).toContain(`<@${TARGET}> is a bot`);
+      expect(e.blob()).not.toHaveProperty('command_access');
+    });
+
+    it.each([
+      ['Manage Channels', holds(MANAGE)],
+      ['Administrator', holds(ADMINISTRATOR)],
+      ['Manage Channels as the string the raw API sends', String(MANAGE)],
+      ['Administrator as the string the raw API sends', String(ADMINISTRATOR)],
+      ['Manage Channels among others', String(MANAGE | PermissionFlagsBits.KickMembers)],
+    ])('refuses a user who has %s, and says why', async (_name, permissions) => {
+      const e = restrictEnv();
+      const { content } = await restrict(e, addUser('rename', TARGET, { member: { permissions } }));
+      expect(content).toContain(
+        `⚠️ <@${TARGET}> has the Manage Channels or Administrator permission`,
+      );
+      expect(content).toContain('would do nothing');
+      expect(e.blob()).not.toHaveProperty('command_access');
+      expect(e.serverLog).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['Manage Channels', String(MANAGE)],
+      ['Administrator', String(ADMINISTRATOR)],
+      ['Manage Channels as a bit field', holds(MANAGE)],
+    ])('refuses a role that has %s', async (_name, permissions) => {
+      const e = restrictEnv();
+      const { content } = await restrict(e, addRole('rename', ROLE, permissions));
+      expect(content).toContain(`<@&${ROLE}> has the Manage Channels or Administrator permission`);
+      expect(e.blob()).not.toHaveProperty('command_access');
+    });
+
+    it('accepts a user and a role with neither permission', async () => {
+      const e = restrictEnv();
+      const kick = String(PermissionFlagsBits.KickMembers);
+      await restrict(e, addUser('rename', TARGET, { member: { permissions: kick } }));
+      await restrict(e, addRole('rename', ROLE, kick));
+      expect(e.blob().command_access).toEqual({ rename: { users: [TARGET], roles: [ROLE] } });
+    });
+
+    /** A rule on a manager is harmless, since the guard skips them, and refusing on a guess is not. */
+    it('lets a user through when nothing can say what they hold', async () => {
+      const e = restrictEnv();
+      await restrict(e, addUser('rename'));
+      expect(e.blob().command_access).toEqual({ rename: { users: [TARGET] } });
+    });
+  });
+
+  /**
+   * Removing is the way out of a rule that no longer makes sense, so it is never
+   * refused on who the target is: the person may since have become a manager, or
+   * a bot, or the role the everyone role.
+   */
+  describe('remove', () => {
+    it('lets the person use the feature again, without the note', async () => {
+      const e = restrictEnv({ command_access: { rename: { users: [TARGET, OTHER] } } });
+      const { content } = await restrict(e, removeUser('rename'));
+      expect(content).toBe(`✅ <@${TARGET}> can use **Name** again.`);
+      expect(e.blob().command_access).toEqual({ rename: { users: [OTHER] } });
+      expect(e.serverLog).toHaveBeenCalledWith(
+        GUILD,
+        1,
+        `🔓 <@${ADMIN}> lifted the **Name** restriction on <@${TARGET}>.`,
+      );
+    });
+
+    it('takes the key off the blob when the last restriction goes', async () => {
+      const e = restrictEnv({ general: 'Voice', command_access: { rename: { users: [TARGET] } } });
+      await restrict(e, removeUser('rename'));
+      expect(e.blob()).toEqual({ general: 'Voice' });
+    });
+
+    it('is not refused for a manager, a bot or the everyone role', async () => {
+      const e = restrictEnv();
+      for (const who of [
+        { user: { id: TARGET }, member: { permissions: holds(MANAGE) } },
+        { user: { id: OTHER, bot: true } },
+        { role: { id: GUILD, permissions: String(ADMINISTRATOR) } },
+      ]) {
+        const { content } = await restrict(e, removeUser('rename', who));
+        expect(content).toContain('was not restricted from **Name**, so nothing changed');
+      }
+    });
+
+    it('can clear a stored everyone rule that a hand edit put there', async () => {
+      const e = restrictEnv({ command_access: { rename: { roles: [GUILD] } } });
+      await restrict(e, removeUser('rename', { role: { id: GUILD, permissions: '0' } }));
+      expect(e.blob()).not.toHaveProperty('command_access');
+    });
+
+    it('logs nothing when there was nothing to remove', async () => {
+      const e = restrictEnv();
+      await restrict(e, removeUser('rename'));
+      expect(e.serverLog).not.toHaveBeenCalled();
+    });
+  });
+
+  it('answers a repeat add as a success that changed nothing, and logs nothing', async () => {
+    const e = restrictEnv({ command_access: { rename: { users: [TARGET] } } });
+    const { content } = await restrict(e, addUser('rename'));
+    expect(content).toContain('is already restricted from **Name**, so nothing changed');
+    expect(e.serverLog).not.toHaveBeenCalled();
+  });
+
+  it("refuses past the cap in the writer's words, with no note and no log line", async () => {
+    const full = Array.from({ length: 50 }, (_, i) => `4${String(i).padStart(17, '0')}`);
+    const e = restrictEnv({ command_access: { rename: { users: full } } });
+    const { content } = await restrict(e, addUser('rename'));
+    expect(content).toContain('⚠️ **Name** already restricts 50 people');
+    expect(content).not.toContain('Restrictions only apply');
+    expect(e.serverLog).not.toHaveBeenCalled();
+  });
+
+  describe('treats its options as client input', () => {
+    it.each(['hide', 'access', 'claim', 'kick', 'constructor'])(
+      'refuses the feature %j, which /restrict does not offer',
+      async (feature) => {
+        const e = restrictEnv();
+        const { content } = await restrict(e, addUser(feature));
+        expect(content).toContain('⚠️ Pick one of the room commands from the list.');
+        expect(e.mergeSettings).not.toHaveBeenCalled();
+      },
+    );
+
+    it('refuses an option that is neither a user nor a role', async () => {
+      const e = restrictEnv();
+      const { content } = await restrict(e, {
+        subcommand: 'add',
+        optionFeature: 'rename',
+        optionWho: {},
+      });
+      expect(content).toContain('⚠️ That is not something I can restrict.');
+      expect(e.mergeSettings).not.toHaveBeenCalled();
+    });
+
+    it('answers an unknown subcommand as an unknown command', async () => {
+      const e = restrictEnv();
+      const { content } = await restrict(e, { subcommand: 'purge' });
+      expect(content).toBe('Unknown command.');
+      expect(e.mergeSettings).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('list', () => {
+    it('says nobody is restricted for every feature when nothing is stored', async () => {
+      const e = restrictEnv();
+      const { content, payload } = await restrict(e, { subcommand: 'list' });
+      for (const label of ['Private and Public', 'Size', 'Name', 'Transfer', 'Nickname']) {
+        expect(content).toContain(`**${label}**: nobody is restricted`);
+      }
+      expect(payload?.flags).toBe(EPHEMERAL);
+      expect(payload?.allowedMentions).toEqual({ parse: [] });
+      expect(e.mergeSettings).not.toHaveBeenCalled();
+      expect(e.serverLog).not.toHaveBeenCalled();
+    });
+
+    it('shows who is restricted from what, as mentions, with the note', async () => {
+      const e = restrictEnv({
+        command_access: { rename: { users: [TARGET], roles: [ROLE] }, nick: { users: [OTHER] } },
+      });
+      const { content } = await restrict(e, { subcommand: 'list' });
+      expect(content).toContain(`**Name**: <@&${ROLE}>, <@${TARGET}>`);
+      expect(content).toContain(`**Nickname**: <@${OTHER}>`);
+      expect(content).toContain('Restrictions only apply on versions of AVC that include them.');
+      expect(content.length).toBeLessThanOrEqual(2000);
+    });
+
+    it('does not show a feature that has no command yet, whatever is stored', async () => {
+      const e = restrictEnv({ command_access: { hide: { users: [TARGET] } } });
+      const { content } = await restrict(e, { subcommand: 'list' });
+      expect(content).not.toContain(TARGET);
+      expect(content).not.toContain('Hide');
+    });
+  });
+
+  /**
+   * Denying /nick and leaving the name somebody chose in every room they own would
+   * defeat the rule, so the saved nickname goes with it, and their rooms are
+   * re-rendered so the old name stops showing.
+   */
+  describe('a Nickname restriction on a user', () => {
+    it('removes the saved nickname, says so, and re-renders their rooms after replying', async () => {
+      const e = restrictEnv({ custom_nicks: { [TARGET]: 'Kay', [OTHER]: 'Sam' } });
+      const order: string[] = [];
+      e.rerenderByOwner.mockImplementation(() => {
+        order.push('render');
+        return Promise.resolve({ considered: 1, renamed: 1, rateLimited: 0 });
+      });
+      const fake = fakeInteraction({
+        kind: 'command',
+        commandName: 'restrict',
+        guildId: GUILD,
+        manageChannels: true,
+        ...addUser('nick'),
+      });
+      fake.reply.mockImplementation(() => {
+        order.push('reply');
+        return Promise.resolve(undefined);
+      });
+      e.env.client.emit('interactionCreate', fake.interaction);
+      await flush();
+
+      expect((fake.reply.mock.calls[0]![0] as { content: string }).content).toContain(
+        'Their saved nickname was removed.',
+      );
+      expect(e.blob().custom_nicks).toEqual({ [OTHER]: 'Sam' });
+      expect(e.blob().command_access).toEqual({ nick: { users: [TARGET] } });
+      expect(e.rerenderByOwner).toHaveBeenCalledWith(GUILD, TARGET);
+      expect(order).toEqual(['reply', 'render']);
+    });
+
+    it('does not fail the command when the re-render does, since the restriction landed', async () => {
+      const e = restrictEnv({ custom_nicks: { [TARGET]: 'Kay' } });
+      e.rerenderByOwner.mockRejectedValue(new Error('discord is down'));
+      const { content, followUp } = await restrict(e, addUser('nick'));
+      expect(content).toContain('Their saved nickname was removed.');
+      expect(e.blob().command_access).toEqual({ nick: { users: [TARGET] } });
+      expect(e.warn).toHaveBeenCalledOnce();
+      expect(followUp).not.toHaveBeenCalled();
+      expect(e.env.reportError).not.toHaveBeenCalled();
+    });
+
+    it('does not re-render when there was no nickname to remove', async () => {
+      const e = restrictEnv({ custom_nicks: { [OTHER]: 'Sam' } });
+      await restrict(e, addUser('nick'));
+      expect(e.rerenderByOwner).not.toHaveBeenCalled();
+    });
+
+    it('does not re-render for a role, or for another feature', async () => {
+      const e = restrictEnv({ custom_nicks: { [TARGET]: 'Kay' } });
+      await restrict(e, addRole('nick', ROLE));
+      await restrict(e, addUser('rename'));
+      expect(e.rerenderByOwner).not.toHaveBeenCalled();
+      expect(e.blob().custom_nicks).toEqual({ [TARGET]: 'Kay' });
+    });
+  });
+
+  /**
+   * The hard gate stops writes and destroys nothing, so a gated admin can still see
+   * who is restricted and lift a restriction, and cannot put a new one up. The
+   * same split `/botprofile`'s resets and sets make.
+   */
+  describe('in a hard-gated guild', () => {
+    const gated = () => ({
+      guilds: {
+        get: vi.fn().mockResolvedValue({ authStatus: 'expired' }),
+        isEntitled: vi.fn().mockResolvedValue(false),
+      } as never,
+      selfHosted: false,
+    });
+
+    it('refuses add with the reactivation notice, and writes nothing', async () => {
+      const e = restrictEnv({}, gated());
+      const { content } = await restrict(e, addUser('rename'));
+      expect(content).toContain('auto-voice.io');
+      expect(e.mergeSettings).not.toHaveBeenCalled();
+    });
+
+    it('still lists', async () => {
+      const e = restrictEnv({ command_access: { rename: { users: [TARGET] } } }, gated());
+      const { content } = await restrict(e, { subcommand: 'list' });
+      expect(content).not.toContain('auto-voice.io');
+      expect(content).toContain(`**Name**: <@${TARGET}>`);
+    });
+
+    it('still removes', async () => {
+      const e = restrictEnv({ command_access: { rename: { users: [TARGET] } } }, gated());
+      const { content } = await restrict(e, removeUser('rename'));
+      expect(content).toBe(`✅ <@${TARGET}> can use **Name** again.`);
+      expect(e.blob()).not.toHaveProperty('command_access');
+    });
+  });
+
+  /**
+   * Rendered replies, not source text: a source scan only ever catches a curly
+   * quote, and every reply here is assembled from a mention, a label and a clause.
+   */
+  it('follows the copy rules in every reply it gives', async () => {
+    const stored = { command_access: { rename: { users: [TARGET] } } };
+    const scenarios: [
+      Record<string, unknown>,
+      Partial<FakeInteractionOpts> & { subcommand: string },
+    ][] = [
+      [{}, addUser('privacy')],
+      [{}, addUser('limit')],
+      [{}, addUser('rename')],
+      [{}, addUser('transfer')],
+      [{ custom_nicks: { [TARGET]: 'Kay' } }, addUser('nick')],
+      [{}, addRole('rename', ROLE)],
+      [{}, addRole('rename', GUILD)],
+      [{}, addRole('rename', ROLE, String(MANAGE))],
+      [{}, addUser('rename', TARGET, { user: { id: TARGET, bot: true } })],
+      [{}, addUser('rename', TARGET, { member: { permissions: holds(MANAGE) } })],
+      [{}, addUser('hide')],
+      [stored, addUser('rename')],
+      [stored, removeUser('rename')],
+      [{}, removeUser('rename')],
+      [{}, { subcommand: 'list' }],
+      [{ command_access: { rename: { users: [TARGET], roles: [ROLE] } } }, { subcommand: 'list' }],
+      [{}, { ...addUser('rename'), manageChannels: false }],
+    ];
+    const replies: string[] = [];
+    for (const [initial, opts] of scenarios) {
+      const e = restrictEnv(initial);
+      replies.push((await restrict(e, opts)).content);
+      dispose?.();
+    }
+    expect(replies.every((r) => r.length > 0)).toBe(true);
+    for (const text of replies) {
+      expect(text, 'no em or en dashes').not.toMatch(/[—–]/);
+      expect(text, 'straight quotes only').not.toMatch(/[‘’“”]/);
+      expect(text, 'no prose semicolons').not.toContain(';');
+      expect(text.toLowerCase()).not.toMatch(/primary|secondary/);
+      expect(text.length).toBeLessThanOrEqual(2000);
+    }
   });
 });

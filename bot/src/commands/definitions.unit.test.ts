@@ -1,5 +1,6 @@
 import { PermissionFlagsBits } from 'discord.js';
 import { describe, expect, it } from 'vitest';
+import { AVAILABLE_FEATURES } from '../features/voice/commandAccess.js';
 import { buildCommandDefinitions } from './definitions.js';
 
 describe('buildCommandDefinitions', () => {
@@ -31,6 +32,7 @@ describe('buildCommandDefinitions', () => {
         'private',
         'public',
         'reclaim',
+        'restrict',
         'setup',
         'source',
         'template',
@@ -71,6 +73,7 @@ describe('buildCommandDefinitions', () => {
       'group',
       'inheritpermissions',
       'logging',
+      'restrict',
     ]) {
       expect(byName.get(name)!.default_member_permissions).toBe(manage);
     }
@@ -143,6 +146,78 @@ describe('buildCommandDefinitions', () => {
     }
     // inheritpermissions is now modal-driven too (no slash options).
     expect(byName.get('inheritpermissions')!.options ?? []).toHaveLength(0);
+  });
+
+  /**
+   * The first command with subcommands, and the first with a mentionable option,
+   * so the shape is pinned: `/restrict add` and `remove` take a required feature
+   * and a required who, and `list` takes nothing.
+   */
+  describe('/restrict', () => {
+    type Sub = { type: number; name: string; options?: Record<string, unknown>[] };
+    const subs = (byName.get('restrict')!.options ?? []) as unknown as Sub[];
+    const sub = (name: string): Sub => subs.find((s) => s.name === name)!;
+    const SUBCOMMAND = 1;
+    const STRING = 3;
+    const MENTIONABLE = 9;
+
+    it('has an add, a remove and a list subcommand, and nothing else', () => {
+      expect(subs.map((s) => [s.name, s.type])).toEqual([
+        ['add', SUBCOMMAND],
+        ['remove', SUBCOMMAND],
+        ['list', SUBCOMMAND],
+      ]);
+    });
+
+    it('takes a required feature and a required person or role on add and remove', () => {
+      for (const name of ['add', 'remove']) {
+        expect(sub(name).options, name).toMatchObject([
+          { name: 'feature', type: STRING, required: true },
+          { name: 'who', type: MENTIONABLE, required: true },
+        ]);
+      }
+    });
+
+    it('takes no options on list', () => {
+      expect(sub('list').options ?? []).toHaveLength(0);
+    });
+
+    /** Hide and Saved lists have no command yet, so offering them would restrict nothing. */
+    it('offers exactly the features that exist, labelled as the panel labels them', () => {
+      const choices = (sub('add').options![0] as { choices: { name: string; value: string }[] })
+        .choices;
+      expect(choices).toEqual([
+        { name: 'Private and Public', value: 'privacy' },
+        { name: 'Size', value: 'limit' },
+        { name: 'Name', value: 'rename' },
+        { name: 'Transfer', value: 'transfer' },
+        { name: 'Nickname', value: 'nick' },
+      ]);
+      expect(choices.map((c) => c.value)).toEqual([...AVAILABLE_FEATURES]);
+    });
+
+    it('offers the same choices on remove as on add', () => {
+      expect(sub('remove').options![0]).toEqual(sub('add').options![0]);
+    });
+
+    it('is not open to every member by default, and is guild only', () => {
+      expect(byName.get('restrict')!.dm_permission).toBe(false);
+      expect(byName.get('restrict')!.default_member_permissions).toBe(
+        PermissionFlagsBits.ManageChannels.toString(),
+      );
+    });
+
+    it('says what it does in one short sentence a customer can read', () => {
+      const def = byName.get('restrict')!;
+      for (const text of [
+        def.description,
+        ...subs.map((s) => (s as { description?: string }).description!),
+      ]) {
+        expect(text.length).toBeLessThanOrEqual(100);
+        expect(text).not.toMatch(/[—–‘’“”;]/);
+        expect(text.toLowerCase()).not.toMatch(/primary|secondary/);
+      }
+    });
   });
 
   it('constrains the limit option to 0..99', () => {
