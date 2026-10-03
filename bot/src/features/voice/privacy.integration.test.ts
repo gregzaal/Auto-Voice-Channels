@@ -145,6 +145,24 @@ describe('PrivacyService (integration)', () => {
       setVoiceStatus: () => Promise.resolve(),
       repositionSecondaries: () => Promise.resolve(),
       repositionGroup: () => Promise.resolve(),
+      // The rest of the interface. This literal is not type-checked, so it had been
+      // missing the companion methods for as long as they existed and only ever
+      // worked because this one test never reaches them.
+      readOverwrites: () => Promise.resolve([]),
+      applyOverwrites: () =>
+        Promise.resolve({
+          written: [],
+          droppedMemberIds: [],
+          requests: 0,
+          deferred: false,
+          channelGone: false,
+        }),
+      roleExists: () => Promise.resolve(true),
+      createCompanionChannel: () =>
+        Promise.resolve({ channelId: 't', grantedRoleId: null, roleMissing: false }),
+      syncCompanionMembers: () =>
+        Promise.resolve({ added: 0, removed: 0, channelGone: false, grantedRoleId: null }),
+      deleteCompanionChannel: () => Promise.resolve(),
     };
     const p2 = new PrivacyService({
       secondaries,

@@ -6,6 +6,7 @@ import {
 } from 'discord.js';
 import type { Client, GuildMember, VoiceState } from 'discord.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { ResolvedOverwrite } from './accessPlan.js';
 import {
   CHANNEL_OBFUSCATED,
   ChannelObfuscatedError,
@@ -19,6 +20,7 @@ import {
 } from './discordAdapter.js';
 
 const UNKNOWN_CHANNEL = 10003;
+const UNKNOWN_MEMBER = 10007;
 const BOT = 'bot-id';
 const VIEW = PermissionFlagsBits.ViewChannel;
 const MANAGE = PermissionFlagsBits.ManageChannels;
@@ -1800,5 +1802,622 @@ describe('DiscordVoiceActions spacing headroom', () => {
     }
     // A step of 2 would absorb exactly one, which is barely better than none.
     expect(free).toBeGreaterThanOrEqual(5);
+  });
+});
+
+/**
+ * A voice room's overwrites on the Map-backed fake the companion tests use: the
+ * writes land in a Map, and the cache the adapter reads is built from it, so what
+ * the adapter wrote is what it reads back rather than whatever a mock says.
+ */
+describe('DiscordVoiceActions room overwrites', () => {
+  const GUILD = 'g1';
+  const ROOM = 'room-1';
+  const SPEAK = PermissionFlagsBits.Speak;
+  const VC = VIEW | CONNECT;
+
+  const role = (id: string, allow = 0n, deny = 0n): ResolvedOverwrite => ({
+    id,
+    type: OverwriteType.Role,
+    allow,
+    deny,
+  });
+  const person = (id: string, allow = 0n, deny = 0n): ResolvedOverwrite => ({
+    id,
+    type: OverwriteType.Member,
+    allow,
+    deny,
+  });
+  const botOverwrite = person(BOT, VIEW | CONNECT | MANAGE | MOVE);
+  const everyone = (allow = 0n, deny = 0n) => role(GUILD, allow, deny);
+
+  const keyOf = (o: { id: string; type: number }) => `${o.type}:${o.id}`;
+  const asMap = (list: readonly ResolvedOverwrite[]) =>
+    Object.fromEntries(list.map((o) => [keyOf(o), { allow: o.allow, deny: o.deny }]));
+
+  function makeRoom(
+    initial: ResolvedOverwrite[] = [],
+    opts: {
+      /** Who Discord says is in the server. */
+      inServer?: string[];
+      /** Who the guild's member cache holds. */
+      cached?: string[];
+      flags?: number;
+      logger?: unknown;
+    } = {},
+  ) {
+    const overwrites = new Map(initial.map((o) => [keyOf(o), { ...o }]));
+    const inServer = new Set(opts.inServer ?? ['alice', 'bob', 'carol', 'dave', 'owner']);
+    const memberCache = new Map((opts.cached ?? []).map((id) => [id, { id }]));
+    const set = vi.fn((list: ResolvedOverwrite[]) => {
+      overwrites.clear();
+      for (const o of list) overwrites.set(keyOf(o), { ...o });
+      return Promise.resolve(undefined);
+    });
+    const put = vi.fn(
+      (
+        _route: string,
+        options: { body: { id: string; type: number; allow: string; deny: string } },
+      ) => {
+        const { id, type, allow, deny } = options.body;
+        overwrites.set(`${type}:${id}`, { id, type, allow: BigInt(allow), deny: BigInt(deny) });
+        return Promise.resolve(undefined);
+      },
+    );
+    const del = vi.fn((route: string) => {
+      const id = route.split('/').pop()!;
+      for (const k of [...overwrites.keys()]) if (k.endsWith(`:${id}`)) overwrites.delete(k);
+      return Promise.resolve(undefined);
+    });
+    const lookup = vi.fn((options: { user: string[]; time?: number }) =>
+      Promise.resolve(
+        new Map(options.user.filter((id) => inServer.has(id)).map((id) => [id, { id }])),
+      ),
+    );
+    const roleCache = new Map([
+      [GUILD, { id: GUILD }],
+      ['mods', { id: 'mods' }],
+    ]);
+    const guild = {
+      id: GUILD,
+      members: { cache: memberCache, fetch: lookup },
+      roles: { cache: roleCache },
+    };
+    const cacheShape = (o: ResolvedOverwrite) => ({
+      ...o,
+      allow: { bitfield: o.allow },
+      deny: { bitfield: o.deny },
+    });
+    const channel = {
+      id: ROOM,
+      guildId: GUILD,
+      guild,
+      flags: { bitfield: opts.flags ?? 0 },
+      isVoiceBased: () => true,
+      permissionOverwrites: {
+        cache: { values: () => [...overwrites.values()].map(cacheShape)[Symbol.iterator]() },
+        set,
+      },
+    };
+    const fetch = vi.fn((_id: string, _options?: { force?: boolean }) => Promise.resolve(channel));
+    const client = {
+      user: { id: BOT },
+      channels: { fetch },
+      guilds: { fetch: vi.fn().mockResolvedValue(guild) },
+      rest: { put, delete: del },
+    } as unknown as Client;
+    return {
+      actions: new DiscordVoiceActions(client, opts.logger as never),
+      client,
+      overwrites,
+      set,
+      put,
+      del,
+      lookup,
+      fetch,
+      memberCache,
+      guild,
+      channel,
+    };
+  }
+
+  const apply = (
+    room: ReturnType<typeof makeRoom>,
+    desired: ResolvedOverwrite[],
+    previous: ResolvedOverwrite[],
+  ) => room.actions.applyOverwrites(GUILD, ROOM, desired, previous);
+
+  describe('readOverwrites', () => {
+    it('forces a fresh fetch, because the overwrite cache can lag a channel update', async () => {
+      const stale = { ...makeRoom([everyone()]).channel };
+      const room = makeRoom([everyone(0n, CONNECT), person('alice', VC)]);
+      room.fetch.mockImplementation((_id, options) =>
+        Promise.resolve(options?.force ? room.channel : stale),
+      );
+      const read = await room.actions.readOverwrites(GUILD, ROOM);
+      expect(room.fetch).toHaveBeenCalledWith(ROOM, { force: true });
+      expect(asMap(read!)).toEqual({
+        [`0:${GUILD}`]: { allow: 0n, deny: CONNECT },
+        '1:alice': { allow: VC, deny: 0n },
+      });
+    });
+
+    it('answers with the shape the planner reads: id, type and bigint bits', async () => {
+      const room = makeRoom([role('r', VIEW, CONNECT), person('m', SPEAK)]);
+      expect(await room.actions.readOverwrites(GUILD, ROOM)).toEqual([
+        { id: 'r', type: OverwriteType.Role, allow: VIEW, deny: CONNECT },
+        { id: 'm', type: OverwriteType.Member, allow: SPEAK, deny: 0n },
+      ]);
+    });
+
+    it('answers null for a channel that is gone, rather than an empty set', async () => {
+      const room = makeRoom();
+      room.fetch.mockRejectedValue(apiError(UNKNOWN_CHANNEL));
+      await expect(room.actions.readOverwrites(GUILD, ROOM)).resolves.toBeNull();
+    });
+
+    it('answers null for a channel that is not a voice channel', async () => {
+      const room = makeRoom();
+      room.fetch.mockResolvedValue({ isVoiceBased: () => false } as never);
+      await expect(room.actions.readOverwrites(GUILD, ROOM)).resolves.toBeNull();
+    });
+
+    it('lets any other failure through, so a room it cannot see is reported and not read as empty', async () => {
+      const room = makeRoom();
+      room.fetch.mockRejectedValue(apiError(50001));
+      await expect(room.actions.readOverwrites(GUILD, ROOM)).rejects.toBeInstanceOf(
+        DiscordAPIError,
+      );
+    });
+
+    it('refuses an obfuscated channel, whose overwrites are a single @everyone deny', async () => {
+      const room = makeRoom([everyone(0n, VIEW)], { flags: CHANNEL_OBFUSCATED });
+      await expect(room.actions.readOverwrites(GUILD, ROOM)).rejects.toBeInstanceOf(
+        ChannelObfuscatedError,
+      );
+    });
+  });
+
+  describe('applyOverwrites', () => {
+    const before = [botOverwrite, everyone(), person('owner', CONNECT)];
+
+    it('writes nothing, and asks nobody anything, when nothing differs', async () => {
+      const room = makeRoom(before);
+      const result = await apply(room, before, before);
+      expect(result).toMatchObject({ requests: 0, deferred: false, channelGone: false });
+      expect(room.set).not.toHaveBeenCalled();
+      expect(room.put).not.toHaveBeenCalled();
+      expect(room.del).not.toHaveBeenCalled();
+      expect(room.lookup).not.toHaveBeenCalled();
+    });
+
+    it('writes ONE change as one request, with the exact bits and not a merge', async () => {
+      const room = makeRoom(before);
+      const desired = [...before.slice(0, 2), person('owner', VC | SPEAK)];
+      const result = await apply(room, desired, before);
+      expect(room.put).toHaveBeenCalledTimes(1);
+      expect(room.put).toHaveBeenCalledWith(`/channels/${ROOM}/permissions/owner`, {
+        body: {
+          id: 'owner',
+          type: OverwriteType.Member,
+          allow: (VC | SPEAK).toString(),
+          deny: '0',
+        },
+      });
+      expect(room.set).not.toHaveBeenCalled();
+      expect(result.requests).toBe(1);
+    });
+
+    it('writes TWO changes as two requests, the bot first', async () => {
+      const room = makeRoom([everyone(), person('owner', CONNECT)]);
+      const desired = [everyone(0n, CONNECT), person('owner', CONNECT), botOverwrite];
+      const result = await apply(room, desired, [everyone(), person('owner', CONNECT)]);
+      expect(room.put.mock.calls.map(([route]) => route)).toEqual([
+        `/channels/${ROOM}/permissions/${BOT}`,
+        `/channels/${ROOM}/permissions/${GUILD}`,
+      ]);
+      expect(room.set).not.toHaveBeenCalled();
+      expect(result.requests).toBe(2);
+    });
+
+    it('writes MANY changes as ONE bulk request carrying the whole set, and no single write', async () => {
+      const previous = [everyone(), person('human', SPEAK)];
+      const desired = [
+        everyone(0n, VC),
+        person('human', SPEAK),
+        botOverwrite,
+        person('owner', VC),
+        person('alice', VC),
+        person('bob', VC),
+      ];
+      const room = makeRoom(previous);
+      const result = await apply(room, desired, previous);
+      expect(room.set).toHaveBeenCalledTimes(1);
+      // The WHOLE set, so a human's overwrite on the channel is not dropped.
+      expect(asMap(room.set.mock.calls[0]![0])).toEqual(asMap(desired));
+      expect(room.put).not.toHaveBeenCalled();
+      expect(result.requests).toBe(1);
+      expect(asMap([...room.overwrites.values()])).toEqual(asMap(desired));
+    });
+
+    it('is atomic: a failed bulk write leaves the channel as it was', async () => {
+      const previous = [everyone()];
+      const room = makeRoom(previous);
+      room.set.mockRejectedValue(apiError(50013));
+      const desired = [everyone(0n, VC), botOverwrite, person('owner', VC), person('alice', VC)];
+      await expect(apply(room, desired, previous)).rejects.toBeInstanceOf(DiscordAPIError);
+      expect(room.set).toHaveBeenCalledTimes(1);
+      expect(room.put).not.toHaveBeenCalled();
+    });
+
+    it('removes an overwrite with a delete, and treats one that is already gone as done', async () => {
+      const previous = [botOverwrite, person('bob', VC)];
+      const room = makeRoom(previous);
+      room.del.mockRejectedValueOnce(apiError(10009));
+      const result = await apply(room, [botOverwrite], previous);
+      expect(room.del).toHaveBeenCalledWith(`/channels/${ROOM}/permissions/bob`);
+      expect(result.requests).toBe(1);
+    });
+
+    it('never sends the obfuscated shell back', async () => {
+      const room = makeRoom([everyone(0n, VIEW)], { flags: CHANNEL_OBFUSCATED });
+      await expect(
+        apply(room, [everyone(0n, VC), botOverwrite], [everyone(0n, VIEW)]),
+      ).rejects.toBeInstanceOf(ChannelObfuscatedError);
+      expect(room.set).not.toHaveBeenCalled();
+      expect(room.put).not.toHaveBeenCalled();
+      expect(room.lookup).not.toHaveBeenCalled();
+    });
+
+    it('reports a channel that is gone instead of throwing', async () => {
+      const room = makeRoom();
+      room.fetch.mockRejectedValue(apiError(UNKNOWN_CHANNEL));
+      const result = await apply(room, [botOverwrite], []);
+      expect(result).toMatchObject({ channelGone: true, requests: 0, written: [] });
+    });
+
+    it('reports a channel that is gone when the write itself says so', async () => {
+      const room = makeRoom();
+      room.put.mockRejectedValue(apiError(UNKNOWN_CHANNEL));
+      const result = await apply(room, [botOverwrite], []);
+      expect(result.channelGone).toBe(true);
+    });
+
+    it('lets any other failure through when it lands inside the probe window', async () => {
+      const room = makeRoom();
+      room.put.mockRejectedValue(apiError(50013));
+      await expect(apply(room, [botOverwrite], [])).rejects.toBeInstanceOf(DiscordAPIError);
+    });
+
+    describe('members who are not in the server', () => {
+      const desired = [
+        botOverwrite,
+        person('owner', VC),
+        person('alice', VC),
+        person('ghost', VC),
+        person('ghost2', 0n, VC),
+      ];
+
+      it('asks once about the members the write would add, and leaves out whoever is gone', async () => {
+        const room = makeRoom([]);
+        const result = await apply(room, desired, []);
+        expect(room.lookup).toHaveBeenCalledTimes(1);
+        expect(room.lookup.mock.calls[0]![0].user.sort()).toEqual([
+          'alice',
+          'ghost',
+          'ghost2',
+          'owner',
+        ]);
+        expect(result.droppedMemberIds.sort()).toEqual(['ghost', 'ghost2']);
+        expect(result.written.map((o) => o.id)).toEqual([BOT, 'owner', 'alice']);
+        // Never written, in the bulk set or anywhere else.
+        expect(room.set.mock.calls[0]![0].map((o: ResolvedOverwrite) => o.id)).toEqual([
+          BOT,
+          'owner',
+          'alice',
+        ]);
+      });
+
+      it('bounds the lookup, because discord.js waits two minutes by default', async () => {
+        const room = makeRoom([]);
+        await apply(room, desired, []);
+        expect(room.lookup.mock.calls[0]![0].time).toBeLessThanOrEqual(5000);
+      });
+
+      it('does not ask about a member the guild cache already holds', async () => {
+        const room = makeRoom([], { cached: ['owner', 'alice'] });
+        await apply(room, desired, []);
+        expect(room.lookup.mock.calls[0]![0].user.sort()).toEqual(['ghost', 'ghost2']);
+
+        const allCached = makeRoom([], { cached: ['owner', 'alice', 'ghost', 'ghost2'] });
+        await apply(allCached, desired, []);
+        expect(allCached.lookup).not.toHaveBeenCalled();
+      });
+
+      it('does not ask about an overwrite that is already there and unchanged', async () => {
+        // Discord already accepted it, and a human's overwrite for somebody who has
+        // since left is not ours to delete.
+        const previous = [person('departed', SPEAK)];
+        const room = makeRoom(previous);
+        const result = await apply(room, [...previous, botOverwrite], previous);
+        expect(room.lookup).not.toHaveBeenCalled();
+        expect(result.written.map((o) => o.id)).toEqual(['departed', BOT]);
+      });
+
+      it('never asks about, or drops, the bot', async () => {
+        // The bot is not in the member list here, as when it has no member record yet.
+        const room = makeRoom([], { inServer: [] });
+        const result = await apply(room, [botOverwrite], []);
+        expect(room.lookup).not.toHaveBeenCalled();
+        expect(result.written).toEqual([botOverwrite]);
+        expect(result.droppedMemberIds).toEqual([]);
+        expect(room.put).toHaveBeenCalledWith(`/channels/${ROOM}/permissions/${BOT}`, {
+          body: expect.objectContaining({ id: BOT }),
+        });
+      });
+
+      it('writes everyone when the lookup itself fails, rather than dropping anyone on a hiccup', async () => {
+        const room = makeRoom([]);
+        room.lookup.mockRejectedValue(new Error('GuildMembersTimeout'));
+        const result = await apply(room, desired, []);
+        expect(result.droppedMemberIds).toEqual([]);
+        expect(result.written).toHaveLength(desired.length);
+      });
+
+      it('retries once without the member Discord says is gone, when the write answers Unknown Member', async () => {
+        // The cache vouches for 'ghost', so the first lookup skips it: this is the
+        // stale-cache case the retry exists for.
+        const room = makeRoom([], { cached: ['owner', 'alice', 'ghost', 'ghost2'] });
+        room.set.mockImplementationOnce(() => Promise.reject(apiError(UNKNOWN_MEMBER)));
+        const result = await apply(room, desired, []);
+        expect(room.set).toHaveBeenCalledTimes(2);
+        // The retry verifies EVERY member against Discord, not the cache.
+        expect(room.lookup).toHaveBeenCalledTimes(1);
+        expect(room.lookup.mock.calls[0]![0].user.sort()).toEqual([
+          'alice',
+          'ghost',
+          'ghost2',
+          'owner',
+        ]);
+        expect(room.set.mock.calls[1]![0].map((o: ResolvedOverwrite) => o.id)).toEqual([
+          BOT,
+          'owner',
+          'alice',
+        ]);
+        expect(result.droppedMemberIds.sort()).toEqual(['ghost', 'ghost2']);
+        expect(result.requests).toBe(2);
+      });
+
+      it('retries on Unknown User too', async () => {
+        const room = makeRoom([], { cached: ['owner', 'alice', 'ghost', 'ghost2'] });
+        room.set.mockImplementationOnce(() => Promise.reject(apiError(10013)));
+        const result = await apply(room, desired, []);
+        expect(result.droppedMemberIds.sort()).toEqual(['ghost', 'ghost2']);
+      });
+
+      it('retries a single write too', async () => {
+        const room = makeRoom([botOverwrite], { cached: ['ghost'] });
+        room.put.mockImplementationOnce(() => Promise.reject(apiError(UNKNOWN_MEMBER)));
+        const result = await apply(room, [botOverwrite, person('ghost', VC)], [botOverwrite]);
+        expect(result.droppedMemberIds).toEqual(['ghost']);
+        expect(result.written).toEqual([botOverwrite]);
+      });
+
+      it('retries only once, even when another member has gone by the time it checks again', async () => {
+        const room = makeRoom([], { cached: ['owner', 'alice', 'ghost', 'ghost2'] });
+        room.set.mockRejectedValue(apiError(UNKNOWN_MEMBER));
+        // ghost is missing on the first check and ghost2 on the second: a retry that
+        // looped would chase them one at a time.
+        const without = (gone: string) => (options: { user: string[] }) =>
+          Promise.resolve(
+            new Map(options.user.filter((id) => id !== gone).map((id) => [id, { id }])),
+          );
+        room.lookup
+          .mockImplementationOnce(without('ghost'))
+          .mockImplementationOnce(without('ghost2'));
+        await expect(apply(room, desired, [])).rejects.toBeInstanceOf(DiscordAPIError);
+        expect(room.set).toHaveBeenCalledTimes(2);
+      });
+
+      it('rethrows when every member checks out, because then it was not them', async () => {
+        const room = makeRoom([], { inServer: ['owner', 'alice', 'ghost', 'ghost2'] });
+        room.set.mockRejectedValue(apiError(UNKNOWN_MEMBER));
+        await expect(apply(room, desired, [])).rejects.toBeInstanceOf(DiscordAPIError);
+        expect(room.set).toHaveBeenCalledTimes(1);
+      });
+
+      it('does not retry a different error', async () => {
+        const room = makeRoom([]);
+        room.set.mockRejectedValue(apiError(50013));
+        await expect(apply(room, desired, [])).rejects.toBeInstanceOf(DiscordAPIError);
+        expect(room.set).toHaveBeenCalledTimes(1);
+      });
+
+      it('asks in batches of a hundred, the most the gateway accepts', async () => {
+        const many = Array.from({ length: 250 }, (_, i) => person(`m${i}`, VC));
+        const room = makeRoom([], { inServer: many.map((o) => o.id) });
+        await apply(room, [botOverwrite, ...many], []);
+        expect(room.lookup.mock.calls.map(([o]) => o.user.length)).toEqual([100, 100, 50]);
+      });
+    });
+
+    describe('when Discord is rate limiting the channel', () => {
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      /**
+       * Overwrite writes are 10 per 10 seconds per channel and discord.js queues a
+       * 429 rather than rejecting it, so an unbounded await here holds the guild's
+       * queue for as long as Discord says.
+       */
+      it('returns deferred rather than waiting when the write outlives the probe window', async () => {
+        vi.useFakeTimers();
+        const room = makeRoom([]);
+        room.set.mockReturnValue(new Promise(() => {}));
+        const pending = apply(room, [botOverwrite, person('alice', VC), person('bob', VC)], []);
+        await vi.advanceTimersByTimeAsync(2600);
+        await expect(pending).resolves.toMatchObject({ deferred: true, requests: 1 });
+      });
+
+      it('does not report deferred for a write that lands promptly', async () => {
+        vi.useFakeTimers();
+        const room = makeRoom([]);
+        await expect(apply(room, [botOverwrite], [])).resolves.toMatchObject({ deferred: false });
+      });
+
+      it('still reports a failure that lands after it has returned', async () => {
+        vi.useFakeTimers();
+        let fail: ((err: unknown) => void) | undefined;
+        const warn = vi.fn();
+        const room = makeRoom([], {
+          logger: { warn, debug: vi.fn(), info: vi.fn(), error: vi.fn() },
+        });
+        room.put.mockReturnValue(new Promise((_resolve, reject) => (fail = reject)));
+        const pending = apply(room, [botOverwrite], []);
+        await vi.advanceTimersByTimeAsync(2600);
+        await expect(pending).resolves.toMatchObject({ deferred: true });
+        expect(warn).not.toHaveBeenCalled();
+
+        fail?.(new Error('429 later'));
+        await vi.advanceTimersByTimeAsync(10);
+        expect(warn).toHaveBeenCalledWith(
+          expect.objectContaining({ guildId: GUILD, channelId: ROOM }),
+          'deferred overwrite write failed',
+        );
+      });
+
+      it('does not warn about a channel that was deleted while it waited', async () => {
+        vi.useFakeTimers();
+        let fail: ((err: unknown) => void) | undefined;
+        const warn = vi.fn();
+        const room = makeRoom([], {
+          logger: { warn, debug: vi.fn(), info: vi.fn(), error: vi.fn() },
+        });
+        room.put.mockReturnValue(new Promise((_resolve, reject) => (fail = reject)));
+        const pending = apply(room, [botOverwrite], []);
+        await vi.advanceTimersByTimeAsync(2600);
+        await pending;
+        fail?.(apiError(UNKNOWN_CHANNEL));
+        await vi.advanceTimersByTimeAsync(10);
+        expect(warn).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  describe('roleExists', () => {
+    it('is true for a role the guild has', async () => {
+      await expect(makeRoom().actions.roleExists(GUILD, 'mods')).resolves.toBe(true);
+    });
+
+    it('is false for a role the guild no longer has', async () => {
+      await expect(makeRoom().actions.roleExists(GUILD, 'deleted')).resolves.toBe(false);
+    });
+
+    it('is false for @everyone, which is never a moderator role', async () => {
+      await expect(makeRoom().actions.roleExists(GUILD, GUILD)).resolves.toBe(false);
+    });
+
+    it('is true while the role cache is empty, because not knowing is not a reason to withhold a grant', async () => {
+      const room = makeRoom();
+      room.guild.roles.cache.clear();
+      await expect(room.actions.roleExists(GUILD, 'mods')).resolves.toBe(true);
+    });
+  });
+});
+
+describe('DiscordVoiceActions.moveMember', () => {
+  function clientFor(
+    voice: { channelId: string | null; setChannel: ReturnType<typeof vi.fn> },
+    fetchMember?: () => void,
+  ): Client {
+    const guild = {
+      members: {
+        fetch: vi.fn(() => {
+          fetchMember?.();
+          return Promise.resolve({ voice });
+        }),
+      },
+    };
+    return { guilds: { fetch: vi.fn().mockResolvedValue(guild) } } as unknown as Client;
+  }
+
+  const inVoice = (channelId: string | null) => ({
+    channelId,
+    setChannel: vi.fn().mockResolvedValue(undefined),
+  });
+
+  it('moves a member as it always has when no options are given', async () => {
+    const voice = inVoice('anywhere');
+    await new DiscordVoiceActions(clientFor(voice)).moveMember('g1', 'u1', 'room');
+    expect(voice.setChannel).toHaveBeenCalledWith('room');
+  });
+
+  it('disconnects a member who is still in the room it was told to take them out of', async () => {
+    const voice = inVoice('room');
+    await new DiscordVoiceActions(clientFor(voice)).moveMember('g1', 'u1', null, {
+      onlyFrom: 'room',
+    });
+    expect(voice.setChannel).toHaveBeenCalledWith(null);
+  });
+
+  /**
+   * A disconnect takes the member out of whichever channel they are in NOW. The
+   * block picked them from a cache read that may be seconds old.
+   */
+  it('does nothing to a member who has moved to another channel', async () => {
+    const voice = inVoice('somewhere-else');
+    await new DiscordVoiceActions(clientFor(voice)).moveMember('g1', 'u1', null, {
+      onlyFrom: 'room',
+    });
+    expect(voice.setChannel).not.toHaveBeenCalled();
+  });
+
+  it('does nothing to a member who is not in voice at all', async () => {
+    const voice = inVoice(null);
+    await new DiscordVoiceActions(clientFor(voice)).moveMember('g1', 'u1', null, {
+      onlyFrom: 'room',
+    });
+    expect(voice.setChannel).not.toHaveBeenCalled();
+  });
+
+  it('reads their channel after fetching them, not before, so a move that lands meanwhile is seen', async () => {
+    const voice = inVoice('room');
+    // The gateway updates the voice state while the member fetch is in flight.
+    const client = clientFor(voice, () => {
+      voice.channelId = 'somewhere-else';
+    });
+    await new DiscordVoiceActions(client).moveMember('g1', 'u1', null, { onlyFrom: 'room' });
+    expect(voice.setChannel).not.toHaveBeenCalled();
+  });
+
+  it('swallows 40032, a member who left voice between the check and the move', async () => {
+    const voice = inVoice('room');
+    voice.setChannel.mockRejectedValue(apiError(40032));
+    await expect(
+      new DiscordVoiceActions(clientFor(voice)).moveMember('g1', 'u1', null, { onlyFrom: 'room' }),
+    ).resolves.toBeUndefined();
+    // And for a plain move too: the old callers are not made to throw by it.
+    await expect(
+      new DiscordVoiceActions(clientFor(voice)).moveMember('g1', 'u1', 'room'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('still swallows an unknown member and an unknown channel', async () => {
+    for (const code of [10007, UNKNOWN_CHANNEL]) {
+      const voice = inVoice('room');
+      voice.setChannel.mockRejectedValue(apiError(code));
+      await expect(
+        new DiscordVoiceActions(clientFor(voice)).moveMember('g1', 'u1', 'x'),
+      ).resolves.toBeUndefined();
+    }
+  });
+
+  it('rethrows anything else, such as a missing permission', async () => {
+    const voice = inVoice('room');
+    voice.setChannel.mockRejectedValue(apiError(50013));
+    await expect(
+      new DiscordVoiceActions(clientFor(voice)).moveMember('g1', 'u1', null, { onlyFrom: 'room' }),
+    ).rejects.toBeInstanceOf(DiscordAPIError);
   });
 });

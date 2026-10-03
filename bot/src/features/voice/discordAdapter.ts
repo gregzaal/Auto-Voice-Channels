@@ -13,11 +13,19 @@ import {
   type VoiceState,
 } from 'discord.js';
 import type { Logger } from '@avc/core';
+import {
+  diffOverwrites,
+  OVERWRITE_MEMBER,
+  SINGLE_WRITE_MAX,
+  type ResolvedOverwrite,
+} from './accessPlan.js';
 import type {
+  ApplyOverwritesResult,
   CompanionSyncResult,
   CreateCompanionChannelInput,
   CreateCompanionChannelResult,
   CreateVoiceChannelInput,
+  MoveMemberOptions,
   RenameResult,
   SyncCompanionMembersInput,
   VoiceActions,
@@ -35,6 +43,12 @@ import type {
 const UNKNOWN_CHANNEL = 10003;
 /** Discord API error code for "Unknown Member" (already gone). */
 const UNKNOWN_MEMBER = 10007;
+/** "Unknown User": an id that names no account, which an overwrite can answer with too. */
+const UNKNOWN_USER = 10013;
+/** "Unknown Overwrite": the overwrite, or the role it names, is not there. */
+const UNKNOWN_OVERWRITE = 10009;
+/** "Target user is not connected to voice": a move or disconnect of a member who is not in voice. */
+const NOT_IN_VOICE = 40032;
 /** "Missing Access" (50001 — can't see the resource) / "Missing Permissions" (50013). */
 const MISSING_ACCESS = 50001;
 const MISSING_PERMISSIONS = 50013;
@@ -106,12 +120,9 @@ function isCompanionType(type: number): boolean {
   return type === ChannelType.GuildText || type === ChannelType.GuildAnnouncement;
 }
 
-export interface ResolvedOverwrite {
-  id: string;
-  type: number;
-  allow: bigint;
-  deny: bigint;
-}
+// Lives in `accessPlan.ts`, which has to stay free of discord.js, and is re-exported
+// so this file's callers keep importing it from here.
+export type { ResolvedOverwrite };
 
 /** The permissions the bot must retain to manage a channel it created. */
 const BOT_REQUIRED_PERMS =
@@ -333,6 +344,33 @@ const RENAME_PROBE_MS = 2500;
  * Separate constant from the rename's so the two can diverge if their limits do.
  */
 const STATUS_PROBE_MS = 2500;
+
+/**
+ * The same window for an overwrite write, as its own number because the limit it
+ * guards is its own: 10 writes per 10 seconds per channel, shared with every edit
+ * to the channel itself (measured 2026-10-03: the 11th got a 429 with a 10.5 second
+ * wait, and discord.js queues such a request rather than rejecting it).
+ *
+ * **Why a probe, when the caller wants to confirm the write.** The same reason as
+ * the rename: this runs inside the guild's serial queue, and a hide that waited out
+ * a 429 would hold every other event for that guild for ten seconds. What makes it
+ * safe is the result's `deferred`, which tells the caller not to confirm anything
+ * yet, and the order the caller works in: the access record is written BEFORE the
+ * request, so a write that lands late agrees with the record, and one that fails
+ * late is repaired by the converge pass. A transition is one bulk request, so a
+ * 429 needs a burst against one room to happen at all.
+ */
+const OVERWRITE_PROBE_MS = 2500;
+
+/** Discord caps the ids in one gateway member request at 100. */
+const MEMBER_LOOKUP_BATCH = 100;
+
+/**
+ * How long to wait for the gateway to answer a member lookup. discord.js waits two
+ * minutes by default, which in the guild queue is an outage. Past this the answer
+ * is "unknown", and unknown members are written rather than dropped.
+ */
+const MEMBER_LOOKUP_TIMEOUT_MS = 3000;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -813,13 +851,30 @@ export class DiscordVoiceActions implements VoiceActions {
     return { rateLimited: true };
   }
 
-  async moveMember(guildId: string, memberId: string, channelId: string | null): Promise<void> {
+  async moveMember(
+    guildId: string,
+    memberId: string,
+    channelId: string | null,
+    options?: MoveMemberOptions,
+  ): Promise<void> {
     try {
       const guild = await this.client.guilds.fetch(guildId);
       const member = await guild.members.fetch(memberId);
+      // Read AFTER the fetch above, not before it: the gateway keeps the voice state
+      // current, so this is as fresh as anything we can know without moving them.
+      // The caller's own read can be seconds old, and a disconnect takes the member
+      // out of whichever channel they are in now.
+      if (options?.onlyFrom !== undefined && member.voice.channelId !== options.onlyFrom) return;
       await member.voice.setChannel(channelId);
     } catch (err) {
-      if (isApiError(err, UNKNOWN_MEMBER) || isApiError(err, UNKNOWN_CHANNEL)) return;
+      // 40032: they left voice between the check and the move. Nothing to undo.
+      if (
+        isApiError(err, UNKNOWN_MEMBER) ||
+        isApiError(err, UNKNOWN_CHANNEL) ||
+        isApiError(err, NOT_IN_VOICE)
+      ) {
+        return;
+      }
       throw err;
     }
   }
@@ -893,6 +948,241 @@ export class DiscordVoiceActions implements VoiceActions {
       if (isApiError(err, UNKNOWN_CHANNEL) || isApiError(err, UNKNOWN_MEMBER)) return;
       throw err;
     }
+  }
+
+  /**
+   * A room's overwrites as Discord holds them now.
+   *
+   * Fetched with `force`, because the overwrite cache can lag a CHANNEL_UPDATE by
+   * long enough to plan against a set that has since changed, and a plan written
+   * back from a stale read reverts whatever somebody did in between. discord.js
+   * patches the cached channel in place from that response, so the cache read below
+   * is the fresh one.
+   */
+  async readOverwrites(_guildId: string, channelId: string): Promise<ResolvedOverwrite[] | null> {
+    let channel;
+    try {
+      channel = await this.client.channels.fetch(channelId, { force: true });
+    } catch (err) {
+      if (isApiError(err, UNKNOWN_CHANNEL)) return null;
+      throw err;
+    }
+    if (!channel?.isVoiceBased()) return null;
+    // The shell holds a single `@everyone` View deny and nothing else. Planning
+    // against it would produce a "complete" set that is a falsehood.
+    if (isObfuscated(channel)) throw new ChannelObfuscatedError(channelId);
+    return mapOverwrites(channel.permissionOverwrites.cache);
+  }
+
+  /**
+   * Makes a room's overwrites `desired`.
+   *
+   * **One or two changes are one request each. More than that is ONE bulk request.**
+   * Overwrite writes are 10 per 10 seconds per channel and a hide touches the owner,
+   * every occupant, the trusted list, a role or two and `@everyone`, which written
+   * one by one is a 429. A bulk `PATCH` with the full `permission_overwrites` array
+   * cost one token whatever it carried (measured 2026-10-03) and is atomic, so it
+   * can never leave a half-applied set. `previous` is what the plan was made
+   * against: the bulk set is built from it, so the caller reads it fresh
+   * ({@link readOverwrites}) immediately before planning.
+   *
+   * A single change is written with the exact allow and deny the plan computed, not
+   * through discord.js's `edit`, which merges onto the CACHED overwrite and would
+   * write a stale cache back.
+   *
+   * **Members who are not in the server are left out.** What Discord does with an
+   * overwrite for a user id that has left is UNVERIFIED, and a list is exactly where
+   * such an id comes from (a saved block outlives the member's membership). So the
+   * members this write would add or change are checked first, in one gateway
+   * request, and a write that still answers Unknown Member or Unknown User is retried
+   * once without whoever Discord confirms is gone. The result names them, so they
+   * are never recorded as having an overwrite. The bot's own overwrite is never
+   * dropped.
+   */
+  async applyOverwrites(
+    guildId: string,
+    channelId: string,
+    desired: readonly ResolvedOverwrite[],
+    previous: readonly ResolvedOverwrite[],
+  ): Promise<ApplyOverwritesResult> {
+    const gone: ApplyOverwritesResult = {
+      written: [],
+      droppedMemberIds: [],
+      requests: 0,
+      deferred: false,
+      channelGone: true,
+    };
+    let channel;
+    try {
+      channel = await this.client.channels.fetch(channelId);
+    } catch (err) {
+      if (isApiError(err, UNKNOWN_CHANNEL)) return gone;
+      throw err;
+    }
+    // Not a voice channel any more is not one of ours to write to either.
+    if (!channel?.isVoiceBased()) return gone;
+    // Sending `desired` back to the shell would replace the real set with a lie.
+    if (isObfuscated(channel)) throw new ChannelObfuscatedError(channelId);
+
+    const botId = this.client.user?.id;
+    const who = { guildId: channel.guild.id, ...(botId ? { botId } : {}) };
+    const changedMembers = diffOverwrites(previous, desired, who)
+      .upserts.filter((o) => o.type === OVERWRITE_MEMBER && o.id !== botId)
+      .map((o) => o.id);
+    const absent = await this.absentMembers(channel.guild, changedMembers, true);
+    const state = {
+      wanted: desired.filter((o) => !(o.type === OVERWRITE_MEMBER && absent.has(o.id))),
+      dropped: [...absent],
+      requests: 0,
+    };
+
+    // As `setVoiceStatus`: the write is raced against a short probe so a 429 cannot
+    // hold the guild's queue, and a failure after the probe has won is logged here
+    // because nothing else is left listening.
+    const write = this.writeOverwrites(channel, previous, state, who);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const probe = new Promise<{ kind: 'pending' }>((resolve) => {
+      timer = setTimeout(() => resolve({ kind: 'pending' }), OVERWRITE_PROBE_MS);
+      (timer as { unref?: () => void }).unref?.();
+    });
+    const outcome = await Promise.race([
+      write.then(
+        () => ({ kind: 'done' as const }),
+        (err: unknown) => ({ kind: 'failed' as const, err }),
+      ),
+      probe,
+    ]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+
+    if (outcome.kind === 'failed') {
+      if (isApiError(outcome.err, UNKNOWN_CHANNEL)) return gone;
+      throw outcome.err;
+    }
+    if (outcome.kind === 'pending') {
+      void write.catch((err: unknown) => {
+        if (!isApiError(err, UNKNOWN_CHANNEL)) {
+          this.logger?.warn({ err, guildId, channelId }, 'deferred overwrite write failed');
+        }
+      });
+      this.logger?.debug({ guildId, channelId }, 'overwrite write deferred, queue continuing');
+    }
+    return {
+      written: [...state.wanted],
+      droppedMemberIds: [...state.dropped],
+      requests: state.requests,
+      deferred: outcome.kind === 'pending',
+      channelGone: false,
+    };
+  }
+
+  /** Writes `state.wanted`, retrying once without members Discord says are not in the server. */
+  private async writeOverwrites(
+    channel: VoiceBasedChannel,
+    previous: readonly ResolvedOverwrite[],
+    state: { wanted: ResolvedOverwrite[]; dropped: string[]; requests: number },
+    who: { guildId: string; botId?: string },
+  ): Promise<void> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await this.writeChanges(channel, previous, state, who);
+        return;
+      } catch (err) {
+        if (attempt > 0 || !(isApiError(err, UNKNOWN_MEMBER) || isApiError(err, UNKNOWN_USER))) {
+          throw err;
+        }
+        // The error does not say whose id it was, and the cache that vouched for
+        // some of them is the thing that may be wrong, so ask about every member
+        // in the set. Nobody missing means this was something else.
+        const missing = await this.absentMembers(
+          channel.guild,
+          state.wanted
+            .filter((o) => o.type === OVERWRITE_MEMBER && o.id !== who.botId)
+            .map((o) => o.id),
+          false,
+        );
+        if (missing.size === 0) throw err;
+        this.logger?.warn(
+          { guildId: channel.guildId, channelId: channel.id, dropped: missing.size },
+          'leaving out overwrites for members no longer in the server',
+        );
+        state.dropped.push(...missing);
+        state.wanted = state.wanted.filter(
+          (o) => !(o.type === OVERWRITE_MEMBER && missing.has(o.id)),
+        );
+      }
+    }
+  }
+
+  private async writeChanges(
+    channel: VoiceBasedChannel,
+    previous: readonly ResolvedOverwrite[],
+    state: { wanted: ResolvedOverwrite[]; requests: number },
+    who: { guildId: string; botId?: string },
+  ): Promise<void> {
+    const diff = diffOverwrites(previous, state.wanted, who);
+    const changes = diff.upserts.length + diff.deletes.length;
+    if (changes === 0) return;
+    if (changes > SINGLE_WRITE_MAX) {
+      state.requests += 1;
+      await channel.permissionOverwrites.set(state.wanted);
+      return;
+    }
+    // The diff already puts the bot first, so a deny that would lock it out cannot
+    // land before the allow that keeps it in.
+    for (const o of diff.upserts) {
+      state.requests += 1;
+      await this.client.rest.put(`/channels/${channel.id}/permissions/${o.id}`, {
+        body: { id: o.id, type: o.type, allow: o.allow.toString(), deny: o.deny.toString() },
+      });
+    }
+    for (const d of diff.deletes) {
+      state.requests += 1;
+      await this.client.rest
+        .delete(`/channels/${channel.id}/permissions/${d.id}`)
+        .catch((err: unknown) => {
+          // Already gone is what a delete is for.
+          if (isApiError(err, UNKNOWN_OVERWRITE) || isApiError(err, UNKNOWN_MEMBER)) return;
+          throw err;
+        });
+    }
+  }
+
+  /**
+   * Which of these members Discord does not have in the server.
+   *
+   * The guild's member cache is trusted for a member it holds (nothing removes one
+   * but a leave) and not for one it does not, because Discord only pushes an
+   * initial slice of a large guild's members on connect. One gateway request per
+   * hundred ids covers the rest. A lookup that fails or times out reports nobody
+   * missing: dropping a member on a gateway hiccup would be a silent block that is
+   * not applied, and a write that really does name someone who has left is caught
+   * by its own error in {@link writeOverwrites}.
+   */
+  private async absentMembers(
+    guild: Guild,
+    ids: readonly string[],
+    trustCache: boolean,
+  ): Promise<Set<string>> {
+    const absent = new Set<string>();
+    const unique = [...new Set(ids)];
+    const toAsk = trustCache ? unique.filter((id) => !guild.members.cache.has(id)) : unique;
+    for (let i = 0; i < toAsk.length; i += MEMBER_LOOKUP_BATCH) {
+      const batch = toAsk.slice(i, i + MEMBER_LOOKUP_BATCH);
+      try {
+        const found = await guild.members.fetch({ user: batch, time: MEMBER_LOOKUP_TIMEOUT_MS });
+        for (const id of batch) if (!found.has(id)) absent.add(id);
+      } catch (err) {
+        this.logger?.debug({ err, guildId: guild.id }, 'member lookup failed, writing without it');
+      }
+    }
+    return absent;
+  }
+
+  /** Whether the moderator role still exists. See {@link VoiceActions.roleExists}. */
+  async roleExists(guildId: string, roleId: string): Promise<boolean> {
+    const guild = await this.client.guilds.fetch(guildId);
+    return this.resolveViewerRole(guild, roleId).roleId !== null;
   }
 
   /**

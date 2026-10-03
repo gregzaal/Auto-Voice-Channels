@@ -1,4 +1,10 @@
 import { DiscordAPIError } from 'discord.js';
+import {
+  diffOverwrites,
+  OVERWRITE_MEMBER,
+  SINGLE_WRITE_MAX,
+  type ResolvedOverwrite,
+} from './accessPlan.js';
 
 /**
  * The Discord side-effect seam. Feature logic depends only on this interface, so
@@ -150,6 +156,44 @@ export interface RenameResult {
   channelGone?: boolean;
 }
 
+/** Options for {@link VoiceActions.moveMember}. */
+export interface MoveMemberOptions {
+  /**
+   * Only act while the member is STILL in this channel, judged from their voice
+   * state read immediately before the move, never from a snapshot an earlier
+   * step took. A disconnect (`channelId` null) takes the member out of whatever
+   * channel they are in now, so a block that picked its target from a stale read
+   * would disconnect somebody who has since moved to an unrelated channel.
+   */
+  onlyFrom?: string;
+}
+
+/** What {@link VoiceActions.applyOverwrites} actually did. */
+export interface ApplyOverwritesResult {
+  /**
+   * The overwrites asked of Discord: `desired` less the members it reported not
+   * being in the server. What the caller records as written, so an id that never
+   * got an overwrite is never remembered as having one.
+   */
+  written: ResolvedOverwrite[];
+  /** Member ids left out because Discord does not have them in the server. */
+  droppedMemberIds: string[];
+  /** REST writes made: 0 when nothing differed, 1 for a bulk write. */
+  requests: number;
+  /**
+   * True when the write did not land within the probe window because Discord is
+   * rate limiting this channel (10 overwrite writes per 10 seconds, shared with
+   * edits to the channel itself). It is still queued and will land, so the caller
+   * must not tell anyone the change has taken effect, and a failure after this
+   * point is logged and left to the next converge pass rather than reported here.
+   * So is a member found to have left after this point: only the ones the check
+   * before the write found are in `droppedMemberIds`.
+   */
+  deferred: boolean;
+  /** True when the channel is confirmed gone, so there was nothing to write. */
+  channelGone: boolean;
+}
+
 export interface VoiceActions {
   /** Creates a voice channel and returns its new id. */
   createVoiceChannel(input: CreateVoiceChannelInput): Promise<string>;
@@ -176,8 +220,16 @@ export interface VoiceActions {
    * channel turned out to be gone (see {@link RenameResult}).
    */
   renameChannel(guildId: string, channelId: string, name: string): Promise<RenameResult>;
-  /** Moves a member to a channel (or disconnects them when channelId is null). */
-  moveMember(guildId: string, memberId: string, channelId: string | null): Promise<void>;
+  /**
+   * Moves a member to a channel (or disconnects them when channelId is null).
+   * A member who is not in voice, or has left the server, is not an error.
+   */
+  moveMember(
+    guildId: string,
+    memberId: string,
+    channelId: string | null,
+    options?: MoveMemberOptions,
+  ): Promise<void>;
   /** Sets a channel's user limit (0 = unlimited). */
   setUserLimit(guildId: string, channelId: string, limit: number): Promise<void>;
   /**
@@ -193,6 +245,35 @@ export interface VoiceActions {
     memberId: string,
     allow: boolean,
   ): Promise<void>;
+  /**
+   * A room's permission overwrites as Discord holds them NOW, read fresh because
+   * the cache can lag a channel update by long enough to plan against a set that
+   * is no longer there. Null when the channel is gone, or is not a voice channel.
+   * Throws for one the bot can no longer see.
+   */
+  readOverwrites(guildId: string, channelId: string): Promise<ResolvedOverwrite[] | null>;
+  /**
+   * Makes a room's overwrites `desired`, given `previous`, the set the plan was
+   * made against. One or two changes are written one request each, the bot's
+   * first. More than that is ONE bulk request carrying the whole set, because
+   * overwrite writes are limited to 10 per 10 seconds per channel and a hide
+   * touches far more than that. Never writes a partial set in bulk.
+   *
+   * Members Discord does not have in the server are left out and reported, so a
+   * list that names someone who has since left cannot fail the whole write.
+   */
+  applyOverwrites(
+    guildId: string,
+    channelId: string,
+    desired: readonly ResolvedOverwrite[],
+    previous: readonly ResolvedOverwrite[],
+  ): Promise<ApplyOverwritesResult>;
+  /**
+   * Whether the role still exists in the guild. False for `@everyone`, which is
+   * never a moderator role. True when the guild's roles are not loaded yet: not
+   * knowing is not grounds to withhold a grant the admin asked for.
+   */
+  roleExists(guildId: string, roleId: string): Promise<boolean>;
   /**
    * Creates an open "⇩ Join" companion voice channel next to `nearChannelId`
    * (same category, adjacent position, @everyone may connect). Returns its id.
@@ -274,10 +355,29 @@ export type RecordedAction =
     }
   | { type: 'delete'; guildId: string; channelId: string }
   | { type: 'rename'; guildId: string; channelId: string; name: string }
-  | { type: 'move'; guildId: string; memberId: string; channelId: string | null }
+  | {
+      type: 'move';
+      guildId: string;
+      memberId: string;
+      channelId: string | null;
+      /** Present only when the caller scoped the move to a channel the member must still be in. */
+      onlyFrom?: string;
+    }
   | { type: 'limit'; guildId: string; channelId: string; limit: number }
   | { type: 'privacy'; guildId: string; channelId: string; isPrivate: boolean }
   | { type: 'connect'; guildId: string; channelId: string; memberId: string; allow: boolean }
+  | {
+      type: 'overwrites';
+      guildId: string;
+      channelId: string;
+      /** What the channel holds after the write. */
+      written: ResolvedOverwrite[];
+      /** The set the plan was made against. */
+      previous: ResolvedOverwrite[];
+      droppedMemberIds: string[];
+      /** What the real adapter would have spent: 0, one per change up to two, else one bulk. */
+      requests: number;
+    }
   | {
       type: 'joinChannel';
       guildId: string;
@@ -336,6 +436,27 @@ export class RecordingVoiceActions implements VoiceActions {
   failMove = false;
   /** When true, `setPrivacy` throws Missing Permissions (tests the created-but-unlockable path). */
   failPrivacy = false;
+  /** When true, `readOverwrites` throws Missing Access, as it does for a room the bot can no longer see. */
+  failReadOverwrites = false;
+  /** When true, `applyOverwrites` throws Missing Permissions and the channel keeps what it held. */
+  failOverwrites = false;
+  /** When true, every `applyOverwrites` reports itself deferred behind Discord's rate limit. */
+  simulateOverwriteRateLimit = false;
+  /** When set, `readOverwrites` and `applyOverwrites` report this channel as deleted on Discord. */
+  overwritesGoneForChannel?: string;
+  /**
+   * Member ids Discord does not have in the server. `applyOverwrites` leaves them
+   * out and reports them, which is what the real adapter's member check and its
+   * retry after Unknown Member or Unknown User add up to.
+   */
+  readonly unknownMemberIds = new Set<string>();
+  /** Role ids that no longer exist in the guild, for `roleExists`. */
+  readonly missingRoleIds = new Set<string>();
+  /**
+   * Members `moveMember` finds not connected to voice (Discord's 40032), which the
+   * real adapter swallows. Nothing is recorded for them.
+   */
+  readonly notConnectedMemberIds = new Set<string>();
   /**
    * When true, a configured moderator role is treated as no longer existing in
    * the guild, exactly as {@link DiscordVoiceActions.resolveViewerRole} decides
@@ -354,8 +475,38 @@ export class RecordingVoiceActions implements VoiceActions {
    * channel's overwrite cache.
    */
   private readonly companionViewers = new Map<string, Set<string>>();
+  /** What each room's overwrites currently are, which `applyOverwrites` replaces. */
+  private readonly overwrites = new Map<string, ResolvedOverwrite[]>();
+  /** Where each member is in voice, for the `onlyFrom` check. Absent means "where the caller expects". */
+  private readonly memberChannels = new Map<string, string | null>();
 
   constructor(private readonly idPrefix = 'sec') {}
+
+  /**
+   * Sets what `readOverwrites` reports for a room and what the next
+   * `applyOverwrites` is measured against. A room never seeded reads as holding
+   * none, which is what a freshly created channel with no inherited set holds.
+   */
+  seedOverwrites(channelId: string, overwrites: readonly ResolvedOverwrite[]): void {
+    this.overwrites.set(
+      channelId,
+      overwrites.map((o) => ({ ...o })),
+    );
+  }
+
+  /** What the room's overwrites are now, after whatever has been written to it. */
+  overwritesOf(channelId: string): ResolvedOverwrite[] {
+    return (this.overwrites.get(channelId) ?? []).map((o) => ({ ...o }));
+  }
+
+  /**
+   * Says which channel a member is in right now, so a move scoped with `onlyFrom`
+   * can find them elsewhere. `null` is not in voice. A member never mentioned is
+   * taken to be where the caller expects.
+   */
+  setMemberChannel(memberId: string, channelId: string | null): void {
+    this.memberChannels.set(memberId, channelId);
+  }
 
   createVoiceChannel(input: CreateVoiceChannelInput): Promise<string> {
     if (this.failCreate) {
@@ -436,7 +587,22 @@ export class RecordingVoiceActions implements VoiceActions {
     return Promise.resolve({ rateLimited: this.simulateRenameRateLimit });
   }
 
-  moveMember(guildId: string, memberId: string, channelId: string | null): Promise<void> {
+  moveMember(
+    guildId: string,
+    memberId: string,
+    channelId: string | null,
+    options?: MoveMemberOptions,
+  ): Promise<void> {
+    // Skipped before anything can fail, as the adapter does: it reads the member's
+    // voice state right before moving them, and a member who is elsewhere is left be.
+    if (
+      options?.onlyFrom !== undefined &&
+      this.memberChannels.has(memberId) &&
+      this.memberChannels.get(memberId) !== options.onlyFrom
+    ) {
+      return Promise.resolve();
+    }
+    if (this.notConnectedMemberIds.has(memberId)) return Promise.resolve();
     if (this.failMove) {
       return Promise.reject(
         new DiscordAPIError(
@@ -449,7 +615,13 @@ export class RecordingVoiceActions implements VoiceActions {
         ),
       );
     }
-    this.actions.push({ type: 'move', guildId, memberId, channelId });
+    this.actions.push({
+      type: 'move',
+      guildId,
+      memberId,
+      channelId,
+      ...(options?.onlyFrom !== undefined ? { onlyFrom: options.onlyFrom } : {}),
+    });
     return Promise.resolve();
   }
 
@@ -483,6 +655,88 @@ export class RecordingVoiceActions implements VoiceActions {
   ): Promise<void> {
     this.actions.push({ type: 'connect', guildId, channelId, memberId, allow });
     return Promise.resolve();
+  }
+
+  readOverwrites(_guildId: string, channelId: string): Promise<ResolvedOverwrite[] | null> {
+    if (this.failReadOverwrites) {
+      return Promise.reject(
+        new DiscordAPIError(
+          { code: 50001, message: 'Missing Access' } as never,
+          50001,
+          403,
+          'GET',
+          'https://discord.test',
+          {} as never,
+        ),
+      );
+    }
+    if (this.overwritesGoneForChannel === channelId) return Promise.resolve(null);
+    return Promise.resolve(this.overwritesOf(channelId));
+  }
+
+  applyOverwrites(
+    guildId: string,
+    channelId: string,
+    desired: readonly ResolvedOverwrite[],
+    previous: readonly ResolvedOverwrite[],
+  ): Promise<ApplyOverwritesResult> {
+    if (this.failOverwrites) {
+      return Promise.reject(
+        new DiscordAPIError(
+          { code: 50013, message: 'Missing Permissions' } as never,
+          50013,
+          403,
+          'PATCH',
+          'https://discord.test',
+          {} as never,
+        ),
+      );
+    }
+    if (this.overwritesGoneForChannel === channelId) {
+      return Promise.resolve({
+        written: [],
+        droppedMemberIds: [],
+        requests: 0,
+        deferred: false,
+        channelGone: true,
+      });
+    }
+    // Only the members this write would add or change are checked, as the adapter
+    // does: an existing overwrite Discord already accepted is not second-guessed.
+    const diff = diffOverwrites(previous, desired);
+    const droppedMemberIds = diff.upserts
+      .filter((o) => o.type === OVERWRITE_MEMBER && this.unknownMemberIds.has(o.id))
+      .map((o) => o.id);
+    const dropped = new Set(droppedMemberIds);
+    const written = desired.filter((o) => !(o.type === OVERWRITE_MEMBER && dropped.has(o.id)));
+    const changes = diffOverwrites(previous, written);
+    const size = changes.upserts.length + changes.deletes.length;
+    const requests = size === 0 ? 0 : size > SINGLE_WRITE_MAX ? 1 : size;
+    this.overwrites.set(
+      channelId,
+      written.map((o) => ({ ...o })),
+    );
+    this.actions.push({
+      type: 'overwrites',
+      guildId,
+      channelId,
+      written: written.map((o) => ({ ...o })),
+      previous: previous.map((o) => ({ ...o })),
+      droppedMemberIds,
+      requests,
+    });
+    return Promise.resolve({
+      written: written.map((o) => ({ ...o })),
+      droppedMemberIds,
+      requests,
+      deferred: this.simulateOverwriteRateLimit,
+      channelGone: false,
+    });
+  }
+
+  roleExists(guildId: string, roleId: string): Promise<boolean> {
+    // `@everyone`'s id is the guild id, and it is never a moderator role.
+    return Promise.resolve(roleId !== guildId && !this.missingRoleIds.has(roleId));
   }
 
   createJoinChannel(guildId: string, name: string, nearChannelId: string): Promise<string> {
