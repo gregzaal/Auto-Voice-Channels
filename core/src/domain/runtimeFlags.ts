@@ -36,12 +36,13 @@ export const RUNTIME_FLAGS = {
    * so it can actually shed the load its name implies.
    *
    * Panels already posted keep WORKING while it is on: their buttons run the
-   * same checked command paths the slash commands do, and withdrawing those
-   * would mean editing a message in every live room to take away controls that
-   * are still safe to press. What they stop doing is keeping up with their
-   * room, which self-heals: the stored fingerprint still holds whatever was
-   * last drawn, so the first re-render after this is lifted sees a mismatch and
-   * catches every frozen panel up in one edit each.
+   * same ownership checks and the same `/restrict` guard as the slash commands,
+   * at click time, and withdrawing those would mean editing a message in every
+   * live room to take away controls that are still safe to press. What they
+   * stop doing is keeping up with their room (including which buttons a
+   * `/restrict` rule hides), which self-heals: the stored fingerprint still
+   * holds whatever was last drawn, so the first re-render after this is lifted
+   * sees a mismatch and catches every frozen panel up in one edit each.
    *
    * A failed flag read is treated as NOT disabled, matching
    * `companion_text.disabled`: a database blip must not silently withdraw a

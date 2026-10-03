@@ -117,8 +117,10 @@ export interface CreateGateDecision {
    * {@link companionTextDisabled}.
    *
    * New panels only. A panel already posted keeps working, because its buttons
-   * run the same checked command paths the slash commands do, and withdrawing
-   * one would mean editing a message in every live room.
+   * run the same ownership checks and the same `/restrict` guard as the slash
+   * commands, at click time, so a button a rule has since withdrawn is refused
+   * even on a panel that has not caught up, and withdrawing one would mean
+   * editing a message in every live room.
    */
   controlPanelDisabled?: boolean;
 }

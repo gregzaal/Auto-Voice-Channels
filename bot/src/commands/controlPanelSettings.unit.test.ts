@@ -239,6 +239,24 @@ describe('buildAppearanceModal', () => {
     expect(on).not.toContain('"disabled":true');
   });
 
+  /**
+   * A switched-on control looks plainly on here, so the one place an admin reads
+   * what the panel is has to say a control can also be withheld from people.
+   */
+  it('says Private and Public, Size, Name and Transfer can be restricted with /restrict', () => {
+    const none = Object.fromEntries(CONTROL_PANEL_CONTROLS.map((c) => [c, false]));
+    for (const settings of [ON, {}, { control_panel: { ...none, panel: true } }]) {
+      const description = (
+        buildControlSettingsPanel(readControlPanel(settings)).embeds![0]! as {
+          description?: string;
+        }
+      ).description;
+      expect(description).toContain(
+        'Private and Public, Size, Name and Transfer can also be withheld from a person or a role with /restrict.',
+      );
+    }
+  });
+
   /** Every button off is a third state: the panel is on and yet nothing is posted. */
   it('says so when every button is off', () => {
     const none = Object.fromEntries(CONTROL_PANEL_CONTROLS.map((c) => [c, false]));
@@ -264,6 +282,7 @@ describe('buildAppearanceModal', () => {
       );
       expect(text).not.toMatch(/[—–]/);
       expect(text).not.toMatch(/[‘’“”]/);
+      expect(text).not.toContain(';');
       expect(text.toLowerCase()).not.toContain('secondary channel');
     }
   });
