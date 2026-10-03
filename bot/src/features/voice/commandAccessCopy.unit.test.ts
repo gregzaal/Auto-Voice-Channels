@@ -298,23 +298,37 @@ describe('renderRestrictionList', () => {
 
   it('says nobody is restricted for every feature when nothing is stored', () => {
     const text = renderRestrictionList({});
-    for (const label of ['Private and Public', 'Hide', 'Size', 'Name', 'Transfer', 'Nickname']) {
+    for (const label of [
+      'Private and Public',
+      'Hide',
+      'Size',
+      'Name',
+      'Transfer',
+      'Saved lists',
+      'Nickname',
+    ]) {
       expect(text).toContain(`**${label}**: nobody is restricted`);
     }
   });
 
-  /** Saved lists has no command yet, so offering it would restrict nothing. */
+  /** Claim, Kick and Info are occupant-level, so a rule on one would only ever refuse. */
   it('lists only the features /restrict offers, even when others are stored', () => {
     const text = renderRestrictionList({
-      access: { users: [USER.id], roles: [] },
-    });
-    expect(text).not.toContain('Saved lists');
+      claim: { users: [USER.id], roles: [] },
+      kick: { users: [USER.id], roles: [] },
+    } as never);
+    expect(text).not.toContain('Claim');
+    expect(text).not.toContain('Kick');
     expect(text).not.toContain(USER.id);
   });
 
-  it('lists Hide, which has a command now', () => {
-    const text = renderRestrictionList({ hide: { users: [USER.id], roles: [] } });
+  it('lists Hide and Saved lists, which have commands now', () => {
+    const text = renderRestrictionList({
+      hide: { users: [USER.id], roles: [] },
+      access: { users: [], roles: [ROLE.id] },
+    });
     expect(text).toContain(`**Hide**: <@${USER.id}>`);
+    expect(text).toContain(`**Saved lists**: <@&${ROLE.id}>`);
   });
 
   it('shows roles before people, as mentions', () => {
@@ -326,24 +340,25 @@ describe('renderRestrictionList', () => {
 
   it('keeps each feature to its own line, in the order /restrict offers them', () => {
     const lines = renderRestrictionList({ nick: { users: [USER.id], roles: [] } }).split('\n');
-    expect(lines.slice(1, 7).map((l) => l.split(':')[0])).toEqual([
+    expect(lines.slice(1, 8).map((l) => l.split(':')[0])).toEqual([
       '**Private and Public**',
       '**Hide**',
       '**Size**',
       '**Name**',
       '**Transfer**',
+      '**Saved lists**',
       '**Nickname**',
     ]);
   });
 
   it('caps a long list with an honest tail rather than cutting it off', () => {
     const text = renderRestrictionList({ rename: { users: ids(1, 20), roles: ids(2, 5) } });
-    expect(text).toContain('and 17 more');
-    expect(text.match(/<@&?\d+>/g)).toHaveLength(8);
+    expect(text).toContain('and 18 more');
+    expect(text.match(/<@&?\d+>/g)).toHaveLength(7);
   });
 
   it('does not add a tail to a list that fits', () => {
-    const text = renderRestrictionList({ rename: { users: ids(1, 8), roles: [] } });
+    const text = renderRestrictionList({ rename: { users: ids(1, 7), roles: [] } });
     expect(text).not.toContain('more');
   });
 

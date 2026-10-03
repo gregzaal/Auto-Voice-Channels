@@ -36,8 +36,6 @@ import { isSnowflake, SETTINGS_KEYS } from './guildSettings.js';
  *
  * Append only, and never rename: the stored map is keyed by these strings, so a
  * renamed id silently un-restricts everybody an admin named under the old one.
- * Saved lists is listed ahead of `/access` so the id is reserved, but nothing offers
- * or enforces it until that command exists.
  *
  * Claim, Kick and Info are not features. They are occupant-level, so a
  * restriction on one could not be hidden from the people it does not apply to
@@ -72,9 +70,9 @@ export const RESTRICT_ENFORCED = true;
 /**
  * The features `/restrict` offers today, in the order it lists them.
  *
- * Saved lists is absent because `/access` does not exist in this build, so an admin
- * could restrict nothing and be told they had. Add one here in the commit that ships
- * its command.
+ * A feature is offered only by a build whose commands enforce it, or an admin could
+ * restrict nothing and be told they had: add one here in the commit that ships its
+ * command. Every feature has a command now, and the order follows the stored ids.
  */
 export const AVAILABLE_FEATURES = [
   'privacy',
@@ -82,6 +80,7 @@ export const AVAILABLE_FEATURES = [
   'limit',
   'rename',
   'transfer',
+  'access',
   'nick',
 ] as const satisfies readonly CommandFeature[];
 
@@ -137,6 +136,10 @@ export const FEATURE_COVERS: Record<CommandFeature, string> = {
  * are governed by Discord permissions and not by this map. A lookup is by
  * `featureForCommand`, which is an own-property test, because the name is client
  * input and `constructor` is a property of every object.
+ *
+ * `access` is here because `/access` is the command Saved lists restricts, but a rule
+ * stops only three of its six subcommands, so the command name alone is NOT enough:
+ * the guard asks {@link accessFeatureFor} with the subcommand instead.
  */
 export const COMMAND_FEATURE: Readonly<Record<string, CommandFeature>> = {
   private: 'privacy',
@@ -144,8 +147,24 @@ export const COMMAND_FEATURE: Readonly<Record<string, CommandFeature>> = {
   limit: 'limit',
   name: 'rename',
   transfer: 'transfer',
+  access: 'access',
   nick: 'nick',
 };
+
+/**
+ * The `/access` subcommands a Saved lists rule stops: the ones that put somebody on a
+ * list or let them in. `remove`, `clear` and `list` are never restricted, because they
+ * are how a member erases or checks what they saved, and a member who is denied the
+ * feature must still be able to empty a list they filled before the rule.
+ */
+const ACCESS_RESTRICTED_SUBCOMMANDS: readonly string[] = ['trust', 'block', 'admit'];
+
+/** The feature a `/access` subcommand belongs to: none for the three that only take back or show. */
+export function accessFeatureFor(subcommand: string | null): CommandFeature | null {
+  return subcommand !== null && ACCESS_RESTRICTED_SUBCOMMANDS.includes(subcommand)
+    ? 'access'
+    : null;
+}
 
 /** The feature a slash command belongs to, or null when no rule can stop it. */
 export function featureForCommand(commandName: string): CommandFeature | null {

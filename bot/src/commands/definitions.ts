@@ -7,6 +7,7 @@ import {
   type RESTPostAPIApplicationCommandsJSONBody,
   type SlashCommandMentionableOption,
   type SlashCommandStringOption,
+  type SlashCommandUserOption,
 } from 'discord.js';
 import type { Logger } from '@avc/core';
 import { MAX_USER_LIMIT } from '../features/voice/index.js';
@@ -75,6 +76,9 @@ export function buildCommandDefinitions(
       .addChoices(...AVAILABLE_FEATURES.map((f) => ({ name: FEATURE_LABELS[f], value: f })));
   const restrictWhoOption = (o: SlashCommandMentionableOption): SlashCommandMentionableOption =>
     o.setName('who').setDescription('The person, or the role.').setRequired(true);
+  /** `/access trust`, `block`, `admit` and `remove` all name one member. */
+  const accessMemberOption = (o: SlashCommandUserOption): SlashCommandUserOption =>
+    o.setName('member').setDescription('The member.').setRequired(true);
 
   const commands: SlashCommandBuilder[] = [
     guildOnly(
@@ -119,6 +123,56 @@ export function buildCommandDefinitions(
       new SlashCommandBuilder()
         .setName('unhide')
         .setDescription('Show your hidden voice channel in the channel list again.'),
+    ),
+    /**
+     * The second command here with subcommands, after `/restrict`, and open to every
+     * member: the saved lists are a member's own, per server, and are not gated by
+     * Manage Channels. `trust`, `block` and `admit` are what a `/restrict` rule on
+     * Saved lists stops, and `remove`, `clear` and `list` never are.
+     */
+    guildOnly(
+      new SlashCommandBuilder()
+        .setName('access')
+        .setDescription('Keep lists of who may join the rooms you create.')
+        .addSubcommand((s) =>
+          s
+            .setName('trust')
+            .setDescription('Always let someone into your locked and hidden rooms.')
+            .addUserOption(accessMemberOption),
+        )
+        .addSubcommand((s) =>
+          s
+            .setName('block')
+            .setDescription('Keep someone out of every room you create.')
+            .addUserOption(accessMemberOption),
+        )
+        .addSubcommand((s) =>
+          s
+            .setName('admit')
+            .setDescription('Let someone into this room only.')
+            .addUserOption(accessMemberOption),
+        )
+        .addSubcommand((s) =>
+          s
+            .setName('remove')
+            .setDescription('Take someone off your lists.')
+            .addUserOption(accessMemberOption),
+        )
+        .addSubcommand((s) => s.setName('list').setDescription('See who is on your lists.'))
+        .addSubcommand((s) =>
+          s
+            .setName('clear')
+            .setDescription('Empty one of your lists, or both.')
+            .addStringOption((o) =>
+              o
+                .setName('list')
+                .setDescription('Which list. Leave it out to empty both.')
+                .addChoices(
+                  { name: 'Trusted', value: 'trusted' },
+                  { name: 'Blocked', value: 'blocked' },
+                ),
+            ),
+        ) as unknown as SlashCommandBuilder,
     ),
     guildOnly(
       new SlashCommandBuilder()

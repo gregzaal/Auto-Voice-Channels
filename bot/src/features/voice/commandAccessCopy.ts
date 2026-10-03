@@ -146,8 +146,12 @@ export const RESTRICT_REFUSALS = {
     `The saved restrictions for ${label(feature)} are in a form this version of AVC cannot change, so nothing was changed.`,
 } as const;
 
-/** Most people and roles shown under one feature before the rest are counted. */
-const LIST_CAP = 8;
+/**
+ * Most people and roles shown under one feature before the rest are counted. Seven
+ * features at the cap, the paused note and the two closing lines are the largest reply
+ * there is, and it has to fit one Discord message (see the test that sizes it).
+ */
+const LIST_CAP = 7;
 
 /**
  * The `/restrict list` reply.

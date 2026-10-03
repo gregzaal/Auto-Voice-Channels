@@ -46,11 +46,15 @@ import {
   STATUS_PAGE_URL,
 } from '../features/billing/messages.js';
 import {
+  ALWAYS_PREFIX,
   isPermissionError,
   JOIN_PREFIX,
   MAX_USER_LIMIT,
+  parseAlwaysId,
   parseJoinId,
   rateLimitNote,
+  type AccessCommands,
+  type AccessTarget,
   type ChannelDebug,
   type CommandResult,
   type EditorField,
@@ -186,6 +190,7 @@ import {
   parseControlPanelId,
 } from '../features/voice/controlPanel.js';
 import {
+  accessFeatureFor,
   FEATURE_LABELS,
   featureForCommand,
   isAvailableFeature,
@@ -197,6 +202,7 @@ import {
   type CommandFeature,
   type RestrictTarget,
 } from '../features/voice/commandAccess.js';
+import { ACCESS_REFUSALS } from '../features/voice/accessListsCopy.js';
 import {
   RESTRICT_NOTE,
   RESTRICT_PAUSED,
@@ -242,6 +248,8 @@ export interface InteractionDeps {
   settings: GuildSettingsService;
   votekick: VoteKickManager;
   privacy: PrivacyService;
+  /** A member's saved trusted and blocked lists: `/access trust`, `block`, `remove`, `clear` and `list`. */
+  access: AccessCommands;
   feature: VoiceFeature;
   guilds: GuildRepository;
   managed: ManagedChannelRepository;
@@ -481,6 +489,16 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
        */
       if (interaction.commandName === 'unhide') return true;
       /**
+       * `/access remove`, `clear` and `list` stay open and `trust`, `block` and `admit`
+       * are refused, `/restrict`'s split again: the hard gate stops writes and destroys
+       * nothing, so a member can still see their lists and erase what they saved, and
+       * cannot put anyone new on one. Decided here because it is the subcommand that
+       * differs.
+       */
+      if (interaction.commandName === 'access') {
+        return ['remove', 'clear', 'list'].includes(interaction.options.getSubcommand(false) ?? '');
+      }
+      /**
        * `/export` is on this list and `/import` deliberately is not.
        *
        * Refusing to let someone take their own configuration with them because
@@ -674,6 +692,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
             deps.privacy.makePublic(guildId, channelId, userId),
           ),
         );
+      case 'access':
+        return handleAccess(interaction, channelId);
       case 'hide':
         return replyResult(
           interaction,
@@ -1433,6 +1453,74 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
           deps.logger.warn({ err, guildId }, 'could not re-render rooms after removing a nickname');
         }
       }
+    }
+  }
+
+  // -- /access ----------------------------------------------------------------
+
+  /**
+   * `/access trust`, `block`, `admit`, `remove`, `clear` and `list`: a member's saved
+   * trusted and blocked lists, and one-off admission to the room they are in.
+   *
+   * **The lists are the member's own, per server, and apply to the rooms they create
+   * here.** An Administrator is never stopped by a block, which every reply that
+   * saves one says. `trust`, `block` and `admit` are what a `/restrict` rule on Saved
+   * lists stops, decided before the defer by `guardedFeatureOf`, and `remove`, `clear`
+   * and `list` never are: they are how a member erases what they saved.
+   *
+   * **Deferred by the router, so every answer is an edit**, with mentions suppressed:
+   * a reply names the people on a list and pings none of them. Each subcommand returns
+   * a result and none can throw into the guild's queue (see `AccessCommands`).
+   * `admit` is the privacy service's, since it is about the one room the member is in,
+   * and the service refuses an ownerless room, one they do not own and a public one.
+   */
+  async function handleAccess(
+    interaction: ChatInputCommandInteraction,
+    channelId: string | undefined,
+  ): Promise<void> {
+    const guildId = interaction.guildId!;
+    const userId = interaction.user.id;
+    const sub = interaction.options.getSubcommand(false);
+    const answer = (result: CommandResult): Promise<void> =>
+      replyAccess(interaction, formatResult(result));
+
+    if (sub === 'list') {
+      return answer(await run(guildId, 'cmd:access:list', () => deps.access.list(guildId, userId)));
+    }
+    if (sub === 'clear') {
+      // Client input even though Discord offers choices: anything else empties both.
+      const which = interaction.options.getString('list');
+      const kind = which === 'trusted' || which === 'blocked' ? which : undefined;
+      return answer(
+        await run(guildId, 'cmd:access:clear', () => deps.access.clear(guildId, userId, kind)),
+      );
+    }
+    if (sub !== 'trust' && sub !== 'block' && sub !== 'admit' && sub !== 'remove') {
+      return replyAccess(interaction, 'Unknown command.');
+    }
+    const member = pickedMember(interaction);
+    if (!member) return answer({ ok: false, message: ACCESS_REFUSALS.unusable });
+
+    switch (sub) {
+      case 'trust':
+      case 'block':
+        return answer(
+          await run(guildId, `cmd:access:${sub}`, () =>
+            deps.access.save(guildId, userId, member, sub === 'trust' ? 'trusted' : 'blocked'),
+          ),
+        );
+      case 'admit':
+        return answer(
+          await run(guildId, 'cmd:access:admit', () =>
+            deps.privacy.admit(guildId, channelId, userId, member.id),
+          ),
+        );
+      case 'remove':
+        return answer(
+          await run(guildId, 'cmd:access:remove', () =>
+            deps.access.remove(guildId, userId, member.id),
+          ),
+        );
     }
   }
 
@@ -3226,7 +3314,12 @@ Already subscribed? Add the new server ` +
     if (interaction.customId === CREATE_AGAIN_ID) return openCreateModal(interaction);
     if (interaction.customId.startsWith(CREATE_RETRY_PREFIX)) return handleCreateRetry(interaction);
     if (interaction.customId.startsWith(KICK_PREFIX)) return handleKickVote(interaction);
-    if (interaction.customId.startsWith(JOIN_PREFIX)) return handleJoinDecision(interaction);
+    if (interaction.customId.startsWith(JOIN_PREFIX)) {
+      return handleJoinDecision(interaction, settings);
+    }
+    if (interaction.customId.startsWith(ALWAYS_PREFIX)) {
+      return handleJoinDecision(interaction, settings);
+    }
     if (interaction.customId.startsWith(ADOPT_PREFIX)) return handleAdoptButton(interaction);
     if (interaction.customId.startsWith(GROUP_PREFIX)) return handleGroupButton(interaction);
     if (interaction.customId.startsWith(ALIAS_PREFIX)) return handleAliasButton(interaction);
@@ -3278,10 +3371,20 @@ Already subscribed? Add the new server ` +
     });
   }
 
-  /** Owner approves/denies/blocks a "⇩ Join" request via the message buttons. */
-  async function handleJoinDecision(interaction: ButtonInteraction): Promise<void> {
+  /**
+   * Owner approves, always allows, denies or blocks a "⇩ Join" request via the message
+   * buttons. Always allow has its own custom-id prefix (see `ALWAYS_PREFIX`) and the
+   * same card, owner check and acknowledgement as the other three.
+   */
+  async function handleJoinDecision(
+    interaction: ButtonInteraction,
+    settings: StoredSettings,
+  ): Promise<void> {
     const guildId = interaction.guildId!;
-    const parsed = parseJoinId(interaction.customId);
+    const always = parseAlwaysId(interaction.customId);
+    const parsed = always
+      ? { ...always, action: 'always' as const }
+      : parseJoinId(interaction.customId);
     if (!parsed) return;
     const { action, joinChannelId, requesterId } = parsed;
 
@@ -3297,6 +3400,10 @@ Already subscribed? Add the new server ` +
       });
       return;
     }
+    // Always allow saves the member on the owner's trusted list, so the rule that stops
+    // `/access trust` stops it. Before the acknowledgement: a refusal is a plain
+    // ephemeral reply, and the card keeps its buttons.
+    if (action === 'always' && !(await allowed(interaction, settings, 'access'))) return;
     // Deferred first. A block saves to the owner's list, applies it to the room and
     // moves the requester out, and an approval grants and moves: several calls
     // against the room's channel bucket, which can outlast the 3 seconds a token
@@ -3305,7 +3412,9 @@ Already subscribed? Add the new server ` +
     const result = await run(guildId, `join:${action}`, () =>
       action === 'approve'
         ? deps.privacy.approveJoin(joinChannelId, requesterId)
-        : deps.privacy.denyJoin(joinChannelId, requesterId, action === 'block'),
+        : action === 'always'
+          ? deps.privacy.approveJoin(joinChannelId, requesterId, true)
+          : deps.privacy.denyJoin(joinChannelId, requesterId, action === 'block'),
     );
     await interaction.editReply({
       content: formatResult(result),
@@ -3316,7 +3425,7 @@ Already subscribed? Add the new server ` +
     // they're pulled into the channel, so no companion message is needed. Note a
     // *blocked* user loses access to the companion too, so may not see it — that's
     // inherent to blocking.
-    if (result.ok && action !== 'approve') {
+    if (result.ok && (action === 'deny' || action === 'block')) {
       await notifyChannel(
         deps.client,
         joinChannelId,
@@ -4616,6 +4725,30 @@ async function replyRestrict(
 }
 
 /**
+ * An ephemeral `/access` reply that pings nobody, edited over the deferral the router
+ * made. Not `replyResult`: that one has no `allowedMentions`, and these replies are made
+ * of mentions of the people on a list.
+ */
+async function replyAccess(
+  interaction: ChatInputCommandInteraction,
+  content: string,
+): Promise<void> {
+  await interaction.editReply({ content, allowedMentions: { parse: [] } });
+}
+
+/**
+ * Who a `/access` subcommand was pointed at: the user option, with Discord's own answers
+ * about the account (a bot) and about membership (Discord resolves a member only for
+ * somebody who is in this server, so a user picked by id alone has none). `null` when
+ * the option carries no user, which only a hand-built request sends.
+ */
+function pickedMember(interaction: ChatInputCommandInteraction): AccessTarget | null {
+  const option = interaction.options.get('member');
+  if (!option?.user) return null;
+  return { id: option.user.id, bot: option.user.bot === true, inServer: option.member != null };
+}
+
+/**
  * Who `/restrict` was pointed at, resolved to a user or a role.
  *
  * The mentionable picker hands back either, and the option's own `user`, `member`
@@ -4681,6 +4814,9 @@ function guardedFeatureOf(interaction: ChatInputCommandInteraction): CommandFeat
       return limitFeatureFor(interaction.options.getInteger('count'));
     case 'nick':
       return nickFeatureFor(interaction.options.getString('name'));
+    case 'access':
+      // Three of its six subcommands: the ones that put somebody on a list or let them in.
+      return accessFeatureFor(interaction.options.getSubcommand(false));
     default:
       return featureForCommand(interaction.commandName);
   }
@@ -4756,6 +4892,7 @@ const DEFERRED_COMMANDS = new Set([
   'public',
   'hide',
   'unhide',
+  'access',
   'reclaim',
   'transfer',
   'nick',

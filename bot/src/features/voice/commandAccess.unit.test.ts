@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { IMPORT_LIMITS } from '@avc/core';
 import { buildCommandDefinitions } from '../../commands/definitions.js';
 import {
+  accessFeatureFor,
   AVAILABLE_FEATURES,
   COMMAND_FEATURE,
   COMMAND_FEATURES,
@@ -52,27 +53,16 @@ describe('the feature list', () => {
     ]);
   });
 
-  /**
-   * Saved lists does not exist yet. Offering it would let an admin restrict nothing and
-   * be told they had.
-   */
+  /** Every feature has its command now, and the order is the order the ids are reserved in. */
   it('offers only the features whose commands exist', () => {
-    expect([...AVAILABLE_FEATURES]).toEqual([
-      'privacy',
-      'hide',
-      'limit',
-      'rename',
-      'transfer',
-      'nick',
-    ]);
+    expect([...AVAILABLE_FEATURES]).toEqual([...COMMAND_FEATURES]);
     for (const feature of AVAILABLE_FEATURES) expect(COMMAND_FEATURES).toContain(feature);
-    expect(AVAILABLE_FEATURES).not.toContain('access');
   });
 
   it('recognises an available feature and nothing else, since the id is client input', () => {
     expect(isAvailableFeature('rename')).toBe(true);
     expect(isAvailableFeature('hide')).toBe(true);
-    expect(isAvailableFeature('access')).toBe(false);
+    expect(isAvailableFeature('access')).toBe(true);
     expect(isAvailableFeature('claim')).toBe(false);
     expect(isAvailableFeature('constructor')).toBe(false);
     expect(isAvailableFeature(undefined)).toBe(false);
@@ -134,8 +124,8 @@ describe('the feature list', () => {
    * what makes a new one fail here and not in a customer's server.
    */
   it('offers only a feature a command maps to, and a panel action too where there is a button', () => {
-    // Nickname is a command with no panel button, so it is the one that has no action.
-    const noPanelButton: readonly string[] = ['nick'];
+    // Nickname and Saved lists are commands with no panel button, so they have no action.
+    const noPanelButton: readonly string[] = ['nick', 'access'];
     for (const feature of AVAILABLE_FEATURES) {
       expect(Object.values(COMMAND_FEATURE), feature).toContain(feature);
       if (noPanelButton.includes(feature)) continue;
@@ -196,13 +186,34 @@ describe('the settings key', () => {
 });
 
 describe('which commands a rule can stop', () => {
-  it('maps the six commands that have an owner-level feature', () => {
+  it('maps the seven commands that have an owner-level feature', () => {
     expect(featureForCommand('private')).toBe('privacy');
     expect(featureForCommand('hide')).toBe('hide');
     expect(featureForCommand('limit')).toBe('limit');
     expect(featureForCommand('name')).toBe('rename');
     expect(featureForCommand('transfer')).toBe('transfer');
+    expect(featureForCommand('access')).toBe('access');
     expect(featureForCommand('nick')).toBe('nick');
+  });
+
+  /**
+   * A rule stops three of `/access`'s six subcommands, so the command name is not enough
+   * and the guard asks with the subcommand. `remove`, `clear` and `list` are how a member
+   * erases or checks what they saved, so they are never restricted.
+   */
+  describe('accessFeatureFor', () => {
+    it('stops trust, block and admit', () => {
+      for (const sub of ['trust', 'block', 'admit']) {
+        expect(accessFeatureFor(sub), sub).toBe('access');
+      }
+    });
+
+    it('never stops remove, clear or list, or a subcommand it does not know', () => {
+      for (const sub of ['remove', 'clear', 'list', 'purge', '', 'constructor', 'TRUST']) {
+        expect(accessFeatureFor(sub), sub).toBeNull();
+      }
+      expect(accessFeatureFor(null)).toBeNull();
+    });
   });
 
   /** An owner whose creator channel starts rooms private must always be able to open one. */

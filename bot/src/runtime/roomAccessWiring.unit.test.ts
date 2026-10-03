@@ -39,13 +39,33 @@ describe('the room_access.disabled lever is wired to every consumer', () => {
     expect(statementFrom('const privacy = new PrivacyService({')).toContain(WIRING);
   });
 
+  it('is handed to the saved list commands, which refuse to save while it is on', () => {
+    expect(statementFrom('const accessCommands = new AccessCommands({')).toContain(WIRING);
+  });
+
+  /**
+   * The same repository, constructed with no fleet, reaches the service that applies the
+   * lists and the commands that edit them. A consumer handed none would quietly apply no
+   * list, and absent is a valid value for every one of them.
+   */
+  it('shares one list repository between the service and the commands, with no fleet', () => {
+    expect(SOURCE).toContain('const memberAccessListsRepo = new MemberAccessListRepository(db);');
+    expect(statementFrom('const privacy = new PrivacyService({')).toContain(
+      'memberAccessLists: memberAccessListsRepo,',
+    );
+    expect(statementFrom('const accessCommands = new AccessCommands({')).toContain(
+      'lists: memberAccessListsRepo,',
+    );
+    expect(statementFrom('registerInteractionHandler({')).toContain('access: accessCommands,');
+  });
+
   it('is reported by /diagnostics, per fleet', () => {
     expect(SOURCE).toMatch(
       /roomAccess: \{\s*disabled: runtimeFlags\[RUNTIME_FLAGS\.ROOM_ACCESS_DISABLED\] === true,\s*\}/,
     );
   });
 
-  it('is wired exactly once as a function, so a second consumer has to be added here too', () => {
-    expect(SOURCE.split(WIRING).length - 1).toBe(1);
+  it('is wired exactly twice as a function, so a third consumer has to be added here too', () => {
+    expect(SOURCE.split(WIRING).length - 1).toBe(2);
   });
 });

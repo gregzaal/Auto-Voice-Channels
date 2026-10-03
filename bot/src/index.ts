@@ -13,6 +13,7 @@ import {
   JoinChannelRepository,
   loadConfig,
   ManagedChannelRepository,
+  MemberAccessListRepository,
   MemberPoolGuildRepository,
   MemberPoolRepository,
   METRICS,
@@ -65,6 +66,7 @@ import { PermissionProblemNotifier } from './ops/permissionProblemNotifier.js';
 import { buildGatewayClient } from './gateway/client.js';
 import { createGatewayHealth } from './gateway/gatewayHealth.js';
 import {
+  AccessCommands,
   CompanionTextService,
   ControlPanelPoster,
   DiscordVoiceActions,
@@ -357,6 +359,8 @@ async function main(): Promise<void> {
   const secondaries = new SecondaryChannelRepository(db, config.fleet);
   const managed = new ManagedChannelRepository(db, config.fleet);
   const joinChannelsRepo = new JoinChannelRepository(db, config.fleet);
+  // No fleet: an owner's saved lists are customer data every fleet reads, like `aliases`.
+  const memberAccessListsRepo = new MemberAccessListRepository(db);
   const companionsRepo = new CompanionChannelRepository(db, config.fleet);
   const guildsRepo = new GuildRepository(db);
   const presenceRepo = new GuildFleetPresenceRepository(db, config.fleet ?? DEFAULT_FLEET);
@@ -476,11 +480,9 @@ async function main(): Promise<void> {
       voiceFeature.rerenderSecondary(gid, cid),
     // Only known once the client has logged in, which is long before a command runs.
     botUserId: () => client.user?.id,
-    // `memberAccessLists` is deliberately not passed yet. With it, the knock card's
-    // Block would start saving to an owner's list that nothing can show or erase
-    // (there is no `/access`), before the Privacy copy and the erasure SQL for that data
-    // are live. Whoever adds `/access` constructs `MemberAccessListRepository` (no fleet:
-    // an owner's lists are customer data every fleet reads) and passes it here with them.
+    // The owners' saved lists, which the knock card's Block and Always allow save to, a
+    // handover applies, and `/access` lets a member see, change and erase.
+    memberAccessLists: memberAccessListsRepo,
     // The same setting companion text reads: a hidden room shows to this role too.
     moderatorRoleId: async (gid: string) =>
       readTextChannelRole((await settingsCache.ensure(gid)).settings),
@@ -681,6 +683,16 @@ async function main(): Promise<void> {
     logger,
   });
   const votekick = new VoteKickManager({ secondaries, voice, actions, logger, access: privacy });
+  // `/access trust`, `block`, `remove`, `clear` and `list`, over the same lists the service reads.
+  const accessCommands = new AccessCommands({
+    lists: memberAccessListsRepo,
+    secondaries,
+    privacy,
+    voice,
+    logger,
+    // The `room_access.disabled` lever, through the creation gate's cached snapshot.
+    roomAccessDisabled: () => creationGate.roomAccessDisabled(),
+  });
   // The natural-language template assistant. One OpenAI-compatible endpoint,
   // enabled iff a key is configured — the self-host default is off, and in that
   // case `/templateassistant` is never even registered (see registerCommands).
@@ -726,6 +738,7 @@ async function main(): Promise<void> {
     settings: settingsService,
     votekick,
     privacy,
+    access: accessCommands,
     feature: voiceFeature,
     guilds: guildsRepo,
     managed,

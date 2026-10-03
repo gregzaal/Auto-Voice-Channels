@@ -12,6 +12,7 @@ describe('buildCommandDefinitions', () => {
   it('exposes the full hybrid command surface', () => {
     expect([...byName.keys()].sort()).toEqual(
       [
+        'access',
         'alias',
         'alwaysprivate',
         'botprofile',
@@ -82,7 +83,7 @@ describe('buildCommandDefinitions', () => {
       expect(byName.get(name)!.default_member_permissions).toBe(manage);
     }
     // Per-channel + utility commands stay open (owner checks live in logic).
-    for (const name of ['limit', 'hide', 'unhide', 'nick', 'ping', 'invite', 'source']) {
+    for (const name of ['limit', 'hide', 'unhide', 'access', 'nick', 'ping', 'invite', 'source']) {
       expect(byName.get(name)!.default_member_permissions ?? null).toBeNull();
     }
   });
@@ -200,7 +201,6 @@ describe('buildCommandDefinitions', () => {
       expect(sub('list').options ?? []).toHaveLength(0);
     });
 
-    /** Saved lists has no command yet, so offering it would restrict nothing. */
     it('offers exactly the features that exist, labelled as the panel labels them', () => {
       const choices = (sub('add').options![0] as { choices: { name: string; value: string }[] })
         .choices;
@@ -210,6 +210,7 @@ describe('buildCommandDefinitions', () => {
         { name: 'Size', value: 'limit' },
         { name: 'Name', value: 'rename' },
         { name: 'Transfer', value: 'transfer' },
+        { name: 'Saved lists', value: 'access' },
         { name: 'Nickname', value: 'nick' },
       ]);
       expect(choices.map((c) => c.value)).toEqual([...AVAILABLE_FEATURES]);
@@ -232,6 +233,68 @@ describe('buildCommandDefinitions', () => {
         def.description,
         ...subs.map((s) => (s as { description?: string }).description!),
       ]) {
+        expect(text.length).toBeLessThanOrEqual(100);
+        expect(text).not.toMatch(/[—–‘’“”;]/);
+        expect(text.toLowerCase()).not.toMatch(/primary|secondary/);
+      }
+    });
+  });
+
+  /**
+   * The second command with subcommands. It is open to every member, because the saved
+   * lists are a member's own, and `remove`, `clear` and `list` are how they erase and
+   * check them.
+   */
+  describe('/access', () => {
+    type Sub = {
+      type: number;
+      name: string;
+      description: string;
+      options?: { name: string; type: number; required?: boolean; choices?: { value: string }[] }[];
+    };
+    const subs = (byName.get('access')!.options ?? []) as unknown as Sub[];
+    const sub = (name: string): Sub => subs.find((s) => s.name === name)!;
+    const SUBCOMMAND = 1;
+    const STRING = 3;
+    const USER = 6;
+
+    it('has trust, block, admit, remove, list and clear, and nothing else', () => {
+      expect(subs.map((s) => [s.name, s.type])).toEqual([
+        ['trust', SUBCOMMAND],
+        ['block', SUBCOMMAND],
+        ['admit', SUBCOMMAND],
+        ['remove', SUBCOMMAND],
+        ['list', SUBCOMMAND],
+        ['clear', SUBCOMMAND],
+      ]);
+    });
+
+    it('takes one required member on trust, block, admit and remove', () => {
+      for (const name of ['trust', 'block', 'admit', 'remove']) {
+        expect(sub(name).options, name).toMatchObject([
+          { name: 'member', type: USER, required: true },
+        ]);
+      }
+    });
+
+    it('takes nothing on list, and an optional trusted or blocked on clear', () => {
+      expect(sub('list').options ?? []).toHaveLength(0);
+      expect(sub('clear').options).toMatchObject([{ name: 'list', type: STRING }]);
+      expect(sub('clear').options![0]!.required ?? false).toBe(false);
+      expect(sub('clear').options![0]!.choices!.map((c) => c.value)).toEqual([
+        'trusted',
+        'blocked',
+      ]);
+    });
+
+    it('is guild only and open to every member, with no default permission', () => {
+      expect(byName.get('access')!.dm_permission).toBe(false);
+      expect(byName.get('access')!.default_member_permissions ?? null).toBeNull();
+    });
+
+    it('says what it does in short sentences a customer can read', () => {
+      const def = byName.get('access')!;
+      for (const text of [def.description, ...subs.map((s) => s.description)]) {
         expect(text.length).toBeLessThanOrEqual(100);
         expect(text).not.toMatch(/[—–‘’“”;]/);
         expect(text.toLowerCase()).not.toMatch(/primary|secondary/);

@@ -20,7 +20,7 @@ import { ALIAS_SELECT_ID, aliasHash, aliasId } from './aliasPanel.js';
 import { controlPanelId } from '../features/voice/controlPanel.js';
 import { controlAppearanceId, controlSettingsId, controlToggleId } from './controlPanelSettings.js';
 import { botProfileResetId, botProfileSetId } from './botProfilePanel.js';
-import { joinId } from '../features/voice/joinPanel.js';
+import { alwaysId, joinId } from '../features/voice/joinPanel.js';
 
 /** A Discord "Missing Permissions" (50013) rejection, as thrown by a failed create. */
 function missingPermissions(): DiscordAPIError {
@@ -95,6 +95,13 @@ interface FakeInteractionOpts {
   subcommand?: string;
   /** `/restrict`'s `feature` choice. */
   optionFeature?: string;
+  /**
+   * `/access`'s `member` option, as Discord resolves it: the user, and the member only
+   * when they are in the server (a user picked by id alone has none).
+   */
+  optionMember?: { user: { id: string; bot?: boolean }; member?: object | null };
+  /** `/access clear`'s optional `list` choice. */
+  optionList?: string;
   /**
    * `/restrict`'s `who` option, as the mentionable picker resolves it: the
    * `role`, or the `user` and the `member` the guild cache would add to it.
@@ -251,11 +258,19 @@ function fakeInteraction(opts: FakeInteractionOpts) {
     options: {
       getInteger: () => opts.optionInteger ?? 2,
       getString: (name?: string) =>
-        name === 'feature' && opts.optionFeature ? opts.optionFeature : (opts.optionString ?? 'x'),
+        name === 'feature' && opts.optionFeature
+          ? opts.optionFeature
+          : name === 'list'
+            ? (opts.optionList ?? null)
+            : (opts.optionString ?? 'x'),
       // `null` when there is none, which is what discord.js answers for `false`.
       getSubcommand: () => opts.subcommand ?? null,
       get: (name: string) =>
-        name === 'who' && opts.optionWho ? { name, ...opts.optionWho } : null,
+        name === 'who' && opts.optionWho
+          ? { name, ...opts.optionWho }
+          : name === 'member' && opts.optionMember
+            ? { name, user: opts.optionMember.user, member: opts.optionMember.member ?? null }
+            : null,
       getUser: () => ({ id: opts.optionUserId ?? 'u2' }),
       getChannel: () => (opts.optionChannelId ? { id: opts.optionChannelId } : null),
       getBoolean: () => null,
@@ -1302,6 +1317,7 @@ describe('commands that talk to Discord acknowledge first', () => {
     'public',
     'hide',
     'unhide',
+    'access',
     'reclaim',
     'transfer',
     'nick',
@@ -1322,6 +1338,7 @@ describe('commands that talk to Discord acknowledge first', () => {
           hide: vi.fn().mockResolvedValue({ ok: true, message: 'done' }),
           unhide: vi.fn().mockResolvedValue({ ok: true, message: 'done' }),
         } as never,
+        access: { list: vi.fn().mockResolvedValue({ ok: true, message: 'done' }) } as never,
         settings: {
           setNick: vi.fn().mockResolvedValue({ ok: true, message: 'done' }),
         } as never,
@@ -1376,6 +1393,299 @@ describe('commands that talk to Discord acknowledge first', () => {
 });
 
 /**
+ * `/access`: a member's saved trusted and blocked lists. The commands are the service's,
+ * so what is pinned here is the router: which service call each subcommand makes with
+ * what, that every answer is an edit over the router's deferral with no mention able to
+ * ping, what a `/restrict` rule stops and what it never does, and the hard gate.
+ */
+describe('registerInteractionHandler (/access)', () => {
+  let dispose: (() => void) | undefined;
+  afterEach(() => dispose?.());
+
+  const KAY = '111111111111111111';
+  const BOB = '222222222222222222';
+  const ROOM = 'room-1';
+  const EPHEMERAL = MessageFlags.Ephemeral;
+
+  const ok = (message: string) => vi.fn().mockResolvedValue({ ok: true, message });
+  function accessEnv(rules?: Record<string, unknown>, extra: Partial<InteractionDeps> = {}) {
+    const access = {
+      save: ok('saved'),
+      remove: ok('removed'),
+      clear: ok('cleared'),
+      list: ok('listed'),
+    };
+    const privacy = { admit: ok('admitted') };
+    const env = setup({
+      access: access as never,
+      privacy: privacy as never,
+      guilds: {
+        get: vi.fn().mockResolvedValue({
+          authStatus: 'active',
+          ...(rules ? { settings: { command_access: rules } } : {}),
+        }),
+        isEntitled: vi.fn().mockResolvedValue(true),
+      } as never,
+      ...extra,
+    });
+    dispose = env.dispose;
+    return { env, access, privacy };
+  }
+  type AccessEnv = ReturnType<typeof accessEnv>;
+
+  async function run(e: AccessEnv, opts: Partial<FakeInteractionOpts>) {
+    const fake = fakeInteraction({
+      kind: 'command',
+      commandName: 'access',
+      userId: KAY,
+      voiceChannelId: ROOM,
+      ...opts,
+    });
+    e.env.client.emit('interactionCreate', fake.interaction);
+    await flush();
+    return fake;
+  }
+  const member = (over: { bot?: boolean; member?: object | null } = {}) => ({
+    optionMember: {
+      user: { id: BOB, ...(over.bot ? { bot: true } : {}) },
+      member: 'member' in over ? over.member : {},
+    },
+  });
+  /** The one edit the member's reply is. */
+  const answer = (f: ReturnType<typeof fakeInteraction>) =>
+    f.editReply.mock.calls[0]?.[0] as { content: string; allowedMentions?: unknown };
+
+  describe('routes each subcommand to the right call', () => {
+    it.each([
+      ['trust', 'trusted'],
+      ['block', 'blocked'],
+    ] as const)(
+      '/access %s saves them as %s, with what Discord resolved about them',
+      async (sub, kind) => {
+        const e = accessEnv();
+        await run(e, { subcommand: sub, ...member() });
+        expect(e.access.save).toHaveBeenCalledWith(
+          'g1',
+          KAY,
+          { id: BOB, bot: false, inServer: true },
+          kind,
+        );
+      },
+    );
+
+    it('tells the service when the user is a bot, and when Discord resolved no member', async () => {
+      const e = accessEnv();
+      await run(e, { subcommand: 'trust', ...member({ bot: true }) });
+      expect(e.access.save).toHaveBeenLastCalledWith(
+        'g1',
+        KAY,
+        { id: BOB, bot: true, inServer: true },
+        'trusted',
+      );
+      dispose?.();
+      const stranger = accessEnv();
+      await run(stranger, { subcommand: 'block', ...member({ member: null }) });
+      expect(stranger.access.save).toHaveBeenCalledWith(
+        'g1',
+        KAY,
+        { id: BOB, bot: false, inServer: false },
+        'blocked',
+      );
+    });
+
+    it('/access admit lets them into the room the caller is in, through the privacy service', async () => {
+      const e = accessEnv();
+      await run(e, { subcommand: 'admit', ...member() });
+      expect(e.privacy.admit).toHaveBeenCalledWith('g1', ROOM, KAY, BOB);
+      expect(e.access.save).not.toHaveBeenCalled();
+    });
+
+    it('/access admit says no channel when the caller is in none, and leaves the refusal to the service', async () => {
+      const e = accessEnv();
+      const f = fakeInteraction({
+        kind: 'command',
+        commandName: 'access',
+        userId: KAY,
+        subcommand: 'admit',
+        ...member(),
+      });
+      e.env.client.emit('interactionCreate', f.interaction);
+      await flush();
+      expect(e.privacy.admit).toHaveBeenCalledWith('g1', undefined, KAY, BOB);
+    });
+
+    it('/access remove takes the member off', async () => {
+      const e = accessEnv();
+      await run(e, { subcommand: 'remove', ...member() });
+      expect(e.access.remove).toHaveBeenCalledWith('g1', KAY, BOB);
+    });
+
+    it("/access list reads the caller's own lists, with no member option", async () => {
+      const e = accessEnv();
+      await run(e, { subcommand: 'list' });
+      expect(e.access.list).toHaveBeenCalledWith('g1', KAY);
+    });
+
+    it.each([
+      ['trusted', 'trusted'],
+      ['blocked', 'blocked'],
+      [undefined, undefined],
+      ['everything', undefined],
+    ] as const)('/access clear with %j empties %j', async (choice, kind) => {
+      const e = accessEnv();
+      await run(e, { subcommand: 'clear', ...(choice ? { optionList: choice } : {}) });
+      expect(e.access.clear).toHaveBeenCalledWith('g1', KAY, kind);
+    });
+
+    it('refuses a request with no user to put on a list, and an unknown subcommand', async () => {
+      const e = accessEnv();
+      const none = await run(e, { subcommand: 'trust' });
+      expect(answer(none).content).toContain("That isn't someone I can put on a list.");
+      expect(e.access.save).not.toHaveBeenCalled();
+      const unknown = await run(e, { subcommand: 'purge' });
+      expect(answer(unknown).content).toBe('Unknown command.');
+    });
+  });
+
+  /**
+   * A reply names the people on a list, and looking at it must never notify any of them.
+   * The router has already deferred, so the answer is an edit, and the deferral itself
+   * is ephemeral.
+   */
+  describe('answers privately', () => {
+    it.each(['trust', 'block', 'admit', 'remove', 'list', 'clear'])(
+      '/access %s defers ephemerally, then edits with mentions suppressed',
+      async (sub) => {
+        const e = accessEnv();
+        const f = await run(e, { subcommand: sub, ...member() });
+        expect(f.interaction.deferReply).toHaveBeenCalledWith({ flags: EPHEMERAL });
+        expect(f.reply).not.toHaveBeenCalled();
+        expect(f.editReply).toHaveBeenCalledTimes(1);
+        expect(answer(f).allowedMentions).toEqual({ parse: [] });
+        expect(answer(f).content.startsWith('✅ ')).toBe(true);
+      },
+    );
+
+    it('puts a refusal behind the warning sign, and counts the command only when it ran', async () => {
+      const e = accessEnv(undefined, {
+        access: {
+          save: vi.fn().mockResolvedValue({ ok: false, message: 'That is you.' }),
+        } as never,
+        countCommand: vi.fn(),
+      });
+      const f = await run(e, { subcommand: 'trust', ...member() });
+      expect(answer(f).content).toBe('⚠️ That is you.');
+    });
+  });
+
+  // -- /restrict --------------------------------------------------------------
+
+  /**
+   * A rule on Saved lists stops the three subcommands that put somebody on a list or let
+   * them in, and never the three that take back or show: a denied member can still empty a
+   * list they filled before the rule, and read it.
+   */
+  describe('and /restrict', () => {
+    const DENY = { access: { users: [KAY] } };
+    const REFUSAL = 'A server admin has turned off **Saved lists** for you.';
+
+    it.each(['trust', 'block', 'admit'])(
+      'refuses /access %s for a member denied Saved lists, before it defers, and does nothing',
+      async (sub) => {
+        const e = accessEnv(DENY);
+        const f = await run(e, { subcommand: sub, ...member() });
+        expect(JSON.stringify(f.reply.mock.calls[0]?.[0])).toContain(REFUSAL);
+        expect(f.reply).toHaveBeenCalledWith(expect.objectContaining({ ephemeral: true }));
+        expect(f.interaction.deferReply).not.toHaveBeenCalled();
+        expect(e.access.save).not.toHaveBeenCalled();
+        expect(e.privacy.admit).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['remove', 'clear', 'list'])(
+      'never refuses /access %s, which is how a member erases or checks what they saved',
+      async (sub) => {
+        const e = accessEnv(DENY);
+        const f = await run(e, { subcommand: sub, ...member() });
+        expect(JSON.stringify(f.editReply.mock.calls)).not.toContain(
+          'A server admin has turned off',
+        );
+        expect(f.interaction.deferReply).toHaveBeenCalled();
+      },
+    );
+
+    it('lets a member through who is not denied, and one who can manage channels', async () => {
+      const e = accessEnv({ access: { users: [BOB] } });
+      await run(e, { subcommand: 'trust', ...member() });
+      expect(e.access.save).toHaveBeenCalledTimes(1);
+      dispose?.();
+      const manager = accessEnv(DENY);
+      await run(manager, { subcommand: 'trust', manageChannels: true, ...member() });
+      expect(manager.access.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('applies to the command in the role shape too', async () => {
+      const ROLE = '333333333333333333';
+      for (const shape of ['guildMember', 'raw'] as const) {
+        const e = accessEnv({ access: { roles: [ROLE] } });
+        const f = await run(e, {
+          subcommand: 'block',
+          memberRoles: [ROLE],
+          memberShape: shape,
+          ...member(),
+        });
+        expect(JSON.stringify(f.reply.mock.calls[0]?.[0]), shape).toContain(REFUSAL);
+        dispose?.();
+      }
+    });
+
+    it('is not counted when refused, and is when it ran', async () => {
+      const countCommand = vi.fn();
+      const refused = accessEnv(DENY, { countCommand });
+      await run(refused, { subcommand: 'trust', ...member() });
+      expect(countCommand).not.toHaveBeenCalled();
+      dispose?.();
+      const ran = accessEnv(undefined, { countCommand });
+      await run(ran, { subcommand: 'list' });
+      expect(countCommand).toHaveBeenCalledWith('access');
+    });
+  });
+
+  // -- the hard gate ------------------------------------------------------------------
+
+  /**
+   * The hard gate stops writes and destroys nothing, so what only removes or shows stays
+   * open, as `/restrict`'s and `/botprofile`'s resets do, and what puts somebody on a list
+   * or lets them in is refused with the reactivation notice.
+   */
+  describe('in a hard-gated guild', () => {
+    const gated = () =>
+      accessEnv(undefined, {
+        guilds: {
+          get: vi.fn().mockResolvedValue({ authStatus: 'expired' }),
+          isEntitled: vi.fn().mockResolvedValue(false),
+        } as never,
+        selfHosted: false,
+      });
+
+    it.each(['trust', 'block', 'admit'])('refuses /access %s', async (sub) => {
+      const e = gated();
+      const f = await run(e, { subcommand: sub, ...member() });
+      expect(JSON.stringify(f.reply.mock.calls[0]?.[0])).toContain('auto-voice.io');
+      expect(e.access.save).not.toHaveBeenCalled();
+      expect(e.privacy.admit).not.toHaveBeenCalled();
+    });
+
+    it.each(['remove', 'clear', 'list'])('still answers /access %s', async (sub) => {
+      const e = gated();
+      const f = await run(e, { subcommand: sub, ...member() });
+      expect(JSON.stringify(f.editReply.mock.calls[0]?.[0])).not.toContain('auto-voice.io');
+      expect(f.editReply).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
+/**
  * The knock card and the two ways to kick answer after work that is no longer a
  * pair of REST calls: a block saves to the owner's list, applies it to the room and
  * moves the requester out, and a kick records itself, writes the room's overwrites
@@ -1397,13 +1707,26 @@ describe('registerInteractionHandler (the knock card and the kick vote)', () => 
 
   /** One knock-card click, with the service call and the acknowledgement put in order. */
   async function click(
-    action: 'approve' | 'deny' | 'block',
-    over: { userId?: string; context?: typeof joinContext | undefined; result?: object } = {},
+    action: 'approve' | 'always' | 'deny' | 'block',
+    over: {
+      userId?: string;
+      context?: typeof joinContext | undefined;
+      result?: object;
+      /** The guild's `command_access` rules, which Always allow is guarded by. */
+      rules?: Record<string, unknown>;
+      /** The guild row's status, for a hard-gated guild. */
+      authStatus?: string;
+      manageChannels?: boolean;
+    } = {},
   ) {
+    // Posting the rejection to the lobby's chat goes through the client, so it is a spy.
+    const fetchChannel = vi.fn().mockResolvedValue(null);
+    const client = Object.assign(new EventEmitter(), { channels: { fetch: fetchChannel } });
     const fake = fakeInteraction({
       kind: 'button',
-      customId: joinId(action, 'join-1', 'bob'),
+      customId: action === 'always' ? alwaysId('join-1', 'bob') : joinId(action, 'join-1', 'bob'),
       userId: over.userId ?? OWNER,
+      ...(over.manageChannels ? { manageChannels: true } : {}),
     });
     const order: string[] = [];
     let finish: (() => void) | undefined;
@@ -1414,19 +1737,32 @@ describe('registerInteractionHandler (the knock card and the kick vote)', () => 
       return over.result ?? { ok: true, message: 'Done.' };
     });
     const env = setup({
+      client: client as never,
       privacy: {
         getJoinContext: vi.fn().mockResolvedValue('context' in over ? over.context : joinContext),
         approveJoin: decide,
         denyJoin: decide,
       } as never,
+      ...(over.rules || over.authStatus
+        ? {
+            guilds: {
+              get: vi.fn().mockResolvedValue({
+                authStatus: over.authStatus ?? 'active',
+                ...(over.rules ? { settings: { command_access: over.rules } } : {}),
+              }),
+              isEntitled: vi.fn().mockResolvedValue(over.authStatus === undefined),
+            } as never,
+            ...(over.authStatus ? { selfHosted: false } : {}),
+          }
+        : {}),
     });
     dispose = env.dispose;
-    env.client.emit('interactionCreate', fake.interaction);
+    client.emit('interactionCreate', fake.interaction);
     await flush();
-    return { ...fake, order, decide, finish: () => finish?.() };
+    return { ...fake, order, decide, fetchChannel, finish: () => finish?.() };
   }
 
-  it.each(['approve', 'deny', 'block'] as const)(
+  it.each(['approve', 'always', 'deny', 'block'] as const)(
     'acknowledges %s before it does the work, then edits the card',
     async (action) => {
       const c = await click(action);
@@ -1455,6 +1791,118 @@ describe('registerInteractionHandler (the knock card and the kick vote)', () => 
     const deny = await click('deny');
     deny.finish();
     expect(deny.decide).toHaveBeenCalledWith('join-1', 'bob', false);
+  });
+
+  /** A plain approval takes exactly the two arguments it always did. */
+  it('passes Approve on as it always was, and Always allow as an approval that saves', async () => {
+    const approve = await click('approve');
+    approve.finish();
+    expect(approve.decide).toHaveBeenCalledWith('join-1', 'bob');
+    dispose?.();
+    const always = await click('always');
+    always.finish();
+    expect(always.decide).toHaveBeenCalledWith('join-1', 'bob', true);
+  });
+
+  it('puts the result of Always allow on the card with the buttons gone, and tells nobody else', async () => {
+    const c = await click('always', { result: { ok: true, message: 'Admitted <@bob>.' } });
+    c.finish();
+    await flush();
+    expect(c.editReply).toHaveBeenCalledWith({
+      content: '✅ Admitted <@bob>.',
+      components: [],
+    });
+    expect(c.interaction.update).not.toHaveBeenCalled();
+    // Approving is not a rejection, so nothing is posted to the join channel's chat, where
+    // the same message would otherwise tell somebody who was just let in they were declined.
+    expect(c.fetchChannel).not.toHaveBeenCalled();
+  });
+
+  it('still tells the lobby when a request was declined or blocked', async () => {
+    for (const action of ['deny', 'block'] as const) {
+      const c = await click(action);
+      c.finish();
+      await flush();
+      expect(c.fetchChannel, action).toHaveBeenCalledWith('join-1');
+      dispose?.();
+    }
+  });
+
+  it('turns away Always allow from anyone but the owner, and an expired card, like the others', async () => {
+    const stranger = await click('always', { userId: 'mallory' });
+    expect(stranger.decide).not.toHaveBeenCalled();
+    expect(stranger.interaction.deferUpdate).not.toHaveBeenCalled();
+    expect(stranger.reply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: 'Only the channel owner can answer this request.',
+        ephemeral: true,
+      }),
+    );
+    dispose?.();
+    const expired = await click('always', { context: undefined });
+    expect(expired.decide).not.toHaveBeenCalled();
+    expect(expired.interaction.update).toHaveBeenCalledWith({
+      content: 'This request has expired.',
+      components: [],
+    });
+  });
+
+  describe('Always allow and /restrict', () => {
+    const KAY = '111111111111111111';
+    const DENY_SAVED = { access: { users: [KAY] } };
+
+    /** It saves to the owner's trusted list, so the rule that stops `/access trust` stops it. */
+    it('is refused for an owner denied Saved lists, before it is acknowledged, and nothing is done', async () => {
+      const c = await click('always', {
+        userId: KAY,
+        context: { ...joinContext, creatorId: KAY },
+        rules: DENY_SAVED,
+      });
+      expect(c.decide).not.toHaveBeenCalled();
+      expect(c.interaction.deferUpdate).not.toHaveBeenCalled();
+      expect(c.interaction.update).not.toHaveBeenCalled();
+      expect(JSON.stringify(c.reply.mock.calls[0]?.[0])).toContain(
+        'A server admin has turned off **Saved lists** for you.',
+      );
+      expect(c.reply).toHaveBeenCalledWith(expect.objectContaining({ ephemeral: true }));
+    });
+
+    it('leaves a plain Approve, Deny and Block open to the same owner', async () => {
+      for (const action of ['approve', 'deny', 'block'] as const) {
+        const c = await click(action, {
+          userId: KAY,
+          context: { ...joinContext, creatorId: KAY },
+          rules: DENY_SAVED,
+        });
+        expect(c.decide, action).toHaveBeenCalled();
+        dispose?.();
+      }
+    });
+
+    it('lets an owner who can manage channels use it whatever the rule says', async () => {
+      const c = await click('always', {
+        userId: KAY,
+        context: { ...joinContext, creatorId: KAY },
+        rules: DENY_SAVED,
+        manageChannels: true,
+      });
+      expect(c.decide).toHaveBeenCalledWith('join-1', 'bob', true);
+    });
+
+    it('is not refused for an owner the rule does not name', async () => {
+      const c = await click('always', { rules: DENY_SAVED });
+      expect(c.decide).toHaveBeenCalledWith('join-1', 'bob', true);
+    });
+  });
+
+  /**
+   * Every write is refused in a hard-gated guild, the three older buttons included, and
+   * Always allow is one: a knock card left over from before the gate does nothing.
+   */
+  it('refuses Always allow in a hard-gated guild with the reactivation notice', async () => {
+    const c = await click('always', { authStatus: 'expired' });
+    expect(c.decide).not.toHaveBeenCalled();
+    expect(JSON.stringify(c.reply.mock.calls[0]?.[0])).toContain('auto-voice.io');
   });
 
   it('puts a failure on the card too, with the buttons gone', async () => {
@@ -4381,7 +4829,7 @@ describe('registerInteractionHandler (/restrict)', () => {
   });
 
   describe('treats its options as client input', () => {
-    it.each(['access', 'claim', 'kick', 'constructor'])(
+    it.each(['claim', 'kick', 'constructor'])(
       'refuses the feature %j, which /restrict does not offer',
       async (feature) => {
         const e = restrictEnv();
@@ -4414,7 +4862,15 @@ describe('registerInteractionHandler (/restrict)', () => {
     it('says nobody is restricted for every feature when nothing is stored', async () => {
       const e = restrictEnv();
       const { content, payload } = await restrict(e, { subcommand: 'list' });
-      for (const label of ['Private and Public', 'Hide', 'Size', 'Name', 'Transfer', 'Nickname']) {
+      for (const label of [
+        'Private and Public',
+        'Hide',
+        'Size',
+        'Name',
+        'Transfer',
+        'Saved lists',
+        'Nickname',
+      ]) {
         expect(content).toContain(`**${label}**: nobody is restricted`);
       }
       expect(payload?.flags).toBe(EPHEMERAL);
@@ -4434,17 +4890,20 @@ describe('registerInteractionHandler (/restrict)', () => {
       expect(content.length).toBeLessThanOrEqual(2000);
     });
 
-    it('does not show a feature that has no command yet, whatever is stored', async () => {
-      const e = restrictEnv({ command_access: { access: { users: [TARGET] } } });
+    it('does not show a feature that has no restriction, whatever is stored', async () => {
+      const e = restrictEnv({ command_access: { claim: { users: [TARGET] } } });
       const { content } = await restrict(e, { subcommand: 'list' });
       expect(content).not.toContain(TARGET);
-      expect(content).not.toContain('Saved lists');
+      expect(content).not.toContain('Claim');
     });
 
-    it('shows Hide, which has a command now', async () => {
-      const e = restrictEnv({ command_access: { hide: { users: [TARGET] } } });
+    it('shows Hide and Saved lists, which have commands now', async () => {
+      const e = restrictEnv({
+        command_access: { hide: { users: [TARGET] }, access: { roles: [ROLE] } },
+      });
       const { content } = await restrict(e, { subcommand: 'list' });
       expect(content).toContain(`**Hide**: <@${TARGET}>`);
+      expect(content).toContain(`**Saved lists**: <@&${ROLE}>`);
     });
   });
 

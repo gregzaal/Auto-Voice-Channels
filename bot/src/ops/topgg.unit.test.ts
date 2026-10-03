@@ -220,12 +220,44 @@ describe('toTopggCommands', () => {
       'limit',
       'rename',
       'transfer',
+      'access',
       'nick',
     ]);
     expect(restrict?.options?.[2]?.options?.map((o) => [o.name, o.type, o.required])).toEqual([
       ['feature', 'string', true],
     ]);
     expect(restrict?.options?.[3]?.options).toBeUndefined();
+  });
+});
+
+/**
+ * `/access` is the second command with subcommands, and the first whose subcommands
+ * take a user option and an optional string with choices.
+ */
+describe('toTopggCommands and /access', () => {
+  const access = toTopggCommands(buildCommandDefinitions()).find((c) => c.name === 'access');
+
+  it('maps its six subcommands', () => {
+    expect(access?.options?.map((o) => [o.name, o.type])).toEqual([
+      ['trust', 'sub_command'],
+      ['block', 'sub_command'],
+      ['admit', 'sub_command'],
+      ['remove', 'sub_command'],
+      ['list', 'sub_command'],
+      ['clear', 'sub_command'],
+    ]);
+  });
+
+  it('maps the member option, and the optional list choice on clear', () => {
+    for (const index of [0, 1, 2, 3]) {
+      expect(access?.options?.[index]?.options?.map((o) => [o.name, o.type, o.required])).toEqual([
+        ['member', 'user', true],
+      ]);
+    }
+    expect(access?.options?.[4]?.options).toBeUndefined();
+    const clear = access?.options?.[5]?.options?.[0];
+    expect([clear?.name, clear?.type, clear?.required ?? false]).toEqual(['list', 'string', false]);
+    expect(clear?.choices?.map((c) => c.value)).toEqual(['trusted', 'blocked']);
   });
 });
 
