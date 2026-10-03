@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AUTH_STATUSES } from '../domain/auth.js';
 import { FLEETS } from '../domain/fleets.js';
+import { MEMBER_PREF_PRIVACIES } from '../domain/memberRoomPrefs.js';
 import { MEMBER_ACCESS_KINDS } from '../domain/roomAccess.js';
 import {
   guilds,
@@ -8,6 +9,7 @@ import {
   guildFleetPresence,
   identifyBuckets,
   memberAccessLists,
+  memberRoomPrefs,
   opsAudit,
   runtimeFlags,
   secondaryChannels,
@@ -92,5 +94,41 @@ describe('schema room access', () => {
   it('adds secondary_channels.access as nullable with no default', () => {
     expect(secondaryChannels.access.notNull).toBe(false);
     expect(secondaryChannels.access.hasDefault).toBe(false);
+  });
+});
+
+/**
+ * What members have remembered about their own rooms. An expand-only table an older build
+ * never reads or writes.
+ */
+describe('schema remembered room settings', () => {
+  /** Same drift guard as the access kinds: the schema inlines the privacy values. */
+  it('member_room_prefs.privacy matches domain MEMBER_PREF_PRIVACIES', () => {
+    expect([...memberRoomPrefs.privacy.enumValues]).toEqual([...MEMBER_PREF_PRIVACIES]);
+  });
+
+  /**
+   * Keyed by a creator channel, which belongs to one fleet already, so a copy of the fleet
+   * here could only disagree with it. The decision is recorded in the doc comment on
+   * `memberRoomPrefs` in the schema.
+   */
+  it('keeps member_room_prefs shared across fleets', () => {
+    expect('fleet' in memberRoomPrefs).toBe(false);
+  });
+
+  /**
+   * Null on every setting is what "nothing remembered" means, and what lets one save write
+   * one column without naming the others. A default on any of them would remember a value
+   * nobody chose.
+   */
+  it('stores each remembered setting as nullable with no default', () => {
+    for (const column of [
+      memberRoomPrefs.nameTemplate,
+      memberRoomPrefs.userLimit,
+      memberRoomPrefs.privacy,
+    ]) {
+      expect(column.notNull).toBe(false);
+      expect(column.hasDefault).toBe(false);
+    }
   });
 });

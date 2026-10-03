@@ -42,8 +42,18 @@ const HERE = dirname(fileURLToPath(import.meta.url));
  * `memberAccessLists.ts` is here for its own reason: it holds no channel id, but its owner and
  * member ids come from a slash command, its rows are keyed by guild, and an owner in one server
  * must never write another server's list. Its two erasure-on-request deletes are exempt below.
+ *
+ * `memberRoomPrefs.ts` is here for the same reason, and its creator channel id arrives from a
+ * room, which a member can name by typing a command in it. It writes with raw SQL as well as
+ * builder calls, which is why `.execute(` counts as a write below. Its erasure by member and its
+ * orphan sweep span servers by design and are exempt below.
  */
-const USER_SUPPLIED = ['autoChannels.ts', 'managedChannels.ts', 'memberAccessLists.ts'];
+const USER_SUPPLIED = [
+  'autoChannels.ts',
+  'managedChannels.ts',
+  'memberAccessLists.ts',
+  'memberRoomPrefs.ts',
+];
 
 /**
  * The ephemeral tables. Enumerated so this file records the distinction rather
@@ -56,8 +66,15 @@ const USER_SUPPLIED = ['autoChannels.ts', 'managedChannels.ts', 'memberAccessLis
  */
 const GATEWAY_ONLY = ['secondaryChannels.ts', 'joinChannels.ts'];
 
-/** Drizzle calls that change a row. A method containing one of these is a write. */
-const WRITE_CALLS = ['.update(', '.delete(', '.insert('];
+/**
+ * Drizzle calls that change a row. A method containing one of these is a write.
+ *
+ * `.execute(` is one because a repository that has to check a condition and write in one
+ * statement (an `INSERT ... SELECT ... WHERE EXISTS`) can only say so in raw SQL, and a write
+ * the scan could not see would be a write nobody checks. It also catches a read that goes
+ * through `execute`, which has to bind the guild too, and every one here does.
+ */
+const WRITE_CALLS = ['.update(', '.delete(', '.insert(', '.execute('];
 
 /**
  * Writes that legitimately do not filter on a guild, each with the reason.
@@ -71,6 +88,10 @@ const EXEMPT: Record<string, string> = {
     'erasure on request for the listed person spans every server by design, so it filters on the member instead. An operator tool, not reachable from a command. Checked explicitly below.',
   'memberAccessLists.ts:deleteByOwner':
     'erasure on request for an owner spans every server by design, so it filters on the owner instead. An operator tool, not reachable from a command. Checked explicitly below.',
+  'memberRoomPrefs.ts:deleteByUser':
+    'erasure on request for a member spans every server and creator channel by design, so it filters on the user instead. An operator tool, not reachable from a command. Checked explicitly below.',
+  'memberRoomPrefs.ts:deleteOrphans':
+    'the orphan sweep spans every server by design, because the rows it reaches belong to creator channels that no longer exist anywhere. It filters on the missing creator channel and an age instead, and is bounded by a limit. Reached only from the periodic sweep. Checked explicitly below.',
 };
 
 interface Method {
@@ -200,6 +221,43 @@ describe('channel repository guards', () => {
       'memberAccessLists.ts:deleteByMember',
       'memberAccessLists.ts:deleteByOwner',
     ]);
+  });
+
+  /**
+   * The remembered settings' two exemptions, checked rather than trusted, for the reason the
+   * saved lists' are. The erasure is keyed on the member it erases. The sweep has no guild to
+   * bind, so its guard is its predicate: a delete that lost the `NOT EXISTS` on the creator
+   * channel, the age test or the `LIMIT` would wipe live members' settings, one pass at a time.
+   * They are also the only writes on that table that are exempt, and every other write binds
+   * the guild in a statement that is raw SQL or builder calls alike.
+   */
+  it('binds the remembered settings erasure to its member, and the sweep to what makes a row an orphan', () => {
+    const writes = writesOf(read('memberRoomPrefs.ts'));
+    const byUser = writes.find((m) => m.name === 'deleteByUser');
+    const sweep = writes.find((m) => m.name === 'deleteOrphans');
+    expect(
+      byUser,
+      'MemberRoomPrefsRepository.deleteByUser has gone or changed shape',
+    ).toBeDefined();
+    expect(
+      sweep,
+      'MemberRoomPrefsRepository.deleteOrphans has gone or changed shape',
+    ).toBeDefined();
+    expect(byUser!.body).toMatch(/\.userId,\s*userId/);
+    expect(sweep!.body).toMatch(/NOT EXISTS \(SELECT 1 FROM auto_channels/);
+    expect(sweep!.body).toMatch(/m\.updated_at < now\(\)/);
+    expect(sweep!.body).toMatch(/LIMIT \$\{limit\}/);
+
+    const exempt = Object.keys(EXEMPT).filter((key) => key.startsWith('memberRoomPrefs.ts:'));
+    expect(exempt.sort()).toEqual([
+      'memberRoomPrefs.ts:deleteByUser',
+      'memberRoomPrefs.ts:deleteOrphans',
+    ]);
+    // The raw writes are in the scan, so none of them can lose its guild binding unseen.
+    const names = writes.map((m) => m.name);
+    for (const name of ['upsertField', 'clearField', 'clearByPrimary', 'deleteByGuild']) {
+      expect(names, `${name} should be a write the scan sees`).toContain(name);
+    }
   });
 
   /** Every exemption names a real method, so a stale one cannot hide a gap. */

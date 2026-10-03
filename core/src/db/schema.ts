@@ -8,6 +8,7 @@ import {
   jsonb,
   pgTable,
   primaryKey,
+  smallint,
   text,
   timestamp,
   uniqueIndex,
@@ -37,6 +38,13 @@ const FLEETS = ['prod', 'beta', 'gold'] as const;
  * `domain/roomAccess.ts`; `schema.unit.test.ts` asserts it.
  */
 const MEMBER_ACCESS_KINDS = ['trusted', 'blocked'] as const;
+
+/**
+ * Which privacy a member's remembered room settings can hold, inlined for the same
+ * reason as {@link AUTH_STATUSES}. MUST stay in sync with `MEMBER_PREF_PRIVACIES` in
+ * `domain/memberRoomPrefs.ts`; `schema.unit.test.ts` asserts it.
+ */
+const MEMBER_PREF_PRIVACIES = ['private', 'hidden'] as const;
 
 /** Bot-owned channels and coordination use this column; customer state is shared. */
 const fleet = () => text('fleet', { enum: FLEETS }).notNull().default('prod');
@@ -415,6 +423,59 @@ export const memberAccessLists = pgTable(
      * erasure by the owner alone, which spans servers.
      */
     index('member_access_lists_owner_idx').on(t.ownerId, t.guildId),
+  ],
+);
+
+/**
+ * What a member chose for their own rooms the last time they made one from a creator
+ * channel that remembers, so the next room starts that way.
+ *
+ * One row per `(primary_channel_id, user_id)`, with a column per setting. Every setting is
+ * nullable and null means nothing is remembered for it, which is not the same as a value:
+ * a `user_limit` of 0 is a remembered "no limit". A row whose settings are all null is
+ * deleted, so a row existing means somebody has something remembered.
+ *
+ * **No `fleet` column, deliberately.** The key is a creator channel, and a creator channel
+ * belongs to exactly one fleet (`auto_channels` carries it), so the fleet is already a
+ * consequence of the key and a copy here could only disagree with it. This is customer
+ * data about a person's own choices, like `member_access_lists` and `aliases`, and nothing
+ * about a row is bot-owned the way a room is. The guild is kept as well as the creator
+ * channel, so every write can be bound to it and an erasure by server is one indexed delete.
+ *
+ * **Opt-in per creator channel, and off by default.** A write is only accepted for a
+ * creator channel whose template says `rememberPrefs: true`, and that check is made in the
+ * same statement as the write (see `MemberRoomPrefsRepository`). Turning the flag off keeps
+ * the rows, dormant, so an admin who turns it back on does not lose what members had saved.
+ *
+ * **Rows outlive the creator channel on purpose, for a while.** Nothing deletes them when
+ * a creator channel goes. The orphan sweep deletes a row once no `auto_channels` row names
+ * its creator channel in any fleet AND it has not been touched for the grace period, which
+ * is what keeps an `/import` that dropped a creator channel undoable (its snapshot does not
+ * carry these rows). A server the bot has left keeps its `auto_channels` rows, so its
+ * remembered settings are not swept by that rule and only erasure on request removes them.
+ *
+ * Not exported: `/export` carries `guilds.settings` and the creator channels, and these are
+ * neither, so a member's remembered name does not leave the database through an admin's file.
+ */
+export const memberRoomPrefs = pgTable(
+  'member_room_prefs',
+  {
+    primaryChannelId: text('primary_channel_id').notNull(),
+    userId: text('user_id').notNull(),
+    guildId: text('guild_id').notNull(),
+    /** The name template the member set themselves, never one inherited from the creator channel. */
+    nameTemplate: text('name_template'),
+    /** The room's user limit. 0 is a remembered "no limit", and null is nothing remembered. */
+    userLimit: smallint('user_limit'),
+    privacy: text('privacy', { enum: MEMBER_PREF_PRIVACIES }),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.primaryChannelId, t.userId] }),
+    /** A server's rows, for the count, the admin's clear and erasure by server. */
+    index('member_room_prefs_guild_idx').on(t.guildId),
+    /** Erasure on request by the member, across every creator channel and server. */
+    index('member_room_prefs_user_idx').on(t.userId),
   ],
 );
 
