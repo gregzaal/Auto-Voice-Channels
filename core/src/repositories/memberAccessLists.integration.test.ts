@@ -84,6 +84,25 @@ describe('MemberAccessListRepository (integration)', () => {
         blocked: [],
       });
     });
+
+    /** What the sweep asks, so a server's other owners are not read every five minutes. */
+    it('lists only the owners it is asked about, in one server, and reads nothing for none', async () => {
+      await repo.add(GUILD, OWNER, 'm-1', 'trusted');
+      await repo.add(GUILD, 'owner-2', 'm-2', 'blocked');
+      await repo.add(GUILD, 'owner-3', 'm-3', 'blocked');
+      await repo.add('guild-2', OWNER, 'm-4', 'blocked');
+
+      const some = await repo.listByGuild(GUILD, [OWNER, 'owner-3', 'nobody']);
+      expect([...some.keys()].sort()).toEqual([OWNER, 'owner-3']);
+      expect(some.get('owner-3')).toEqual({ trusted: [], blocked: ['m-3'] });
+      // Every owner of the server when none is named, and nobody for an empty list.
+      expect([...(await repo.listByGuild(GUILD)).keys()].sort()).toEqual([
+        OWNER,
+        'owner-2',
+        'owner-3',
+      ]);
+      expect((await repo.listByGuild(GUILD, [])).size).toBe(0);
+    });
   });
 
   /**

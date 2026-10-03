@@ -1,4 +1,4 @@
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
 import { memberAccessLists } from '../db/schema.js';
 import {
@@ -96,8 +96,17 @@ export class MemberAccessListRepository {
    *
    * A per-owner `get` per room would be one read per room per sweep; this is one
    * read per guild, keyed by owner, and an owner with nobody saved has no key.
+   *
+   * `ownerIds` narrows it to those owners, which is what the sweep asks: it only
+   * needs the lists of whoever has a live room, and a server's other owners' rows
+   * (up to 50 each) would be read every five minutes for nothing. An empty list
+   * reads nothing at all.
    */
-  async listByGuild(guildId: string): Promise<Map<string, MemberAccessLists>> {
+  async listByGuild(
+    guildId: string,
+    ownerIds?: readonly string[],
+  ): Promise<Map<string, MemberAccessLists>> {
+    if (ownerIds !== undefined && ownerIds.length === 0) return new Map();
     const rows = await this.db
       .select({
         ownerId: memberAccessLists.ownerId,
@@ -105,7 +114,14 @@ export class MemberAccessListRepository {
         kind: memberAccessLists.kind,
       })
       .from(memberAccessLists)
-      .where(eq(memberAccessLists.guildId, guildId))
+      .where(
+        ownerIds === undefined
+          ? eq(memberAccessLists.guildId, guildId)
+          : and(
+              eq(memberAccessLists.guildId, guildId),
+              inArray(memberAccessLists.ownerId, [...ownerIds]),
+            ),
+      )
       .orderBy(asc(memberAccessLists.createdAt), asc(memberAccessLists.memberId));
     const byOwner = new Map<string, MemberAccessLists>();
     for (const row of rows) {
