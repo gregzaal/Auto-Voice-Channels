@@ -1100,6 +1100,8 @@ describe('VoiceFeature (integration)', () => {
    */
   describe('a restriction on Nickname', () => {
     const DENIED_ROLE = '323456789012345678';
+    // A real snowflake, because a rule drops an id that is not one.
+    const DENIED_USER = '423456789012345678';
 
     async function ownedRoom(id: string, owner: string, roleIds: string[]): Promise<void> {
       await secondaries.create({
@@ -1115,7 +1117,13 @@ describe('VoiceFeature (integration)', () => {
     beforeEach(async () => {
       await autoChannels.upsert(GUILD, PRIMARY, { name: '@@owner@@' });
       await guilds.updateSettings(GUILD, {
-        custom_nicks: { alice: 'Big Alice', bea: 'Big Bea' },
+        custom_nicks: {
+          alice: 'Big Alice',
+          bea: 'Big Bea',
+          bob: 'Big Bob',
+          carol: 'Big Carol',
+          [DENIED_USER]: 'Big Dan',
+        },
         command_access: { nick: { roles: [DENIED_ROLE] } },
       });
     });
@@ -1144,6 +1152,225 @@ describe('VoiceFeature (integration)', () => {
       await guilds.updateSettings(GUILD, { command_access: {} });
       await feature.rerenderSecondary(GUILD, 'c1');
       expect(actions.ofType('rename').map((a) => a.name)).toEqual(['alice', 'Big Alice']);
+    });
+
+    /**
+     * A member who can manage channels is never restricted, so `/nick` lets them
+     * through. If the render did not agree, their `/nick` would reply that rooms
+     * will call them the new name and no room ever would.
+     */
+    it('keeps the nickname of an owner who can manage channels, whatever role a rule names', async () => {
+      await secondaries.create({
+        channelId: 'c1',
+        guildId: GUILD,
+        primaryChannelId: PRIMARY,
+        ownerId: 'alice',
+        state: { name: 'stale', index: 0 },
+      });
+      voice.put('c1', { ...member('alice'), roleIds: [DENIED_ROLE], canManage: true });
+      await feature.rerenderSecondary(GUILD, 'c1');
+      expect(actions.ofType('rename').map((a) => a.name)).toEqual(['Big Alice']);
+    });
+
+    /**
+     * `@@original_creator@@` is a second place a nickname is read, and the creator
+     * has usually left, so what the rule needs to know about them comes from the
+     * room's snapshot while they are in it and from the cache after.
+     */
+    describe('for @@original_creator@@', () => {
+      async function roomMadeBy(
+        creator: string,
+        inRoom: { roleIds: string[]; canManage?: boolean } | null,
+      ): Promise<void> {
+        await autoChannels.upsert(GUILD, PRIMARY, { name: '@@original_creator@@' });
+        await secondaries.create({
+          channelId: 'oc',
+          guildId: GUILD,
+          primaryChannelId: PRIMARY,
+          ownerId: 'alice',
+          originalCreator: creator,
+          state: { name: 'stale', index: 0, originalCreatorName: creator },
+        });
+        // Somebody nobody has restricted is always in the room, so it is never empty.
+        voice.put('oc', member('alice'));
+        if (inRoom) voice.put('oc', { ...member(creator), ...inRoom });
+      }
+      const rendered = async (): Promise<string[]> => {
+        await feature.rerenderSecondary(GUILD, 'oc');
+        return actions.ofType('rename').map((a) => a.name);
+      };
+
+      it('names a creator who is still in the room by their Discord name when their role is denied', async () => {
+        await roomMadeBy('carol', { roleIds: [DENIED_ROLE] });
+        expect(await rendered()).toEqual(['carol']);
+      });
+
+      it('keeps the nickname of a creator in the room whom no rule names', async () => {
+        await roomMadeBy('carol', { roleIds: ['999999999999999999'] });
+        expect(await rendered()).toEqual(['Big Carol']);
+      });
+
+      it('finds the roles of a creator who has left in the cache', async () => {
+        await roomMadeBy('carol', null);
+        voice.setOwnerAccess('carol', { roleIds: [DENIED_ROLE] });
+        expect(await rendered()).toEqual(['carol']);
+      });
+
+      it('keeps the nickname of a departed creator the cache does not hold the roles of', async () => {
+        await roomMadeBy('carol', null);
+        expect(await rendered()).toEqual(['Big Carol']);
+      });
+
+      it('still applies a rule that names a departed creator themselves, with nothing to look up', async () => {
+        await guilds.updateSettings(GUILD, { command_access: { nick: { users: [DENIED_USER] } } });
+        await roomMadeBy(DENIED_USER, null);
+        expect(await rendered()).toEqual([DENIED_USER]);
+      });
+
+      it('keeps the nickname of a departed creator who can manage channels', async () => {
+        await roomMadeBy('carol', null);
+        voice.setOwnerAccess('carol', { roleIds: [DENIED_ROLE], canManage: true });
+        expect(await rendered()).toEqual(['Big Carol']);
+      });
+    });
+
+    /**
+     * The same member's name is also what a private room's "Join" channel is named
+     * after, and it is read on the three paths below. Each reads it through
+     * `displayName`, so each has to be shown to apply the rule.
+     */
+    describe('where a new owner is named', () => {
+      const handovers = (): { changes: string[]; f: VoiceFeature } => {
+        const changes: string[] = [];
+        const f = new VoiceFeature({
+          autoChannels,
+          secondaries,
+          guilds,
+          actions,
+          voice,
+          selfHosted: true,
+          logger: fakeLogger(),
+          onOwnerChanged: (_g, _c, _id, name) => {
+            changes.push(name);
+            return Promise.resolve();
+          },
+        });
+        return { changes, f };
+      };
+
+      it.each([
+        ['a denied role', [DENIED_ROLE], 'bob'],
+        ['no restriction', ['999999999999999999'], 'Big Bob'],
+      ])('names a new owner after the owner leaves (%s)', async (_what, roleIds, expected) => {
+        const { changes, f } = handovers();
+        await ownedRoom('c1', 'alice', []);
+        voice.put('c1', { ...member('bob'), roleIds });
+        voice.drop('c1', 'alice');
+        await f.handleVoiceStateUpdate({
+          guildId: GUILD,
+          member: member('alice'),
+          beforeChannelId: 'c1',
+        });
+        expect((await secondaries.get('c1'))!.ownerId).toBe('bob');
+        expect(changes).toEqual([expected]);
+      });
+
+      it.each([
+        ['a denied role', [DENIED_ROLE], 'bob'],
+        ['no restriction', ['999999999999999999'], 'Big Bob'],
+      ])(
+        'names a new owner after a /transfer or /reclaim (%s)',
+        async (_what, roleIds, expected) => {
+          const { changes, f } = handovers();
+          await f.repointJoinCompanion(GUILD, 'c1', { ...member('bob'), roleIds });
+          expect(changes).toEqual([expected]);
+        },
+      );
+
+      it.each([
+        ['a denied role', [DENIED_ROLE], 'alice'],
+        ['no restriction', ['999999999999999999'], 'Big Alice'],
+      ])('names the creator of a room born private (%s)', async (_what, roleIds, expected) => {
+        const named: string[] = [];
+        const f = new VoiceFeature({
+          autoChannels,
+          secondaries,
+          guilds,
+          actions,
+          voice,
+          selfHosted: true,
+          logger: fakeLogger(),
+          makePrivateOnCreate: (_g, _c, _owner, name) => {
+            named.push(name);
+            return Promise.resolve();
+          },
+        });
+        // A prior test blocks the guild, and a blocked guild creates nothing.
+        await guilds.transitionAuth({ guildId: GUILD, toStatus: 'trial' });
+        await autoChannels.upsert(GUILD, PRIMARY, { name: '@@owner@@', defaultPrivate: true });
+        const alice = { ...member('alice'), roleIds };
+        voice.put(PRIMARY, alice);
+        await f.handleVoiceStateUpdate({ guildId: GUILD, member: alice, afterChannelId: PRIMARY });
+        expect(named).toEqual([expected]);
+      });
+    });
+
+    /**
+     * `command_access.disabled` is the incident lever, and a saved nickname is the
+     * one rule that is enforced when a name is rendered and not at a guard. If the
+     * lever stopped at the guards, "enforcement is paused" would be untrue for the
+     * rule that changes what every member of a room reads.
+     */
+    describe('and command_access.disabled', () => {
+      let asked = 0;
+      const withLever = (disabled: boolean): VoiceFeature =>
+        new VoiceFeature({
+          autoChannels,
+          secondaries,
+          guilds,
+          actions,
+          voice,
+          selfHosted: true,
+          logger: fakeLogger(),
+          gate: {
+            allowCreate: () => Promise.resolve({ allowed: true }),
+            commandAccessDisabled: () => {
+              asked += 1;
+              return Promise.resolve(disabled);
+            },
+          },
+        });
+
+      beforeEach(() => {
+        asked = 0;
+      });
+
+      it("shows a restricted owner's nickname again while it is on", async () => {
+        await ownedRoom('c1', 'alice', [DENIED_ROLE]);
+        await withLever(true).rerenderSecondary(GUILD, 'c1');
+        expect(actions.ofType('rename').map((a) => a.name)).toEqual(['Big Alice']);
+      });
+
+      it('keeps the rule in force while it is off', async () => {
+        await ownedRoom('c1', 'alice', [DENIED_ROLE]);
+        await withLever(false).rerenderSecondary(GUILD, 'c1');
+        expect(actions.ofType('rename').map((a) => a.name)).toEqual(['alice']);
+      });
+
+      it('takes the nickname away again when it is lifted, because nothing was cleared', async () => {
+        await ownedRoom('c1', 'alice', [DENIED_ROLE]);
+        await withLever(true).rerenderSecondary(GUILD, 'c1');
+        await withLever(false).rerenderSecondary(GUILD, 'c1');
+        expect(actions.ofType('rename').map((a) => a.name)).toEqual(['Big Alice', 'alice']);
+      });
+
+      it('is never asked about for a server with no rules', async () => {
+        await guilds.updateSettings(GUILD, { command_access: {} });
+        await ownedRoom('c1', 'alice', [DENIED_ROLE]);
+        await withLever(true).rerenderSecondary(GUILD, 'c1');
+        expect(asked).toBe(0);
+        expect(actions.ofType('rename').map((a) => a.name)).toEqual(['Big Alice']);
+      });
     });
   });
 
@@ -2347,6 +2574,27 @@ describe('VoiceFeature (integration)', () => {
         await makeRoom();
         expect(has(posted[0]!.payload, 'rename')).toBe(false);
         expect(has(posted[0]!.payload, 'limit')).toBe(true);
+      });
+
+      /**
+       * On the create path the lookup is an argument to the post, after the room
+       * exists and outside any catch. A throw there would reject a create that
+       * already succeeded: no result, no log line, no repair, and a failure against
+       * the guild's breaker.
+       */
+      it('still creates the room, with every control, when looking up the owner throws', async () => {
+        buildCapturing();
+        await guilds.updateSettings(GUILD, RULE);
+        voice.ownerAccessOf = () => {
+          throw new Error('cache exploded');
+        };
+        const room = await makeRoom();
+        expect((await secondaries.get(room))!.ownerId).toBe('alice');
+        expect(posted).toHaveLength(1);
+        expect(has(posted[0]!.payload, 'rename')).toBe(true);
+        // And the re-render path, which has its own catch, agrees.
+        await feature.rerenderSecondary(GUILD, room);
+        expect(edited).toHaveLength(0);
       });
 
       it('leaves the panel alone for an owner nobody can resolve', async () => {

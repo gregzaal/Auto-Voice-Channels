@@ -492,6 +492,46 @@ describe('ControlPanelPoster and /restrict', () => {
     expect(commandAccessDisabled).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * The refresh path asks the lever as well as the post. A panel drawn while the
+   * rules were in force must catch up to every control the first time it is
+   * re-rendered after the lever is set, or "paused" would be untrue for every room
+   * already open.
+   */
+  it('shows every control again on the next refresh once enforcement is switched off', async () => {
+    const owner = view({ ownerId: OWNER, ownerAccess: denied });
+    const row = {
+      guildId: GUILD,
+      state: {
+        controlPanelMessageId: MESSAGE,
+        controlPanelChannelId: ROOM,
+        controlPanelHash: controlPanelFingerprint(
+          buildControlPanel(
+            ROOM,
+            readControlPanel(WITH_RULES),
+            owner,
+            readCommandAccess(WITH_RULES, GUILD),
+          ),
+        ),
+      },
+    };
+
+    // With the lever off the panel is already as the rules draw it: nothing to edit.
+    const enforced = setup({
+      settings: WITH_RULES,
+      commandAccessDisabled: vi.fn().mockResolvedValue(false),
+    });
+    await enforced.poster.refreshForRoom(GUILD, ROOM, row, owner);
+    expect(enforced.edit).not.toHaveBeenCalled();
+
+    const commandAccessDisabled = vi.fn().mockResolvedValue(true);
+    const paused = setup({ settings: WITH_RULES, commandAccessDisabled });
+    await paused.poster.refreshForRoom(GUILD, ROOM, row, owner);
+    expect(paused.edit).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(payloadOf(paused.edit.mock.calls[0]!))).toContain('avc:panel:rename');
+    expect(commandAccessDisabled).toHaveBeenCalledTimes(1);
+  });
+
   it('never asks about the lever for a server with no rules', async () => {
     const commandAccessDisabled = vi.fn().mockResolvedValue(true);
     const { poster } = setup({ settings: ON, commandAccessDisabled });

@@ -149,6 +149,14 @@ export interface CreationGate {
    * Absent means not disabled.
    */
   controlPanelDisabled?(): Promise<boolean>;
+  /**
+   * The `/restrict` lever alone, for the one restriction a render enforces: a
+   * saved nickname that a rule now covers stops showing in room names.
+   *
+   * Its own method for the same reason as the two above. Absent means not
+   * disabled, which keeps the rules in force.
+   */
+  commandAccessDisabled?(): Promise<boolean>;
 }
 
 export interface VoiceFeatureDeps {
@@ -642,7 +650,7 @@ export class VoiceFeature {
     if (!primary || primary.guildId !== guildId) return { action: 'skip' };
 
     const guild = await this.deps.guilds.ensure(guildId);
-    const settings = parseVoiceSettings(guild.settings, guildId);
+    const settings = await this.voiceSettings(guild.settings, guildId);
     if (!settings.enabled) return { action: 'skip' };
     if (!isEntitled({ status: guild.authStatus, selfHosted: this.deps.selfHosted })) {
       this.deps.logger.debug({ guildId }, 'skipping creation: not entitled');
@@ -1152,7 +1160,7 @@ export class VoiceFeature {
 
     await this.deps.secondaries.setOwner(channelId, newOwner.id);
     const guild = await this.deps.guilds.ensure(guildId);
-    const newOwnerName = displayName(parseVoiceSettings(guild.settings, guildId), newOwner);
+    const newOwnerName = displayName(await this.voiceSettings(guild.settings, guildId), newOwner);
 
     this.deps.logger.info(
       { guildId, secondaryId: channelId, from: leaverId, to: newOwner.id },
@@ -1182,7 +1190,7 @@ export class VoiceFeature {
     if (!this.deps.onOwnerChanged) return;
     try {
       const guild = await this.deps.guilds.ensure(guildId);
-      const name = displayName(parseVoiceSettings(guild.settings, guildId), newOwner);
+      const name = displayName(await this.voiceSettings(guild.settings, guildId), newOwner);
       await this.deps.onOwnerChanged(guildId, channelId, newOwner.id, name);
     } catch (err) {
       this.deps.logger.warn(
@@ -1279,7 +1287,7 @@ export class VoiceFeature {
     if (row.template.name === undefined && row.template.status === undefined) return {};
 
     const guild = await this.deps.guilds.ensure(guildId);
-    const settings = parseVoiceSettings(guild.settings, guildId);
+    const settings = await this.voiceSettings(guild.settings, guildId);
     const members = this.deps.voice.membersInChannel(channelId);
     // An adopted standalone channel has no privacy model and no owning primary,
     // so `{{PRIVATE}}` is false and the numbering tokens keep rendering `?`.
@@ -1582,7 +1590,7 @@ export class VoiceFeature {
       return { found: false, scope: 'adopted', name: empty, status: empty };
     }
     const guild = await this.deps.guilds.ensure(guildId);
-    const settings = parseVoiceSettings(guild.settings, guildId);
+    const settings = await this.voiceSettings(guild.settings, guildId);
     const members = this.deps.voice.membersInChannel(channelId);
     const renderCtx = this.buildRenderContext({
       channelId,
@@ -1652,6 +1660,29 @@ export class VoiceFeature {
     return this.deps.clock?.() ?? new Date();
   }
 
+  /**
+   * The guild's voice settings as a RENDER should read them: with the
+   * `/restrict` rules withdrawn while `command_access.disabled` is on.
+   *
+   * A saved nickname is the one restriction enforced at render time and not at a
+   * guard, so this is where the lever has to reach it. Without it "enforcement is
+   * paused" would be untrue for the one rule that changes what everybody reads in
+   * a room name. Asked only when the guild has a rule at all, through the gate's
+   * cached snapshot, so a server with none pays nothing. The gate never throws and
+   * a failed flag read counts as not disabled, so the rules keep applying. Like
+   * the lever everywhere else it freezes rather than strips: a room's name
+   * catches up at its next re-render, in either direction.
+   */
+  private async voiceSettings(
+    raw: Record<string, unknown>,
+    guildId: string,
+  ): Promise<VoiceSettings> {
+    const settings = parseVoiceSettings(raw, guildId);
+    if (Object.keys(settings.commandAccess).length === 0) return settings;
+    if (!(await this.deps.gate?.commandAccessDisabled?.())) return settings;
+    return { ...settings, commandAccess: {} };
+  }
+
   buildRenderContext(input: RenderContextInput): RenderContext {
     const { settings, members, channelId } = input;
     const owner = input.ownerId ? members.find((m) => m.id === input.ownerId) : undefined;
@@ -1673,16 +1704,27 @@ export class VoiceFeature {
       (input.originalCreatorId
         ? members.find((m) => m.id === input.originalCreatorId)?.displayName
         : undefined);
+    /**
+     * What a restriction on Nickname needs to know about the original creator: their
+     * roles and whether they can manage channels. From the room's snapshot while
+     * they are in it, else from the cache, because they have usually left and a
+     * rule naming their ROLE would otherwise never apply to them. Asked only when
+     * a Nickname rule exists. Only a member the cache has also lost is unresolved,
+     * and then only a rule naming the person applies (see `displayName`).
+     */
+    const creatorStanding =
+      input.originalCreatorId && settings.commandAccess.nick !== undefined
+        ? (members.find((m) => m.id === input.originalCreatorId) ??
+          this.deps.voice.ownerAccessOf?.(channelId, input.originalCreatorId))
+        : undefined;
     const originalCreatorName =
       rawOriginalCreator === undefined || !input.originalCreatorId
         ? rawOriginalCreator
         : displayName(settings, {
             id: input.originalCreatorId,
             displayName: rawOriginalCreator,
-            // Only when they are in the room: the creator has usually left, and
-            // then a rule naming their ROLE cannot be checked, which reads as
-            // not restricted. See `displayName`.
-            roleIds: members.find((m) => m.id === input.originalCreatorId)?.roleIds,
+            roleIds: creatorStanding?.roleIds,
+            canManage: creatorStanding?.canManage,
           });
     return {
       index: input.index,
@@ -1727,7 +1769,7 @@ export class VoiceFeature {
     if (members.filter((m) => !m.bot).length === 0) return {};
 
     const guild = await this.deps.guilds.ensure(guildId);
-    const settings = parseVoiceSettings(guild.settings, guildId);
+    const settings = await this.voiceSettings(guild.settings, guildId);
     const primary = await this.deps.autoChannels.get(secondary.primaryChannelId);
     // Reconciliation may pass a freshly-computed sibling position to renumber
     // `##` tokens after a middle channel was deleted; otherwise use the stored one.
@@ -2083,7 +2125,7 @@ export class VoiceFeature {
    */
   async debugChannel(guildId: string, channelId: string): Promise<ChannelDebug> {
     const guild = await this.deps.guilds.ensure(guildId);
-    const settings = parseVoiceSettings(guild.settings, guildId);
+    const settings = await this.voiceSettings(guild.settings, guildId);
     const secondary = await this.deps.secondaries.get(channelId);
     const inGuild = secondary !== undefined && secondary.guildId === guildId;
     const isPrimary = await this.deps.autoChannels.isPrimary(guildId, channelId);
@@ -2173,7 +2215,7 @@ export class VoiceFeature {
    */
   async channelInfo(guildId: string, channelId: string): Promise<ChannelInfo> {
     const guild = await this.deps.guilds.ensure(guildId);
-    const settings = parseVoiceSettings(guild.settings, guildId);
+    const settings = await this.voiceSettings(guild.settings, guildId);
     const members = this.deps.voice.membersInChannel(channelId);
     const userLimit = this.deps.voice.userLimitOf?.(channelId) ?? 0;
     const secondary = await this.deps.secondaries.get(channelId);
@@ -2378,7 +2420,18 @@ export class VoiceFeature {
     ownerId: string | null,
   ): PanelOwnerAccess | undefined {
     if (ownerId === null) return undefined;
-    return this.deps.voice.ownerAccessOf?.(channelId, ownerId) ?? 'unknown';
+    try {
+      return this.deps.voice.ownerAccessOf?.(channelId, ownerId) ?? 'unknown';
+    } catch (err) {
+      // On the create path this sits in an argument after the room exists, outside
+      // any catch, so a throw would fail a create that already succeeded. Failing
+      // open is the same answer as a cold cache: hide nothing.
+      this.deps.logger.warn(
+        { err, secondaryId: channelId },
+        'could not resolve the room owner for the control panel',
+      );
+      return 'unknown';
+    }
   }
 
   /**
@@ -2440,7 +2493,7 @@ export class VoiceFeature {
     // Adopted standalone channels live in their own repo, not as secondaries.
     if (scope === 'adopted') return this.getManagedEditorState(guildId, channelId);
     const guild = await this.deps.guilds.ensure(guildId);
-    const settings = parseVoiceSettings(guild.settings, guildId);
+    const settings = await this.voiceSettings(guild.settings, guildId);
     const empty: EditorFieldState = { effectiveTemplate: '', preview: '' };
     const secondary = await this.deps.secondaries.get(channelId);
     if (!secondary || secondary.guildId !== guildId) {

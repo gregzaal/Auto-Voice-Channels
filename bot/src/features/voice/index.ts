@@ -1,6 +1,9 @@
 export * from './types.js';
 export * from './actions.js';
 export * from './nameTemplate.js';
+// `./types.js` extends the engine's `VoiceMember` with the one bot-only field, and
+// `./nameTemplate.js` re-exports the engine's own, so the name is claimed here.
+export type { VoiceMember } from './types.js';
 export * from './commands.js';
 export * from './handler.js';
 export * from './joinPanel.js';

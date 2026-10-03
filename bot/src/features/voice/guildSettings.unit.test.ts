@@ -280,6 +280,23 @@ describe('displayName and a restriction on Nickname', () => {
     expect(displayName(settingsWith({ nick: { users: [OWNER] } }), member([]))).toBe('Greg');
   });
 
+  /**
+   * Manage Channels or Administrator exempts a member from every rule, and the
+   * `/nick` guard lets them through on that, so the render has to agree or their
+   * `/nick` would confirm a name that no room ever shows.
+   */
+  it('keeps the nickname of a member who can manage channels, whatever names them', () => {
+    const manager = { ...member([DENIED_ROLE]), canManage: true };
+    expect(displayName(settingsWith({ nick: { roles: [DENIED_ROLE] } }), manager)).toBe('Big G');
+    expect(displayName(settingsWith({ nick: { users: [OWNER] } }), manager)).toBe('Big G');
+    // Absent and false are the same: only a snapshot that says so is exempt.
+    const plain = { ...member([DENIED_ROLE]), canManage: false };
+    expect(displayName(settingsWith({ nick: { roles: [DENIED_ROLE] } }), plain)).toBe('Greg');
+    expect(
+      displayName(settingsWith({ nick: { roles: [DENIED_ROLE] } }), member([DENIED_ROLE])),
+    ).toBe('Greg');
+  });
+
   it('only restricts Nickname, not another feature', () => {
     expect(
       displayName(settingsWith({ rename: { roles: [DENIED_ROLE] } }), member([DENIED_ROLE])),

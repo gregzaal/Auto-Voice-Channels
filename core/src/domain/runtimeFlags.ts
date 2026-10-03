@@ -58,14 +58,16 @@ export const RUNTIME_FLAGS = {
    * everybody through, and a room's panel shows every control again once it next
    * re-renders.
    *
-   * It does NOT unfreeze a restricted member's saved nickname, which stays out of
-   * room names while a rule names them: that is read on the synchronous render
-   * path, which consults no flag. Lifting the rule itself brings the name back.
+   * That includes a restricted member's saved nickname, which is the one rule
+   * enforced when a room name is rendered and not at a guard: while this is on it
+   * shows again, and a room's name catches up the next time it is re-rendered, in
+   * either direction.
    *
    * It never blocks `/restrict` itself, so an admin can still add, list and lift
    * rules while it is on, and `/restrict list` says that nothing is being
    * enforced. It also holds nothing open that was closed: the undo directions
-   * (`/public`, `/unlimit`, a limit of 0) are never restricted anyway.
+   * (`/public`, `/unlimit`, a limit of 0, `/nick reset`) are never restricted
+   * anyway.
    *
    * Reach for it when a rule is refusing people it was never meant to. A failed
    * flag read is treated as NOT disabled, matching `control_panel.disabled`: a

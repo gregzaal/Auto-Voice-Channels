@@ -7,6 +7,7 @@ import {
   type Activity,
   type Client,
   type Guild,
+  type GuildBasedChannel,
   type GuildMember,
   type VoiceBasedChannel,
   type VoiceState,
@@ -242,7 +243,34 @@ function toVoiceMember(member: GuildMember): VoiceMember {
     activities,
     roleIds: [...member.roles.cache.keys()],
     selfStreaming: member.voice?.streaming ?? false,
+    canManage: managesChannels(member),
   };
+}
+
+/**
+ * Whether a member can manage channels, which no `/restrict` rule can stop.
+ *
+ * Judged against `channel` when there is one, so Manage Channels held only
+ * through a category or room overwrite counts, which is how the command guard
+ * sees it (it reads the interaction's own channel-level permissions). Without
+ * one it is the guild-wide answer, which is all a snapshot of a member has.
+ * `permissionsFor` answers null for a member it cannot resolve, which falls
+ * back to the guild-wide answer too.
+ *
+ * Never throws, because the snapshot is built on the path of every voice state
+ * event and a throw there would drop the event. Not exempt is the answer that
+ * changes nothing else: it only means a rule that names this member applies.
+ */
+function managesChannels(member: GuildMember, channel?: GuildBasedChannel): boolean {
+  try {
+    const permissions = channel?.permissionsFor(member) ?? member.permissions;
+    return (
+      permissions.has(PermissionFlagsBits.ManageChannels) ||
+      permissions.has(PermissionFlagsBits.Administrator)
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1415,15 +1443,15 @@ export class DiscordVoiceView implements GuildVoiceView {
    * A room owner's roles and whether they can manage channels, from the cache.
    *
    * The roles are the member's own, without `@everyone` (whose id is the guild
-   * id and is in every member's `roles.cache`). `canManage` comes from the
-   * member's GUILD-level permissions, which is the closest the cache offers to
-   * what `/restrict` bypasses on. The guard itself reads the interaction's own
-   * permissions, which also include the channel's overwrites, so a member who can
-   * manage channels only through an overwrite is let through by the guard and
-   * still has the button hidden here. That errs toward hiding, and the slash
-   * command is still theirs. Cache only, and `undefined` when the room or the
-   * member is not in it, which the panel reads as "cannot say" and hides nothing
-   * for.
+   * id and is in every member's `roles.cache`). `canManage` is judged against the
+   * ROOM, so a member who has Manage Channels through the category or a room
+   * overwrite counts, as they do for the guard, which reads the interaction's own
+   * channel-level permissions. It cannot match the guard exactly: a companion
+   * text panel is clicked in a different channel from the room, and that
+   * channel's overwrites are the ones the guard sees. The click-time guard is the
+   * authority, this only decides which buttons are drawn. Cache only, and
+   * `undefined` when the room or the member is not in it, which the panel reads
+   * as "cannot say" and hides nothing for.
    */
   ownerAccessOf(channelId: string, ownerId: string): CommandCaller | undefined {
     const channel = this.client.channels.cache.get(channelId);
@@ -1434,9 +1462,7 @@ export class DiscordVoiceView implements GuildVoiceView {
     return {
       userId: ownerId,
       roleIds: [...member.roles.cache.keys()].filter((id) => id !== guild.id),
-      canManage:
-        member.permissions.has(PermissionFlagsBits.ManageChannels) ||
-        member.permissions.has(PermissionFlagsBits.Administrator),
+      canManage: managesChannels(member, channel),
     };
   }
 

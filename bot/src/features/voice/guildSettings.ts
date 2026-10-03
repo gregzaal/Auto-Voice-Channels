@@ -260,22 +260,30 @@ export function readTimeZone(settings: Record<string, unknown>): string | undefi
  * room name, which is the thing the rule was written to stop. The saved name is
  * kept rather than cleared, so lifting the rule (or the lever) brings it back.
  *
- * `roleIds` is the member's roles as the voice snapshot carries them, and may
- * include the guild id: the rules never hold it, so it cannot match. Absent,
- * which is the original creator of a room who has left, means nobody can say what
- * they hold, so only a rule naming the person applies, the direction that fails
- * open. `canManage` is false because a render has no permission data: a member
- * with Manage Channels can still set a nickname (the guard lets them) that then
- * does not render while a rule names them, and `/restrict add` refuses to name
- * such a member in the first place.
+ * `roleIds` and `canManage` are the member's, as the voice snapshot carries
+ * them, so a render and the `/nick` guard agree: a member who can manage
+ * channels is never restricted, so their nickname shows whatever role a rule
+ * names. `roleIds` may include the guild id, which the rules never hold, so it
+ * cannot match. Absent, for a member nobody could resolve (the original creator
+ * of a room, who has left and is not cached), means nobody can say what they
+ * hold, so only a rule naming the person applies, the direction that fails open.
  */
 export function displayName(
   settings: VoiceSettings,
-  member: { id: string; displayName: string; roleIds?: readonly string[] | undefined },
+  member: {
+    id: string;
+    displayName: string;
+    roleIds?: readonly string[] | undefined;
+    canManage?: boolean | undefined;
+  },
 ): string {
   const nick = settings.customNicks[member.id];
   if (nick === undefined) return member.displayName;
-  const caller = { userId: member.id, roleIds: member.roleIds ?? [], canManage: false };
+  const caller = {
+    userId: member.id,
+    roleIds: member.roleIds ?? [],
+    canManage: member.canManage === true,
+  };
   return mayUse('nick', caller, settings.commandAccess) ? nick : member.displayName;
 }
 

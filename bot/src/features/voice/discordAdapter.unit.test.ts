@@ -39,13 +39,14 @@ function apiError(code: number): DiscordAPIError {
   );
 }
 
-const fakeMember = (id = 'u1'): GuildMember =>
+const fakeMember = (id = 'u1', permissions = 0n): GuildMember =>
   ({
     id,
     displayName: 'Greg',
     user: { bot: false },
     presence: null,
     roles: { cache: new Map() },
+    permissions: new PermissionsBitField(permissions),
     voice: { streaming: false },
   }) as unknown as GuildMember;
 
@@ -82,6 +83,32 @@ describe('normalizeVoiceState', () => {
       afterChannelId: 'b',
       member: { id: 'u1', displayName: 'Greg', bot: false },
     });
+  });
+
+  /**
+   * Whether a rule can apply to them rides in the snapshot, because a saved
+   * nickname is judged at render time, where only the snapshot is in hand.
+   */
+  it('records whether the member can manage channels, which no restriction can stop', () => {
+    const memberOf = (permissions: bigint) =>
+      normalizeVoiceState(
+        voiceState({ channelId: null }),
+        voiceState({ channelId: 'b', member: fakeMember('u1', permissions) }),
+      )!.member;
+    expect(memberOf(MANAGE).canManage).toBe(true);
+    expect(memberOf(PermissionFlagsBits.Administrator).canManage).toBe(true);
+    expect(memberOf(VIEW).canManage).toBe(false);
+    expect(memberOf(0n).canManage).toBe(false);
+  });
+
+  /** This runs for every voice state event, so a member it cannot read must not drop one. */
+  it('still maps the event, as not exempt, when the member permissions cannot be read', () => {
+    const unreadable = { ...fakeMember(), permissions: undefined } as unknown as GuildMember;
+    const event = normalizeVoiceState(
+      voiceState({ channelId: null }),
+      voiceState({ channelId: 'b', member: unreadable }),
+    );
+    expect(event?.member).toMatchObject({ id: 'u1', canManage: false });
   });
 
   it('omits a channel id that is null (join-only / leave-only)', () => {
@@ -1277,9 +1304,23 @@ describe('DiscordVoiceView.ownerAccessOf', () => {
     roles: { cache: new Map(roleIds.map((id) => [id, {}])) },
     permissions: new PermissionsBitField(permissions),
   });
-  const viewWith = (members: Record<string, unknown>) => {
+  // `roomPermissions` is what the room's own overwrites give a member, which is
+  // what `GuildChannel.permissionsFor` answers and which can differ from the
+  // member's guild-wide permissions. It answers null for a member it cannot resolve.
+  const viewWith = (
+    members: Record<string, unknown>,
+    roomPermissions: (id: string) => bigint | null = () => null,
+  ) => {
     const guild = { id: GUILD, members: { cache: new Map(Object.entries(members)) } };
-    const cache = new Map<string, unknown>([['room', { id: 'room', guild }]]);
+    const room = {
+      id: 'room',
+      guild,
+      permissionsFor: (m: { id: string }) => {
+        const bits = roomPermissions(m.id);
+        return bits === null ? null : new PermissionsBitField(bits);
+      },
+    };
+    const cache = new Map<string, unknown>([['room', room]]);
     return new DiscordVoiceView({ channels: { cache } } as unknown as Client);
   };
 
@@ -1304,6 +1345,29 @@ describe('DiscordVoiceView.ownerAccessOf', () => {
     });
     expect(v.ownerAccessOf('room', 'mod')!.canManage).toBe(true);
     expect(v.ownerAccessOf('room', 'admin')!.canManage).toBe(true);
+  });
+
+  /**
+   * A moderator whose Manage Channels comes from the voice category or a room
+   * overwrite has it only at channel level, and the command guard (which reads the
+   * interaction's own channel-level permissions) lets them through, so the panel
+   * has to agree and keep their buttons.
+   */
+  it('counts Manage Channels held only through the room, as the guard does', () => {
+    const v = viewWith(
+      {
+        mod: { id: 'mod', ...member([GUILD], VIEW) },
+        plain: { id: 'plain', ...member([GUILD], VIEW) },
+      },
+      (id) => (id === 'mod' ? MANAGE : VIEW),
+    );
+    expect(v.ownerAccessOf('room', 'mod')!.canManage).toBe(true);
+    expect(v.ownerAccessOf('room', 'plain')!.canManage).toBe(false);
+  });
+
+  it('falls back to the guild-wide permissions when the room cannot resolve the member', () => {
+    const v = viewWith({ mod: { id: 'mod', ...member([GUILD], MANAGE) } }, () => null);
+    expect(v.ownerAccessOf('room', 'mod')!.canManage).toBe(true);
   });
 
   it('answers undefined, which the panel reads as "cannot say", when it cannot find them', () => {

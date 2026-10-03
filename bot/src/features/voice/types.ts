@@ -10,10 +10,26 @@
  * re-exported here. Everything below this line is bot-only: it depends on a
  * live discord.js cache, which `core` deliberately knows nothing about.
  */
-export type { MemberActivity, VoiceMember } from '@avc/core/template';
+export type { MemberActivity } from '@avc/core/template';
 
-import type { VoiceMember } from '@avc/core/template';
+import type { VoiceMember as TemplateVoiceMember } from '@avc/core/template';
 import type { CommandCaller } from './commandAccess.js';
+
+/**
+ * The engine's member, plus the one fact about them the bot needs and the engine
+ * must not know: whether `/restrict` can apply to them.
+ *
+ * Declared here and not in `core`, which would put a moderation concept into the
+ * template engine's input that the marketing site's demos then have to carry.
+ */
+export interface VoiceMember extends TemplateVoiceMember {
+  /**
+   * Manage Channels or Administrator in the guild, which no restriction can stop.
+   * Absent reads as false: a snapshot that was not built from a live member
+   * cannot show they are exempt, so a rule that names them applies.
+   */
+  canManage?: boolean;
+}
 
 export interface VoiceChannelView {
   id: string;
