@@ -163,4 +163,99 @@ describe('AutoChannelRepository (integration)', () => {
       expect(row!.updatedAt.getTime()).toBeGreaterThan(before.updatedAt.getTime());
     });
   });
+
+  describe('setRememberPrefs', () => {
+    it('turns the switch on, and off by removing the key rather than storing false', async () => {
+      await repo.upsert(GUILD, CHANNEL, { name: 'Room ##' });
+
+      const on = await repo.setRememberPrefs(GUILD, CHANNEL, true);
+      expect(on?.template).toEqual({ name: 'Room ##', rememberPrefs: true });
+
+      const off = await repo.setRememberPrefs(GUILD, CHANNEL, false);
+      expect(off?.template).toEqual({ name: 'Room ##' });
+      expect(off!.template).not.toHaveProperty('rememberPrefs');
+      // The row as read back agrees with the row the write returned.
+      expect((await repo.get(CHANNEL))!.template).toEqual(off!.template);
+    });
+
+    it('is idempotent in both directions, so a double click or a retry changes nothing', async () => {
+      await repo.upsert(GUILD, CHANNEL, { name: 'Room ##' });
+      for (let i = 0; i < 3; i++) {
+        expect((await repo.setRememberPrefs(GUILD, CHANNEL, true))!.template).toEqual({
+          name: 'Room ##',
+          rememberPrefs: true,
+        });
+      }
+      for (let i = 0; i < 3; i++) {
+        expect((await repo.setRememberPrefs(GUILD, CHANNEL, false))!.template).toEqual({
+          name: 'Room ##',
+        });
+      }
+    });
+
+    it('leaves every other field alone, including one this build does not know', async () => {
+      await repo.upsert(GUILD, CHANNEL, {
+        name: 'Room ##',
+        status: 'Playing',
+        limit: 4,
+        startAt: 3,
+        above: true,
+        defaultPrivate: true,
+        defaultHidden: true,
+        inheritperms: 'category',
+        textChannel: true,
+        someFutureField: { nested: [1, 2] },
+      });
+      const kept = {
+        name: 'Room ##',
+        status: 'Playing',
+        limit: 4,
+        startAt: 3,
+        above: true,
+        defaultPrivate: true,
+        defaultHidden: true,
+        inheritperms: 'category',
+        textChannel: true,
+        someFutureField: { nested: [1, 2] },
+      };
+      expect((await repo.setRememberPrefs(GUILD, CHANNEL, true))!.template).toEqual({
+        ...kept,
+        rememberPrefs: true,
+      });
+      expect((await repo.setRememberPrefs(GUILD, CHANNEL, false))!.template).toEqual(kept);
+    });
+
+    /**
+     * The defect a read-then-upsert toggle has, and the reason this is one statement: a
+     * `/template` edit that lands between the toggle's read and its write is undone.
+     */
+    it('keeps an edit made after the template was read', async () => {
+      await repo.upsert(GUILD, CHANNEL, { name: 'Old name', limit: 2 });
+      const stale = await repo.get(CHANNEL);
+      expect(stale?.template.name).toBe('Old name');
+
+      await repo.upsert(GUILD, CHANNEL, { name: 'New name', limit: 9 });
+      const row = await repo.setRememberPrefs(GUILD, CHANNEL, true);
+
+      expect(row!.template).toEqual({ name: 'New name', limit: 9, rememberPrefs: true });
+    });
+
+    it('does not touch a creator channel of another guild, or another fleet', async () => {
+      await repo.upsert(GUILD, CHANNEL, { name: 'Room ##' });
+      const beta = new AutoChannelRepository(env.handle.db, 'beta');
+
+      expect(await repo.setRememberPrefs(OTHER_GUILD, CHANNEL, true)).toBeUndefined();
+      expect(await beta.setRememberPrefs(GUILD, CHANNEL, true)).toBeUndefined();
+      expect(await repo.setRememberPrefs(GUILD, 'nope', true)).toBeUndefined();
+
+      expect((await repo.get(CHANNEL))!.template).toEqual({ name: 'Room ##' });
+    });
+
+    it('moves updatedAt, which the import differ and the audit read', async () => {
+      const before = await repo.upsert(GUILD, CHANNEL, { name: 'Room ##' });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const row = await repo.setRememberPrefs(GUILD, CHANNEL, true);
+      expect(row!.updatedAt.getTime()).toBeGreaterThan(before.updatedAt.getTime());
+    });
+  });
 });

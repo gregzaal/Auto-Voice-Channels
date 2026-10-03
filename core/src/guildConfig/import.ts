@@ -361,6 +361,7 @@ export const PRIMARY_FIELDS = [
   'defaultHidden',
   'inheritperms',
   'textChannel',
+  'rememberPrefs',
 ] as const;
 
 /** Both fields of `managedTemplateSchema`. */
@@ -1561,6 +1562,7 @@ function validateTemplateField(
     case 'defaultPrivate':
     case 'defaultHidden':
     case 'textChannel':
+    case 'rememberPrefs':
       return typeof value === 'boolean' ? value : drop();
     case 'inheritperms': {
       if (typeof value !== 'string') return drop();

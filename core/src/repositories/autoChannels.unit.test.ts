@@ -26,3 +26,14 @@ describe('startModeOf', () => {
     expect(startModeOf(template)).toBe('hidden');
   });
 });
+
+describe('rememberPrefs on the stored template', () => {
+  it('is an optional boolean that survives a parse, and a creator channel without it parses', () => {
+    expect(primaryTemplateSchema.parse({ rememberPrefs: true }).rememberPrefs).toBe(true);
+    expect(primaryTemplateSchema.parse({ name: 'Room ##' }).rememberPrefs).toBeUndefined();
+  });
+
+  it('refuses a value that is not a boolean, which only a hand edit could store', () => {
+    expect(primaryTemplateSchema.safeParse({ rememberPrefs: 'yes' }).success).toBe(false);
+  });
+});

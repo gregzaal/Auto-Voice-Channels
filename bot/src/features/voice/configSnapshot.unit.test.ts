@@ -301,6 +301,26 @@ describe('the round trip', () => {
     expect(restored.creatorChannels[0]!.template).toEqual(before.creatorChannels[0]!.template);
   });
 
+  /**
+   * The switch for remembered room settings travels with the creator channel it belongs to,
+   * so restoring a guild from its own file keeps it on. What members saved is not in the
+   * file, and that is on purpose: the snapshot is an admin's configuration, not a copy of
+   * other people's choices.
+   */
+  it('carries a remembering creator channel through the file and back', () => {
+    const before = configured();
+    before.creatorChannels[0]!.template = { name: '@@game_name@@ ##', rememberPrefs: true };
+    const file = buildExportFile(before, options());
+    expect(file.creator_channels[0]!.template).toMatchObject({ rememberPrefs: true });
+    const restored = apply(empty(), planFor(before, empty()));
+    expect(restored.creatorChannels[0]!.template).toEqual(before.creatorChannels[0]!.template);
+  });
+
+  it('writes null for the switch on a creator channel that never turned it on', () => {
+    const file = buildExportFile(configured(), options());
+    expect(file.creator_channels[0]!.template.rememberPrefs).toBeNull();
+  });
+
   it('survives two round trips unchanged', () => {
     const once = buildExportFile(configured(), options());
     const parsed = parseNativeFile(JSON.parse(serializeGuildConfig(once)));

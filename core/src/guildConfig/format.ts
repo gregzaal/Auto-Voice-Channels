@@ -218,6 +218,11 @@ export const exportedPrimaryTemplateSchema = z
     defaultHidden: z.boolean().nullable().optional(),
     inheritperms: z.string().nullable(),
     textChannel: z.boolean().nullable(),
+    /**
+     * Optional as well as nullable, for the reason given on `defaultHidden`. This is the
+     * switch only: what members saved is a table of its own and is not exported.
+     */
+    rememberPrefs: z.boolean().nullable().optional(),
   })
   .passthrough();
 

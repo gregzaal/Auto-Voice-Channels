@@ -213,6 +213,31 @@ describe('parseNativeFile', () => {
     expect(result.ok, result.ok ? '' : result.reason).toBe(true);
   });
 
+  /**
+   * And again for `rememberPrefs`, which arrived after `defaultHidden`: a file written by
+   * the release before it has the first of the two and not the second.
+   */
+  it('accepts a creator channel template written before rememberPrefs existed', () => {
+    const fromPreviousRelease = {
+      name: 'Room ##',
+      status: null,
+      limit: null,
+      startAt: null,
+      above: null,
+      defaultPrivate: true,
+      defaultHidden: true,
+      inheritperms: null,
+      textChannel: null,
+    };
+    const file = nativeFile({
+      creator_channels: [
+        { channel_id: CREATOR, channel_name: null, template: fromPreviousRelease },
+      ],
+    });
+    const result = parseNativeFile(JSON.parse(JSON.stringify(file)));
+    expect(result.ok, result.ok ? '' : result.reason).toBe(true);
+  });
+
   /** A reason may name the path and the problem. It may never carry a value. */
   it('never puts a file value in the failure reason', () => {
     const file = nativeFile() as unknown as Record<string, Record<string, unknown>>;
@@ -830,6 +855,82 @@ describe('diffGuildConfig: creator channels', () => {
     });
   });
 
+  /**
+   * The switch for remembered room settings is configuration and travels with the creator
+   * channel. What members saved is a table of its own and is not in the file at all.
+   */
+  describe('rememberPrefs', () => {
+    it('is carried, and a re-import of the same file changes nothing', () => {
+      const file = nativeFile({
+        creator_channels: [creatorEntry({ rememberPrefs: true })] as never,
+      });
+      const plan = planOf(file);
+      expect(plan.creatorWrites[0]?.template).toEqual({
+        name: 'Room ##',
+        limit: 4,
+        rememberPrefs: true,
+      });
+      const again = planOf(
+        file,
+        currentConfig({
+          creatorChannels: [{ channelId: CREATOR, template: plan.creatorWrites[0]!.template }],
+        }),
+      );
+      expect(again.creatorWrites).toEqual([]);
+      expect(again.changed).toBe(false);
+    });
+
+    it('is dropped with a note when it is not a boolean, and the rest of the template stays', () => {
+      const plan = planOf(
+        nativeFile({ creator_channels: [creatorEntry({ rememberPrefs: 'yes' })] as never }),
+      );
+      expect(plan.creatorWrites[0]?.template).toEqual({ name: 'Room ##', limit: 4 });
+      expect(plan.notes).toContainEqual(
+        expect.objectContaining({
+          code: 'template_field_invalid',
+          subject: `${CREATOR}.rememberPrefs`,
+        }),
+      );
+    });
+
+    /** `null` on the wire means the key is absent from the stored blob, so it clears. */
+    it('is cleared by a null, which is how a file says the key is absent', () => {
+      const plan = planOf(
+        nativeFile({ creator_channels: [creatorEntry({ rememberPrefs: null })] as never }),
+        currentConfig({
+          creatorChannels: [
+            { channelId: CREATOR, template: { name: 'Room ##', limit: 4, rememberPrefs: true } },
+          ],
+        }),
+      );
+      expect(plan.creatorWrites[0]?.template).toEqual({ name: 'Room ##', limit: 4 });
+      expect(plan.creatorChanges[0]?.fields).toContainEqual(
+        expect.objectContaining({ field: 'rememberPrefs', before: true, after: undefined }),
+      );
+    });
+
+    /**
+     * A native import replaces the whole template, so a file that does not carry the key,
+     * which is every file written before it existed, turns it off. The preview lists it as a
+     * change, and what members saved is untouched. Pinned so the docs that say so stay true.
+     */
+    it('is turned off by a file that omits it, and the preview says so', () => {
+      // The default fixture carries no `rememberPrefs`, as a file from before it existed does not.
+      const plan = planOf(
+        nativeFile({ creator_channels: [creatorEntry()] as never }),
+        currentConfig({
+          creatorChannels: [
+            { channelId: CREATOR, template: { name: 'Room ##', limit: 4, rememberPrefs: true } },
+          ],
+        }),
+      );
+      expect(plan.creatorWrites[0]?.template).toEqual({ name: 'Room ##', limit: 4 });
+      expect(plan.creatorChanges[0]?.fields).toContainEqual(
+        expect.objectContaining({ field: 'rememberPrefs', before: true }),
+      );
+    });
+  });
+
   it('drops an inheritperms id that does not resolve, and keeps the two keywords', () => {
     const bad = planOf(
       nativeFile({
@@ -905,9 +1006,10 @@ describe('diffGuildConfig: legacy templates', () => {
    * silently clear the voice-status template and `/alwaysprivate` on every
    * creator channel the file names. Days later, with no way to tell why. `defaultHidden`
    * is held to the same rule: a hidden creator channel that a legacy import turned into a
-   * locked one would show every room's name in the channel list again.
+   * locked one would show every room's name in the channel list again. So is `rememberPrefs`,
+   * which a legacy file cannot say either, and which would otherwise be switched off quietly.
    */
-  it('leaves status, defaultPrivate and defaultHidden alone, because the legacy format cannot express them', () => {
+  it('leaves status, defaultPrivate, defaultHidden and rememberPrefs alone, because the legacy format cannot express them', () => {
     const incoming = fromLegacyPlan(
       {
         settings: {},
@@ -929,6 +1031,7 @@ describe('diffGuildConfig: legacy templates', () => {
               status: 'Playing @@game_name@@',
               defaultPrivate: true,
               defaultHidden: true,
+              rememberPrefs: true,
             },
           },
         ],
@@ -942,6 +1045,7 @@ describe('diffGuildConfig: legacy templates', () => {
       status: 'Playing @@game_name@@',
       defaultPrivate: true,
       defaultHidden: true,
+      rememberPrefs: true,
       above: true,
     });
   });

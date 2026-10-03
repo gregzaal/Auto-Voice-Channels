@@ -108,6 +108,7 @@ export function buildExportFile(
         defaultHidden: pick(row.template, 'defaultHidden'),
         inheritperms: pick(row.template, 'inheritperms'),
         textChannel: pick(row.template, 'textChannel'),
+        rememberPrefs: pick(row.template, 'rememberPrefs'),
         // Unknown keys carried through, for the rolling-deploy case above.
         ...unknownKeys(row.template, [
           'name',
@@ -119,6 +120,7 @@ export function buildExportFile(
           'defaultHidden',
           'inheritperms',
           'textChannel',
+          'rememberPrefs',
         ]),
       }),
     })),

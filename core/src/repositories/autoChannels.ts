@@ -69,6 +69,20 @@ export const primaryTemplateSchema = z
      * guild pays the category-slot cost only where it asked for it.
      */
     textChannel: z.boolean().optional(),
+    /**
+     * When `true`, a member who comes back to this creator channel gets a room that starts with
+     * the name, size and privacy they chose last time, instead of the server defaults. Off when
+     * absent. Toggled from this creator channel's `/template` editor.
+     *
+     * **Only the switch lives here.** What members saved is `member_room_prefs`, which is not
+     * part of this template and so is neither exported nor imported. Turning the switch off
+     * keeps those rows, dormant, and a save is refused for a creator channel that does not
+     * remember (see `MemberRoomPrefsRepository`).
+     *
+     * A native `/import` replaces the whole template, so a file that does not carry the key,
+     * which is every file written before it existed, turns this off. The saved rows wait.
+     */
+    rememberPrefs: z.boolean().optional(),
   })
   .passthrough();
 
@@ -297,6 +311,39 @@ export class AutoChannelRepository {
         : mode === 'locked'
           ? sql`(${autoChannels.template} - 'defaultHidden') || '{"defaultPrivate":true}'::jsonb`
           : sql`${autoChannels.template} || '{"defaultPrivate":true,"defaultHidden":true}'::jsonb`;
+    const [row] = await this.db
+      .update(autoChannels)
+      .set({ template, updatedAt: new Date() })
+      .where(
+        this.scoped(and(eq(autoChannels.guildId, guildId), eq(autoChannels.channelId, channelId))),
+      )
+      .returning();
+    return row ? autoChannelRowSchema.parse(row) : undefined;
+  }
+
+  /**
+   * Turns remembered room settings on or off for one creator channel, leaving every other
+   * template field alone.
+   *
+   * One DB-side statement, for the reason {@link setDefaultPrivacy} is: {@link upsert}
+   * replaces `template` wholesale, so a toggle that read the row and wrote it back lost a
+   * `/template` edit made between its read and its write. On sets the key, and off removes it
+   * rather than storing `false`, so a creator channel that never remembered stays lean and an
+   * export of it carries nothing new. Neither direction touches what members saved: those rows
+   * are another table, and turning this off keeps them dormant.
+   *
+   * Idempotent, so a double click or a retry ends in the same state. Guild- and fleet-bound
+   * like every other write here, and returns the row as stored afterwards, or `undefined` when
+   * this guild has no such creator channel on this fleet.
+   */
+  async setRememberPrefs(
+    guildId: string,
+    channelId: string,
+    enabled: boolean,
+  ): Promise<AutoChannelRow | undefined> {
+    const template = enabled
+      ? sql`${autoChannels.template} || '{"rememberPrefs":true}'::jsonb`
+      : sql`${autoChannels.template} - 'rememberPrefs'`;
     const [row] = await this.db
       .update(autoChannels)
       .set({ template, updatedAt: new Date() })
