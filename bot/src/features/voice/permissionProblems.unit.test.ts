@@ -125,6 +125,33 @@ describe('permissionProblemMessage', () => {
     expect(msg).not.toContain('granting something I do not have');
   });
 
+  it('sends an access change that did not apply to Manage Roles, not the general access advice', () => {
+    const msg = permissionProblemMessage('123', 'access');
+    expect(msg).toContain('<#123>');
+    expect(msg).toContain('who can see or join');
+    expect(msg).toContain('Manage Roles');
+    expect(msg).toContain('The room itself is working');
+    // The room is fine, so neither the create copy nor the lost-access copy is true.
+    expect(msg).not.toContain('lost access');
+    expect(msg).not.toContain('could not create');
+    expect(msg).not.toContain('Manage Channels');
+  });
+
+  /**
+   * The default used to be spelled 'access', which collided with the operation of
+   * that name once it existed. No operation is still the lost-access message.
+   */
+  it('keeps no operation, and the operations with no branch of their own, as lost access', () => {
+    for (const msg of [
+      permissionProblemMessage('123'),
+      permissionProblemMessage('123', 'delete'),
+      permissionProblemMessage('123', 'rename'),
+    ]) {
+      expect(msg).toContain('I have lost access to it');
+      expect(msg).not.toContain('who can see or join');
+    }
+  });
+
   it('sends privacy failures to Manage Roles, not the general access advice', () => {
     const msg = permissionProblemMessage('123', 'privacy');
     expect(msg).toContain('made a room');
@@ -135,7 +162,7 @@ describe('permissionProblemMessage', () => {
 
 const problem = (
   channelId: string,
-  operation: 'create' | 'delete' | 'move' | 'privacy' = 'delete',
+  operation: 'create' | 'delete' | 'move' | 'privacy' | 'access' = 'delete',
 ) => ({
   channelId,
   operation,
@@ -185,6 +212,33 @@ describe('permissionProblemSummary', () => {
     expect(line).not.toContain('could not create');
     expect(line).not.toContain('Move Members');
     expect(line).toContain('Manage Roles');
+  });
+
+  /**
+   * The summary's NEGATIVE filter again: an operation left out of it renders as
+   * lost access, which claims the bot has given up on a room it is managing and
+   * names four permissions that have nothing to do with a hide that did not apply.
+   */
+  it('never describes an access change that did not apply as lost access', () => {
+    const lines = permissionProblemSummary([problem('a', 'access')]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('could not change who can see or join <#a>');
+    expect(lines[0]).toContain('Manage Roles');
+    expect(lines[0]).toContain('The rooms are working');
+    expect(lines[0]).not.toContain('lost access');
+    expect(lines[0]).not.toContain('stopped managing');
+    expect(lines[0]).not.toContain('could not create');
+  });
+
+  it('keeps access changes on their own line, ahead of lost access', () => {
+    const lines = permissionProblemSummary([
+      problem('a', 'create'),
+      problem('b'),
+      problem('c', 'access'),
+    ]);
+    expect(lines).toHaveLength(3);
+    expect(lines[1]).toContain('who can see or join <#c>');
+    expect(lines[2]).toContain('lost access to <#b>');
   });
 
   it('keeps privacy failures on their own line alongside the others', () => {
@@ -266,6 +320,7 @@ describe('copy rules', () => {
     permissionProblemMessage('123', 'panel'),
     permissionProblemMessage('123', 'companion'),
     permissionProblemMessage('123', 'companion_role'),
+    permissionProblemMessage('123', 'access'),
     ...permissionProblemSummary([
       problem('a', 'create'),
       problem('b'),
@@ -273,6 +328,7 @@ describe('copy rules', () => {
       problem('d', 'move'),
       problem('e', 'privacy'),
       problem('f', 'panel'),
+      problem('g', 'access'),
     ]),
     ...permissionProblemSummary(Array.from({ length: 9 }, (_, i) => problem(`c${i}`, 'create'))),
     problemNoticeBody(permissionProblemSummary([problem('a', 'create')]), 1, 'contact'),

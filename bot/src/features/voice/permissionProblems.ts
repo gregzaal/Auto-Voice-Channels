@@ -17,7 +17,12 @@ export type PermissionOperation =
   | 'companion'
   | 'companion_role'
   /** A room was made but its control panel could not be posted into the chat. */
-  | 'panel';
+  | 'panel'
+  /**
+   * Who can see or join a room could not be changed: hiding it, or applying a saved
+   * list. Not "lost access", which is the catch-all for every operation not named.
+   */
+  | 'access';
 
 export interface PermissionProblem {
   channelId: string;
@@ -193,7 +198,10 @@ export class PermissionProblemTracker {
  */
 export function permissionProblemMessage(
   channelId: string,
-  operation: PermissionOperation | 'access' = 'access',
+  // No operation, or one with no branch of its own (`delete`, `rename`), is the
+  // lost-access message. That used to be spelled `'access'`, which is now an
+  // operation in its own right.
+  operation?: PermissionOperation,
 ): string {
   if (operation === 'create') {
     return (
@@ -248,6 +256,20 @@ export function permissionProblemMessage(
       'my role. The rooms themselves are working and every button has a command that still ' +
       'works, so this only costs the shortcut. Turn the buttons off with `/controlpanel` if you ' +
       'would rather not see this.'
+    );
+  }
+  if (operation === 'access') {
+    /**
+     * The room itself is fine, so neither the create nor the lost-access copy is
+     * true here. What is not in effect is the part that decides who may see or
+     * join it, which is worth saying plainly: a block or a hide that did not apply
+     * is not a cosmetic failure.
+     */
+    return (
+      `⚠️ I could not change who can see or join <#${channelId}>. I need **Manage Roles** (to ` +
+      'set permission overrides) on the category the rooms are made in, or on my role. The room ' +
+      'itself is working, but hiding it, saved blocks and saved trusted members may not be in ' +
+      'effect until this is fixed.'
     );
   }
   if (operation === 'companion') {
@@ -312,6 +334,7 @@ export function permissionProblemSummary(problems: readonly ProblemLike[]): stri
   const companions = problems.filter((p) => p.operation === 'companion');
   const companionRoles = problems.filter((p) => p.operation === 'companion_role');
   const panels = problems.filter((p) => p.operation === 'panel');
+  const accessChanges = problems.filter((p) => p.operation === 'access');
   /**
    * The catch-all, and the reason every operation above has to be named here
    * too: this is a NEGATIVE filter, so an operation left out of it renders as
@@ -326,7 +349,8 @@ export function permissionProblemSummary(problems: readonly ProblemLike[]): stri
       p.operation !== 'privacy' &&
       p.operation !== 'companion' &&
       p.operation !== 'companion_role' &&
-      p.operation !== 'panel',
+      p.operation !== 'panel' &&
+      p.operation !== 'access',
   );
   const lines: string[] = [];
   if (creates.length > 0) {
@@ -398,6 +422,19 @@ export function permissionProblemSummary(problems: readonly ProblemLike[]): stri
         'need **Send Messages** and **Embed Links** on the category the rooms are made in, or ' +
         'on my role. The rooms are working, and every button has a command that still works. ' +
         'Turn the buttons off with `/controlpanel` if you would rather not see this.',
+    );
+  }
+  /**
+   * Its own line: the rooms are made and working, and only the part that decides
+   * who may see or join one did not apply. The permission is not one the other
+   * lines name, and "stopped managing it" would be false.
+   */
+  if (accessChanges.length > 0) {
+    lines.push(
+      `I could not change who can see or join ${list(accessChanges)}. I need **Manage Roles** ` +
+        '(to set permission overrides) on the category the rooms are made in, or on my role. ' +
+        'The rooms are working, but hiding a room, saved blocks and saved trusted members may ' +
+        'not be in effect until this is fixed.',
     );
   }
   if (access.length > 0) {

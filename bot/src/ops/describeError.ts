@@ -13,8 +13,12 @@ const DISCORD_CODE_HINTS: Record<number, string> = {
   10003: 'that channel no longer exists',
   10007: 'that member is no longer in the server',
   10008: 'that message no longer exists',
+  // Also what a permission write answers for a role that has been deleted.
+  10009: 'that permission override, or the role it names, no longer exists',
   10013: 'that user no longer exists',
   30013: "this server has hit Discord's channel limit",
+  30060: "this room has hit Discord's limit of 1000 permission overrides",
+  40032: 'that member is not connected to voice',
   50001: "I don't have access to that resource",
   50013: "I'm missing the permissions Discord needs for that",
   50035: 'Discord rejected the request as invalid',

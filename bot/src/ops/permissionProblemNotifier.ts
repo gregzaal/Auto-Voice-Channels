@@ -403,9 +403,14 @@ export class PermissionProblemNotifier {
      * they asked for this, recently, by name.
      */
     const mentionId = mode === 'contact' ? contactId.mentionable : null;
+    // A NEGATIVE filter: an operation left out of it opens the notice with "has
+    // stopped working here", which is false for every one the rooms survive.
     const blocking = problems.some(
       (p) =>
-        p.operation !== 'companion' && p.operation !== 'companion_role' && p.operation !== 'panel',
+        p.operation !== 'companion' &&
+        p.operation !== 'companion_role' &&
+        p.operation !== 'panel' &&
+        p.operation !== 'access',
     );
     const body = problemNoticeBody(permissionProblemSummary(problems), sends, mode, blocking);
 

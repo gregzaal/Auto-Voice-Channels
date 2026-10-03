@@ -20,6 +20,27 @@ describe('describeError', () => {
     expect(out).toContain('Discord error 50013: Missing Permissions');
   });
 
+  /**
+   * The three an overwrite write can answer that nothing read before. Each had no
+   * hint, so a failed hide surfaced as a bare code.
+   */
+  it.each([
+    [40032, 'Target user is not connected to voice', 'that member is not connected to voice'],
+    [10009, 'Unknown Overwrite', 'permission override'],
+    [30060, 'Maximum number of permission overwrites reached', '1000 permission overrides'],
+  ])('gives %i a plain hint and still carries the technical detail', (code, message, hint) => {
+    const out = describeError(apiError(code, message));
+    expect(out).toContain(hint);
+    expect(out).toContain(`Discord error ${code}: ${message}`);
+  });
+
+  it('writes the new hints without dashes, semicolons or curly quotes', () => {
+    for (const code of [40032, 10009, 30060]) {
+      const out = describeError(apiError(code, 'x'));
+      expect(out).not.toMatch(/[—–;‘’“”]/);
+    }
+  });
+
   it('falls back to the raw Discord detail for an unmapped code', () => {
     const out = describeError(apiError(40001, 'Unauthorized'));
     expect(out).toBe('Discord error 40001: Unauthorized');

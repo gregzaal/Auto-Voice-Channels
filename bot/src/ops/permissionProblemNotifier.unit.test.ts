@@ -146,7 +146,7 @@ function harness(
     advance: (ms: number) => {
       clock += ms;
     },
-    break: (channelId: string, operation: 'create' | 'delete' = 'create') =>
+    break: (channelId: string, operation: 'create' | 'delete' | 'access' = 'create') =>
       problems.record(GUILD, { channelId, operation, at: clock }),
   };
 }
@@ -441,6 +441,34 @@ describe('PermissionProblemNotifier aggregation', () => {
     h.break('creator-3');
     // Three incidents in one guild, one pending timer, so one message.
     expect(h.notifier.snapshot()['pending']).toBe(1);
+  });
+});
+
+describe('PermissionProblemNotifier headline', () => {
+  /**
+   * `blocking` is a negative filter: an operation left out of it opens the notice
+   * with "has stopped working here", which for a hide or a saved list that did not
+   * apply is false and contradicts the line printed under it.
+   */
+  it('does not say AVC has stopped working for an access change that did not apply', async () => {
+    const h = harness();
+    h.break('room-1', 'access');
+    await h.notifier.send(GUILD);
+
+    const body = h.sent[0]!.content;
+    expect(body).toContain('Your rooms are working');
+    expect(body).not.toContain('stopped working');
+    expect(body).toContain('could not change who can see or join <#room-1>');
+    expect(body).not.toContain('lost access');
+  });
+
+  it('still says it when something alongside the access change did stop it', async () => {
+    const h = harness();
+    h.break('room-1', 'access');
+    h.break('creator-1', 'create');
+    await h.notifier.send(GUILD);
+
+    expect(h.sent[0]!.content).toContain('has stopped working here');
   });
 });
 
