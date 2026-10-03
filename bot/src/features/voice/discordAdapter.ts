@@ -34,8 +34,10 @@ import type {
 } from './actions.js';
 import type { CommandCaller } from './commandAccess.js';
 import type {
+  BotRoleAccess,
   GuildVoiceView,
   MemberActivity,
+  MemberFacts,
   VoiceChannelProperties,
   VoiceMember,
   VoiceStateEvent,
@@ -1858,6 +1860,51 @@ export class DiscordVoiceView implements GuildVoiceView {
       userId: ownerId,
       roleIds: [...member.roles.cache.keys()].filter((id) => id !== guild.id),
       canManage: managesChannels(member, channel),
+    };
+  }
+
+  /**
+   * Whether a member is a bot, an Administrator or the server's owner, from the
+   * member cache. `undefined` for a member who is not in it, which is "cannot
+   * say" and not "ordinary".
+   *
+   * The two that matter bypass every channel overwrite, so a deny written for one
+   * does nothing and moving them out of a room is wrong, not merely useless.
+   */
+  memberFacts(guildId: string, memberId: string): MemberFacts | undefined {
+    const guild = this.client.guilds.cache.get(guildId);
+    const member = guild?.members.cache.get(memberId);
+    if (!guild || !member) return undefined;
+    return {
+      bot: member.user.bot,
+      administrator: member.permissions.has(PermissionFlagsBits.Administrator),
+      guildOwner: guild.ownerId === memberId,
+    };
+  }
+
+  /**
+   * Which of `roleIds` sit at or above the bot's own top role, and the bot's own
+   * managed role, from the guild's role cache.
+   *
+   * The comparison is Discord's hierarchy for editing a role, which is ASSUMED to
+   * hold for a role's overwrite on a channel too: not verified against Discord
+   * (see `uneditableRoleIds` in `accessPlan.ts`). The bot's own managed role is
+   * never reported as uneditable, however high it sits: it is the role the bot
+   * itself relies on and the planner leaves its overwrite alone.
+   */
+  botRoleAccess(guildId: string, roleIds: readonly string[]): BotRoleAccess | undefined {
+    const guild = this.client.guilds.cache.get(guildId);
+    const me = guild?.members.me;
+    if (!guild || !me) return undefined;
+    const botRoleId = me.roles.botRole?.id ?? null;
+    const top = me.roles.highest;
+    return {
+      leaveRoleId: botRoleId,
+      uneditableRoleIds: roleIds.filter((id) => {
+        if (id === botRoleId || id === guild.id) return false;
+        const role = guild.roles.cache.get(id);
+        return role !== undefined && role.comparePositionTo(top) >= 0;
+      }),
     };
   }
 

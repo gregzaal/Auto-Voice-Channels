@@ -126,8 +126,17 @@ export interface AccessPlanInput {
   trusted: readonly string[];
   /** Members admitted to this room only. */
   admitted: readonly string[];
-  /** The original creator's saved blocked list, plus anyone voted out of a hidden room. */
+  /** The original creator's saved blocked list. */
   blocked: readonly string[];
+  /**
+   * Members a votekick removed from this room (`record.kicked`).
+   *
+   * Treated as blocked in every mode: View and Connect denied, ahead of any grant
+   * for the same member (a trusted member who was voted out must stay out). They
+   * are NOT part of the saved list, so they are never in `facts.blocked` and no
+   * list edit, which only takes back what `record.blocked` names, can lift one.
+   */
+  kicked?: readonly string[] | undefined;
   /** The moderator role that may SEE a hidden room (View only), or null. */
   viewerRoleId?: string | null | undefined;
   /**
@@ -348,7 +357,10 @@ export function planAccess(input: AccessPlanInput): AccessPlan {
    * out of their own room, and one on the bot out of the room it manages), and a
    * block beats every other grant for the same member.
    */
-  const blocked = new Set(input.blocked.filter((id) => id !== ownerId && id !== botId));
+  const notOwnerOrBot = (id: string): boolean => id !== ownerId && id !== botId;
+  /** The saved list as it is applied, which is what the record's `blocked` names. */
+  const savedBlocked = input.blocked.filter(notOwnerOrBot);
+  const blocked = new Set([...savedBlocked, ...(input.kicked ?? []).filter(notOwnerOrBot)]);
   const eligible = (ids: readonly string[]): Set<string> =>
     new Set(ids.filter((id) => id !== botId && !blocked.has(id)));
   const occupants = eligible(input.occupants);
@@ -607,7 +619,9 @@ export function planAccess(input: AccessPlanInput): AccessPlan {
       mode === 'public'
         ? sortedUnique((record?.admitted ?? []).filter((id) => !blocked.has(id)))
         : sortedUnique(admitted),
-    blocked: sortedUnique(blocked),
+    // The saved list only: a kick is the room's and is recorded in `kicked`, where
+    // no list diff can take it back.
+    blocked: sortedUnique(savedBlocked),
     hidden: mode === 'hidden',
   };
 
@@ -703,4 +717,44 @@ export function leaveOutMembers(
     const was = before.get(key(o.type, o.id));
     return was ? [{ ...was }] : [];
   });
+}
+
+/**
+ * The overwrites of a room's "⇩ Join" channel once the owner's blocked members are
+ * denied Connect on it.
+ *
+ * Not a plan in the sense of {@link planAccess}: the Join channel is open on
+ * purpose, so there is no mode, no baseline and no record to keep. It is created
+ * with whatever its category gives it, and the only thing this adds is a Connect
+ * deny for each blocked member (View is left alone: they can see an open channel,
+ * they just cannot sit in it and knock) and the bot's own overwrite, which the
+ * write seam insists on for every set it is handed. Everything already on the
+ * channel is kept exactly as it is.
+ */
+export function joinChannelOverwrites(
+  current: readonly ResolvedOverwrite[],
+  botId: string,
+  blockedIds: readonly string[],
+): ResolvedOverwrite[] {
+  const work = new Map<string, ResolvedOverwrite>();
+  for (const o of current) {
+    const k = key(o.type, o.id);
+    if (!work.has(k)) work.set(k, { ...o });
+  }
+  const at = (id: string): ResolvedOverwrite => {
+    const k = key(OVERWRITE_MEMBER, id);
+    let o = work.get(k);
+    if (!o) work.set(k, (o = { id, type: OVERWRITE_MEMBER, allow: 0n, deny: 0n }));
+    return o;
+  };
+  const bot = at(botId);
+  bot.allow |= BOT_ACCESS;
+  bot.deny &= ~BOT_ACCESS;
+  for (const id of sortedUnique(blockedIds)) {
+    if (id === botId) continue;
+    const o = at(id);
+    o.deny |= CONNECT;
+    o.allow &= ~CONNECT;
+  }
+  return [...work.values()];
 }

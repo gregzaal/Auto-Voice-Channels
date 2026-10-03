@@ -11,6 +11,7 @@ import {
   OVERWRITE_ROLE,
   VIEW_CHANNEL,
   diffOverwrites,
+  joinChannelOverwrites,
   leaveOutMembers,
   planAccess,
   type AccessFacts,
@@ -656,6 +657,121 @@ describe('blocks', () => {
       record: { blocked: [OWNER] },
     });
     expect(find(p, m(OWNER))).toEqual({ allow: C, deny: 0n });
+  });
+});
+
+/**
+ * A votekick belongs to the room and not to the owner's saved list, so it is a block
+ * that no edit to the list can lift. The first review of the planner found that a
+ * trusted member's grant replaced the unrecorded deny a kick left, so the next apply
+ * undid it without anyone being told.
+ */
+describe('kicked members', () => {
+  it('are denied View and Connect in every mode, ahead of any grant for the same member', () => {
+    for (const mode of ['public', 'locked', 'hidden'] as const) {
+      const p = plan({
+        mode,
+        previousMode: 'public',
+        occupants: [CAROL],
+        trusted: [CAROL],
+        admitted: [CAROL],
+        kicked: [CAROL],
+      });
+      expect(find(p, m(CAROL)), mode).toEqual({ allow: 0n, deny: VC });
+    }
+  });
+
+  it('take the grant a trusted member already holds off them as well as denying it', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'locked',
+      current: [member(CAROL, VC | SPEAK)],
+      trusted: [CAROL],
+      kicked: [CAROL],
+    });
+    expect(find(p, m(CAROL))).toEqual({ allow: SPEAK, deny: VC });
+  });
+
+  it('are not part of the saved list, so they never reach the record of what the list wrote', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'locked',
+      blocked: [DAVE],
+      kicked: [CAROL],
+    });
+    expect(p.facts.blocked).toEqual([DAVE]);
+    expect(p.factsBeforeWrite.blocked).toEqual([DAVE]);
+    expect(find(p, m(CAROL))).toEqual({ allow: 0n, deny: VC });
+  });
+
+  it('are not taken back when the saved list stops naming the member', () => {
+    for (const mode of ['public', 'locked', 'hidden'] as const) {
+      const p = plan({
+        mode,
+        previousMode: mode,
+        current: [member(CAROL, 0n, VC)],
+        // The list wrote this block earlier and no longer has it, and a vote removed them too.
+        record: { blocked: [CAROL], kicked: [CAROL] },
+        kicked: [CAROL],
+      });
+      expect(find(p, m(CAROL)), mode).toEqual({ allow: 0n, deny: VC });
+      expect(p.facts.blocked, mode).toEqual([]);
+    }
+  });
+
+  it('are still taken back when only the list named them and the vote did not', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'locked',
+      current: [member(CAROL, 0n, VC)],
+      record: { blocked: [CAROL] },
+    });
+    expect(find(p, m(CAROL))).toBeUndefined();
+  });
+
+  it('keep the deny when the member is also on the saved list, which stays recorded', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'locked',
+      blocked: [CAROL],
+      kicked: [CAROL],
+    });
+    expect(find(p, m(CAROL))).toEqual({ allow: 0n, deny: VC });
+    expect(p.facts.blocked).toEqual([CAROL]);
+  });
+
+  it('never apply to the owner or the bot', () => {
+    const p = plan({ mode: 'hidden', previousMode: 'public', kicked: [OWNER, BOT] });
+    expect(find(p, m(OWNER))).toEqual({ allow: VC, deny: 0n });
+    expect(find(p, m(BOT))).toEqual({ allow: BOT_ACCESS, deny: 0n });
+  });
+
+  it('keep a trusted member out of a public room too, which only trusted entries would not', () => {
+    const p = plan({ mode: 'public', previousMode: 'public', trusted: [CAROL], kicked: [CAROL] });
+    expect(find(p, m(CAROL))).toEqual({ allow: 0n, deny: VC });
+    // A public room keeps trusted overwrites, but never one for a member who was voted out.
+    expect(p.facts.trusted).toEqual([]);
+  });
+
+  it('are stable: planning the result again changes nothing', () => {
+    const first = plan({
+      mode: 'hidden',
+      previousMode: 'public',
+      occupants: [ALICE],
+      trusted: [CAROL],
+      kicked: [CAROL],
+    });
+    const again = plan({
+      mode: 'hidden',
+      previousMode: 'hidden',
+      current: first.desired,
+      occupants: [ALICE],
+      trusted: [CAROL],
+      kicked: [CAROL],
+      record: { ...recordOf(first.facts), kicked: [CAROL] },
+    });
+    expect(again.diff.upserts).toEqual([]);
+    expect(again.diff.deletes).toEqual([]);
   });
 });
 
@@ -1731,5 +1847,51 @@ describe('leaveOutMembers', () => {
     const out = leaveOutMembers(desired, [], new Set());
     expect(out).toEqual(desired);
     expect(out[0]).not.toBe(desired[0]);
+  });
+});
+
+describe('joinChannelOverwrites', () => {
+  it('denies each blocked member Connect and leaves View alone', () => {
+    const out = joinChannelOverwrites([], BOT, [CAROL, DAVE]);
+    expect(view(out)).toEqual({
+      [m(BOT)]: { allow: BOT_ACCESS, deny: 0n },
+      [m(CAROL)]: { allow: 0n, deny: C },
+      [m(DAVE)]: { allow: 0n, deny: C },
+    });
+  });
+
+  it('keeps every overwrite already on the channel, and takes only Connect off an allow', () => {
+    const out = joinChannelOverwrites(
+      [role(MEMBERS, V), everyone(0n, SPEAK), member(CAROL, VC | SPEAK), member(ALICE, C)],
+      BOT,
+      [CAROL],
+    );
+    expect(view(out)).toEqual({
+      [r(MEMBERS)]: { allow: V, deny: 0n },
+      [r(GUILD)]: { allow: 0n, deny: SPEAK },
+      [m(CAROL)]: { allow: V | SPEAK, deny: C },
+      [m(ALICE)]: { allow: C, deny: 0n },
+      [m(BOT)]: { allow: BOT_ACCESS, deny: 0n },
+    });
+  });
+
+  it('gives the bot its own access, which the write seam insists on, and never blocks it', () => {
+    const out = joinChannelOverwrites([member(BOT, 0n, C)], BOT, [BOT]);
+    expect(view(out)[m(BOT)]).toEqual({ allow: BOT_ACCESS, deny: 0n });
+  });
+
+  it('is stable: a set it has already produced comes back unchanged, in the same order', () => {
+    const once = joinChannelOverwrites([role(MEMBERS, V)], BOT, [DAVE, CAROL, CAROL]);
+    const twice = joinChannelOverwrites(once, BOT, [CAROL, DAVE]);
+    expect(twice).toEqual(once);
+  });
+
+  it('changes nothing it was given', () => {
+    const current = [member(CAROL, VC)];
+    const before = JSON.stringify(current, (_k, v) => (typeof v === 'bigint' ? v.toString() : v));
+    joinChannelOverwrites(current, BOT, [CAROL]);
+    expect(JSON.stringify(current, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))).toBe(
+      before,
+    );
   });
 });

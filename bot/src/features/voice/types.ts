@@ -38,6 +38,23 @@ export interface VoiceChannelView {
   members: VoiceMember[];
 }
 
+/** What {@link GuildVoiceView.memberFacts} says of a member. */
+export interface MemberFacts {
+  bot: boolean;
+  /** Holds Administrator, which bypasses every overwrite. */
+  administrator: boolean;
+  /** Owns the server, which bypasses every overwrite and cannot be removed from it. */
+  guildOwner: boolean;
+}
+
+/** What {@link GuildVoiceView.botRoleAccess} says of a set of roles. */
+export interface BotRoleAccess {
+  /** The bot's own managed role, whose overwrite is left exactly as it is, or null. */
+  leaveRoleId: string | null;
+  /** The roles, of those asked about, that the bot cannot edit an overwrite for. */
+  uneditableRoleIds: string[];
+}
+
 /**
  * Read-only view of a guild's live voice state. Backed by discord.js voice-state
  * cache in production, and by an in-memory model in tests.
@@ -101,6 +118,31 @@ export interface GuildVoiceView {
    * found. A cache read, so it is cheap enough for every panel re-render.
    */
   ownerAccessOf?(channelId: string, ownerId: string): CommandCaller | undefined;
+  /**
+   * What a member is, for the lists that must not apply to some of them: a bot, an
+   * Administrator, the server's owner. `undefined` when the member is not in the
+   * cache, which a caller reads as "cannot say" and so does not skip them.
+   *
+   * Optional and read like {@link ownerAccessOf}. A cache read, so it is cheap
+   * enough to ask once per listed member on every apply. Administrators and the
+   * server owner bypass every channel overwrite, so a deny written for one does
+   * nothing and moving them out of a room would be wrong. A member can BECOME an
+   * Administrator after they were listed, which is why this is asked at apply time
+   * and not only when somebody is added to a list.
+   */
+  memberFacts?(guildId: string, memberId: string): MemberFacts | undefined;
+  /**
+   * What the bot's own role position means for a set of roles: which of them it
+   * cannot edit an overwrite for, and which is its own managed role. `undefined`
+   * when the guild or the bot's member is not in the cache.
+   *
+   * Optional and read like {@link memberFacts}. Writing an overwrite for a role
+   * above the bot's top role is assumed to fail, and one failure refuses a whole
+   * bulk write, so the planner is told up front and refuses a hide such a role
+   * would defeat. Unverified against Discord: see `uneditableRoleIds` in
+   * `accessPlan.ts`.
+   */
+  botRoleAccess?(guildId: string, roleIds: readonly string[]): BotRoleAccess | undefined;
   /**
    * Whether Discord has actually given us this guild's data, i.e. whether
    * {@link channelExists} means anything for it.

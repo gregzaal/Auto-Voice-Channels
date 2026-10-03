@@ -1,5 +1,11 @@
 import type { CommandCaller } from './commandAccess.js';
-import type { GuildVoiceView, VoiceChannelProperties, VoiceMember } from './types.js';
+import type {
+  BotRoleAccess,
+  GuildVoiceView,
+  MemberFacts,
+  VoiceChannelProperties,
+  VoiceMember,
+} from './types.js';
 
 /**
  * Mutable in-memory voice view for tests. Tracks channel *existence* separately
@@ -19,6 +25,10 @@ export class FakeVoiceView implements GuildVoiceView {
   private readonly userLimits = new Map<string, number>();
   /** ownerId → their standing under `/restrict`. Unset → "cannot say". */
   private readonly ownerAccess = new Map<string, CommandCaller>();
+  /** memberId → what they are (bot, Administrator, server owner). Unset → "cannot say". */
+  private readonly facts = new Map<string, MemberFacts>();
+  /** The bot's role standing. Unset → "cannot say". */
+  private roleAccess: { leaveRoleId: string | null; uneditableRoleIds: string[] } | undefined;
   /** Whether Discord has handed us this guild. True unless a test says otherwise. */
   private available = true;
 
@@ -92,6 +102,43 @@ export class FakeVoiceView implements GuildVoiceView {
   /** Forgets who an owner is, which reads as "cannot say" again. */
   clearOwnerAccess(ownerId: string): void {
     this.ownerAccess.delete(ownerId);
+  }
+
+  /**
+   * Opt-in like {@link ownerAccessOf}: a member nobody described is "cannot say",
+   * which is read as "not exempt", so no test that predates saved lists changes.
+   */
+  memberFacts(_guildId: string, memberId: string): MemberFacts | undefined {
+    return this.facts.get(memberId);
+  }
+
+  /** Says what a member is: a bot, an Administrator, the server's owner. */
+  setMemberFacts(memberId: string, facts: Partial<MemberFacts>): void {
+    this.facts.set(memberId, {
+      bot: facts.bot ?? false,
+      administrator: facts.administrator ?? false,
+      guildOwner: facts.guildOwner ?? false,
+    });
+  }
+
+  /**
+   * Opt-in as well: a test that never describes the bot's roles gets "cannot say",
+   * so no role is treated as out of its reach.
+   */
+  botRoleAccess(_guildId: string, roleIds: readonly string[]): BotRoleAccess | undefined {
+    if (!this.roleAccess) return undefined;
+    return {
+      leaveRoleId: this.roleAccess.leaveRoleId,
+      uneditableRoleIds: roleIds.filter((id) => this.roleAccess!.uneditableRoleIds.includes(id)),
+    };
+  }
+
+  /** Says which roles the bot cannot edit, and which is its own managed role. */
+  setBotRoleAccess(access: { leaveRoleId?: string | null; uneditableRoleIds?: string[] }): void {
+    this.roleAccess = {
+      leaveRoleId: access.leaveRoleId ?? null,
+      uneditableRoleIds: access.uneditableRoleIds ?? [],
+    };
   }
 
   voicePropertiesOf(channelId: string): VoiceChannelProperties | undefined {

@@ -1383,6 +1383,113 @@ describe('DiscordVoiceView.ownerAccessOf', () => {
   });
 });
 
+describe('DiscordVoiceView.memberFacts', () => {
+  const GUILD = '900';
+  const viewWith = (members: Record<string, unknown>, ownerId = 'the-owner') =>
+    new DiscordVoiceView({
+      guilds: {
+        cache: new Map([
+          [GUILD, { id: GUILD, ownerId, members: { cache: new Map(Object.entries(members)) } }],
+        ]),
+      },
+    } as unknown as Client);
+  const member = (bot: boolean, permissions: bigint) => ({
+    user: { bot },
+    permissions: new PermissionsBitField(permissions),
+  });
+
+  it('reports a bot, an Administrator and the server owner, each on its own', () => {
+    const v = viewWith({
+      plain: member(false, VIEW),
+      bot: member(true, VIEW),
+      admin: member(false, PermissionFlagsBits.Administrator),
+      'the-owner': member(false, VIEW),
+    });
+    expect(v.memberFacts(GUILD, 'plain')).toEqual({
+      bot: false,
+      administrator: false,
+      guildOwner: false,
+    });
+    expect(v.memberFacts(GUILD, 'bot')).toMatchObject({ bot: true, administrator: false });
+    expect(v.memberFacts(GUILD, 'admin')).toMatchObject({ administrator: true, guildOwner: false });
+    // The server owner holds every permission without holding the bit, so it is its own fact.
+    expect(v.memberFacts(GUILD, 'the-owner')).toMatchObject({
+      administrator: false,
+      guildOwner: true,
+    });
+  });
+
+  it('answers undefined, which is "cannot say", for a member or a guild it does not hold', () => {
+    const v = viewWith({});
+    expect(v.memberFacts(GUILD, 'nobody')).toBeUndefined();
+    expect(v.memberFacts('other-guild', 'nobody')).toBeUndefined();
+  });
+});
+
+describe('DiscordVoiceView.botRoleAccess', () => {
+  const GUILD = '900';
+  /** Roles by id and position, with the bot holding `held` and the managed one named. */
+  const viewWith = (
+    positions: Record<string, number>,
+    held: string[],
+    botRoleId: string | null,
+  ) => {
+    const roles = new Map(
+      Object.entries(positions).map(([id, position]) => [
+        id,
+        {
+          id,
+          position,
+          comparePositionTo: (other: { position: number }) => position - other.position,
+        },
+      ]),
+    );
+    const highest = [...held.map((id) => roles.get(id)!)].sort(
+      (a, b) => b.position - a.position,
+    )[0];
+    const guild = {
+      id: GUILD,
+      roles: { cache: roles },
+      members: {
+        me: { roles: { highest, botRole: botRoleId ? roles.get(botRoleId) : null } },
+      },
+    };
+    return new DiscordVoiceView({
+      guilds: { cache: new Map([[GUILD, guild]]) },
+    } as unknown as Client);
+  };
+
+  it('reports the roles at or above the bot as ones it cannot edit', () => {
+    const v = viewWith({ low: 1, bots: 5, same: 5, high: 9 }, ['bots'], 'bots');
+    expect(v.botRoleAccess(GUILD, ['low', 'same', 'high'])?.uneditableRoleIds).toEqual([
+      'same',
+      'high',
+    ]);
+  });
+
+  it("names the bot's own managed role, and never calls it uneditable", () => {
+    const v = viewWith({ low: 1, bots: 5 }, ['bots'], 'bots');
+    expect(v.botRoleAccess(GUILD, ['bots', 'low'])).toEqual({
+      leaveRoleId: 'bots',
+      uneditableRoleIds: [],
+    });
+  });
+
+  it('never calls @everyone uneditable, and skips a role it has no record of', () => {
+    const v = viewWith({ [GUILD]: 0, bots: 5 }, ['bots'], 'bots');
+    expect(v.botRoleAccess(GUILD, [GUILD, 'ghost'])?.uneditableRoleIds).toEqual([]);
+  });
+
+  it('answers undefined, which is "cannot say", when the guild or the bot is not cached', () => {
+    const v = viewWith({ bots: 5 }, ['bots'], 'bots');
+    expect(v.botRoleAccess('other-guild', ['bots'])).toBeUndefined();
+    const noMe = new DiscordVoiceView({
+      guilds: { cache: new Map([[GUILD, { id: GUILD, members: { me: null } }]]) },
+    } as unknown as Client);
+    expect(noMe.botRoleAccess(GUILD, ['bots'])).toBeUndefined();
+  });
+});
+
 describe('DiscordVoiceActions.createVoiceChannel bitrate/region/video-quality/nsfw', () => {
   function makeClient(maximumBitrate = 384_000) {
     const created = { id: 'new', setPosition: vi.fn() };
