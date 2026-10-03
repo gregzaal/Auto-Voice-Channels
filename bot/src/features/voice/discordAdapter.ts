@@ -86,8 +86,11 @@ function isClientRejection(err: unknown): boolean {
  * error (the dispatcher logs every one it catches, once per sweep while a failure
  * lasts) would write every member id with an allow or deny on the room: a hidden
  * room's guest list and an owner's block list. Nothing downstream reads it.
+ *
+ * Exported for the same reason at one more place: a failed channel create carries the
+ * name it was given, and a Join channel is named for its owner.
  */
-function withoutRequestBody<T>(err: T): T {
+export function withoutRequestBody<T>(err: T): T {
   if (typeof err === 'object' && err !== null && 'requestBody' in err) {
     (err as { requestBody: unknown }).requestBody = { files: undefined, json: undefined };
   }
@@ -1016,6 +1019,19 @@ export class DiscordVoiceActions implements VoiceActions {
     // The shell holds a single `@everyone` View deny and nothing else. Planning
     // against it would produce a "complete" set that is a falsehood.
     if (isObfuscated(channel)) throw new ChannelObfuscatedError(channelId);
+    return mapOverwrites(channel.permissionOverwrites.cache);
+  }
+
+  /**
+   * A room's overwrites from the channel cache, which every channel update patches, so a
+   * hand edit shows here without a request. `undefined` for anything the cache cannot be
+   * trusted for: not cached, not a voice channel, another guild's, or the obfuscated shell.
+   * See {@link VoiceActions.cachedOverwrites}.
+   */
+  cachedOverwrites(guildId: string, channelId: string): ResolvedOverwrite[] | undefined {
+    const channel = this.client.channels.cache.get(channelId);
+    if (!channel || !channel.isVoiceBased() || channel.guildId !== guildId) return undefined;
+    if (isObfuscated(channel)) return undefined;
     return mapOverwrites(channel.permissionOverwrites.cache);
   }
 

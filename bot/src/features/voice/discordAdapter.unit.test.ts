@@ -2082,7 +2082,7 @@ describe('DiscordVoiceActions room overwrites', () => {
     const fetch = vi.fn((_id: string, _options?: { force?: boolean }) => Promise.resolve(channel));
     const client = {
       user: { id: BOT },
-      channels: { fetch },
+      channels: { fetch, cache: new Map([[ROOM, channel]]) },
       guilds: { fetch: vi.fn().mockResolvedValue(guild) },
       rest: { put, delete: del },
     } as unknown as Client;
@@ -2172,6 +2172,44 @@ describe('DiscordVoiceActions room overwrites', () => {
       const room = makeRoom([everyone()]);
       room.fetch.mockResolvedValue({ ...room.channel, guildId: 'other' } as never);
       await expect(room.actions.readOverwrites(GUILD, ROOM)).rejects.toThrow(/not in/);
+    });
+  });
+
+  /**
+   * What the sweep asks before it asks Discord, so a room that holds what it should costs no
+   * request. It must never answer from a cache it cannot trust, because "nothing differs"
+   * read from a falsehood would skip a repair.
+   */
+  describe('cachedOverwrites', () => {
+    it('answers from the cache in the planner shape, without a request', () => {
+      const room = makeRoom([role('r', VIEW, CONNECT), person('m', SPEAK)]);
+      expect(room.actions.cachedOverwrites(GUILD, ROOM)).toEqual([
+        { id: 'r', type: OverwriteType.Role, allow: VIEW, deny: CONNECT },
+        { id: 'm', type: OverwriteType.Member, allow: SPEAK, deny: 0n },
+      ]);
+      expect(room.fetch).not.toHaveBeenCalled();
+    });
+
+    it('cannot say for a channel that is not cached', () => {
+      const room = makeRoom([everyone()]);
+      (room.client.channels.cache as unknown as Map<string, unknown>).clear();
+      expect(room.actions.cachedOverwrites(GUILD, ROOM)).toBeUndefined();
+    });
+
+    it('cannot say for a channel that is not a voice channel', () => {
+      const room = makeRoom([everyone()]);
+      (room.channel as { isVoiceBased: () => boolean }).isVoiceBased = () => false;
+      expect(room.actions.cachedOverwrites(GUILD, ROOM)).toBeUndefined();
+    });
+
+    it("cannot say for another guild's channel", () => {
+      const room = makeRoom([everyone()]);
+      expect(room.actions.cachedOverwrites('other', ROOM)).toBeUndefined();
+    });
+
+    it('cannot say for the obfuscated shell, whose overwrites are a single @everyone deny', () => {
+      const room = makeRoom([everyone(0n, VIEW)], { flags: CHANNEL_OBFUSCATED });
+      expect(room.actions.cachedOverwrites(GUILD, ROOM)).toBeUndefined();
     });
   });
 

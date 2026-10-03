@@ -259,6 +259,18 @@ export interface VoiceActions {
    */
   readOverwrites(guildId: string, channelId: string): Promise<ResolvedOverwrite[] | null>;
   /**
+   * A room's overwrites as the gateway cache holds them, with no request, or `undefined`
+   * when the cache cannot say (the channel is not cached, belongs to another guild, or is
+   * only the obfuscated shell of one the bot cannot see).
+   *
+   * Optional, and never a basis for a WRITE: the cache can lag a channel update, which is
+   * why {@link readOverwrites} forces a fresh read. It is for a caller that only asks
+   * "does anything differ", the sweep, which then reads fresh before it writes. A wrong
+   * answer costs a repair one more sweep (the cache is patched by every channel update)
+   * or one fresh read it did not need. Absent means the caller reads fresh, as it did.
+   */
+  cachedOverwrites?(guildId: string, channelId: string): ResolvedOverwrite[] | undefined;
+  /**
    * Makes a room's overwrites `desired`, given `previous`, the set the plan was
    * made against. One or two changes are written one request each, the bot's
    * first. More than that is ONE bulk request carrying the whole set, because
@@ -678,6 +690,16 @@ export class RecordingVoiceActions implements VoiceActions {
     }
     if (this.overwritesGoneForChannel === channelId) return Promise.resolve(null);
     return Promise.resolve(this.overwritesOf(channelId));
+  }
+
+  /**
+   * What the real adapter's cache would say: what the room holds, and nothing for a room
+   * whose read fails (the cache of a channel the bot cannot see is only its shell) or that
+   * is gone. A test makes it stale by spying on it.
+   */
+  cachedOverwrites(_guildId: string, channelId: string): ResolvedOverwrite[] | undefined {
+    if (this.failReadOverwrites || this.overwritesGoneForChannel === channelId) return undefined;
+    return this.overwritesOf(channelId);
   }
 
   applyOverwrites(
