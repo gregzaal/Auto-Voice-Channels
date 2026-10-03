@@ -136,6 +136,19 @@ describe('startModeMessage', () => {
     // The admin choosing this default is the one who would assume nobody else can see a room.
     expect(startModeMessage('hidden', 'public')).toContain('Administrators always see them');
   });
+
+  /**
+   * A moderator role from `/setup` sees every hidden room (View only), so an admin who reads
+   * "Administrators" as the whole list is told less than is true. The reply cannot name the
+   * role without a settings read, so it names where the role comes from, and keeps the owners
+   * a separate clause so they do not read as part of the first list.
+   */
+  it('says the moderator role from /setup sees them too, and that owners are a separate thing', () => {
+    const reply = startModeMessage('hidden', 'public');
+    expect(reply).toContain('the role you picked under `/setup` for reading room chats');
+    expect(reply).toContain("Each room's owner can let people in");
+    expect(reply).not.toContain('<@&');
+  });
 });
 
 describe('roleDefeatsHide', () => {

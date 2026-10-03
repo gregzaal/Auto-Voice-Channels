@@ -230,7 +230,8 @@ export function permissionProblemMessage(
       `⚠️ I made a room from <#${channelId}> but could not make it private, so I deleted it ` +
       'again. I need **Manage Roles** (to set permission overrides) and **Connect**, on the ' +
       'category the rooms are made in or on my role. Rooms that start hidden also need my role ' +
-      'above any role with an override that lets it see this creator channel.'
+      'above any role with an override that lets it see the channel or category the rooms copy ' +
+      'their permissions from.'
     );
   }
   if (operation === 'companion_role') {
@@ -398,7 +399,8 @@ export function permissionProblemSummary(problems: readonly ProblemLike[]): stri
       `I made rooms from ${list(privacyFails)} but could not make them private, so I deleted ` +
         'them again. I need **Manage Roles** (to set permission overrides) and **Connect**, on ' +
         'the category the rooms are made in or on my role. Rooms that start hidden also need my ' +
-        'role above any role with an override that lets it see the creator channel.',
+        'role above any role with an override that lets it see the channel or category the ' +
+        'rooms copy their permissions from.',
     );
   }
   /**

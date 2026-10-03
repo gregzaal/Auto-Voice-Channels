@@ -36,7 +36,7 @@ describe('createModal', () => {
       'Creator channel name',
       'Name template (/template to edit later)',
       'Status template (/template to edit later)',
-      'Default privacy (/alwaysprivate later)',
+      'Default privacy (change it later)',
     ]);
     // Discord caps a modal at 5 top-level components — never exceed it.
     expect(labels).toHaveLength(5);

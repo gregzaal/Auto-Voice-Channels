@@ -173,6 +173,17 @@ describe('permissionProblemMessage', () => {
     expect(permissionProblemMessage('123', 'privacy')).toContain('Rooms that start hidden');
     expect(permissionProblemMessage('123', 'privacy')).toContain('my role above any role');
   });
+
+  /**
+   * The override that shows a room is on the channel or category the room copies its
+   * permissions from, which `/inheritpermissions` can point away from the creator channel,
+   * so the notice names that and not the creator channel.
+   */
+  it('names where the rooms copy their permissions from, not the creator channel', () => {
+    const msg = permissionProblemMessage('123', 'privacy');
+    expect(msg).toContain('the channel or category the rooms copy their permissions from');
+    expect(msg).not.toContain('see this creator channel');
+  });
 });
 
 const problem = (
@@ -228,6 +239,7 @@ describe('permissionProblemSummary', () => {
     expect(line).not.toContain('Move Members');
     expect(line).toContain('Manage Roles');
     expect(line).toContain('Rooms that start hidden');
+    expect(line).toContain('the channel or category the rooms copy their permissions from');
   });
 
   /**

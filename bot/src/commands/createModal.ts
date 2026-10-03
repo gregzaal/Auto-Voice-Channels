@@ -56,8 +56,10 @@ const DEFAULT_PRIMARY_NAME = '➕ New Session';
  * Category is a real category picker and Default privacy a dropdown (the
  * templates + name stay text inputs). A modal is capped at 5 components; position
  * is intentionally left out (new rooms default to below the creator channel — editable
- * later with `/position`) so the 5th slot is the privacy selector. Field labels
- * point at `/template` / `/alwaysprivate` for editing later.
+ * later with `/position`) so the 5th slot is the privacy selector. The template labels
+ * point at `/template` for editing later. The privacy label names no command: it is changed
+ * with `/alwaysprivate` or `/alwayshidden`, and naming only one points an admin who chose
+ * the other at the wrong command (a label is capped at 45 characters, too few for both).
  *
  * Pass `prefill` to re-open the modal with a user's prior selections intact (used
  * by the "Retry" button after a failed create) instead of the guild defaults.
@@ -127,28 +129,26 @@ export function buildCreateModal(
       // The 5th (final) slot: whether new rooms are public, private or hidden by
       // default. Editable per creator channel later with `/alwaysprivate` and
       // `/alwayshidden`.
-      new LabelBuilder()
-        .setLabel('Default privacy (/alwaysprivate later)')
-        .setStringSelectMenuComponent(
-          new StringSelectMenuBuilder()
-            .setCustomId('privacy')
-            .setMinValues(1)
-            .setMaxValues(1)
-            .addOptions(
-              new StringSelectMenuOptionBuilder()
-                .setLabel('Open, anyone can join')
-                .setValue('open')
-                .setDefault(privacyPicked === 'open'),
-              new StringSelectMenuOptionBuilder()
-                .setLabel('Private, others request to join')
-                .setValue('private')
-                .setDefault(privacyPicked === 'private'),
-              new StringSelectMenuOptionBuilder()
-                .setLabel('Hidden, not in the channel list')
-                .setValue('hidden')
-                .setDefault(privacyPicked === 'hidden'),
-            ),
-        ),
+      new LabelBuilder().setLabel('Default privacy (change it later)').setStringSelectMenuComponent(
+        new StringSelectMenuBuilder()
+          .setCustomId('privacy')
+          .setMinValues(1)
+          .setMaxValues(1)
+          .addOptions(
+            new StringSelectMenuOptionBuilder()
+              .setLabel('Open, anyone can join')
+              .setValue('open')
+              .setDefault(privacyPicked === 'open'),
+            new StringSelectMenuOptionBuilder()
+              .setLabel('Private, others request to join')
+              .setValue('private')
+              .setDefault(privacyPicked === 'private'),
+            new StringSelectMenuOptionBuilder()
+              .setLabel('Hidden, not in the channel list')
+              .setValue('hidden')
+              .setDefault(privacyPicked === 'hidden'),
+          ),
+      ),
     );
 }
 
