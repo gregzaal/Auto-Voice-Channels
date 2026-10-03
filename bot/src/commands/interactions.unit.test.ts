@@ -3087,6 +3087,69 @@ describe('registerInteractionHandler (the expired-guild carve-out)', () => {
   });
 
   /**
+   * `/unhide` leaves a room LOCKED, with a "⇩ Join" channel nobody can knock on in a guild
+   * that is gated, so an owner has to be able to open it. `/public` and the Unlock button
+   * only ever remove, which the hard gate allows, and `/private` and its Lock button are
+   * writes that stay refused. Without this a guild that lapses with a locked room in it
+   * strands the room.
+   */
+  describe('opening a locked or hidden room', () => {
+    const gated = () => {
+      const makePublic = vi.fn().mockResolvedValue({ ok: true, message: 'opened' });
+      const makePrivate = vi.fn().mockResolvedValue({ ok: true, message: 'locked' });
+      const env = setup({
+        privacy: { makePublic, makePrivate } as never,
+        guilds: {
+          get: vi.fn().mockResolvedValue({ authStatus: 'expired' }),
+          isEntitled: vi.fn().mockResolvedValue(false),
+        } as never,
+        selfHosted: false,
+      });
+      dispose = env.dispose;
+      return { env, makePublic, makePrivate };
+    };
+    const fire = async (
+      env: ReturnType<typeof gated>['env'],
+      opts: Parameters<typeof fakeInteraction>[0],
+    ) => {
+      const fake = fakeInteraction(opts);
+      env.client.emit('interactionCreate', fake.interaction);
+      await flush();
+      return fake;
+    };
+
+    it('lets /public and the Unlock button through, and does the work', async () => {
+      const g = gated();
+      const command = await fire(g.env, {
+        kind: 'command',
+        commandName: 'public',
+        voiceChannelId: 'v1',
+      });
+      expect(JSON.stringify(command.editReply.mock.calls[0]?.[0])).toContain('opened');
+      const button = await fire(g.env, {
+        kind: 'button',
+        customId: controlPanelId('unlock', 'r1'),
+      });
+      expect(JSON.stringify(button.editReply.mock.calls[0]?.[0])).toContain('opened');
+      expect(g.makePublic).toHaveBeenCalledTimes(2);
+      expect(JSON.stringify(command.reply.mock.calls)).not.toContain('auto-voice.io');
+    });
+
+    it('still refuses /private and the Lock button with the reactivation notice', async () => {
+      const g = gated();
+      const command = await fire(g.env, {
+        kind: 'command',
+        commandName: 'private',
+        voiceChannelId: 'v1',
+      });
+      expect(JSON.stringify(command.reply.mock.calls[0]?.[0])).toContain('auto-voice.io');
+      const button = await fire(g.env, { kind: 'button', customId: controlPanelId('lock', 'r1') });
+      expect(JSON.stringify(button.reply.mock.calls[0]?.[0])).toContain('auto-voice.io');
+      expect(g.makePrivate).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
    * `/setup` and its settings modals are the exemption that lets a gated admin
    * see and fix their state, and the named-lists PANEL is reachable from the
    * exempt settings select. Its buttons therefore have to be exempt too:

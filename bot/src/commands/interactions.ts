@@ -489,6 +489,17 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
        */
       if (interaction.commandName === 'unhide') return true;
       /**
+       * `/public` is open for the same reason, and for one more: `/unhide` puts a hidden
+       * room back to LOCKED, and in a guild that has since been gated a locked room is
+       * a trap. Its "⇩ Join" channel is made but nobody can knock on it (the join listener
+       * drops knocks in a gated guild), and an owner who could not then open the room
+       * would have a room nobody else can enter. Opening only ever removes: it takes the
+       * lock off, deletes the Join channel and restores what the room had, and the guild
+       * ends up with fewer restrictions and no new automation. A guild that is gated
+       * while rooms are hidden or locked therefore never strands one.
+       */
+      if (interaction.commandName === 'public') return true;
+      /**
        * `/access remove`, `clear` and `list` stay open and `trust`, `block` and `admit`
        * are refused, `/restrict`'s split again: the hard gate stops writes and destroys
        * nothing, so a member can still see their lists and erase what they saved, and
@@ -563,6 +574,9 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       // Unhide, the button of the `/unhide` command above, for the same reason. Hide is
       // a write and stays refused, with every other button on the panel.
       if (interaction.customId.startsWith(`${CONTROL_PANEL_PREFIX}unhide:`)) return true;
+      // And Unlock, the button of `/public`, which is open for the reason given there: a
+      // locked or hidden room must always have a way back to open in a gated guild.
+      if (interaction.customId.startsWith(`${CONTROL_PANEL_PREFIX}unlock:`)) return true;
       // The bot profile's resets, not its set buttons: see the command's
       // entry above. The set MODALS are absent from the modal branch
       // below for the same reason.
