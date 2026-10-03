@@ -6,6 +6,7 @@ CREATE TABLE "member_room_prefs" (
 	"user_limit" smallint,
 	"privacy" text,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"orphaned_at" timestamp with time zone,
 	CONSTRAINT "member_room_prefs_primary_channel_id_user_id_pk" PRIMARY KEY("primary_channel_id","user_id")
 );
 --> statement-breakpoint

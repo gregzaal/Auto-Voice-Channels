@@ -1,4 +1,4 @@
-import { and, eq, isNull, sql, type SQL } from 'drizzle-orm';
+import { and, eq, sql, type SQL } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
 import { autoChannels, memberRoomPrefs } from '../db/schema.js';
 import {
@@ -45,6 +45,27 @@ type PrefColumn = 'name_template' | 'user_limit' | 'privacy';
 const isPrivacy = (value: string | null): value is MemberPrefPrivacy =>
   value !== null && (MEMBER_PREF_PRIVACIES as readonly string[]).includes(value);
 
+/** A name a save would have accepted, so a row written any other way reads as nothing. */
+const isName = (value: string | null): value is string =>
+  value !== null && value.trim() !== '' && value.length <= MAX_MEMBER_PREF_NAME_LENGTH;
+
+/** A limit a save would have accepted, for the same reason. */
+const isLimit = (value: number | null): value is number =>
+  value !== null && Number.isInteger(value) && value >= 0 && value <= MAX_MEMBER_PREF_LIMIT;
+
+/**
+ * What one pass of the orphan sweep did, in rows.
+ *
+ * - `marked`: rows whose creator channel is missing, put on the grace clock for the first time.
+ * - `restored`: rows whose creator channel is back, taken off the clock.
+ * - `removed`: rows that were orphaned for the whole grace and are gone.
+ */
+export interface OrphanSweepResult {
+  marked: number;
+  restored: number;
+  removed: number;
+}
+
 /**
  * Repository for what members have remembered about their own rooms, per creator channel.
  *
@@ -83,13 +104,18 @@ export class MemberRoomPrefsRepository {
       )
       .limit(1);
     if (!row) return undefined;
-    // The column is plain text, so a newer build may store a privacy this one does not know,
-    // and an older reader must read around it rather than act on a mode it cannot apply.
-    return {
-      name: row.name,
-      limit: row.limit,
+    // The columns are plain text and a number, so a newer build may store a privacy this one
+    // does not know, and a hand edit or another build may leave a limit Discord refuses or an
+    // empty name. A reader must read around each rather than act on a value it cannot apply,
+    // which is what a save already refuses to store.
+    const prefs: MemberRoomPrefs = {
+      name: isName(row.name) ? row.name : null,
+      limit: isLimit(row.limit) ? row.limit : null,
       privacy: isPrivacy(row.privacy) ? row.privacy : null,
     };
+    return prefs.name === null && prefs.limit === null && prefs.privacy === null
+      ? undefined
+      : prefs;
   }
 
   /**
@@ -153,6 +179,10 @@ export class MemberRoomPrefsRepository {
    * guild reaches the statement twice: in the opt-in check, which also pins the creator
    * channel to this server, and on the conflict path, so a row that somehow belongs to
    * another server is never updated by this one.
+   *
+   * The opt-in is the JSON boolean `true` and nothing else, which is how the bot reads it
+   * (`=== true`). `->>` would also take the string "true", which an older build's `/import`
+   * can carry in unvalidated, and the editor would show Off for a creator channel that saves.
    */
   private async upsertField(
     guildId: string,
@@ -169,7 +199,7 @@ export class MemberRoomPrefsRepository {
          SELECT 1 FROM auto_channels
           WHERE ${eq(autoChannels.channelId, primaryChannelId)}
             AND ${eq(autoChannels.guildId, guildId)}
-            AND ${autoChannels.template}->>'rememberPrefs' = 'true'
+            AND ${autoChannels.template}->'rememberPrefs' = 'true'::jsonb
        )
       ON CONFLICT (primary_channel_id, user_id) DO UPDATE
         SET ${col} = EXCLUDED.${col}, updated_at = now()
@@ -187,11 +217,14 @@ export class MemberRoomPrefsRepository {
    * refusing it would leave a dormant value that comes back, unasked, the day an admin
    * turns the feature on again. It is bound to the guild all the same.
    *
-   * One statement with two disjoint branches, because a data-modifying CTE cannot see the
-   * other's change and a row cannot be updated and deleted in the same statement: the row
-   * is deleted when every other setting is already empty, and updated when one is not. A
-   * row that already had nothing here is left untouched, so a replay does not move
-   * `updated_at`.
+   * Two statements in one transaction: null the setting, then delete the row if that left
+   * nothing. They are not one statement because a deciding snapshot is the hazard. A single
+   * statement that chose between deleting and updating from the other settings as they
+   * stood when it started would, racing a save of another setting, match neither branch
+   * once that save committed, and a clear that answered `cleared` would have kept the value.
+   * The update takes the row lock and re-reads the row, so the delete after it sees the
+   * settings as they are now, and nobody else sees a row with nothing in it. A row that
+   * already had nothing here is left untouched, so a replay does not move `updated_at`.
    */
   private async clearField(
     guildId: string,
@@ -204,22 +237,17 @@ export class MemberRoomPrefsRepository {
       eq(memberRoomPrefs.userId, userId),
       eq(memberRoomPrefs.guildId, guildId),
     );
-    const others = {
-      name_template: and(isNull(memberRoomPrefs.userLimit), isNull(memberRoomPrefs.privacy)),
-      user_limit: and(isNull(memberRoomPrefs.nameTemplate), isNull(memberRoomPrefs.privacy)),
-      privacy: and(isNull(memberRoomPrefs.nameTemplate), isNull(memberRoomPrefs.userLimit)),
-    }[column];
     const col = sql.raw(`"${column}"`);
-    await this.db.execute(sql`
-      WITH gone AS (
-        DELETE FROM member_room_prefs WHERE ${mine} AND ${others} RETURNING 1
-      ), cleared AS (
+    await this.db.transaction(async (tx) => {
+      await tx.execute(sql`
         UPDATE member_room_prefs SET ${col} = NULL, updated_at = now()
-         WHERE ${mine} AND NOT (${others}) AND ${col} IS NOT NULL
-        RETURNING 1
-      )
-      SELECT (SELECT count(*) FROM gone) + (SELECT count(*) FROM cleared) AS touched
-    `);
+         WHERE ${mine} AND ${col} IS NOT NULL
+      `);
+      await tx.execute(sql`
+        DELETE FROM member_room_prefs
+         WHERE ${mine} AND name_template IS NULL AND user_limit IS NULL AND privacy IS NULL
+      `);
+    });
     return { status: 'cleared' };
   }
 
@@ -290,9 +318,9 @@ export class MemberRoomPrefsRepository {
   }
 
   /**
-   * The orphan sweep: deletes rows whose creator channel has no `auto_channels` row in ANY
-   * fleet and that have sat untouched for at least `olderThanMs`, at most `limit` per call.
-   * Resolves to how many went.
+   * The orphan sweep, one bounded pass: puts rows whose creator channel is missing on a grace
+   * clock, takes rows whose creator channel is back off it, and deletes the rows that have
+   * been on it for at least `graceMs`. Each step touches at most `limit` rows.
    *
    * **The whole predicate is in SQL**, as `CompanionChannelRepository.listOrphans` does,
    * for the same reason: it needs no Discord cache, no shard and no lease, so it reaches
@@ -301,31 +329,71 @@ export class MemberRoomPrefsRepository {
    * belongs to exactly one fleet, so a row that exists in any of them is the creator
    * channel these rows name, and scoping it would invent orphans out of another fleet's.
    *
-   * **The grace is the point of the `updated_at` test.** See
+   * **The grace runs from `orphaned_at`, which the sweep stamps when it first finds the
+   * creator channel missing, and not from `updated_at`.** See
    * {@link MEMBER_PREFS_ORPHAN_GRACE_MS}: a creator channel dropped by `/import` can come
-   * back from its snapshot, and the snapshot carries no remembered settings.
+   * back from its snapshot, and the snapshot carries no remembered settings. `updated_at`
+   * moves only when the member saves, so a row last saved a month ago would have been
+   * deleted the hour its creator channel went. The stamp is cleared when the creator
+   * channel is back, so a later removal starts a fresh grace. Delete also re-checks that the
+   * creator channel is still missing, so a creator channel that returned after the stamp
+   * was read cannot lose its rows.
+   *
+   * Idempotent, and safe for every instance of every fleet to run: each step picks its rows
+   * with `FOR UPDATE SKIP LOCKED`, so two sweeps that overlap take disjoint batches instead of
+   * waiting on, or deadlocking over, each other's rows, and a repeat finds nothing to do.
    *
    * Not bound to a guild, like the erasures: it spans servers by design, and it is the
    * sweep's, not a command's. `limit` bounds one pass and the job runs again, oldest first.
-   * There is no index on `updated_at`, so a pass scans the table, which is bounded by the
+   * There is no index on these columns, so a pass scans the table, which is bounded by the
    * members who have changed a room and is run about once an hour.
    */
-  async deleteOrphans(opts: { olderThanMs: number; limit: number }): Promise<number> {
+  async sweepOrphans(opts: { graceMs: number; limit: number }): Promise<OrphanSweepResult> {
     const limit = Math.trunc(opts.limit);
-    if (!(limit > 0)) return 0;
-    const graceMs = Math.max(0, opts.olderThanMs);
-    const result = await this.db.execute(sql`
+    if (!(limit > 0)) return { marked: 0, restored: 0, removed: 0 };
+    const graceMs = Math.max(0, opts.graceMs);
+    const restored = await this.db.execute(sql`
+      UPDATE member_room_prefs SET orphaned_at = NULL
+       WHERE (primary_channel_id, user_id) IN (
+         SELECT m.primary_channel_id, m.user_id
+           FROM member_room_prefs m
+          WHERE m.orphaned_at IS NOT NULL
+            AND EXISTS (SELECT 1 FROM auto_channels a WHERE a.channel_id = m.primary_channel_id)
+          LIMIT ${limit}
+            FOR UPDATE OF m SKIP LOCKED
+       )
+      RETURNING 1
+    `);
+    const marked = await this.db.execute(sql`
+      UPDATE member_room_prefs SET orphaned_at = now()
+       WHERE (primary_channel_id, user_id) IN (
+         SELECT m.primary_channel_id, m.user_id
+           FROM member_room_prefs m
+          WHERE m.orphaned_at IS NULL
+            AND NOT EXISTS (SELECT 1 FROM auto_channels a WHERE a.channel_id = m.primary_channel_id)
+          ORDER BY m.updated_at
+          LIMIT ${limit}
+            FOR UPDATE OF m SKIP LOCKED
+       )
+      RETURNING 1
+    `);
+    const removed = await this.db.execute(sql`
       DELETE FROM member_room_prefs
        WHERE (primary_channel_id, user_id) IN (
          SELECT m.primary_channel_id, m.user_id
            FROM member_room_prefs m
-          WHERE m.updated_at < now() - (${graceMs}::double precision * interval '1 millisecond')
+          WHERE m.orphaned_at < now() - (${graceMs}::double precision * interval '1 millisecond')
             AND NOT EXISTS (SELECT 1 FROM auto_channels a WHERE a.channel_id = m.primary_channel_id)
-          ORDER BY m.updated_at
+          ORDER BY m.orphaned_at
           LIMIT ${limit}
+            FOR UPDATE OF m SKIP LOCKED
        )
       RETURNING 1
     `);
-    return result.rows.length;
+    return {
+      marked: marked.rows.length,
+      restored: restored.rows.length,
+      removed: removed.rows.length,
+    };
   }
 }

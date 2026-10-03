@@ -23,12 +23,15 @@ export const MAX_MEMBER_PREF_LIMIT = 99;
 
 /**
  * How long a row whose creator channel no longer exists is kept before the orphan sweep
- * deletes it.
+ * deletes it, counted from when the sweep first found the creator channel missing and not
+ * from when the member last saved.
  *
  * The grace is what keeps `/import` undoable. An import that drops a creator channel is
  * one way, with the snapshot it takes first as the only route back, and that snapshot does
  * not carry anyone's remembered settings. Deleting those rows the moment the creator
  * channel went would make the undo lose them for good, so they wait out this long first.
+ * Counting from the member's last save would not do that: a row last saved a month ago
+ * would be eligible the hour its creator channel went.
  */
 export const MEMBER_PREFS_ORPHAN_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 

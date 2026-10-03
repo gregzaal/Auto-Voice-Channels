@@ -833,15 +833,18 @@ async function main(): Promise<void> {
     sweepCompanionOrphans: () => companionText.sweepOrphans(),
     /**
      * The same reasoning, and the same lack of `ownsGuild`: a row here is a remembered
-     * setting of a creator channel that exists in no fleet, so no instance owns it. One
-     * bounded delete behind a grace period (see `MEMBER_PREFS_ORPHAN_GRACE_MS` for why),
-     * idempotent, and throttled to once an hour in the reconciler.
+     * setting of a creator channel that exists in no fleet, so no instance owns it. Bounded
+     * passes behind a grace period that runs from when the creator channel went (see
+     * `MEMBER_PREFS_ORPHAN_GRACE_MS` for why), idempotent, and throttled to once an hour in
+     * the reconciler. Only what it deleted is reported: stamping a row is bookkeeping.
      */
     sweepMemberPrefsOrphans: async () => ({
-      removed: await memberRoomPrefsRepo.deleteOrphans({
-        olderThanMs: MEMBER_PREFS_ORPHAN_GRACE_MS,
-        limit: MEMBER_PREFS_ORPHAN_SWEEP_LIMIT,
-      }),
+      removed: (
+        await memberRoomPrefsRepo.sweepOrphans({
+          graceMs: MEMBER_PREFS_ORPHAN_GRACE_MS,
+          limit: MEMBER_PREFS_ORPHAN_SWEEP_LIMIT,
+        })
+      ).removed,
     }),
   });
 

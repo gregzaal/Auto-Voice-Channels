@@ -90,8 +90,8 @@ const EXEMPT: Record<string, string> = {
     'erasure on request for an owner spans every server by design, so it filters on the owner instead. An operator tool, not reachable from a command. Checked explicitly below.',
   'memberRoomPrefs.ts:deleteByUser':
     'erasure on request for a member spans every server and creator channel by design, so it filters on the user instead. An operator tool, not reachable from a command. Checked explicitly below.',
-  'memberRoomPrefs.ts:deleteOrphans':
-    'the orphan sweep spans every server by design, because the rows it reaches belong to creator channels that no longer exist anywhere. It filters on the missing creator channel and an age instead, and is bounded by a limit. Reached only from the periodic sweep. Checked explicitly below.',
+  'memberRoomPrefs.ts:sweepOrphans':
+    'the orphan sweep spans every server by design, because the rows it reaches belong to creator channels that no longer exist anywhere. It filters on the missing creator channel and the time since the sweep first saw it missing instead, and is bounded by a limit. Reached only from the periodic sweep. Checked explicitly below.',
 };
 
 interface Method {
@@ -227,31 +227,32 @@ describe('channel repository guards', () => {
    * The remembered settings' two exemptions, checked rather than trusted, for the reason the
    * saved lists' are. The erasure is keyed on the member it erases. The sweep has no guild to
    * bind, so its guard is its predicate: a delete that lost the `NOT EXISTS` on the creator
-   * channel, the age test or the `LIMIT` would wipe live members' settings, one pass at a time.
+   * channel, the test that the grace has run from the stamp or the `LIMIT` would wipe live
+   * members' settings, one pass at a time.
    * They are also the only writes on that table that are exempt, and every other write binds
    * the guild in a statement that is raw SQL or builder calls alike.
    */
   it('binds the remembered settings erasure to its member, and the sweep to what makes a row an orphan', () => {
     const writes = writesOf(read('memberRoomPrefs.ts'));
     const byUser = writes.find((m) => m.name === 'deleteByUser');
-    const sweep = writes.find((m) => m.name === 'deleteOrphans');
+    const sweep = writes.find((m) => m.name === 'sweepOrphans');
     expect(
       byUser,
       'MemberRoomPrefsRepository.deleteByUser has gone or changed shape',
     ).toBeDefined();
-    expect(
-      sweep,
-      'MemberRoomPrefsRepository.deleteOrphans has gone or changed shape',
-    ).toBeDefined();
+    expect(sweep, 'MemberRoomPrefsRepository.sweepOrphans has gone or changed shape').toBeDefined();
     expect(byUser!.body).toMatch(/\.userId,\s*userId/);
-    expect(sweep!.body).toMatch(/NOT EXISTS \(SELECT 1 FROM auto_channels/);
-    expect(sweep!.body).toMatch(/m\.updated_at < now\(\)/);
-    expect(sweep!.body).toMatch(/LIMIT \$\{limit\}/);
+    // The statement that deletes, and not the two that only stamp and unstamp.
+    const deletion = sweep!.body.slice(sweep!.body.indexOf('DELETE FROM member_room_prefs'));
+    expect(deletion).toMatch(/m\.orphaned_at < now\(\)/);
+    expect(deletion).toMatch(/NOT EXISTS \(SELECT 1 FROM auto_channels/);
+    expect(deletion).toMatch(/LIMIT \$\{limit\}/);
+    expect(deletion).toMatch(/SKIP LOCKED/);
 
     const exempt = Object.keys(EXEMPT).filter((key) => key.startsWith('memberRoomPrefs.ts:'));
     expect(exempt.sort()).toEqual([
       'memberRoomPrefs.ts:deleteByUser',
-      'memberRoomPrefs.ts:deleteOrphans',
+      'memberRoomPrefs.ts:sweepOrphans',
     ]);
     // The raw writes are in the scan, so none of them can lose its guild binding unseen.
     const names = writes.map((m) => m.name);

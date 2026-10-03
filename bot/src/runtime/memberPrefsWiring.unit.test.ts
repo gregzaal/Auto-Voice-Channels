@@ -46,8 +46,8 @@ describe('the remembered settings orphan sweep is wired', () => {
   it('into the reconciler, with the grace period and a bounded pass', () => {
     const reconciler = statementFrom('const reconciler = new Reconciler({');
     expect(reconciler).toContain('sweepMemberPrefsOrphans: async () => ({');
-    expect(reconciler).toContain('memberRoomPrefsRepo.deleteOrphans({');
-    expect(reconciler).toContain('olderThanMs: MEMBER_PREFS_ORPHAN_GRACE_MS,');
+    expect(reconciler).toContain('memberRoomPrefsRepo.sweepOrphans({');
+    expect(reconciler).toContain('graceMs: MEMBER_PREFS_ORPHAN_GRACE_MS,');
     expect(reconciler).toContain('limit: MEMBER_PREFS_ORPHAN_SWEEP_LIMIT,');
   });
 

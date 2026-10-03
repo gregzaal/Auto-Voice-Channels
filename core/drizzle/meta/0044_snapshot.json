@@ -1,5 +1,5 @@
 {
-  "id": "5be32697-8f9f-418d-ab56-f0e07585b296",
+  "id": "23df1bec-5c52-4ad6-8234-8e9421e5bfab",
   "prevId": "02375d48-32f1-465b-930b-5b6f0e73ca6c",
   "version": "7",
   "dialect": "postgresql",
@@ -2155,6 +2155,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "orphaned_at": {
+          "name": "orphaned_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {

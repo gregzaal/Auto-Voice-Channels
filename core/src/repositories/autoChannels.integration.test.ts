@@ -3,6 +3,7 @@ import { AutoChannelRepository, startModeOf } from './autoChannels.js';
 import { autoChannels } from '../db/schema.js';
 import type { PgTestEnv } from '../test/pgContainer.js';
 import { startPostgres } from '../test/pgContainer.js';
+import { racing } from '../test/racing.js';
 
 const GUILD = 'guild-1';
 const OTHER_GUILD = 'guild-2';
@@ -238,6 +239,27 @@ describe('AutoChannelRepository (integration)', () => {
       const row = await repo.setRememberPrefs(GUILD, CHANNEL, true);
 
       expect(row!.template).toEqual({ name: 'New name', limit: 9, rememberPrefs: true });
+    });
+
+    /**
+     * The test above never hands the stale read to the method, so a toggle that read the
+     * template itself and wrote it back would pass it too. This one holds the edit open and
+     * uncommitted on another connection while the toggle runs, so the toggle waits behind it
+     * and has to take what the edit left, which only a single DB-side statement does.
+     */
+    it('keeps an edit that commits while the toggle is waiting for the row', async () => {
+      await repo.upsert(GUILD, CHANNEL, { name: 'Old name', limit: 2 });
+
+      const row = await racing(
+        env,
+        `UPDATE auto_channels SET template = template || '{"name":"New name","limit":9}'::jsonb
+          WHERE channel_id = $1`,
+        [CHANNEL],
+        () => repo.setRememberPrefs(GUILD, CHANNEL, true),
+      );
+
+      expect(row!.template).toEqual({ name: 'New name', limit: 9, rememberPrefs: true });
+      expect((await repo.get(CHANNEL))!.template).toEqual(row!.template);
     });
 
     it('does not touch a creator channel of another guild, or another fleet', async () => {

@@ -131,4 +131,14 @@ describe('schema remembered room settings', () => {
       expect(column.hasDefault).toBe(false);
     }
   });
+
+  /**
+   * Null means a creator channel exists for the row, which is what an older build's insert
+   * leaves and what the sweep restores a row to. A default would put every new row on the
+   * grace clock the moment it was made.
+   */
+  it('stores the orphan stamp as nullable with no default', () => {
+    expect(memberRoomPrefs.orphanedAt.notNull).toBe(false);
+    expect(memberRoomPrefs.orphanedAt.hasDefault).toBe(false);
+  });
 });

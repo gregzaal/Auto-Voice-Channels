@@ -448,11 +448,14 @@ export const memberAccessLists = pgTable(
  * the rows, dormant, so an admin who turns it back on does not lose what members had saved.
  *
  * **Rows outlive the creator channel on purpose, for a while.** Nothing deletes them when
- * a creator channel goes. The orphan sweep deletes a row once no `auto_channels` row names
- * its creator channel in any fleet AND it has not been touched for the grace period, which
- * is what keeps an `/import` that dropped a creator channel undoable (its snapshot does not
- * carry these rows). A server the bot has left keeps its `auto_channels` rows, so its
- * remembered settings are not swept by that rule and only erasure on request removes them.
+ * a creator channel goes. The orphan sweep first stamps `orphaned_at` on a row whose creator
+ * channel has no `auto_channels` row in any fleet, and deletes it only once that stamp is a
+ * grace period old. The clock runs from when the creator channel went and not from when the
+ * member last saved, so an `/import` that dropped a creator channel stays undoable for the
+ * whole grace however long ago its members last changed a room (the snapshot that undoes
+ * it does not carry these rows). The stamp is cleared when the creator channel returns.
+ * A server the bot has left keeps its `auto_channels` rows, so its remembered settings are
+ * not swept by that rule and only erasure on request removes them.
  *
  * Not exported: `/export` carries `guilds.settings` and the creator channels, and these are
  * neither, so a member's remembered name does not leave the database through an admin's file.
@@ -469,6 +472,12 @@ export const memberRoomPrefs = pgTable(
     userLimit: smallint('user_limit'),
     privacy: text('privacy', { enum: MEMBER_PREF_PRIVACIES }),
     updatedAt: updatedAt(),
+    /**
+     * When the orphan sweep first found no creator channel for this row, or null while there
+     * is one. Nullable with no default, so an older build's insert leaves it null and the sweep
+     * stamps it. Written only by the sweep: it is not a save, and never moves `updated_at`.
+     */
+    orphanedAt: timestamp('orphaned_at', { withTimezone: true }),
   },
   (t) => [
     primaryKey({ columns: [t.primaryChannelId, t.userId] }),

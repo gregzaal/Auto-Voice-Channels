@@ -328,9 +328,11 @@ export class AutoChannelRepository {
    * One DB-side statement, for the reason {@link setDefaultPrivacy} is: {@link upsert}
    * replaces `template` wholesale, so a toggle that read the row and wrote it back lost a
    * `/template` edit made between its read and its write. On sets the key, and off removes it
-   * rather than storing `false`, so a creator channel that never remembered stays lean and an
-   * export of it carries nothing new. Neither direction touches what members saved: those rows
-   * are another table, and turning this off keeps them dormant.
+   * rather than storing `false`, so the stored template of a creator channel that never
+   * remembered stays lean. (An export still writes the field, as `null`, like every field a
+   * template lacks, which the export schema accepts because it is nullable and optional.)
+   * Neither direction touches what members saved: those rows are another table, and turning
+   * this off keeps them dormant.
    *
    * Idempotent, so a double click or a retry ends in the same state. Guild- and fleet-bound
    * like every other write here, and returns the row as stored afterwards, or `undefined` when

@@ -9,6 +9,7 @@ import {
 } from '../domain/memberRoomPrefs.js';
 import type { PgTestEnv } from '../test/pgContainer.js';
 import { startPostgres } from '../test/pgContainer.js';
+import { racing } from '../test/racing.js';
 
 const GUILD = 'guild-1';
 const OTHER_GUILD = 'guild-2';
@@ -25,6 +26,7 @@ type Row = {
   user_limit: number | null;
   privacy: string | null;
   updated_at: string | Date;
+  orphaned_at: string | Date | null;
 };
 
 describe('MemberRoomPrefsRepository (integration)', () => {
@@ -74,14 +76,20 @@ describe('MemberRoomPrefsRepository (integration)', () => {
       limit: number | null;
       privacy: string | null;
       ageDays: number;
+      /** How long ago the sweep stamped the row as an orphan. Unstamped when left out. */
+      orphanedDaysAgo: number;
     }> = {},
   ) =>
     env.handle.db.execute(
       sql`INSERT INTO member_room_prefs
-            (primary_channel_id, user_id, guild_id, name_template, user_limit, privacy, updated_at)
+            (primary_channel_id, user_id, guild_id, name_template, user_limit, privacy, updated_at,
+             orphaned_at)
           VALUES (${over.primary ?? PRIMARY}, ${over.user ?? USER}, ${over.guild ?? GUILD},
                   ${over.name ?? null}, ${over.limit ?? null}, ${over.privacy ?? null},
-                  now() - (${over.ageDays ?? 0}::double precision * interval '1 day'))`,
+                  now() - (${over.ageDays ?? 0}::double precision * interval '1 day'),
+                  CASE WHEN ${over.orphanedDaysAgo ?? null}::double precision IS NULL THEN NULL
+                       ELSE now() - (${over.orphanedDaysAgo ?? null}::double precision
+                                     * interval '1 day') END)`,
     );
 
   describe('the table', () => {
@@ -105,6 +113,7 @@ describe('MemberRoomPrefsRepository (integration)', () => {
         { column_name: 'user_limit', data_type: 'smallint', is_nullable: 'YES' },
         { column_name: 'privacy', data_type: 'text', is_nullable: 'YES' },
         { column_name: 'updated_at', data_type: 'timestamp with time zone', is_nullable: 'NO' },
+        { column_name: 'orphaned_at', data_type: 'timestamp with time zone', is_nullable: 'YES' },
       ]);
 
       const indexes = (
@@ -243,6 +252,24 @@ describe('MemberRoomPrefsRepository (integration)', () => {
       expect(await rows()).toEqual([]);
     });
 
+    /**
+     * The bot reads the switch as the JSON boolean `true`. An older build's `/import` carries
+     * unknown template keys in unvalidated, so the string "true" can be stored, and a check
+     * that took it would save for a creator channel the editor shows as Off.
+     */
+    it('takes the JSON boolean true and not the string "true"', async () => {
+      await creators.upsert(GUILD, PRIMARY, { name: 'Room ##' });
+      await env.handle.db.execute(
+        sql`UPDATE auto_channels SET template = template || '{"rememberPrefs":"true"}'::jsonb
+             WHERE channel_id = ${PRIMARY}`,
+      );
+      expect(await repo.saveName(GUILD, PRIMARY, USER, 'den')).toEqual({ status: 'notOptedIn' });
+      expect(await rows()).toEqual([]);
+
+      await optIn();
+      expect(await repo.saveName(GUILD, PRIMARY, USER, 'den')).toEqual({ status: 'saved' });
+    });
+
     /** A creator channel id is global, and a server must not save into another server's. */
     it('writes nothing when the creator channel belongs to another server', async () => {
       await optIn(PRIMARY, GUILD);
@@ -331,6 +358,30 @@ describe('MemberRoomPrefsRepository (integration)', () => {
       await stage({ name: 'den', privacy: 'sealed' });
       expect(await repo.get(PRIMARY, USER)).toEqual({ name: 'den', limit: null, privacy: null });
     });
+
+    /**
+     * A save refuses these, but a hand edit or another build may have left one, and a restore
+     * that read them back raw would hand Discord a limit of 500 or a blank name.
+     */
+    it('reads around a name, a limit or a privacy a save would have refused', async () => {
+      await stage({ name: '   ', limit: 500, privacy: 'private' });
+      expect(await repo.get(PRIMARY, USER)).toEqual({
+        name: null,
+        limit: null,
+        privacy: 'private',
+      });
+
+      await stage({
+        user: OTHER_USER,
+        name: 'x'.repeat(MAX_MEMBER_PREF_NAME_LENGTH + 1),
+        limit: -1,
+      });
+      // Nothing usable is left in the row, so it reads as nothing remembered.
+      expect(await repo.get(PRIMARY, OTHER_USER)).toBeUndefined();
+
+      await stage({ user: 'user-3', name: 'den', limit: 0 });
+      expect(await repo.get(PRIMARY, 'user-3')).toEqual({ name: 'den', limit: 0, privacy: null });
+    });
   });
 
   describe('clearing one setting', () => {
@@ -382,6 +433,61 @@ describe('MemberRoomPrefsRepository (integration)', () => {
       await repo.saveName(GUILD, PRIMARY, USER, null);
       await repo.saveName(GUILD, PRIMARY, USER, null);
       expect(await repo.get(PRIMARY, USER)).toEqual({ name: null, limit: 3, privacy: null });
+    });
+
+    /**
+     * The defect a clear that decided from a snapshot has. Another connection has a save of the
+     * limit in flight and uncommitted, and the clear runs behind it. A single statement that
+     * chose between deleting and updating from the limit as it stood when it started matched
+     * neither branch once the save committed, answered `cleared`, and kept the name.
+     */
+    it('clears the setting even when a save of another one commits just before it', async () => {
+      await optIn();
+      await repo.saveName(GUILD, PRIMARY, USER, 'den');
+
+      const result = await racing(
+        env,
+        `UPDATE member_room_prefs SET user_limit = 4, updated_at = now()
+          WHERE primary_channel_id = $1 AND user_id = $2`,
+        [PRIMARY, USER],
+        () => repo.saveName(GUILD, PRIMARY, USER, null),
+      );
+
+      expect(result).toEqual({ status: 'cleared' });
+      expect(await repo.get(PRIMARY, USER)).toEqual({ name: null, limit: 4, privacy: null });
+    });
+
+    /** The same, with the other setting cleared a moment earlier: the last clear removes the row. */
+    it('removes the row when a clear of the other setting commits just before the last one', async () => {
+      await optIn();
+      await repo.saveName(GUILD, PRIMARY, USER, 'den');
+      await repo.saveLimit(GUILD, PRIMARY, USER, 4);
+
+      const result = await racing(
+        env,
+        `UPDATE member_room_prefs SET name_template = NULL, updated_at = now()
+          WHERE primary_channel_id = $1 AND user_id = $2`,
+        [PRIMARY, USER],
+        () => repo.saveLimit(GUILD, PRIMARY, USER, null),
+      );
+
+      expect(result).toEqual({ status: 'cleared' });
+      expect(await rows()).toEqual([]);
+    });
+
+    /** A save that lands on a row being emptied makes a fresh one, and loses nothing. */
+    it('keeps a save that arrives while the last setting is being cleared', async () => {
+      await optIn();
+      await repo.saveName(GUILD, PRIMARY, USER, 'den');
+      for (let i = 0; i < 10; i += 1) {
+        await Promise.all([
+          repo.saveName(GUILD, PRIMARY, USER, null),
+          repo.saveLimit(GUILD, PRIMARY, USER, 4),
+        ]);
+        expect(await repo.get(PRIMARY, USER)).toEqual({ name: null, limit: 4, privacy: null });
+        await repo.saveName(GUILD, PRIMARY, USER, 'den');
+        await repo.saveLimit(GUILD, PRIMARY, USER, null);
+      }
     });
 
     /** A replay that changes nothing should not make a row look recently used. */
@@ -495,16 +601,43 @@ describe('MemberRoomPrefsRepository (integration)', () => {
   });
 
   /**
-   * The sweep deletes rows whose creator channel is gone everywhere, after a grace, and
-   * can never reach a live creator channel's rows however old they are.
+   * The sweep puts rows whose creator channel is gone everywhere on a grace clock, and deletes
+   * them once the clock has run. The clock starts when the sweep first finds the creator
+   * channel missing, and never at the member's last save.
    */
   describe('the orphan sweep', () => {
-    const SWEEP = { olderThanMs: MEMBER_PREFS_ORPHAN_GRACE_MS, limit: 100 };
+    const SWEEP = { graceMs: MEMBER_PREFS_ORPHAN_GRACE_MS, limit: 100 };
+    const NOTHING = { marked: 0, restored: 0, removed: 0 };
 
-    it('deletes an old row whose creator channel is gone', async () => {
-      await stage({ name: 'orphan', ageDays: 8 });
-      expect(await repo.deleteOrphans(SWEEP)).toBe(1);
+    /**
+     * The defect a grace measured from `updated_at` has. The row was last saved a month ago,
+     * and the creator channel was dropped by an `/import` just now. The snapshot that undoes
+     * the import carries no remembered settings, so the row has to wait out the whole grace
+     * from the moment the creator channel went, and not be eligible at the very next sweep.
+     */
+    it('starts the grace when the creator channel goes, not when the member last saved', async () => {
+      await stage({ name: 'idle for a month', ageDays: 30 });
+
+      expect(await repo.sweepOrphans(SWEEP)).toEqual({ ...NOTHING, marked: 1 });
+      expect(await rows()).toHaveLength(1);
+      // Any number of later sweeps inside the grace leave it alone.
+      expect(await repo.sweepOrphans(SWEEP)).toEqual(NOTHING);
+      expect(await rows()).toHaveLength(1);
+    });
+
+    it('deletes a row once it has been an orphan for the whole grace', async () => {
+      await stage({ name: 'orphan', ageDays: 30, orphanedDaysAgo: 8 });
+      expect(await repo.sweepOrphans(SWEEP)).toEqual({ ...NOTHING, removed: 1 });
       expect(await rows()).toEqual([]);
+    });
+
+    it('stamps the row without moving updated_at, which only a save moves', async () => {
+      await stage({ name: 'orphan', ageDays: 30 });
+      const before = at((await rows())[0]!);
+      await repo.sweepOrphans(SWEEP);
+      const [after] = await rows();
+      expect(at(after!)).toBe(before);
+      expect(after!.orphaned_at).not.toBeNull();
     });
 
     /**
@@ -512,19 +645,35 @@ describe('MemberRoomPrefsRepository (integration)', () => {
      * pre-import snapshot, which carries no remembered settings.
      */
     it('keeps an orphan until it has waited out the grace period', async () => {
-      await stage({ name: 'fresh', ageDays: 6.9 });
-      expect(await repo.deleteOrphans(SWEEP)).toBe(0);
+      await stage({ name: 'fresh', ageDays: 30, orphanedDaysAgo: 6.9 });
+      expect(await repo.sweepOrphans(SWEEP)).toEqual(NOTHING);
       expect(await rows()).toHaveLength(1);
 
       // And what makes the grace a real window: the creator channel returns, and nothing is lost.
       await optIn();
-      expect(await repo.deleteOrphans({ olderThanMs: 0, limit: 100 })).toBe(0);
+      expect(await repo.sweepOrphans({ graceMs: 0, limit: 100 })).toEqual({
+        ...NOTHING,
+        restored: 1,
+      });
       expect(await repo.get(PRIMARY, USER)).toBeDefined();
+    });
+
+    /** A later removal is a new event, so it gets a grace of its own. */
+    it('takes a returned creator channel off the clock, so a second removal starts a new grace', async () => {
+      await stage({ name: 'came back', ageDays: 30, orphanedDaysAgo: 30 });
+      await optIn();
+      expect(await repo.sweepOrphans(SWEEP)).toEqual({ ...NOTHING, restored: 1 });
+      expect((await rows())[0]!.orphaned_at).toBeNull();
+
+      await env.handle.db.delete(autoChannels);
+      expect(await repo.sweepOrphans(SWEEP)).toEqual({ ...NOTHING, marked: 1 });
+      expect(await rows()).toHaveLength(1);
     });
 
     it('takes a row of any age when the grace is zero', async () => {
       await stage({ name: 'just now', ageDays: 0 });
-      expect(await repo.deleteOrphans({ olderThanMs: 0, limit: 100 })).toBe(1);
+      expect(await repo.sweepOrphans({ graceMs: 0, limit: 100 })).toMatchObject({ removed: 1 });
+      expect(await rows()).toEqual([]);
     });
 
     it('never deletes a row whose creator channel exists, however old, remembering or not', async () => {
@@ -532,9 +681,12 @@ describe('MemberRoomPrefsRepository (integration)', () => {
       await creators.upsert(GUILD, OTHER_PRIMARY, { name: 'Room ##' });
       await stage({ name: 'ancient', ageDays: 400 });
       await stage({ primary: OTHER_PRIMARY, name: 'dormant', ageDays: 400 });
+      // Even one carrying a stale stamp from an earlier removal.
+      await stage({ user: OTHER_USER, name: 'stamped', ageDays: 400, orphanedDaysAgo: 400 });
 
-      expect(await repo.deleteOrphans(SWEEP)).toBe(0);
-      expect(await rows()).toHaveLength(2);
+      expect(await repo.sweepOrphans(SWEEP)).toEqual({ ...NOTHING, restored: 1 });
+      expect(await rows()).toHaveLength(3);
+      expect((await rows()).every((r) => r.orphaned_at === null)).toBe(true);
     });
 
     /**
@@ -544,42 +696,92 @@ describe('MemberRoomPrefsRepository (integration)', () => {
      */
     it('keeps rows whose creator channel exists in another fleet', async () => {
       await betaCreators.upsert(GUILD, PRIMARY, { rememberPrefs: true });
-      await stage({ name: 'beta owns it', ageDays: 30 });
+      await stage({ name: 'beta owns it', ageDays: 30, orphanedDaysAgo: 30 });
 
-      expect(await repo.deleteOrphans(SWEEP)).toBe(0);
+      expect(await repo.sweepOrphans(SWEEP)).toEqual({ ...NOTHING, restored: 1 });
       expect(await rows()).toHaveLength(1);
     });
 
     it('deletes at most the limit per call, oldest first, and a second call carries on', async () => {
-      await stage({ user: 'u-newest', ageDays: 9 });
-      await stage({ user: 'u-oldest', ageDays: 30 });
-      await stage({ user: 'u-middle', ageDays: 15 });
-      await stage({ user: 'u-fresh', ageDays: 1 });
+      await stage({ user: 'u-newest', orphanedDaysAgo: 9 });
+      await stage({ user: 'u-oldest', orphanedDaysAgo: 30 });
+      await stage({ user: 'u-middle', orphanedDaysAgo: 15 });
+      await stage({ user: 'u-fresh', orphanedDaysAgo: 1 });
 
-      expect(await repo.deleteOrphans({ ...SWEEP, limit: 2 })).toBe(2);
+      expect((await repo.sweepOrphans({ ...SWEEP, limit: 2 })).removed).toBe(2);
       expect((await rows()).map((r) => r.user_id).sort()).toEqual(['u-fresh', 'u-newest']);
-      expect(await repo.deleteOrphans({ ...SWEEP, limit: 2 })).toBe(1);
+      expect((await repo.sweepOrphans({ ...SWEEP, limit: 2 })).removed).toBe(1);
       expect((await rows()).map((r) => r.user_id)).toEqual(['u-fresh']);
-      expect(await repo.deleteOrphans({ ...SWEEP, limit: 2 })).toBe(0);
+      expect((await repo.sweepOrphans({ ...SWEEP, limit: 2 })).removed).toBe(0);
+    });
+
+    it('stamps at most the limit per call, and a second call carries on', async () => {
+      await stage({ user: 'u-1', ageDays: 3 });
+      await stage({ user: 'u-2', ageDays: 2 });
+      await stage({ user: 'u-3', ageDays: 1 });
+      const stamped = async () => (await rows()).filter((r) => r.orphaned_at !== null).length;
+
+      expect((await repo.sweepOrphans({ ...SWEEP, limit: 2 })).marked).toBe(2);
+      expect(await stamped()).toBe(2);
+      expect((await repo.sweepOrphans({ ...SWEEP, limit: 2 })).marked).toBe(1);
+      expect(await stamped()).toBe(3);
     });
 
     it('does nothing for a limit that is not a positive number', async () => {
-      await stage({ name: 'orphan', ageDays: 30 });
-      expect(await repo.deleteOrphans({ ...SWEEP, limit: 0 })).toBe(0);
-      expect(await repo.deleteOrphans({ ...SWEEP, limit: -5 })).toBe(0);
-      expect(await repo.deleteOrphans({ ...SWEEP, limit: Number.NaN })).toBe(0);
+      await stage({ name: 'orphan', ageDays: 30, orphanedDaysAgo: 30 });
+      expect(await repo.sweepOrphans({ ...SWEEP, limit: 0 })).toEqual(NOTHING);
+      expect(await repo.sweepOrphans({ ...SWEEP, limit: -5 })).toEqual(NOTHING);
+      expect(await repo.sweepOrphans({ ...SWEEP, limit: Number.NaN })).toEqual(NOTHING);
       expect(await rows()).toHaveLength(1);
     });
 
     it('sweeps orphans in every server in one pass, which is the point of it', async () => {
-      await stage({ guild: GUILD, primary: 'gone-1', name: 'a', ageDays: 20 });
-      await stage({ guild: OTHER_GUILD, primary: 'gone-2', name: 'b', ageDays: 20 });
-      expect(await repo.deleteOrphans(SWEEP)).toBe(2);
+      await stage({ guild: GUILD, primary: 'gone-1', name: 'a', orphanedDaysAgo: 20 });
+      await stage({ guild: OTHER_GUILD, primary: 'gone-2', name: 'b', orphanedDaysAgo: 20 });
+      expect((await repo.sweepOrphans(SWEEP)).removed).toBe(2);
     });
 
     /** The sweep is idempotent: nothing left to do is not an error. */
-    it('answers 0 when there is nothing to sweep', async () => {
-      expect(await repo.deleteOrphans(SWEEP)).toBe(0);
+    it('answers zero for everything when there is nothing to sweep', async () => {
+      expect(await repo.sweepOrphans(SWEEP)).toEqual(NOTHING);
+    });
+
+    /**
+     * Every instance of every fleet runs this, and a deploy starts them within moments of each
+     * other. A batch another sweep holds is skipped and not waited on, so the two never block
+     * on, or deadlock over, each other's rows.
+     */
+    it('skips rows another sweep has locked instead of waiting for them', async () => {
+      await stage({ user: 'u-held', orphanedDaysAgo: 30 });
+      await stage({ user: 'u-free', orphanedDaysAgo: 30 });
+
+      const holder = await env.handle.pool.connect();
+      try {
+        await holder.query('BEGIN');
+        await holder.query(`SELECT 1 FROM member_room_prefs WHERE user_id = 'u-held' FOR UPDATE`);
+        const outcome = await Promise.race([
+          repo.sweepOrphans(SWEEP),
+          new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 5_000)),
+        ]);
+        expect(outcome).not.toBe('blocked');
+        expect(outcome).toMatchObject({ removed: 1 });
+        expect((await rows()).map((r) => r.user_id)).toEqual(['u-held']);
+      } finally {
+        await holder.query('ROLLBACK');
+        holder.release();
+      }
+      // Released, so the next pass takes what was skipped.
+      expect((await repo.sweepOrphans(SWEEP)).removed).toBe(1);
+      expect(await rows()).toEqual([]);
+    });
+
+    it('lets two sweeps overlap without double counting or failing', async () => {
+      for (let i = 0; i < 30; i += 1) {
+        await stage({ user: `u-${i}`, orphanedDaysAgo: 20 });
+      }
+      const [a, b] = await Promise.all([repo.sweepOrphans(SWEEP), repo.sweepOrphans(SWEEP)]);
+      expect(a.removed + b.removed).toBe(30);
+      expect(await rows()).toEqual([]);
     });
   });
 });
