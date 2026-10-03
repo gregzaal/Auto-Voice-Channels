@@ -545,6 +545,8 @@ async function main(): Promise<void> {
     logger: logger.child({ component: 'control-panel' }),
     permissionProblems,
     serverLog: (gid, level, message) => serverLogger.log(gid, level, message),
+    // Whether `/restrict` still hides buttons: the same cached lever the guards read.
+    commandAccessDisabled: () => creationGate.commandAccessDisabled(),
     count: (outcome) => {
       metricsCollector.increment(
         outcome === 'posted'

@@ -21,6 +21,13 @@ import {
   type ControlPanelConfig,
   type ControlPanelControl,
 } from './guildSettings.js';
+import {
+  mayUse,
+  PANEL_ACTION_FEATURE,
+  type CommandAccess,
+  type CommandCaller,
+  type CommandFeature,
+} from './commandAccess.js';
 import { MAX_USER_LIMIT } from './commands.js';
 import { SITE_URL } from '../billing/messages.js';
 import { PANEL_FOOTER, PANEL_LINKS_FIELD } from '../panelBranding.js';
@@ -36,11 +43,14 @@ import { PANEL_FOOTER, PANEL_LINKS_FIELD } from '../panelBranding.js';
  * **The panel follows the room.** It is re-rendered whenever the room changes,
  * which is why {@link buildControlPanel} takes a {@link RoomPanelView} rather
  * than only a config: the privacy button shows the action that is available
- * rather than both of them, and the description names the current owner, who
- * changes when one leaves. What it can never follow is the READER: a channel
- * message is one object rendered identically to everyone who can see it, so
- * hiding an owner-only button from a non-owner is not something Discord can do.
- * Ownership therefore gates the click, in an ephemeral reply, and not the panel.
+ * rather than both of them, the description names the current owner, who
+ * changes when one leaves, and a control a `/restrict` rule denies the current
+ * owner is absent (see {@link hiddenControls}). What it can never follow is the
+ * READER: a channel message is one object rendered identically to everyone who
+ * can see it, so hiding an owner-only button from a non-owner is not something
+ * Discord can do. Ownership, and any restriction on whoever clicks, therefore
+ * gate the click, in an ephemeral reply, and not the panel: an occupant who is
+ * not the owner still sees the owner's buttons and is refused on pressing one.
  *
  * **Editing is cheap; drifting is not.** A message edit is not on the
  * `PATCH /channels/{id}` bucket that caps a rename at 2 per 10 minutes, and it
@@ -145,6 +155,18 @@ export function renderPanelText(text: string, view: RoomPanelView): string {
     .replaceAll(CONTROL_PANEL_CREATOR_TOKEN, () => `<#${view.primaryChannelId}>`);
 }
 
+/**
+ * What is known about the room owner's standing under `/restrict`: their raw
+ * identity (id, role ids, whether they can manage channels), or `unknown` when
+ * it could not be read, for instance because the member is not in the cache.
+ *
+ * Raw rather than a verdict, so the rules are applied in ONE place (the poster)
+ * for the create-time post and every later re-render, and the two cannot
+ * diverge. `unknown` is a different answer from "nothing is restricted" and the
+ * panel treats it differently, see {@link hiddenControls}.
+ */
+export type PanelOwnerAccess = CommandCaller | 'unknown';
+
 /** What the room's current state does to the panel. */
 export interface RoomPanelView {
   /** The current owner, or null when the room has none (Claim's case). */
@@ -155,6 +177,11 @@ export interface RoomPanelView {
   isPrivate: boolean;
   /** The live user limit, 0 for none, shown on the Size field. */
   userLimit: number;
+  /**
+   * The owner's standing under `/restrict`. Absent reads as `unknown`, which is
+   * what every caller that predates restrictions gets, so nothing is hidden.
+   */
+  ownerAccess?: PanelOwnerAccess | undefined;
 }
 
 /** Label and emoji for a control, as the button and the field both show it. */
@@ -230,6 +257,55 @@ export function settingsFaceOf(control: ControlPanelControl): ControlFace {
   };
 }
 
+/**
+ * Whether `/restrict` denies this room's owner the feature behind a control.
+ *
+ * Three answers, which is the point of reading the owner as raw access:
+ *
+ * - **A resolved owner** is judged exactly as the slash command would judge them.
+ * - **An ownerless room** hides every control whose feature anybody is denied.
+ *   There is nobody to judge, and the panel cannot tell who will press it, so the
+ *   control that some members would be refused on is withdrawn. The slash
+ *   commands still gate by the caller's own identity.
+ * - **An owner who could not be resolved** hides nothing. A cold member cache is
+ *   routine, and withdrawing a button on a guess is worse than leaving one that
+ *   the click-time guard will refuse for the people it applies to.
+ */
+function ownerRestricted(
+  feature: CommandFeature,
+  view: RoomPanelView,
+  access: CommandAccess,
+): boolean {
+  if (!access[feature]) return false;
+  if (view.ownerId === null) return true;
+  const owner = view.ownerAccess;
+  if (owner === undefined || owner === 'unknown') return false;
+  return !mayUse(feature, owner, access);
+}
+
+/**
+ * The controls a `/restrict` rule withdraws from this room's panel.
+ *
+ * Decided from the action each control would CARRY right now, not from the
+ * control, so the undo direction is never hidden: a locked room still shows
+ * Public, because opening a room again is never restricted, and Private is
+ * hidden only while the room is public. Size, Name and Transfer are hidden when
+ * the owner is denied. Claim, Kick and Info are occupant-level and never hidden.
+ * `PANEL_ACTION_FEATURE` is a `Record` over every action, so a control added
+ * later cannot reach here without a decision about it.
+ */
+export function hiddenControls(
+  view: RoomPanelView,
+  access: CommandAccess,
+): ReadonlySet<ControlPanelControl> {
+  const hidden = new Set<ControlPanelControl>();
+  for (const control of CONTROL_PANEL_CONTROLS) {
+    const feature = PANEL_ACTION_FEATURE[faceOf(control, view).action];
+    if (feature !== null && ownerRestricted(feature, view, access)) hidden.add(control);
+  }
+  return hidden;
+}
+
 /** The panel message: an embed and its button rows, or null when there is none to show. */
 export interface ControlPanelMessage {
   embeds: APIEmbed[];
@@ -243,17 +319,26 @@ export interface ControlPanelMessage {
  * to a reader: the panel switched off, and every single button switched off.
  * The caller skips the post entirely, so a server that does not want this gets
  * no message in its rooms rather than an empty embed.
+ *
+ * **Null is decided from the admin's configuration, BEFORE any restriction is
+ * applied.** The caller turns null into "post nothing" or into an edit to the
+ * line saying the panel was switched off for the server, and a room whose owner
+ * is merely denied every button is not that. When restrictions leave no buttons
+ * the embed is still rendered, with no component rows, so the panel stays and
+ * says who owns the room and where to make one's own.
  */
 export function buildControlPanel(
   roomId: string,
   config: ControlPanelConfig,
   view: RoomPanelView,
+  access: CommandAccess = {},
 ): ControlPanelMessage | null {
   if (!config.enabled) return null;
-  const shown = CONTROL_PANEL_CONTROLS.filter((c) => config.controls[c]);
-  if (shown.length === 0) return null;
+  const enabled = CONTROL_PANEL_CONTROLS.filter((c) => config.controls[c]);
+  if (enabled.length === 0) return null;
 
-  const faces = shown.map((c) => faceOf(c, view));
+  const hidden = hiddenControls(view, access);
+  const faces = enabled.filter((c) => !hidden.has(c)).map((c) => faceOf(c, view));
 
   const fields: APIEmbedField[] = faces.map(({ face }) => ({
     name: `${face.emoji} ${face.label}`,

@@ -21,6 +21,7 @@ import type {
   SyncCompanionMembersInput,
   VoiceActions,
 } from './actions.js';
+import type { CommandCaller } from './commandAccess.js';
 import type {
   GuildVoiceView,
   MemberActivity,
@@ -1408,6 +1409,32 @@ export class DiscordVoiceView implements GuildVoiceView {
     const channel = this.client.channels.cache.get(channelId);
     if (!channel || !channel.isVoiceBased()) return undefined;
     return (channel as VoiceBasedChannel).userLimit;
+  }
+
+  /**
+   * A room owner's roles and whether they can manage channels, from the cache.
+   *
+   * The roles are the member's own, without `@everyone` (whose id is the guild
+   * id and is in every member's `roles.cache`). `canManage` comes from the
+   * member's GUILD-level permissions, which is what `/restrict` bypasses on: it
+   * does not look at overwrites on this one room, so a member who can manage
+   * channels only here is still restricted, the same as the slash commands see
+   * them. Cache only, and `undefined` when the room or the member is not in it,
+   * which the panel reads as "cannot say" and hides nothing for.
+   */
+  ownerAccessOf(channelId: string, ownerId: string): CommandCaller | undefined {
+    const channel = this.client.channels.cache.get(channelId);
+    if (!channel || !('guild' in channel)) return undefined;
+    const guild = channel.guild;
+    const member = guild.members.cache.get(ownerId);
+    if (!member) return undefined;
+    return {
+      userId: ownerId,
+      roleIds: [...member.roles.cache.keys()].filter((id) => id !== guild.id),
+      canManage:
+        member.permissions.has(PermissionFlagsBits.ManageChannels) ||
+        member.permissions.has(PermissionFlagsBits.Administrator),
+    };
   }
 
   displayOrderOf(channelIds: string[]): string[] | undefined {

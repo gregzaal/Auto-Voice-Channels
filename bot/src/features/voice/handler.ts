@@ -32,7 +32,7 @@ import {
   type PermissionProblemTracker,
 } from './permissionProblems.js';
 import type { CommandResult } from './commands.js';
-import type { RoomPanelView } from './controlPanel.js';
+import type { PanelOwnerAccess, RoomPanelView } from './controlPanel.js';
 import type { PanelRoomRow } from './controlPanelPoster.js';
 
 /** A fresh 31-bit random seed for a channel's `[[random]]` picks. */
@@ -974,6 +974,7 @@ export class VoiceFeature {
           // answer for certain.
           isPrivate: primary?.template.defaultPrivate === true,
           userLimit: primary?.template.limit ?? 0,
+          ownerAccess: this.panelOwnerAccess(newChannelId, member.id),
         },
         // The row the insert above returned, which on a conflict is the LIVE
         // one, so it answers the poster's replay guard without a second read
@@ -2351,6 +2352,7 @@ export class VoiceFeature {
         primaryChannelId: primaryChannelId ?? secondary.primaryChannelId,
         isPrivate: secondary.state.private === true,
         userLimit: this.deps.voice.userLimitOf?.(secondary.channelId) ?? 0,
+        ownerAccess: this.panelOwnerAccess(secondary.channelId, secondary.ownerId),
       });
     } catch (err) {
       this.deps.logger.warn(
@@ -2358,6 +2360,23 @@ export class VoiceFeature {
         'could not refresh the room control panel',
       );
     }
+  }
+
+  /**
+   * The room owner's raw standing under `/restrict`, for the panel's view.
+   *
+   * Raw, not a verdict, so the poster applies the rules in one place for the
+   * create-time post and every re-render, and the two cannot diverge. `unknown`
+   * when the view cannot say (a cold cache, or no accessor wired): the panel
+   * hides nothing for an owner it cannot resolve. Absent for an ownerless room,
+   * which the panel judges by its own rule.
+   */
+  private panelOwnerAccess(
+    channelId: string,
+    ownerId: string | null,
+  ): PanelOwnerAccess | undefined {
+    if (ownerId === null) return undefined;
+    return this.deps.voice.ownerAccessOf?.(channelId, ownerId) ?? 'unknown';
   }
 
   /**

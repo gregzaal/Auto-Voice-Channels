@@ -13,6 +13,7 @@
 export type { MemberActivity, VoiceMember } from '@avc/core/template';
 
 import type { VoiceMember } from '@avc/core/template';
+import type { CommandCaller } from './commandAccess.js';
 
 export interface VoiceChannelView {
   id: string;
@@ -73,6 +74,17 @@ export interface GuildVoiceView {
    * live read tells the truth.
    */
   userLimitOf?(channelId: string): number | undefined;
+  /**
+   * Who a room's owner is for `/restrict`: their id, their role ids without
+   * `@everyone`, and whether they can manage channels. `undefined` when it cannot
+   * be said (the room or the member is not in the cache).
+   *
+   * Optional and read like {@link userLimitOf}: absent or `undefined` means
+   * "cannot say", which the panel treats as "do not hide anything" and not as
+   * "nothing is restricted". `channelId` is the room, and is only how the guild is
+   * found. A cache read, so it is cheap enough for every panel re-render.
+   */
+  ownerAccessOf?(channelId: string, ownerId: string): CommandCaller | undefined;
   /**
    * Whether Discord has actually given us this guild's data, i.e. whether
    * {@link channelExists} means anything for it.

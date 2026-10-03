@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ControlPanelPoster, type PanelRoomRow } from './controlPanelPoster.js';
 import { buildControlPanel, controlPanelFingerprint, type RoomPanelView } from './controlPanel.js';
+import { readCommandAccess } from './commandAccess.js';
 import { readControlPanel } from './guildSettings.js';
 import { PermissionProblemTracker } from './permissionProblems.js';
 import type { SecondaryChannelRepository } from '@avc/core';
@@ -44,6 +45,7 @@ function setup(
     row?: { guildId: string } | null;
     send?: () => Promise<string>;
     edit?: () => Promise<void>;
+    commandAccessDisabled?: () => Promise<boolean>;
   } = {},
 ) {
   const setControlPanelMessage = vi.fn().mockResolvedValue(undefined);
@@ -72,6 +74,7 @@ function setup(
     permissionProblems: problems,
     serverLog,
     count,
+    ...(opts.commandAccessDisabled ? { commandAccessDisabled: opts.commandAccessDisabled } : {}),
   });
   return {
     poster,
@@ -303,5 +306,202 @@ describe('ControlPanelPoster.refreshForRoom', () => {
     expect(clearControlPanelMessage).toHaveBeenCalledWith(ROOM);
     expect(problems.recent(GUILD)).toEqual([]);
     expect(count).not.toHaveBeenCalledWith('updated', GUILD);
+  });
+});
+
+/**
+ * The panel follows the room owner. The poster is the ONE place the rules are
+ * applied, for the create-time post and for every later re-render, so these run
+ * both paths against the same settings and the same owner.
+ */
+describe('ControlPanelPoster and /restrict', () => {
+  const DENIED_ROLE = '523456789012345678';
+  const OWNER = '423456789012345678';
+  const denied = { userId: OWNER, roleIds: [DENIED_ROLE], canManage: false } as const;
+  const RULES = {
+    command_access: {
+      privacy: { roles: [DENIED_ROLE] },
+      limit: { roles: [DENIED_ROLE] },
+      rename: { roles: [DENIED_ROLE] },
+      transfer: { roles: [DENIED_ROLE] },
+    },
+  };
+  const WITH_RULES = { control_panel: { panel: true }, ...RULES };
+  /** Only what a rule can hide, so a denied owner is left with no buttons at all. */
+  const ONLY_RESTRICTABLE = {
+    control_panel: { panel: true, claim: false, kick: false, info: false },
+    ...RULES,
+  };
+
+  type Payload = { content?: string; embeds: unknown[]; components: unknown[] };
+  /** An edit is `(channel, message, payload)`. */
+  const payloadOf = (call: unknown[]): Payload => call[2] as Payload;
+
+  it('posts a denied owner a panel without the buttons their rules withdraw', async () => {
+    const { poster, send } = setup({ settings: WITH_RULES });
+    await poster.postForRoom(
+      GUILD,
+      ROOM,
+      PRIMARY,
+      ROOM,
+      view({ ownerId: OWNER, ownerAccess: denied }),
+    );
+    const text = JSON.stringify(send.mock.calls[0]![1]);
+    for (const hidden of ['lock', 'limit', 'rename', 'transfer']) {
+      expect(text).not.toContain(`avc:panel:${hidden}:`);
+    }
+    expect(text).toContain('avc:panel:kick:');
+  });
+
+  /**
+   * `null` from the builder is "post nothing" here, and "edit to the line saying
+   * the controls were switched off" on a refresh. A denied owner is neither.
+   */
+  it('still posts the panel when every control the server leaves on is hidden', async () => {
+    const { poster, send, setControlPanelMessage } = setup({ settings: ONLY_RESTRICTABLE });
+    await poster.postForRoom(
+      GUILD,
+      ROOM,
+      PRIMARY,
+      ROOM,
+      view({ ownerId: OWNER, ownerAccess: denied }),
+    );
+    expect(send).toHaveBeenCalledTimes(1);
+    const payload = send.mock.calls[0]![1] as Payload;
+    expect(payload.embeds).toHaveLength(1);
+    expect(payload.components).toEqual([]);
+    expect(setControlPanelMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('edits to a bare embed, not the switched-off line, when every control is hidden', async () => {
+    const { poster, edit } = setup({ settings: ONLY_RESTRICTABLE });
+    const open = view({ ownerId: OWNER, ownerAccess: { ...denied, roleIds: [] } });
+    const before = controlPanelFingerprint(
+      buildControlPanel(ROOM, readControlPanel(ONLY_RESTRICTABLE), open),
+    );
+    await poster.refreshForRoom(
+      GUILD,
+      ROOM,
+      {
+        guildId: GUILD,
+        state: {
+          controlPanelMessageId: MESSAGE,
+          controlPanelChannelId: ROOM,
+          controlPanelHash: before,
+        },
+      },
+      view({ ownerId: OWNER, ownerAccess: denied }),
+    );
+    expect(edit).toHaveBeenCalledTimes(1);
+    const payload = payloadOf(edit.mock.calls[0]!);
+    expect(payload.content).toBeUndefined();
+    expect(payload.embeds).toHaveLength(1);
+    expect(payload.components).toEqual([]);
+  });
+
+  /** The two builders cannot diverge: what the post stored is what a refresh expects. */
+  it('stores a fingerprint at the post that the next refresh sees as unchanged', async () => {
+    const v = view({ ownerId: OWNER, ownerAccess: denied });
+    const posted = setup({ settings: WITH_RULES });
+    await posted.poster.postForRoom(GUILD, ROOM, PRIMARY, ROOM, v);
+    const stored = posted.setControlPanelMessage.mock.calls[0]![3] as string;
+
+    const refreshed = setup({ settings: WITH_RULES });
+    await refreshed.poster.refreshForRoom(
+      GUILD,
+      ROOM,
+      {
+        guildId: GUILD,
+        state: {
+          controlPanelMessageId: MESSAGE,
+          controlPanelChannelId: ROOM,
+          controlPanelHash: stored,
+        },
+      },
+      v,
+    );
+    expect(refreshed.edit).not.toHaveBeenCalled();
+  });
+
+  it('hides a button when a rule is added and shows it again across an owner change', async () => {
+    const owner = view({ ownerId: OWNER, ownerAccess: denied });
+    // Posted before the rule existed.
+    const plain = {
+      guildId: GUILD,
+      state: {
+        controlPanelMessageId: MESSAGE,
+        controlPanelChannelId: ROOM,
+        controlPanelHash: controlPanelFingerprint(
+          buildControlPanel(ROOM, readControlPanel(ON), owner),
+        ),
+      },
+    };
+    const added = setup({ settings: WITH_RULES });
+    await added.poster.refreshForRoom(GUILD, ROOM, plain, owner);
+    expect(added.edit).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(payloadOf(added.edit.mock.calls[0]!))).not.toContain('avc:panel:rename');
+
+    // Then the room changes hands to somebody who is not denied.
+    const restricted = {
+      guildId: GUILD,
+      state: {
+        ...plain.state,
+        controlPanelHash: controlPanelFingerprint(
+          buildControlPanel(
+            ROOM,
+            readControlPanel(WITH_RULES),
+            owner,
+            readCommandAccess(WITH_RULES, GUILD),
+          ),
+        ),
+      },
+    };
+    const next = view({
+      ownerId: '623456789012345678',
+      ownerAccess: { userId: '623456789012345678', roleIds: [], canManage: false },
+    });
+    const changed = setup({ settings: WITH_RULES });
+    await changed.poster.refreshForRoom(GUILD, ROOM, restricted, next);
+    expect(changed.edit).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(payloadOf(changed.edit.mock.calls[0]!))).toContain('avc:panel:rename');
+  });
+
+  it('does not hide an owner it could not resolve', async () => {
+    const { poster, send } = setup({ settings: WITH_RULES });
+    await poster.postForRoom(
+      GUILD,
+      ROOM,
+      PRIMARY,
+      ROOM,
+      view({ ownerId: OWNER, ownerAccess: 'unknown' }),
+    );
+    expect(JSON.stringify(send.mock.calls[0]![1])).toContain('avc:panel:rename');
+  });
+
+  it('shows every control while enforcement is switched off', async () => {
+    const commandAccessDisabled = vi.fn().mockResolvedValue(true);
+    const { poster, send } = setup({ settings: WITH_RULES, commandAccessDisabled });
+    await poster.postForRoom(
+      GUILD,
+      ROOM,
+      PRIMARY,
+      ROOM,
+      view({ ownerId: OWNER, ownerAccess: denied }),
+    );
+    expect(JSON.stringify(send.mock.calls[0]![1])).toContain('avc:panel:rename');
+    expect(commandAccessDisabled).toHaveBeenCalledTimes(1);
+  });
+
+  it('never asks about the lever for a server with no rules', async () => {
+    const commandAccessDisabled = vi.fn().mockResolvedValue(true);
+    const { poster } = setup({ settings: ON, commandAccessDisabled });
+    await poster.postForRoom(
+      GUILD,
+      ROOM,
+      PRIMARY,
+      ROOM,
+      view({ ownerId: OWNER, ownerAccess: denied }),
+    );
+    expect(commandAccessDisabled).not.toHaveBeenCalled();
   });
 });

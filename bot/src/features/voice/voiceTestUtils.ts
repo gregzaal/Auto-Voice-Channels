@@ -1,3 +1,4 @@
+import type { CommandCaller } from './commandAccess.js';
 import type { GuildVoiceView, VoiceChannelProperties, VoiceMember } from './types.js';
 
 /**
@@ -16,6 +17,8 @@ export class FakeVoiceView implements GuildVoiceView {
   private readonly voiceProperties = new Map<string, VoiceChannelProperties>();
   /** channelId → live user limit. Unset → "cannot say", read as unlimited. */
   private readonly userLimits = new Map<string, number>();
+  /** ownerId → their standing under `/restrict`. Unset → "cannot say". */
+  private readonly ownerAccess = new Map<string, CommandCaller>();
   /** Whether Discord has handed us this guild. True unless a test says otherwise. */
   private available = true;
 
@@ -66,6 +69,29 @@ export class FakeVoiceView implements GuildVoiceView {
   /** Sets a channel's live user limit, for `@@limit@@`/`@@slots@@`/`{{FULL}}`. */
   setUserLimit(channelId: string, limit: number): void {
     this.userLimits.set(channelId, limit);
+  }
+
+  /**
+   * Opt-in like {@link userLimitOf}: a test that never says who an owner is gets
+   * `undefined`, which the panel reads as "cannot say" and hides nothing for, so
+   * no test that predates `/restrict` changes behaviour.
+   */
+  ownerAccessOf(_channelId: string, ownerId: string): CommandCaller | undefined {
+    return this.ownerAccess.get(ownerId);
+  }
+
+  /** Says who an owner is for `/restrict`: their roles and whether they can manage channels. */
+  setOwnerAccess(ownerId: string, access: { roleIds?: string[]; canManage?: boolean }): void {
+    this.ownerAccess.set(ownerId, {
+      userId: ownerId,
+      roleIds: access.roleIds ?? [],
+      canManage: access.canManage ?? false,
+    });
+  }
+
+  /** Forgets who an owner is, which reads as "cannot say" again. */
+  clearOwnerAccess(ownerId: string): void {
+    this.ownerAccess.delete(ownerId);
   }
 
   voicePropertiesOf(channelId: string): VoiceChannelProperties | undefined {

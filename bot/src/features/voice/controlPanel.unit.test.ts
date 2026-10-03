@@ -7,9 +7,11 @@ import {
   controlPanelFingerprint,
   CONTROL_PANEL_PREFIX,
   controlPanelId,
+  hiddenControls,
   parseControlPanelId,
   type RoomPanelView,
 } from './controlPanel.js';
+import type { CommandAccess } from './commandAccess.js';
 import {
   CONTROL_PANEL_CONTROLS,
   CONTROL_PANEL_DEFAULT_COLOR,
@@ -314,6 +316,8 @@ describe('copy rules', () => {
     JSON.stringify([
       buildControlPanel(ROOM, allOn(), view()),
       buildControlPanel(ROOM, allOn(), view({ isPrivate: true, userLimit: 5, ownerId: null })),
+      // A panel a restriction has stripped, down to no buttons at all.
+      buildControlPanel(ROOM, onlyRestrictable(), view({ ownerAccess: standing() }), DENY_ALL),
       buildLimitModal(ROOM, 3).toJSON(),
       buildRenameModal(ROOM, 'den').toJSON(),
       buildMemberPicker('kickpick', ROOM, [{ id: 'u1', displayName: 'Ana' }]).toJSON(),
@@ -464,5 +468,188 @@ describe('parsePanelColor', () => {
   it('round trips through the formatter, zero padded', () => {
     expect(formatPanelColor(parsePanelColor('#000001')!)).toBe('#000001');
     expect(formatPanelColor(0)).toBe('#000000');
+  });
+});
+
+/**
+ * The panel follows the room owner: a control a `/restrict` rule denies the
+ * current owner is absent, because Discord cannot hide a button per reader and
+ * the owner is the one person the owner-level buttons are for.
+ */
+const DENIED_ROLE = '423456789012345678';
+const OTHER_ROLE = '523456789012345678';
+
+/** The owner's standing: by default holding the denied role and nothing else. */
+const standing = (over: Partial<{ roleIds: string[]; canManage: boolean }> = {}) => ({
+  userId: OWNER,
+  roleIds: [DENIED_ROLE],
+  canManage: false,
+  ...over,
+});
+
+/** Every owner-level feature denied to one role. */
+const DENY_ALL: CommandAccess = {
+  privacy: { users: [], roles: [DENIED_ROLE] },
+  limit: { users: [], roles: [DENIED_ROLE] },
+  rename: { users: [], roles: [DENIED_ROLE] },
+  transfer: { users: [], roles: [DENIED_ROLE] },
+};
+
+/** Only the four restrictable controls enabled, so hiding them all leaves nothing. */
+function onlyRestrictable(): ControlPanelConfig {
+  const config = defaults();
+  for (const c of CONTROL_PANEL_CONTROLS) config.controls[c] = false;
+  for (const c of ['privacy', 'limit', 'rename', 'transfer'] as const) config.controls[c] = true;
+  return config;
+}
+
+const actionsOf = (panel: ReturnType<typeof buildControlPanel>): string[] =>
+  buttonIds(panel).map((id) => id.split(':')[2]!);
+
+describe('buildControlPanel and /restrict', () => {
+  it('shows every control when nothing is restricted', () => {
+    const plain = buildControlPanel(ROOM, allOn(), view());
+    expect(buildControlPanel(ROOM, allOn(), view(), {})).toEqual(plain);
+    expect(buildControlPanel(ROOM, allOn(), view({ ownerAccess: standing() }), {})).toEqual(plain);
+  });
+
+  it('hides Private, Size, Name and Transfer from a room whose owner is denied them', () => {
+    const panel = buildControlPanel(ROOM, allOn(), view({ ownerAccess: standing() }), DENY_ALL);
+    // Claim, Kick and Info are occupant-level and are never hidden.
+    expect(actionsOf(panel)).toEqual(['claim', 'kick', 'info']);
+    expect(fieldsOf(panel).map((f) => f.name)).not.toContain('🔒 Private');
+  });
+
+  it('hides only the features the owner is denied', () => {
+    const access: CommandAccess = { rename: { users: [OWNER], roles: [] } };
+    const panel = buildControlPanel(
+      ROOM,
+      allOn(),
+      view({ ownerAccess: standing({ roleIds: [] }) }),
+      access,
+    );
+    expect(actionsOf(panel)).toEqual(['lock', 'limit', 'claim', 'transfer', 'kick', 'info']);
+  });
+
+  it('keeps the undo direction: a locked room still shows Public to a denied owner', () => {
+    const panel = buildControlPanel(
+      ROOM,
+      allOn(),
+      view({ isPrivate: true, ownerAccess: standing() }),
+      DENY_ALL,
+    );
+    expect(actionsOf(panel)).toEqual(['unlock', 'claim', 'kick', 'info']);
+  });
+
+  it('shows Private on a public room for an owner who is not denied', () => {
+    const open = buildControlPanel(
+      ROOM,
+      allOn(),
+      view({ ownerAccess: standing({ roleIds: [OTHER_ROLE] }) }),
+      DENY_ALL,
+    );
+    expect(actionsOf(open)).toContain('lock');
+  });
+
+  it('never hides anything for an owner who can manage channels', () => {
+    const panel = buildControlPanel(
+      ROOM,
+      allOn(),
+      view({ ownerAccess: standing({ canManage: true }) }),
+      DENY_ALL,
+    );
+    expect(actionsOf(panel)).toEqual([
+      'lock',
+      'limit',
+      'rename',
+      'claim',
+      'transfer',
+      'kick',
+      'info',
+    ]);
+  });
+
+  /**
+   * Two different answers, and this pins the difference. An ownerless room has
+   * nobody to judge and the panel cannot tell who will press it, so a control some
+   * member would be refused on is withdrawn. An owner who could not be resolved
+   * (a cold cache is routine) hides nothing: withdrawing a button on a guess is
+   * worse than leaving one the click-time guard refuses for the people it covers.
+   */
+  it('hides restricted controls from an ownerless room but not for an unresolved owner', () => {
+    const ownerless = buildControlPanel(ROOM, allOn(), view({ ownerId: null }), DENY_ALL);
+    expect(actionsOf(ownerless)).toEqual(['claim', 'kick', 'info']);
+
+    const unknown = buildControlPanel(ROOM, allOn(), view({ ownerAccess: 'unknown' }), DENY_ALL);
+    expect(actionsOf(unknown)).toEqual([
+      'lock',
+      'limit',
+      'rename',
+      'claim',
+      'transfer',
+      'kick',
+      'info',
+    ]);
+    // And absent, which is what a caller that predates restrictions passes.
+    expect(actionsOf(buildControlPanel(ROOM, allOn(), view(), DENY_ALL))).toEqual(
+      actionsOf(unknown),
+    );
+  });
+
+  it('hides nothing from an ownerless room for a feature nobody is denied', () => {
+    const access: CommandAccess = { limit: { users: [], roles: [DENIED_ROLE] } };
+    const panel = buildControlPanel(ROOM, allOn(), view({ ownerId: null }), access);
+    expect(actionsOf(panel)).toEqual(['lock', 'rename', 'claim', 'transfer', 'kick', 'info']);
+  });
+
+  it('keeps Public on an ownerless locked room', () => {
+    const panel = buildControlPanel(
+      ROOM,
+      allOn(),
+      view({ ownerId: null, isPrivate: true }),
+      DENY_ALL,
+    );
+    expect(actionsOf(panel)).toEqual(['unlock', 'claim', 'kick', 'info']);
+  });
+
+  it('computes the hidden set from the action each control would carry', () => {
+    const hidden = (over: Partial<RoomPanelView>) =>
+      [...hiddenControls(view({ ownerAccess: standing(), ...over }), DENY_ALL)].sort();
+    expect(hidden({})).toEqual(['limit', 'privacy', 'rename', 'transfer']);
+    expect(hidden({ isPrivate: true })).toEqual(['limit', 'rename', 'transfer']);
+  });
+
+  /**
+   * The trap this guards: `null` from the builder means "post nothing", or, on a
+   * refresh, "edit the panel into the line saying the room controls were switched
+   * off for this server". Hiding every button is neither. The null decision is
+   * the admin's configuration alone, and a panel a restriction stripped bare is
+   * still a panel.
+   */
+  it('renders the embed with no buttons when restrictions hide every control', () => {
+    const panel = buildControlPanel(
+      ROOM,
+      onlyRestrictable(),
+      view({ ownerAccess: standing() }),
+      DENY_ALL,
+    );
+    expect(panel).not.toBeNull();
+    expect(panel!.components).toEqual([]);
+    expect(panel!.embeds).toHaveLength(1);
+    expect(controlPanelFingerprint(panel)).not.toBe(controlPanelFingerprint(null));
+  });
+
+  it('still returns null when the admin has switched the panel or every button off', () => {
+    const off = { ...allOn(), enabled: false };
+    expect(buildControlPanel(ROOM, off, view(), DENY_ALL)).toBeNull();
+    const none = allOn();
+    for (const c of CONTROL_PANEL_CONTROLS) none.controls[c] = false;
+    expect(buildControlPanel(ROOM, none, view({ ownerAccess: standing() }), DENY_ALL)).toBeNull();
+  });
+
+  it('moves the fingerprint when a rule hides a button, so a refresh edits the panel', () => {
+    const before = buildControlPanel(ROOM, allOn(), view({ ownerAccess: standing() }), {});
+    const after = buildControlPanel(ROOM, allOn(), view({ ownerAccess: standing() }), DENY_ALL);
+    expect(controlPanelFingerprint(after)).not.toBe(controlPanelFingerprint(before));
   });
 });

@@ -5,6 +5,7 @@ import {
   type ControlPanelMessage,
   type RoomPanelView,
 } from './controlPanel.js';
+import { readCommandAccess, type CommandAccess } from './commandAccess.js';
 import { readControlPanel } from './guildSettings.js';
 import { permissionProblemMessage, type PermissionProblemTracker } from './permissionProblems.js';
 
@@ -67,6 +68,12 @@ export interface ControlPanelPosterDeps {
   permissionProblems?: PermissionProblemTracker;
   serverLog?: (guildId: string, level: 1 | 2 | 3, message: string) => void;
   count?: (outcome: 'posted' | 'failed' | 'updated', guildId: string) => void;
+  /**
+   * Whether `/restrict` enforcement is switched off (`command_access.disabled`).
+   * Asked only when a server has a rule to apply, so one with none never pays for
+   * it. Absent means not disabled. Never throws, like the gate accessor behind it.
+   */
+  commandAccessDisabled?: () => Promise<boolean>;
 }
 
 /**
@@ -98,6 +105,25 @@ export interface ControlPanelPosterDeps {
  */
 export class ControlPanelPoster {
   constructor(private readonly deps: ControlPanelPosterDeps) {}
+
+  /**
+   * The `/restrict` rules to draw this room's panel against.
+   *
+   * Here, in the one place both the create-time post and every later re-render
+   * pass through, so the two cannot disagree about which buttons a room has. A
+   * rule only HIDES a button: the click-time guard is what enforces it, and it
+   * is authoritative for anyone who presses a button that was never hidden.
+   * Empty while the lever is on, so lifting the rules and drawing the panel
+   * agree.
+   */
+  private async accessFor(
+    guildId: string,
+    settings: Record<string, unknown>,
+  ): Promise<CommandAccess> {
+    const access = readCommandAccess(settings, guildId);
+    if (Object.keys(access).length === 0) return access;
+    return (await this.deps.commandAccessDisabled?.()) ? {} : access;
+  }
 
   /**
    * Posts the panel for a freshly-created room, once.
@@ -133,7 +159,12 @@ export class ControlPanelPoster {
       if (typeof row.state.controlPanelMessageId === 'string') return;
 
       const guild = await this.deps.guilds.ensure(guildId);
-      panel = buildControlPanel(roomId, readControlPanel(guild.settings), view);
+      panel = buildControlPanel(
+        roomId,
+        readControlPanel(guild.settings),
+        view,
+        await this.accessFor(guildId, guild.settings),
+      );
       if (!panel) {
         /**
          * Switched off, wholly or button by button. Not a failure, so nothing
@@ -244,7 +275,12 @@ export class ControlPanelPoster {
     let fingerprint: string;
     try {
       const guild = await this.deps.guilds.ensure(guildId);
-      panel = buildControlPanel(roomId, readControlPanel(guild.settings), view);
+      panel = buildControlPanel(
+        roomId,
+        readControlPanel(guild.settings),
+        view,
+        await this.accessFor(guildId, guild.settings),
+      );
       fingerprint = controlPanelFingerprint(panel);
       if (fingerprint === row.state.controlPanelHash) return;
     } catch (err) {

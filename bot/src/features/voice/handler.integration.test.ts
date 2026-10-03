@@ -7,7 +7,7 @@ import {
   SecondaryChannelRepository,
   db,
 } from '@avc/core';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { PgTestEnv } from '../../test/pgContainer.js';
 import { startPostgres } from '../../test/pgContainer.js';
 import { fakeLogger } from '../../runtime/testUtils.js';
@@ -1118,6 +1118,12 @@ describe('VoiceFeature (integration)', () => {
         custom_nicks: { alice: 'Big Alice', bea: 'Big Bea' },
         command_access: { nick: { roles: [DENIED_ROLE] } },
       });
+    });
+
+    // Guild settings outlive a test, and a nickname or rule left behind would
+    // rename every later test's owner.
+    afterEach(async () => {
+      await guilds.updateSettings(GUILD, { custom_nicks: {}, command_access: {} });
     });
 
     it("names a role-denied owner's room by their Discord name, not their saved nickname", async () => {
@@ -2281,6 +2287,138 @@ describe('VoiceFeature (integration)', () => {
       await feature.reconcileGuild(GUILD);
       await feature.reconcileGuild(GUILD);
       expect(edited).toHaveLength(0);
+    });
+
+    /**
+     * `/restrict`: the panel follows the room owner. The wiring is what these
+     * pin: the create-time post and the re-render both read the owner's standing
+     * from the voice view and hand it to the poster, which applies the rules.
+     */
+    describe('and /restrict', () => {
+      const DENIED_ROLE = '523456789012345678';
+      let posted: { channelId: string; payload: unknown }[];
+
+      // Guild settings outlive a test, and a rule left behind by the last one
+      // would hide buttons from this one's first panel.
+      beforeEach(async () => {
+        await guilds.updateSettings(GUILD, { command_access: {} });
+      });
+
+      /** `build()`, with the payloads of what it sends as well as where it sent them. */
+      function buildCapturing(): void {
+        build();
+        posted = [];
+        poster = new ControlPanelPoster({
+          send: (channelId, payload) => {
+            sent.push({ channelId });
+            posted.push({ channelId, payload });
+            return Promise.resolve(`msg-${sent.length}`);
+          },
+          edit: (channelId, messageId, payload) => {
+            edited.push({ channelId, messageId, payload });
+            return Promise.resolve();
+          },
+          guilds,
+          secondaries,
+          logger: fakeLogger(),
+          permissionProblems: problems,
+        });
+        feature = new VoiceFeature({
+          autoChannels,
+          secondaries,
+          guilds,
+          actions,
+          voice,
+          selfHosted: true,
+          logger: fakeLogger(),
+          controlPanel: poster,
+          permissionProblems: problems,
+        });
+      }
+
+      const RULE = { command_access: { rename: { roles: [DENIED_ROLE] } } };
+      const has = (payload: unknown, action: string): boolean =>
+        JSON.stringify(payload).includes(`avc:panel:${action}:`);
+
+      it("posts a denied owner's panel without the buttons their rules withdraw", async () => {
+        buildCapturing();
+        await guilds.updateSettings(GUILD, RULE);
+        voice.setOwnerAccess('alice', { roleIds: [DENIED_ROLE] });
+        await makeRoom();
+        expect(has(posted[0]!.payload, 'rename')).toBe(false);
+        expect(has(posted[0]!.payload, 'limit')).toBe(true);
+      });
+
+      it('leaves the panel alone for an owner nobody can resolve', async () => {
+        buildCapturing();
+        await guilds.updateSettings(GUILD, RULE);
+        await makeRoom();
+        expect(has(posted[0]!.payload, 'rename')).toBe(true);
+      });
+
+      /** The create-time builder and the re-render must reach the same panel. */
+      it('draws the same panel at the post and the next re-render', async () => {
+        buildCapturing();
+        await guilds.updateSettings(GUILD, RULE);
+        voice.setOwnerAccess('alice', { roleIds: [DENIED_ROLE] });
+        const room = await makeRoom();
+        await feature.rerenderSecondary(GUILD, room);
+        expect(edited).toHaveLength(0);
+      });
+
+      it('hides a button when a rule is added, and shows it again when the room changes hands', async () => {
+        buildCapturing();
+        voice.setOwnerAccess('alice', { roleIds: [DENIED_ROLE] });
+        const room = await makeRoom();
+        expect(has(posted[0]!.payload, 'rename')).toBe(true);
+
+        // An admin runs `/restrict add`, which refreshes every panel.
+        await guilds.updateSettings(GUILD, RULE);
+        await feature.refreshGuildPanels(GUILD);
+        expect(edited).toHaveLength(1);
+        expect(has(edited[0]!.payload, 'rename')).toBe(false);
+
+        // Bea is not denied, and takes the room over.
+        const bea = member('bea');
+        voice.put(room, bea);
+        voice.setOwnerAccess('bea', { roleIds: [] });
+        await secondaries.setOwnerAndCreator(room, bea.id, bea.displayName);
+        await feature.rerenderSecondary(GUILD, room);
+        expect(edited).toHaveLength(2);
+        expect(has(edited[1]!.payload, 'rename')).toBe(true);
+      });
+
+      it('keeps a bare embed when every control the server leaves on is hidden', async () => {
+        buildCapturing();
+        await guilds.updateSettings(GUILD, {
+          control_panel: { panel: true, claim: false, kick: false, info: false },
+          command_access: {
+            privacy: { roles: [DENIED_ROLE] },
+            limit: { roles: [DENIED_ROLE] },
+            rename: { roles: [DENIED_ROLE] },
+            transfer: { roles: [DENIED_ROLE] },
+          },
+        });
+        voice.setOwnerAccess('alice', { roleIds: [DENIED_ROLE] });
+        const room = await makeRoom();
+        // Posted, not skipped, and with no buttons.
+        expect(posted).toHaveLength(1);
+        expect((posted[0]!.payload as { components: unknown[] }).components).toEqual([]);
+
+        // The re-render path: the owner stops being denied, then is denied again.
+        voice.setOwnerAccess('alice', { roleIds: [] });
+        await feature.rerenderSecondary(GUILD, room);
+        expect(has(edited[0]!.payload, 'rename')).toBe(true);
+        voice.setOwnerAccess('alice', { roleIds: [DENIED_ROLE] });
+        await feature.rerenderSecondary(GUILD, room);
+        const last = edited[edited.length - 1]!.payload as {
+          content?: string;
+          components: unknown[];
+        };
+        expect(last.components).toEqual([]);
+        // Not the line that says the server switched the controls off.
+        expect(last.content).toBeUndefined();
+      });
     });
 
     it('edits every open room when a button is switched off server-wide', async () => {

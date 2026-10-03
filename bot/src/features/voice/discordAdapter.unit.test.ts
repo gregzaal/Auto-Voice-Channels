@@ -1,4 +1,9 @@
-import { DiscordAPIError, OverwriteType, PermissionFlagsBits } from 'discord.js';
+import {
+  DiscordAPIError,
+  OverwriteType,
+  PermissionFlagsBits,
+  PermissionsBitField,
+} from 'discord.js';
 import type { Client, GuildMember, VoiceState } from 'discord.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -1263,6 +1268,52 @@ describe('DiscordVoiceView.voicePropertiesOf', () => {
     const v = new DiscordVoiceView({ channels: { cache } } as unknown as Client);
     expect(v.voicePropertiesOf('t1')).toBeUndefined();
     expect(v.voicePropertiesOf('missing')).toBeUndefined();
+  });
+});
+
+describe('DiscordVoiceView.ownerAccessOf', () => {
+  const GUILD = '900';
+  const member = (roleIds: string[], permissions: bigint) => ({
+    roles: { cache: new Map(roleIds.map((id) => [id, {}])) },
+    permissions: new PermissionsBitField(permissions),
+  });
+  const viewWith = (members: Record<string, unknown>) => {
+    const guild = { id: GUILD, members: { cache: new Map(Object.entries(members)) } };
+    const cache = new Map<string, unknown>([['room', { id: 'room', guild }]]);
+    return new DiscordVoiceView({ channels: { cache } } as unknown as Client);
+  };
+
+  /**
+   * `@everyone`'s id is the guild id and is in every member's `roles.cache`, so a
+   * stored rule naming it would deny the whole server. It is dropped here as well
+   * as in the reader.
+   */
+  it("reads the owner's roles without @everyone, and whether they can manage channels", () => {
+    const v = viewWith({ u1: member([GUILD, 'r1', 'r2'], VIEW) });
+    expect(v.ownerAccessOf('room', 'u1')).toEqual({
+      userId: 'u1',
+      roleIds: ['r1', 'r2'],
+      canManage: false,
+    });
+  });
+
+  it('reports Manage Channels and Administrator as able to manage', () => {
+    const v = viewWith({
+      mod: member([GUILD], MANAGE),
+      admin: member([GUILD], PermissionFlagsBits.Administrator),
+    });
+    expect(v.ownerAccessOf('room', 'mod')!.canManage).toBe(true);
+    expect(v.ownerAccessOf('room', 'admin')!.canManage).toBe(true);
+  });
+
+  it('answers undefined, which the panel reads as "cannot say", when it cannot find them', () => {
+    const v = viewWith({});
+    expect(v.ownerAccessOf('room', 'nobody')).toBeUndefined();
+    expect(v.ownerAccessOf('missing-room', 'u1')).toBeUndefined();
+    const noGuild = new DiscordVoiceView({
+      channels: { cache: new Map([['room', { id: 'room' }]]) },
+    } as unknown as Client);
+    expect(noGuild.ownerAccessOf('room', 'u1')).toBeUndefined();
   });
 });
 
