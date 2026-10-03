@@ -581,8 +581,7 @@ export class PrivacyService {
     try {
       const row = await this.deps.secondaries.get(channelId);
       if (!row || row.guildId !== guildId) return false;
-      const read = await this.deps.secondaries.readAccess(channelId);
-      if (!read?.readable) return false;
+      // A record this build cannot read answers `unreadable` here and is left as it is.
       const written = await this.deps.secondaries.mutateAccess(channelId, (current) =>
         withMember(current, 'kicked', targetId),
       );
@@ -756,16 +755,21 @@ export class PrivacyService {
     newOwnerName: string,
     opts: { handover?: boolean } = {},
   ): Promise<void> {
-    const row = await this.deps.joinChannels.getBySecondary(secondaryChannelId);
-    if (row) {
-      await this.deps.joinChannels.setCreatorBySecondary(secondaryChannelId, newOwnerId);
-      await this.deps.actions.renameChannel(guildId, row.channelId, `⇩ Join ${newOwnerName}`);
-      this.deps.logger.info(
-        { guildId, secondaryChannelId, joinChannelId: row.channelId, newOwnerId },
-        're-pointed join channel at new owner',
-      );
+    try {
+      const row = await this.deps.joinChannels.getBySecondary(secondaryChannelId);
+      if (row) {
+        await this.deps.joinChannels.setCreatorBySecondary(secondaryChannelId, newOwnerId);
+        await this.deps.actions.renameChannel(guildId, row.channelId, `⇩ Join ${newOwnerName}`);
+        this.deps.logger.info(
+          { guildId, secondaryChannelId, joinChannelId: row.channelId, newOwnerId },
+          're-pointed join channel at new owner',
+        );
+      }
+    } finally {
+      // Whether or not the companion could be renamed: who may enter the room does not
+      // wait on what its lobby is called. Never throws, so it cannot hide the error above.
+      if (opts.handover) await this.applyAccessLists(guildId, secondaryChannelId);
     }
-    if (opts.handover) await this.applyAccessLists(guildId, secondaryChannelId);
   }
 
   // -- internals ------------------------------------------------------------------
@@ -1086,6 +1090,9 @@ export class PrivacyService {
    * Only `private` and `hidden` go back: what the plan recorded stays, because a
    * write that stopped halfway may have put it on the channel and nothing else would
    * ever name it.
+   *
+   * Only an edge that was not already hidden is ever reverted (a room leaving hidden
+   * keeps both flags until its write has landed), so `hidden` simply comes off.
    */
   private async revertIntent(channelId: string, from: AccessMode): Promise<void> {
     try {
@@ -1094,7 +1101,7 @@ export class PrivacyService {
         access: (stored) => {
           if (!stored) return stored;
           const { hidden: _hidden, ...rest } = stored;
-          return from === 'hidden' ? { ...rest, hidden: true } : rest;
+          return rest;
         },
       });
     } catch (err) {

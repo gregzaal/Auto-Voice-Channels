@@ -39,7 +39,7 @@ export function skippedRolesNote(roleIds: readonly string[]): string {
 export const ROOM_ACCESS_REPLIES = {
   noChannel: "You need to be in one of this server's voice channels.",
   notManaged: "This isn't a bot-managed voice channel.",
-  ownerless: 'This room has no owner right now. Use `/claim` to take it, then try again.',
+  ownerless: 'This room has no owner right now. Use `/reclaim` to take it, then try again.',
   notOwnerPrivate: 'Only the channel owner can make it private.',
   notOwnerPublic: 'Only the channel owner can make it public.',
   notOwnerHide: 'Only the room owner can hide it.',

@@ -484,7 +484,7 @@ describe('PrivacyService (integration)', () => {
       const res = await calls[name]!(GUILD, SEC, 'mallory');
       expect(res.ok).toBe(false);
       expect(res.message).toBe(
-        'This room has no owner right now. Use `/claim` to take it, then try again.',
+        'This room has no owner right now. Use `/reclaim` to take it, then try again.',
       );
       await untouched();
     });
@@ -2281,6 +2281,146 @@ describe('PrivacyService (integration)', () => {
       expect(actions.ofType('move')).toContainEqual(
         expect.objectContaining({ memberId: 'eve', channelId: null, onlyFrom: SEC }),
       );
+    });
+  });
+
+  // -- edges a first pass of mutation testing found uncovered -------------------------------
+
+  describe('edges', () => {
+    it('does not say a moderator role sees the room when the bot could not grant it', async () => {
+      moderatorRole = MODS;
+      voice.setBotRoleAccess({ uneditableRoleIds: [MODS] });
+
+      const res = await privacy.hide(GUILD, SEC, 'alice');
+
+      expect(res.ok).toBe(true);
+      expect(held(MODS, OVERWRITE_ROLE)).toBeUndefined();
+      expect(res.message).toContain('nobody else sees it unless you let them in');
+      expect(res.message).not.toContain('and so do members with');
+      // And it says which role it could not change, and why.
+      expect(res.message).toContain('<@&role-mods>');
+      expect(res.message).toContain('sits above my role');
+    });
+
+    it('applies the creator the record names when the column names somebody else', async () => {
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      await env.handle.pool.query(
+        "UPDATE secondary_channels SET original_creator = 'bob' WHERE channel_id = $1",
+        [SEC],
+      );
+      await lists.add(GUILD, 'alice', 'mallory', 'blocked');
+      await lists.add(GUILD, 'bob', 'eve', 'blocked');
+
+      await privacy.applyAccessLists(GUILD, SEC);
+
+      expect(held('mallory')).toBeDefined();
+      expect(held('eve')).toBeUndefined();
+    });
+
+    it('plans a locked room that has no record, which is not the room it skips for being public', async () => {
+      // An older instance's lock: private, `@everyone` Connect denied, nobody granted.
+      actions.seedOverwrites(SEC, [roleOw(GUILD, 0n, C)]);
+      await secondaries.updateState(SEC, { ...(await row()).state, private: true });
+
+      const res = await privacy.applyAccessLists(GUILD, SEC);
+
+      expect(res.status).toBe('applied');
+      expect(bits(held('alice'))).toEqual({ allow: C, deny: 0n });
+      expect(bits(held(BOT))).toEqual({ allow: BOT_ACCESS, deny: 0n });
+    });
+
+    it('counts the roster, which the voice cache lags, as who is in the room', async () => {
+      await secondaries.updateState(SEC, { ...(await row()).state, roster: ['alice', 'bob'] });
+      expect(voice.membersInChannel(SEC).map((m) => m.id)).toEqual(['alice']);
+
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+
+      expect(bits(held('bob'))).toEqual({ allow: C, deny: 0n });
+    });
+
+    it('keeps the way back for a recorded member who has left the server, so nothing is left unrevocable', async () => {
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      await lists.add(GUILD, 'alice', 'carol', 'trusted');
+      await privacy.applyAccessLists(GUILD, SEC);
+      expect(bits(held('carol'))).toEqual({ allow: C, deny: 0n });
+
+      // The hide would add View for her, and Discord has no such member any more.
+      actions.unknownMemberIds.add('carol');
+      await privacy.hide(GUILD, SEC, 'alice');
+
+      expect(bits(held('carol'))).toEqual({ allow: C, deny: 0n });
+      expect((await access())?.trusted).toEqual(['carol']);
+    });
+
+    it('does not move the owner or an Administrator a vote removed: that is for the vote to do', async () => {
+      voice.put(SEC, member('admin'));
+      voice.setMemberFacts('admin', { administrator: true });
+
+      expect(await privacy.denyKicked(GUILD, SEC, 'admin')).toBe(true);
+      expect(await privacy.denyKicked(GUILD, SEC, 'alice')).toBe(true);
+
+      expect(actions.ofType('move')).toEqual([]);
+      // Whatever a vote says, the owner is never locked out of their own room.
+      expect(held('alice')?.deny ?? 0n).toBe(0n);
+    });
+
+    it('returns a failure and does not throw when something unexpected breaks under a command', async () => {
+      const broken = build({
+        secondaries: {
+          get: () => Promise.reject(new Error('db down')),
+        } as unknown as SecondaryChannelRepository,
+      });
+      for (const call of [
+        () => broken.makePrivate(GUILD, SEC, 'alice'),
+        () => broken.makePublic(GUILD, SEC, 'alice'),
+        () => broken.hide(GUILD, SEC, 'alice'),
+        () => broken.unhide(GUILD, SEC, 'alice'),
+        () => broken.admit(GUILD, SEC, 'alice', 'bob'),
+      ]) {
+        const res = await call();
+        expect(res.ok).toBe(false);
+        expect(res.message).toContain('db down');
+      }
+    });
+
+    it('turns a blocked knock away on the creator’s list even when a caretaker owns the room', async () => {
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      const joinId = actions.ofType('joinChannel')[0]!.channelId;
+      await secondaries.setOwner(SEC, 'bob');
+      await joinChannels.setCreatorBySecondary(SEC, 'bob');
+      await lists.add(GUILD, 'alice', 'mallory', 'blocked');
+
+      expect(
+        await privacy.refuseBlockedKnock((await privacy.getJoinContext(joinId))!, 'mallory'),
+      ).toBe(true);
+    });
+
+    it('does not apply any lists when the owner merely leaves, however they have changed', async () => {
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      await lists.add(GUILD, 'alice', 'carol', 'trusted');
+      await privacy.applyAccessLists(GUILD, SEC);
+      await lists.remove(GUILD, 'alice', 'carol');
+      await secondaries.setOwner(SEC, 'bob');
+
+      await privacy.handleOwnerChanged(GUILD, SEC, 'bob', 'Bob');
+
+      // Nothing has been applied, so her overwrite is still there for the next apply to take back.
+      expect(held('carol')).toBeDefined();
+    });
+
+    it('applies the new creator’s lists after a handover even when the join channel cannot be renamed', async () => {
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      await lists.add(GUILD, 'alice', 'carol', 'trusted');
+      await privacy.applyAccessLists(GUILD, SEC);
+      await secondaries.setOwnerAndCreator(SEC, 'bob', 'Bob');
+      actions.renameChannel = () => Promise.reject(apiError(50013));
+
+      await expect(
+        privacy.handleOwnerChanged(GUILD, SEC, 'bob', 'Bob', { handover: true }),
+      ).rejects.toBeDefined();
+
+      expect(held('carol')).toBeUndefined();
+      expect((await access())?.creatorId).toBe('bob');
     });
   });
 
