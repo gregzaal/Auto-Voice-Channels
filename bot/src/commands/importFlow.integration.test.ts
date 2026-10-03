@@ -354,6 +354,65 @@ describe('import and export flow (integration)', () => {
       expect(JSON.stringify(first?.details)).not.toContain('"Greg"');
     });
 
+    /**
+     * `command_access` holds the ids of members an admin restricted. The preview
+     * and the public announcement print a count, and the audit row, which is
+     * backed up under retention, keeps how many and drops who. The attached
+     * snapshot is the one place the ids stay, because it is the admin's undo.
+     */
+    it('puts no restricted member id in the preview, the announcement or the audit row', async () => {
+      const [USER_A, USER_B, USER_C, ROLE_A] = [
+        '555555555555555551',
+        '555555555555555552',
+        '555555555555555553',
+        '555555555555555554',
+      ];
+      await configureGuild();
+      await guilds.updateSettings(GUILD, {
+        command_access: { rename: { users: [USER_A, USER_B], roles: [ROLE_A] } },
+      });
+      const exported = fakeCommand(fakeGuild());
+      await handleExport(exported.interaction, deps);
+      const edited = JSON.parse(exported.replies.at(-1)!.files![0]!.attachment!.toString('utf8'));
+      // The export carries the stored map, which is what a round trip needs.
+      expect(edited.settings.command_access).toEqual({
+        rename: { users: [USER_A, USER_B], roles: [ROLE_A] },
+      });
+      edited.settings.command_access = { nick: { users: [USER_C] } };
+      serveFile(JSON.stringify(edited));
+
+      const previewed = fakeCommand(fakeGuild(), [
+        { name: 'avc-config.json', attachment: Buffer.from(JSON.stringify(edited), 'utf8') },
+      ]);
+      await handleImportCommand(previewed.interaction, deps);
+      const preview = previewed.replies.at(-1)!.content!;
+      expect(preview).toContain('Who can use room commands: 1 restriction (was 3 restrictions)');
+
+      const guild = fakeGuild();
+      const confirmed = fakeButton(guild, importId('confirm', 'i-1'));
+      await handleImportButton(confirmed.interaction, deps);
+
+      const announcement = (guild.systemChannel.send.mock.calls[0]![0] as { content: string })
+        .content;
+      const rows = await new OpsAuditRepository(env.handle.db).recent(10);
+      const audit = JSON.stringify(rows.find((r) => r.action === 'guild.config_import')?.details);
+      for (const id of [USER_A, USER_B, USER_C, ROLE_A]) {
+        expect(preview).not.toContain(id);
+        expect(announcement).not.toContain(id);
+        expect(audit).not.toContain(id);
+      }
+      expect(announcement).toContain('Who can use room commands');
+      expect(audit).toContain('"redactedEntryCount":3');
+
+      // The undo is real: the snapshot the admin is handed still names who.
+      const snapshot = confirmed.replies.find((r) => r.files?.[0]?.name?.includes('before-import'));
+      const before = JSON.parse(snapshot!.files![0]!.attachment!.toString('utf8'));
+      expect(before.settings.command_access.rename.users).toEqual([USER_A, USER_B]);
+      expect((await guilds.ensure(GUILD)).settings.command_access).toEqual({
+        nick: { users: [USER_C] },
+      });
+    });
+
     it('refuses while the kill switch is set, on either fleet', async () => {
       await configureGuild();
       const beta = new RuntimeFlagsRepository(env.handle.db, 'beta');

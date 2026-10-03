@@ -41,6 +41,7 @@ import type { GuildSettingsService } from '../features/voice/settings.js';
 import { CircuitOpenError } from '../runtime/circuitBreaker.js';
 import { missingBotPermissions, missingRenamePermissions } from './setupPanel.js';
 import {
+  commandAccessCount,
   destructiveCount,
   importButtons,
   ImportSessionStore,
@@ -996,6 +997,11 @@ function auditDetails(
       // both mean there is nothing here to redact.
       custom_nicks: snapshot.settings.custom_nicks
         ? { redactedEntryCount: Object.keys(snapshot.settings.custom_nicks).length }
+        : null,
+      // The same rule for the same reason: these are the ids of members an admin
+      // restricted, so the row keeps how many and drops who.
+      command_access: snapshot.settings.command_access
+        ? { redactedEntryCount: commandAccessCount(snapshot.settings.command_access) }
         : null,
     },
   };

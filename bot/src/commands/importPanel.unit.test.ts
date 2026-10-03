@@ -14,6 +14,9 @@ import {
 
 const ACTOR = '123456789012345678';
 const NICK_USER = '222222222222222222';
+const RESTRICTED_USER = '333333333333333333';
+const RESTRICTED_ROLE = '444444444444444444';
+const OTHER_USER = '555555555555555555';
 
 const ctx: RenderContext = { actorId: ACTOR, fileName: 'avc-config.json', source: 'native' };
 
@@ -193,6 +196,90 @@ describe('renderAnnouncement', () => {
     expect(text).not.toContain(NICK_USER);
     expect(text).not.toContain('Greg');
     expect(text).toContain('1 member nicknames');
+  });
+
+  /**
+   * The same assertion for the other key that holds member ids. Every shape a
+   * `command_access` change can take, on both surfaces that reach more than the
+   * admin who ran the command.
+   */
+  it('emits no restricted member or role id for a command_access change, only a count', () => {
+    const before = { rename: { users: [NICK_USER, RESTRICTED_USER], roles: [RESTRICTED_ROLE] } };
+    const after = { nick: { users: [OTHER_USER] } };
+    for (const change of [
+      setting({
+        key: 'command_access',
+        before,
+        after,
+        entriesAdded: ['nick'],
+        entriesRemoved: ['rename'],
+      }),
+      setting({ key: 'command_access', before: undefined, after, entriesAdded: ['nick'] }),
+      setting({
+        key: 'command_access',
+        before,
+        after: undefined,
+        cleared: true,
+        entriesRemoved: [],
+      }),
+      setting({
+        key: 'command_access',
+        before,
+        after: { rename: { users: [OTHER_USER] } },
+        entriesChanged: ['rename'],
+      }),
+    ]) {
+      for (const text of [
+        renderAnnouncement(plan({ settingChanges: [change] }), ctx),
+        renderPreview(plan({ settingChanges: [change] }), ctx),
+      ]) {
+        for (const id of [NICK_USER, RESTRICTED_USER, RESTRICTED_ROLE, OTHER_USER]) {
+          expect(text).not.toContain(id);
+        }
+        expect(text).toContain('Who can use room commands');
+        expect(text).toMatch(/\d restrictions?|none/);
+        assertCopyRules(text);
+      }
+    }
+  });
+
+  it('counts the people and roles a command_access change restricts, not its features', () => {
+    const text = renderAnnouncement(
+      plan({
+        settingChanges: [
+          setting({
+            key: 'command_access',
+            before: { rename: { users: [NICK_USER, RESTRICTED_USER], roles: [RESTRICTED_ROLE] } },
+            after: { rename: { users: [OTHER_USER] }, nick: { users: [NICK_USER] } },
+            entriesAdded: ['nick'],
+            entriesChanged: ['rename'],
+          }),
+        ],
+      }),
+      ctx,
+    );
+    expect(text).toContain('Who can use room commands: 2 restrictions (was 3 restrictions)');
+  });
+
+  it('says how many restrictions an import removes, and not whose', () => {
+    const text = renderAnnouncement(
+      plan({
+        settingChanges: [
+          setting({
+            key: 'command_access',
+            before: {
+              rename: { users: [NICK_USER, RESTRICTED_USER] },
+              nick: { roles: [RESTRICTED_ROLE] },
+            },
+            after: { nick: { roles: [RESTRICTED_ROLE] } },
+            entriesRemoved: ['rename'],
+          }),
+        ],
+      }),
+      ctx,
+    );
+    expect(text).toContain('2 restrictions on room commands');
+    expect(text).not.toContain(RESTRICTED_USER);
   });
 
   /**

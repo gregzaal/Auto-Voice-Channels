@@ -251,6 +251,7 @@ const SETTING_LABELS: Record<string, string> = {
   text_channel_role: 'Role that can read room text channels',
   control_panel: 'Room control panel buttons',
   control_panel_style: 'Room control panel title, description and colour',
+  command_access: 'Who can use room commands',
 };
 
 const NOTE_LABELS: Record<ImportNoteCode, string> = {
@@ -418,8 +419,48 @@ const PREVIEW_FOOTER = [
   'Re-uploading the file afterwards is safe and changes nothing on its own.',
 ];
 
+/**
+ * How many people and roles a stored `command_access` value restricts, and
+ * nothing else about it.
+ *
+ * `features` narrows the count to those feature ids, for the removal line.
+ * Defensive about shape because the argument is a raw settings value, which is
+ * whatever the blob held, and `describeValue` cannot be trusted with this key: it
+ * would say "2 entries" for two features, which is a number nobody can read as
+ * two features with a few people each.
+ */
+export function commandAccessCount(value: unknown, features?: readonly string[]): number {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return 0;
+  let count = 0;
+  for (const [feature, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (features && !features.includes(feature)) continue;
+    if (typeof entry !== 'object' || entry === null) continue;
+    const { users, roles } = entry as { users?: unknown; roles?: unknown };
+    if (Array.isArray(users)) count += users.length;
+    if (Array.isArray(roles)) count += roles.length;
+  }
+  return count;
+}
+
+function restrictions(count: number): string {
+  if (count === 0) return 'none';
+  return count === 1 ? '1 restriction' : `${count} restrictions`;
+}
+
 function settingLine(change: SettingChange): string {
   const label = SETTING_LABELS[change.key] ?? change.key;
+  /**
+   * A COUNT on every surface, like `custom_nicks`: the entries are the ids of
+   * members an admin has restricted, and this line reaches the public
+   * announcement. The entry names the generic path would add are feature ids,
+   * so they would not leak an id today, but a count is the contract and a
+   * future change to the shape should not be able to break it.
+   */
+  if (change.key === 'command_access') {
+    const was = commandAccessCount(change.before);
+    if (change.cleared) return `${label}: cleared (${restrictions(was)} removed)`;
+    return `${label}: ${restrictions(commandAccessCount(change.after))} (was ${restrictions(was)})`;
+  }
   if (change.cleared) {
     const removed = change.entriesRemoved.length;
     if (removed > 0 && change.key === 'custom_nicks') {
@@ -453,7 +494,8 @@ function channelLine(change: ChannelChange, isPublic: boolean): string {
  * destructive part of the import.
  *
  * `custom_nicks` is a COUNT on every surface including this one, because the
- * entries are names members chose for themselves.
+ * entries are names members chose for themselves, and `command_access` is too,
+ * because they are the ids of members an admin restricted.
  */
 function removalSection(plan: ImportPlan, isPublic: boolean): string[] {
   const out: string[] = [];
@@ -464,6 +506,12 @@ function removalSection(plan: ImportPlan, isPublic: boolean): string[] {
     const label = SETTING_LABELS[change.key] ?? change.key;
     if (change.key === 'custom_nicks') {
       out.push(`${change.entriesRemoved.length} member nicknames`);
+      continue;
+    }
+    if (change.key === 'command_access') {
+      out.push(
+        `${restrictions(commandAccessCount(change.before, change.entriesRemoved))} on room commands`,
+      );
       continue;
     }
     out.push(

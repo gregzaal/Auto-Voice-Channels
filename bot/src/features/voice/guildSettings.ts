@@ -30,6 +30,7 @@ export const SETTINGS_KEYS = {
   textChannelRole: 'text_channel_role',
   controlPanel: 'control_panel',
   controlPanelStyle: 'control_panel_style',
+  commandAccess: 'command_access',
 } as const;
 
 /**

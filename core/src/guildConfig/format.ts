@@ -70,6 +70,7 @@ export const EXPORT_SETTINGS_KEYS = [
   'text_channel_role',
   'control_panel',
   'control_panel_style',
+  'command_access',
 ] as const;
 
 export type ExportSettingsKey = (typeof EXPORT_SETTINGS_KEYS)[number];
@@ -145,6 +146,23 @@ export const exportedSettingsSchema = z.object({
    * Discord's range fails every panel render rather than one write.
    */
   control_panel_style: z.record(z.string(), z.union([z.string(), z.number()])).nullable(),
+  /**
+   * Who may not use which room command: a feature id to `{ users, roles }`, each a
+   * list of snowflakes. Only departures are stored, so absent means nobody is
+   * denied anything.
+   *
+   * A key of its own for the reason `control_panel_style` is one, and `unknown`
+   * where that one is a union, because the entry's SHAPE is the part most likely
+   * to grow. Zod refuses a known key whose value has a new shape, which would
+   * make every file a restricting guild writes unreadable by the build on the
+   * other fleets, the pre-import snapshot included. So the wire accepts any
+   * entry and `validateSettingsValue` checks the shape, where a value it cannot
+   * read costs one entry and an issue instead of the whole file.
+   *
+   * The denied ids are member data. Every import surface that prints a setting
+   * reports a count for this key and never an id.
+   */
+  command_access: z.record(z.string(), z.unknown()).nullable(),
 });
 
 export type ExportedSettings = z.infer<typeof exportedSettingsSchema>;

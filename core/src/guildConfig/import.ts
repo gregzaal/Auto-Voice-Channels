@@ -80,6 +80,17 @@ export const IMPORT_LIMITS = {
    * control this one does not know about still imports.
    */
   controlPanel: 40,
+  /**
+   * Room command restrictions: `MAX_RESTRICTED_USERS`, `MAX_RESTRICTED_ROLES` and
+   * `MAX_RESTRICTIONS` in `bot/src/features/voice/commandAccess.ts`, which core
+   * cannot import. `commandAccess.unit.test.ts` binds the two sets of numbers.
+   *
+   * Bounded because the denied ids ride in the settings blob that every instance
+   * keeps resident and that `route` reads in full on every interaction.
+   */
+  commandAccessUsers: 50,
+  commandAccessRoles: 25,
+  commandAccessTotal: 150,
 } as const;
 
 export type ChannelKind = 'voice' | 'text' | 'category' | 'other';
@@ -391,6 +402,29 @@ function stable(value: unknown): string {
 function isStringMap(value: unknown): value is Record<string, string> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   return Object.values(value).every((v) => typeof v === 'string');
+}
+
+/**
+ * A list of snowflakes, deduplicated in the order given, or null when `value` is
+ * present and is not a list. An absent list is an empty one.
+ *
+ * `dropped` counts what was refused (not a snowflake, or `exclude`) and not what
+ * was merely a repeat, so the caller can say something was dropped without
+ * calling a duplicate a mistake.
+ */
+function snowflakeList(
+  value: unknown,
+  exclude: string | undefined,
+): { ids: string[]; dropped: number } | null {
+  if (value === undefined) return { ids: [], dropped: 0 };
+  if (!Array.isArray(value)) return null;
+  const ids = new Set<string>();
+  let dropped = 0;
+  for (const id of value) {
+    if (isSnowflake(id) && id !== exclude) ids.add(id);
+    else dropped += 1;
+  }
+  return { ids: [...ids], dropped };
 }
 
 /** Turns a validated native file into the normalised shape. */
@@ -1087,6 +1121,72 @@ function validateSetting(
         kept[control] = flag;
       }
       return kept;
+    }
+
+    /**
+     * Who may not use which room command: a feature id to `{ users, roles }`.
+     *
+     * The feature id is not checked, for `control_panel`'s reason: an id this
+     * build has never heard of is inert, because the reader looks each feature up
+     * by name, and refusing it would lose the whole map over one entry a newer
+     * build wrote. Everything else is, because these ids sit in the blob forever
+     * and are read on every interaction.
+     *
+     * A role that no longer exists here is harmless and cannot be detected
+     * (`GuildFacts` carries no roles): a deny that matches nothing fails open.
+     * The guild id as a role is the exception, since it IS `@everyone` and would
+     * deny the whole server, so it is dropped the way `text_channel_role` refuses
+     * it. An entry with nothing left in it is dropped without a note, because
+     * that is what a normalised empty list looks like rather than a mistake.
+     *
+     * A count overrun drops the whole key, as `aliases` does: a silent partial
+     * list of who is restricted is harder to explain than an untouched one.
+     */
+    case 'command_access': {
+      const record = asRecord(value);
+      if (!record) return drop('setting_invalid');
+      const entries: [string, { users?: string[]; roles?: string[] }][] = [];
+      let total = 0;
+      for (const [feature, raw] of Object.entries(record)) {
+        const shape = asRecord(raw);
+        const users = shape ? snowflakeList(shape.users, undefined) : null;
+        const roles = shape ? snowflakeList(shape.roles, facts.guildId) : null;
+        if (!shape || !users || !roles || feature.length > 40) {
+          notes.push({ code: 'setting_invalid', severity: 'dropped', subject: `${key}.entry` });
+          continue;
+        }
+        if (users.dropped + roles.dropped > 0) {
+          notes.push({ code: 'setting_invalid', severity: 'dropped', subject: `${key}.entry` });
+        }
+        if (users.ids.length > limits.commandAccessUsers) {
+          return drop('setting_over_limit', {
+            limit: limits.commandAccessUsers,
+            count: users.ids.length,
+          });
+        }
+        if (roles.ids.length > limits.commandAccessRoles) {
+          return drop('setting_over_limit', {
+            limit: limits.commandAccessRoles,
+            count: roles.ids.length,
+          });
+        }
+        if (users.ids.length + roles.ids.length === 0) continue;
+        total += users.ids.length + roles.ids.length;
+        entries.push([
+          feature,
+          {
+            ...(users.ids.length > 0 ? { users: users.ids } : {}),
+            ...(roles.ids.length > 0 ? { roles: roles.ids } : {}),
+          },
+        ]);
+      }
+      if (total > limits.commandAccessTotal) {
+        return drop('setting_over_limit', { limit: limits.commandAccessTotal, count: total });
+      }
+      // `fromEntries` rather than assigning into a literal: a feature id of
+      // `__proto__` is reachable through a hand-edited file, and an assignment
+      // would invoke the prototype setter and drop the entry instead of keeping it.
+      return entries.length > 0 ? Object.fromEntries(entries) : drop('setting_invalid');
     }
   }
 

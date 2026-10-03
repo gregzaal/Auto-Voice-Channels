@@ -77,6 +77,9 @@ function configured(): CurrentConfig {
       // Only what an admin switched OFF is ever stored, and the sentinel for the
       // panel itself shares the map with the per-button flags.
       control_panel: { kick: false, panel: false },
+      // Who may not use which room command. It is member data, so the round trip
+      // for this key is the one that proves nothing is lost or invented.
+      command_access: { rename: { users: [CONTACT], roles: ['234567890123456790'] } },
     },
     creatorChannels: [
       {

@@ -81,6 +81,7 @@ function nativeFile(over: Partial<GuildConfigFile> = {}): GuildConfigFile {
       timezone: null,
       lists: null,
       game_name_mode: null,
+      command_access: null,
     },
     creator_channels: [],
     adopted_channels: [],
@@ -1172,5 +1173,249 @@ describe('control panel appearance round trip', () => {
   it('drops an entry of the wrong shape and keeps the rest', () => {
     const plan = planOf(withSettings({ control_panel_style: { title: 'Kept', color: { no: 1 } } }));
     expect(plan.settingsPatch.control_panel_style).toEqual({ title: 'Kept' });
+  });
+});
+
+/**
+ * Who may not use which room command (`command_access`).
+ *
+ * A key of its own for `control_panel_style`'s reason, and a permissive wire
+ * schema so that a shape a newer build invents costs one entry and an issue
+ * rather than making the whole file, the pre-import snapshot included,
+ * unreadable.
+ */
+describe('command_access', () => {
+  const USER_A = '111111111111111111';
+  const USER_B = '222222222222222222';
+  const ROLE_A = '333333333333333333';
+  const ROLE_B = '444444444444444444';
+
+  const withAccess = (command_access: unknown): GuildConfigFile =>
+    nativeFile({ settings: { ...nativeFile().settings, command_access } as never });
+
+  const ids = (prefix: number, count: number): string[] =>
+    Array.from({ length: count }, (_, i) => `${prefix}${String(i).padStart(17, '0')}`);
+
+  it('carries a map through, in the order it was written', () => {
+    const plan = planOf(
+      withAccess({
+        rename: { users: [USER_B, USER_A], roles: [ROLE_A] },
+        limit: { roles: [ROLE_B] },
+      }),
+    );
+    expect(plan.settingsPatch.command_access).toEqual({
+      rename: { users: [USER_B, USER_A], roles: [ROLE_A] },
+      limit: { roles: [ROLE_B] },
+    });
+  });
+
+  it('keeps a feature id this build has never heard of', () => {
+    const plan = planOf(withAccess({ somethingnew: { users: [USER_A] } }));
+    expect(plan.settingsPatch.command_access).toEqual({ somethingnew: { users: [USER_A] } });
+  });
+
+  /**
+   * An empty list is the same as no list, and an entry with nothing left is not
+   * worth a slot. Quietly: it is what normalising looks like, not a mistake.
+   */
+  it('normalises an empty list to absent and drops an entry with nothing in it', () => {
+    const plan = planOf(
+      withAccess({
+        rename: { users: [], roles: [ROLE_A] },
+        limit: { users: [], roles: [] },
+        nick: {},
+      }),
+    );
+    expect(plan.settingsPatch.command_access).toEqual({ rename: { roles: [ROLE_A] } });
+    expect(noteCodes(plan)).not.toContain('setting_invalid');
+  });
+
+  it('removes a repeated id, and does not call a repeat a mistake', () => {
+    const plan = planOf(withAccess({ rename: { users: [USER_A, USER_B, USER_A] } }));
+    expect(plan.settingsPatch.command_access).toEqual({ rename: { users: [USER_A, USER_B] } });
+    expect(noteCodes(plan)).not.toContain('setting_invalid');
+  });
+
+  it('drops an id that is not a snowflake and says so', () => {
+    const plan = planOf(withAccess({ rename: { users: [USER_A, 'not-an-id', 42, '12'] } }));
+    expect(plan.settingsPatch.command_access).toEqual({ rename: { users: [USER_A] } });
+    expect(noteCodes(plan)).toContain('setting_invalid');
+  });
+
+  /** The guild id as a role is `@everyone`, which would deny the whole server. */
+  it('drops the guild id from the roles, and keeps it nowhere', () => {
+    const plan = planOf(withAccess({ rename: { roles: [GUILD, ROLE_A] } }));
+    expect(plan.settingsPatch.command_access).toEqual({ rename: { roles: [ROLE_A] } });
+    expect(noteCodes(plan)).toContain('setting_invalid');
+
+    const only = planOf(withAccess({ rename: { roles: [GUILD] } }));
+    expect(only.settingsPatch.command_access).toBeUndefined();
+  });
+
+  /** The guild id is a legal USER id as far as shape goes: it is only a role that it denies. */
+  it('does not drop the guild id from the users, since there it is just an id', () => {
+    const plan = planOf(withAccess({ rename: { users: [GUILD] } }));
+    expect(plan.settingsPatch.command_access).toEqual({ rename: { users: [GUILD] } });
+  });
+
+  it('drops an entry that is not a map, or whose lists are not lists, and keeps the rest', () => {
+    const plan = planOf(
+      withAccess({
+        rename: ['nope'],
+        limit: { users: 'nope' },
+        nick: { users: [USER_A] },
+      }),
+    );
+    expect(plan.settingsPatch.command_access).toEqual({ nick: { users: [USER_A] } });
+    expect(noteCodes(plan).filter((c) => c === 'setting_invalid')).toHaveLength(2);
+  });
+
+  it('refuses a value that is not a map, and a map with nothing in it', () => {
+    for (const value of [['rename'], 'rename', 7, {}]) {
+      const plan = planOf(withAccess(value));
+      expect(plan.settingsPatch.command_access).toBeUndefined();
+      expect(noteCodes(plan)).toContain('setting_invalid');
+    }
+  });
+
+  it('keeps an entry named __proto__ as an entry rather than as a prototype', () => {
+    const raw = JSON.parse(`{"__proto__":{"users":["${USER_A}"]}}`);
+    const plan = planOf(withAccess(raw));
+    const written = plan.settingsPatch.command_access as Record<string, unknown>;
+    expect(Object.keys(written)).toEqual(['__proto__']);
+    expect(Object.getPrototypeOf(written)).toBe(Object.prototype);
+  });
+
+  describe('caps', () => {
+    it('is bound to the numbers /restrict enforces', () => {
+      expect(IMPORT_LIMITS.commandAccessUsers).toBe(50);
+      expect(IMPORT_LIMITS.commandAccessRoles).toBe(25);
+      expect(IMPORT_LIMITS.commandAccessTotal).toBe(150);
+    });
+
+    it('accepts a feature at exactly the user and role limits', () => {
+      const entry = {
+        users: ids(1, IMPORT_LIMITS.commandAccessUsers),
+        roles: ids(2, IMPORT_LIMITS.commandAccessRoles),
+      };
+      const plan = planOf(withAccess({ rename: entry }));
+      expect(plan.settingsPatch.command_access).toEqual({ rename: entry });
+    });
+
+    it('drops the whole key when one feature has more users than the limit', () => {
+      const plan = planOf(
+        withAccess({
+          nick: { users: [USER_A] },
+          rename: { users: ids(1, IMPORT_LIMITS.commandAccessUsers + 1) },
+        }),
+        currentConfig({ settings: { command_access: { limit: { users: [USER_B] } } } }),
+      );
+      expect(plan.settingsPatch.command_access).toBeUndefined();
+      expect(plan.notes).toContainEqual(
+        expect.objectContaining({
+          code: 'setting_over_limit',
+          subject: 'command_access',
+          limit: IMPORT_LIMITS.commandAccessUsers,
+          count: IMPORT_LIMITS.commandAccessUsers + 1,
+        }),
+      );
+    });
+
+    it('drops the whole key when one feature has more roles than the limit', () => {
+      const plan = planOf(
+        withAccess({ rename: { roles: ids(2, IMPORT_LIMITS.commandAccessRoles + 1) } }),
+      );
+      expect(plan.settingsPatch.command_access).toBeUndefined();
+      expect(plan.notes).toContainEqual(
+        expect.objectContaining({
+          code: 'setting_over_limit',
+          limit: IMPORT_LIMITS.commandAccessRoles,
+        }),
+      );
+    });
+
+    /** Four features, each inside its own limit, together past the whole-map one. */
+    it('drops the whole key when the entries add up past the total', () => {
+      const full = (prefix: number) => ({
+        users: ids(prefix, IMPORT_LIMITS.commandAccessUsers),
+        roles: ids(prefix + 10, IMPORT_LIMITS.commandAccessRoles),
+      });
+      const plan = planOf(withAccess({ privacy: full(1), limit: full(2), rename: full(3) }));
+      expect(plan.settingsPatch.command_access).toBeUndefined();
+      expect(plan.notes).toContainEqual(
+        expect.objectContaining({
+          code: 'setting_over_limit',
+          limit: IMPORT_LIMITS.commandAccessTotal,
+          count: 3 * (IMPORT_LIMITS.commandAccessUsers + IMPORT_LIMITS.commandAccessRoles),
+        }),
+      );
+    });
+
+    it('counts an id once however often the file repeats it', () => {
+      const repeated = Array.from({ length: 80 }, () => USER_A);
+      const plan = planOf(withAccess({ rename: { users: repeated } }));
+      expect(plan.settingsPatch.command_access).toEqual({ rename: { users: [USER_A] } });
+    });
+  });
+
+  describe('round trip', () => {
+    const stored = { rename: { users: [USER_A], roles: [ROLE_A] }, nick: { users: [USER_B] } };
+
+    it('changes nothing when the file matches what is stored', () => {
+      const plan = planOf(
+        withAccess(stored),
+        currentConfig({ settings: { command_access: stored } }),
+      );
+      expect(plan.settingsPatch.command_access).toBeUndefined();
+      expect(plan.settingsRemove).not.toContain('command_access');
+    });
+
+    it('clears the stored map when the file says it is absent', () => {
+      const plan = planOf(
+        withAccess(null),
+        currentConfig({ settings: { command_access: stored } }),
+      );
+      expect(plan.settingsRemove).toContain('command_access');
+    });
+
+    it('leaves the stored map alone when an older file does not mention the key', () => {
+      const file = nativeFile() as unknown as Record<string, Record<string, unknown>>;
+      delete file.settings.command_access;
+      const plan = planOf(file as never, currentConfig({ settings: { command_access: stored } }));
+      expect(plan.settingsRemove).not.toContain('command_access');
+      expect(plan.settingsPatch.command_access).toBeUndefined();
+    });
+
+    it('reads a file whose entry has a shape this build does not know, and drops that entry', () => {
+      const parsed = parseNativeFile(withAccess({ rename: { users: { [USER_A]: 1700000000 } } }));
+      expect(parsed.ok).toBe(true);
+      const plan = planOf(withAccess({ rename: { users: { [USER_A]: 1700000000 } } }));
+      expect(plan.settingsPatch.command_access).toBeUndefined();
+      expect(noteCodes(plan)).toContain('setting_invalid');
+    });
+
+    it('lists the features whose entries changed, by feature name', () => {
+      const plan = planOf(
+        withAccess({ rename: { users: [USER_A, USER_B] }, limit: { roles: [ROLE_A] } }),
+        currentConfig({ settings: { command_access: { rename: { users: [USER_A] } } } }),
+      );
+      const change = plan.settingChanges.find((c) => c.key === 'command_access');
+      expect(change?.entriesChanged).toEqual(['rename']);
+      expect(change?.entriesAdded).toEqual(['limit']);
+    });
+  });
+
+  /** Notes name a key and a count, never a value, and an id is a value. */
+  it('never puts a denied id in a note', () => {
+    const plan = planOf(
+      withAccess({
+        rename: { users: [USER_A, 'junk'], roles: [GUILD] },
+        limit: { users: ids(1, IMPORT_LIMITS.commandAccessUsers + 1) },
+      }),
+    );
+    const serialized = JSON.stringify(plan.notes);
+    expect(serialized).not.toContain(USER_A);
+    expect(serialized).not.toContain('junk');
+    expect(serialized).not.toMatch(/\d{17,}/);
   });
 });
