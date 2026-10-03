@@ -181,6 +181,9 @@ export class VoiceCommands {
     // names the person who now owns the room rather than whoever gave it away.
     const target = this.deps.voice.membersInChannel(id).find((m) => m.id === targetId);
     await this.deps.secondaries.setOwnerAndCreator(id, targetId, target?.displayName);
+    // A private room's "⇩ Join" companion names its owner and gates who may answer
+    // a knock, so it follows the handover exactly as it does when the owner leaves.
+    if (target) await this.deps.feature.repointJoinCompanion(guildId, id, target);
     await this.deps.feature.rerenderSecondary(guildId, id);
     return ok(`Transferred ownership to <@${targetId}>.`);
   }
@@ -213,11 +216,9 @@ export class VoiceCommands {
     if (ownerPresent && !isOriginalCreator) {
       return fail('The current owner is still here, they can `/transfer` it to you.');
     }
-    await this.deps.secondaries.setOwnerAndCreator(
-      row.channelId,
-      userId,
-      present.find((m) => m.id === userId)?.displayName,
-    );
+    const claimant = present.find((m) => m.id === userId);
+    await this.deps.secondaries.setOwnerAndCreator(row.channelId, userId, claimant?.displayName);
+    if (claimant) await this.deps.feature.repointJoinCompanion(guildId, row.channelId, claimant);
     await this.deps.feature.rerenderSecondary(guildId, row.channelId);
     return ok(
       isOriginalCreator

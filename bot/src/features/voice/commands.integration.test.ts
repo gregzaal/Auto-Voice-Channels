@@ -1,4 +1,10 @@
-import { AutoChannelRepository, GuildRepository, SecondaryChannelRepository, db } from '@avc/core';
+import {
+  AutoChannelRepository,
+  GuildRepository,
+  JoinChannelRepository,
+  SecondaryChannelRepository,
+  db,
+} from '@avc/core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { PgTestEnv } from '../../test/pgContainer.js';
 import { startPostgres } from '../../test/pgContainer.js';
@@ -6,6 +12,7 @@ import { fakeLogger } from '../../runtime/testUtils.js';
 import { RecordingVoiceActions } from './actions.js';
 import { VoiceCommands } from './commands.js';
 import { VoiceFeature } from './handler.js';
+import { PrivacyService } from './privacy.js';
 import { FakeVoiceView, fakeMember as member } from './voiceTestUtils.js';
 
 const GUILD = 'guild-cmd-test';
@@ -217,6 +224,111 @@ describe('VoiceCommands (integration)', () => {
     const row = await secondaries.get(SEC);
     expect(row!.ownerId).toBe('alice');
     expect(row!.originalCreator).toBe('alice');
+  });
+
+  /**
+   * A private room's "⇩ Join" companion names its owner and gates who may answer
+   * a knock (`avc:join:` checks `join_channels.creator_id`). The owner-left path
+   * re-points it; `/transfer` and `/reclaim` did not, so after a handover only the
+   * PREVIOUS owner could approve anyone, and the companion kept their name.
+   */
+  describe('a handover re-points the "⇩ Join" companion', () => {
+    const JOIN = 'join-1';
+    let joinChannels: JoinChannelRepository;
+    let handoverCommands: VoiceCommands;
+
+    beforeEach(async () => {
+      await env.handle.db.delete(db.schema.joinChannels);
+      joinChannels = new JoinChannelRepository(env.handle.db);
+      const privacy = new PrivacyService({
+        secondaries,
+        joinChannels,
+        actions,
+        voice,
+        logger: fakeLogger(),
+      });
+      const feature = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+        onOwnerChanged: (gid, cid, ownerId, ownerName) =>
+          privacy.handleOwnerChanged(gid, cid, ownerId, ownerName),
+      });
+      handoverCommands = new VoiceCommands({
+        secondaries,
+        actions,
+        voice,
+        feature,
+        logger: fakeLogger(),
+      });
+      await joinChannels.create({
+        channelId: JOIN,
+        guildId: GUILD,
+        secondaryChannelId: SEC,
+        creatorId: 'alice',
+      });
+      await secondaries.updateState(SEC, { name: '#1 [General]', index: 0, private: true });
+    });
+
+    it('/transfer moves the right to answer a knock, and renames the companion', async () => {
+      voice.put(SEC, member('bob'));
+      const res = await handoverCommands.transfer(GUILD, SEC, 'alice', 'bob');
+      expect(res.ok).toBe(true);
+      expect((await joinChannels.getBySecondary(SEC))!.creatorId).toBe('bob');
+      expect(actions.ofType('rename')).toContainEqual(
+        expect.objectContaining({ channelId: JOIN, name: '⇩ Join bob' }),
+      );
+    });
+
+    it('/reclaim does the same for a claim of an abandoned room', async () => {
+      voice.drop(SEC, 'alice');
+      voice.put(SEC, member('bob'));
+      const res = await handoverCommands.claim(GUILD, SEC, 'bob');
+      expect(res.ok).toBe(true);
+      expect((await joinChannels.getBySecondary(SEC))!.creatorId).toBe('bob');
+    });
+
+    it('leaves a public room alone, since it has no companion', async () => {
+      await joinChannels.removeBySecondary(SEC);
+      voice.put(SEC, member('bob'));
+      const before = actions.ofType('rename').length;
+      const res = await handoverCommands.transfer(GUILD, SEC, 'alice', 'bob');
+      expect(res.ok).toBe(true);
+      expect(
+        actions
+          .ofType('rename')
+          .slice(before)
+          .filter((r) => r.channelId === JOIN),
+      ).toHaveLength(0);
+    });
+
+    it('still completes the handover when the companion cannot be renamed', async () => {
+      voice.put(SEC, member('bob'));
+      const feature = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+        onOwnerChanged: () => Promise.reject(new Error('Missing Permissions')),
+      });
+      const broken = new VoiceCommands({
+        secondaries,
+        actions,
+        voice,
+        feature,
+        logger: fakeLogger(),
+      });
+      const res = await broken.transfer(GUILD, SEC, 'alice', 'bob');
+      expect(res.ok).toBe(true);
+      expect((await secondaries.get(SEC))!.ownerId).toBe('bob');
+    });
   });
 
   /**

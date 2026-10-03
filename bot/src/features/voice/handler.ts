@@ -1160,6 +1160,35 @@ export class VoiceFeature {
     await this.deps.onOwnerChanged?.(guildId, channelId, newOwner.id, newOwnerName);
   }
 
+  /**
+   * A handover that was not the owner leaving: `/transfer` and `/reclaim`.
+   *
+   * Re-points a private room's "⇩ Join" companion at the new owner, the same way
+   * the leave path does through the same hook. Without it the join row keeps
+   * naming the PREVIOUS owner, so only they can answer a knock and the new owner
+   * is refused their own room's Approve button.
+   *
+   * Never throws: the handover has already happened, and a failed rename of the
+   * companion must not turn a successful `/transfer` into an error reply.
+   */
+  async repointJoinCompanion(
+    guildId: string,
+    channelId: string,
+    newOwner: VoiceMember,
+  ): Promise<void> {
+    if (!this.deps.onOwnerChanged) return;
+    try {
+      const guild = await this.deps.guilds.ensure(guildId);
+      const name = displayName(parseVoiceSettings(guild.settings), newOwner);
+      await this.deps.onOwnerChanged(guildId, channelId, newOwner.id, name);
+    } catch (err) {
+      this.deps.logger.warn(
+        { err, guildId, channelId, newOwnerId: newOwner.id },
+        'could not re-point the join channel after a handover',
+      );
+    }
+  }
+
   /** Appends a member to a secondary's arrival roster (no-op if already tracked). */
   private async addToRoster(guildId: string, channelId: string, memberId: string): Promise<void> {
     const secondary = await this.deps.secondaries.get(channelId);
