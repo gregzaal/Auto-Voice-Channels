@@ -120,6 +120,11 @@ export interface PrivacyServiceDeps {
    * quietly stopped locking a room would be a worse fault than the one it was thrown for.
    * They, `makePublic` and `unhide` therefore still write the creator's saved lists as
    * part of their own change, so this does not stop every write of a saved list.
+   *
+   * The one creation it does reach is a creator channel set to start its rooms hidden, and
+   * not through this service: `VoiceFeature.maybeCreate` asks the same snapshot and makes a
+   * locked room instead, so `tryMakePrivateForCreation` is never asked to hide one while the
+   * lever is on. The room is still locked, never open.
    */
   roomAccessDisabled?: () => Promise<boolean>;
   /**

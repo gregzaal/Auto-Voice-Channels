@@ -101,6 +101,13 @@ export const RUNTIME_FLAGS = {
    * still writes the creator's saved lists into the room as part of the change it
    * makes. A fault in the planner itself is a deploy rollback, not this switch.
    *
+   * **It does stop a creator channel whose rooms start hidden (`/alwayshidden`) from
+   * hiding them.** While it is on a room from such a channel is made private instead,
+   * with a "Join" channel, which is what a build that predates hiding makes from the same
+   * setting. It does not make a room open, it is read from the creation gate's cached
+   * snapshot, and the next room after the lever is lifted is hidden again. Without it a
+   * fleet where hiding fails would delete a room on every join to such a channel.
+   *
    * A failed flag read is treated as NOT disabled, matching `command_access.disabled`:
    * a database blip must not quietly withdraw a feature that is on by default.
    */

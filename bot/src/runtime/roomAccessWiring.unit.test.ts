@@ -72,6 +72,17 @@ describe('the room_access.disabled lever is wired to every consumer', () => {
     expect(feature).toContain('roomAccess: privacy,');
   });
 
+  /**
+   * A creator channel that starts its rooms hidden asks the creation gate itself, and a
+   * feature with no gate reads the lever as off, so a wiring that dropped `gate` would keep
+   * hiding rooms through an incident with every test green.
+   */
+  it('hands the voice feature the creation gate, which a hidden creator channel asks', () => {
+    expect(statementFrom('const voiceFeature = new VoiceFeature({')).toContain(
+      'gate: creationGate,',
+    );
+  });
+
   it('is reported by /diagnostics, per fleet', () => {
     expect(SOURCE).toMatch(
       /roomAccess: \{\s*disabled: runtimeFlags\[RUNTIME_FLAGS\.ROOM_ACCESS_DISABLED\] === true,\s*\}/,

@@ -6,12 +6,19 @@ import {
   ManagedChannelRepository,
   SecondaryChannelRepository,
   db,
+  startModeOf,
 } from '@avc/core';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PgTestEnv } from '../../test/pgContainer.js';
 import { startPostgres } from '../../test/pgContainer.js';
 import { fakeLogger } from '../../runtime/testUtils.js';
-import { BOT_ACCESS, CONNECT, OVERWRITE_ROLE, VIEW_CHANNEL } from './accessPlan.js';
+import {
+  BOT_ACCESS,
+  CONNECT,
+  MAX_PLANNED_OVERWRITES,
+  OVERWRITE_ROLE,
+  VIEW_CHANNEL,
+} from './accessPlan.js';
 import { RecordingVoiceActions } from './actions.js';
 import { CompanionTextService } from './companionText.js';
 import { ControlPanelPoster } from './controlPanelPoster.js';
@@ -1931,8 +1938,12 @@ describe('VoiceFeature (integration)', () => {
     const BOTH = VIEW_CHANNEL | CONNECT;
     const ABOVE = 'role-above-the-bot';
 
-    /** The feature wired as index.ts does: the privacy service behind makePrivateOnCreate. */
-    function wire(over: { rerender?: boolean } = {}) {
+    /**
+     * The feature wired as index.ts does: the privacy service behind makePrivateOnCreate.
+     * `roomAccessDisabled` is the creation gate's answer for `room_access.disabled`, and
+     * leaving it out leaves the feature with no gate at all.
+     */
+    function wire(over: { roomAccessDisabled?: () => Promise<boolean> } = {}) {
       const problems = new PermissionProblemTracker();
       const logs: { level: number; message: string }[] = [];
       const privacy = new PrivacyService({
@@ -1956,6 +1967,14 @@ describe('VoiceFeature (integration)', () => {
         logger: fakeLogger(),
         permissionProblems: problems,
         serverLog: (_g, level, message) => logs.push({ level, message }),
+        ...(over.roomAccessDisabled
+          ? {
+              gate: {
+                allowCreate: () => Promise.resolve({ allowed: true }),
+                roomAccessDisabled: over.roomAccessDisabled,
+              },
+            }
+          : {}),
         // As index.ts wires it: the mode rides along.
         makePrivateOnCreate: (g, c, ownerId, ownerName, mode) =>
           privacy.makePrivateForCreation(g, c, ownerId, ownerName, mode),
@@ -1967,7 +1986,6 @@ describe('VoiceFeature (integration)', () => {
           refreshForRoom: () => Promise.resolve(),
         },
       });
-      void over;
       return { f, problems, logs, views, privacy };
     }
 
@@ -2115,7 +2133,15 @@ describe('VoiceFeature (integration)', () => {
         );
       });
 
-      it('does not delete the room for an error that is not a refusal or a permission', async () => {
+      /**
+       * Any other failure to hide (a Discord 5xx, a dropped socket) leaves the same open room
+       * in everyone's channel list, named after its owner, so the room is deleted for it too.
+       * The error is still thrown for the guild's breaker, and no notice blames the admin for
+       * a fault that is not a permission or a role.
+       */
+      it('deletes the room for any other failure to hide it, and still throws it', async () => {
+        const problems = new PermissionProblemTracker();
+        const removed: string[] = [];
         const failing = new VoiceFeature({
           autoChannels,
           secondaries,
@@ -2124,6 +2150,11 @@ describe('VoiceFeature (integration)', () => {
           voice,
           selfHosted: true,
           logger: fakeLogger(),
+          permissionProblems: problems,
+          onSecondaryRemoved: (_g, channelId) => {
+            removed.push(channelId);
+            return Promise.resolve();
+          },
           makePrivateOnCreate: () => Promise.reject(new Error('socket hang up')),
         });
         await guilds.transitionAuth({ guildId: GUILD, toStatus: 'trial' });
@@ -2136,8 +2167,152 @@ describe('VoiceFeature (integration)', () => {
             afterChannelId: PRIMARY,
           }),
         ).rejects.toThrow('socket hang up');
-        // Left to the sweep and the breaker, as a failure to lock a room always was.
-        expect(actions.ofType('delete')).toHaveLength(0);
+
+        const id = actions.ofType('create')[0]!.channelId;
+        expect(actions.ofType('delete')).toContainEqual(expect.objectContaining({ channelId: id }));
+        expect(await secondaries.get(id)).toBeUndefined();
+        expect(removed).toEqual([id]);
+        // Nobody was moved into it, and the admin is not told to fix a permission.
+        expect(actions.ofType('move')).toEqual([]);
+        expect(problems.recent(GUILD)).toEqual([]);
+      });
+
+      it('throws the original failure even when cleaning the room up fails too', async () => {
+        const failing = new VoiceFeature({
+          autoChannels,
+          secondaries,
+          guilds,
+          actions,
+          voice,
+          selfHosted: true,
+          logger: fakeLogger(),
+          onSecondaryRemoved: () => Promise.reject(new Error('cleanup failed')),
+          makePrivateOnCreate: () => Promise.reject(new Error('socket hang up')),
+        });
+        await guilds.transitionAuth({ guildId: GUILD, toStatus: 'trial' });
+        const alice = member('alice');
+        voice.put(PRIMARY, alice);
+        await expect(
+          failing.handleVoiceStateUpdate({
+            guildId: GUILD,
+            member: alice,
+            afterChannelId: PRIMARY,
+          }),
+        ).rejects.toThrow('socket hang up');
+      });
+
+      /**
+       * The plan refuses a hide for either reason, and the room is deleted for both. The role
+       * case is above, and a room whose copied overrides leave no room for the hide is the
+       * other, which is a refusal and not a Discord error, so it is checked on its own.
+       */
+      it('deletes the room when its permissions leave no room for the hide', async () => {
+        const { f, problems } = wire();
+        actions.seedOverwrites(
+          'sec-1',
+          Array.from({ length: MAX_PLANNED_OVERWRITES }, (_, i) => ({
+            id: `foreign-${i}`,
+            type: OVERWRITE_ROLE,
+            allow: 0n,
+            deny: VIEW_CHANNEL,
+          })),
+        );
+        const id = await join(f);
+
+        expect(id).toBe('sec-1');
+        expect(actions.ofType('delete')).toContainEqual(expect.objectContaining({ channelId: id }));
+        expect(await secondaries.get(id)).toBeUndefined();
+        expect(actions.ofType('move')).toEqual([]);
+        expect(problems.recent(GUILD)).toEqual([
+          expect.objectContaining({ channelId: PRIMARY, operation: 'privacy' }),
+        ]);
+      });
+
+      /**
+       * `room_access.disabled` stops new hides, and a hidden creator channel is the one
+       * creation that hides. A locked room is what an instance that predates hiding makes
+       * from the same stored setting, so the room is still private and never open. It is
+       * decided before the render, so the name and the panel say what the room is.
+       */
+      describe('while room_access.disabled is on', () => {
+        beforeEach(async () => {
+          await autoChannels.upsert(GUILD, PRIMARY, {
+            name: '{{HIDDEN ?? 🙈 // 👁}}{{PRIVATE ?? 🔒 // 🔓}} @@creator@@',
+            defaultPrivate: true,
+            defaultHidden: true,
+          });
+        });
+
+        it('makes a locked room, with a Join channel, and not a hidden one', async () => {
+          const { f, views } = wire({ roomAccessDisabled: () => Promise.resolve(true) });
+          const id = await join(f);
+
+          const held = actions.overwritesOf(id);
+          expect(held).toContainEqual(expect.objectContaining({ id: GUILD, deny: CONNECT }));
+          expect(held).not.toContainEqual(expect.objectContaining({ id: GUILD, deny: BOTH }));
+          expect(actions.ofType('joinChannel')).toHaveLength(1);
+          expect(actions.ofType('create')[0]!.reserveSlotAbove).toBe(true);
+          const row = (await secondaries.get(id))!;
+          expect(row.state.private).toBe(true);
+          expect(row.access?.hidden).not.toBe(true);
+          expect(views).toEqual([{ isPrivate: true, isHidden: false }]);
+          // The creator channel's own setting is untouched: the next room after the lever is
+          // lifted is hidden again.
+          expect(startModeOf((await autoChannels.get(PRIMARY))!.template)).toBe('hidden');
+        });
+
+        it('renders the first name as a locked room, with no second rename', async () => {
+          const { f } = wire({ roomAccessDisabled: () => Promise.resolve(true) });
+          const id = await join(f);
+          expect(spaced(actions.ofType('create')[0]!.name)).toBe('👁 🔒 alice');
+
+          voice.put(id, member('alice'));
+          expect(await f.rerenderSecondary(GUILD, id)).toEqual({});
+          expect(actions.ofType('rename')).toHaveLength(0);
+        });
+
+        it('hides the room as the admin asked once the lever is lifted', async () => {
+          let on = true;
+          const { f } = wire({ roomAccessDisabled: () => Promise.resolve(on) });
+          const first = await join(f);
+          expect((await secondaries.get(first))!.access?.hidden).not.toBe(true);
+
+          on = false;
+          // A second member, because the first is still standing in the creator channel.
+          const bob = member('bob');
+          voice.put(PRIMARY, bob);
+          await f.handleVoiceStateUpdate({ guildId: GUILD, member: bob, afterChannelId: PRIMARY });
+          const second = actions.ofType('create')[1]!.channelId;
+          expect((await secondaries.get(second))!.access?.hidden).toBe(true);
+        });
+
+        it('fails open: a gate that cannot answer hides the room', async () => {
+          const { f } = wire({ roomAccessDisabled: () => Promise.reject(new Error('flags down')) });
+          const id = await join(f);
+          expect((await secondaries.get(id))!.access?.hidden).toBe(true);
+          expect(actions.ofType('joinChannel')).toHaveLength(0);
+        });
+
+        /**
+         * The lever is asked only of a creator channel that starts hidden, which is what keeps
+         * it free for every other creation: the gate's snapshot is cached, but an open or a
+         * locked creator channel has no reason to read it at all.
+         */
+        it.each([
+          ['an open', {}],
+          ['a locked', { defaultPrivate: true }],
+        ] as const)(
+          'is not asked of %s creator channel, and does not change it',
+          async (_n, template) => {
+            await autoChannels.upsert(GUILD, PRIMARY, { name: "@@creator@@'s room", ...template });
+            const asked = vi.fn(() => Promise.resolve(true));
+            const { f } = wire({ roomAccessDisabled: asked });
+            const id = await join(f);
+            expect(asked).not.toHaveBeenCalled();
+            const row = (await secondaries.get(id))!;
+            expect(row.state.private === true).toBe('defaultPrivate' in template);
+          },
+        );
       });
     });
 
@@ -2175,6 +2350,55 @@ describe('VoiceFeature (integration)', () => {
         voice.put(id, member('alice'));
         expect(await f.rerenderSecondary(GUILD, id)).toEqual({});
         expect(actions.ofType('rename')).toHaveLength(0);
+      });
+
+      /**
+       * Only a hidden room is deleted for a failure that is not a refusal or a permission. A
+       * locked room that fails that way is left to the sweep and the breaker, as it always
+       * was, and this keeps the widening above from reaching it.
+       */
+      it('leaves the room for a failure that is not a refusal or a permission', async () => {
+        const failing = new VoiceFeature({
+          autoChannels,
+          secondaries,
+          guilds,
+          actions,
+          voice,
+          selfHosted: true,
+          logger: fakeLogger(),
+          makePrivateOnCreate: () => Promise.reject(new Error('socket hang up')),
+        });
+        await guilds.transitionAuth({ guildId: GUILD, toStatus: 'trial' });
+        const alice = member('alice');
+        voice.put(PRIMARY, alice);
+        await expect(
+          failing.handleVoiceStateUpdate({
+            guildId: GUILD,
+            member: alice,
+            afterChannelId: PRIMARY,
+          }),
+        ).rejects.toThrow('socket hang up');
+        expect(actions.ofType('delete')).toHaveLength(0);
+      });
+
+      it('deletes the room when its permissions leave no room for the lock', async () => {
+        const { f, problems } = wire();
+        actions.seedOverwrites(
+          'sec-1',
+          Array.from({ length: MAX_PLANNED_OVERWRITES }, (_, i) => ({
+            id: `foreign-${i}`,
+            type: OVERWRITE_ROLE,
+            allow: 0n,
+            deny: VIEW_CHANNEL,
+          })),
+        );
+        const id = await join(f);
+
+        expect(actions.ofType('delete')).toContainEqual(expect.objectContaining({ channelId: id }));
+        expect(await secondaries.get(id)).toBeUndefined();
+        expect(problems.recent(GUILD)).toEqual([
+          expect.objectContaining({ channelId: PRIMARY, operation: 'privacy' }),
+        ]);
       });
     });
 

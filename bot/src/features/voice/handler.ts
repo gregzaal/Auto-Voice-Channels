@@ -181,13 +181,14 @@ export interface CreationGate {
    */
   commandAccessDisabled?(): Promise<boolean>;
   /**
-   * The room access lever alone (`room_access.disabled`), for the one thing a room create
-   * does with it: skip applying the creator's saved lists to the room it just made.
+   * The room access lever alone (`room_access.disabled`), for the two things a room create
+   * does with it: make a locked room where the creator channel asks for a hidden one, and
+   * skip applying the creator's saved lists to the room it just made.
    *
    * Its own method, and not a field of the decision, because the lever is not a creation
    * lever and a room is created whatever it says. Asked through the gate's cached snapshot
-   * and failing open, so it costs no query and a blip lets the lists apply. Absent means
-   * not disabled.
+   * and failing open, so it costs no query and a blip hides the room and lets the lists
+   * apply. Absent means not disabled.
    */
   roomAccessDisabled?(): Promise<boolean>;
 }
@@ -304,7 +305,9 @@ export interface VoiceFeatureDeps {
    * no-op when unset.
    *
    * **Throws when it cannot, which is what the create path's rollback reads**: a room
-   * that was meant to be locked or hidden and is not is deleted, never left open.
+   * meant to be locked or hidden that a permission error or a refusal stopped is deleted
+   * rather than left open, and a hidden one is deleted for any failure. A locked room that
+   * fails for another reason is left to the sweep, as it always was.
    */
   makePrivateOnCreate?: (
     guildId: string,
@@ -840,7 +843,29 @@ export class VoiceFeature {
      * it, and four separate reads of the stored booleans are how they drift. It is the
      * creator channel's default; a member's remembered preference will feed the same local.
      */
-    const startMode: StartMode = primary ? startModeOf(primary.template) : 'public';
+    let startMode: StartMode = primary ? startModeOf(primary.template) : 'public';
+    /**
+     * `room_access.disabled` stops new hides, and a creator channel that starts its rooms
+     * hidden is the one creation that hides. Without this the lever could not reach it, and
+     * a fleet where hiding fails would delete a room on every join to such a channel until a
+     * deploy. A locked room is what an instance that predates hiding makes from the same
+     * stored setting, so the room is still private to join, and it is the only thing the
+     * lever changes about a creation: it never makes a room open. Decided HERE, before the
+     * render, so `{{HIDDEN}}` and the panel agree with the room that is actually made.
+     *
+     * Asked only of a hidden creator channel, through the gate's cached snapshot (no query),
+     * and failing open: a blip hides the room as the admin asked.
+     */
+    if (
+      startMode === 'hidden' &&
+      (await this.deps.gate?.roomAccessDisabled?.().catch(() => false))
+    ) {
+      startMode = 'locked';
+      this.deps.logger.info(
+        { guildId, primaryId: channelId },
+        'room_access.disabled is on: making a locked room where the creator channel asks for hidden',
+      );
+    }
     // Generate the per-channel random seed once, here, so `[[random]]` picks are
     // fixed for this channel's lifetime and never trigger a later rename.
     const seed = randomSeed();
@@ -951,6 +976,11 @@ export class VoiceFeature {
     // it (granting them access by id, since their move isn't cached yet). Hidden
     // writes the owner's View and Connect, the bot's allow and the `@everyone` deny,
     // and makes no Join channel.
+    //
+    // A hidden room is therefore as visible as the creator channel it copies, and named,
+    // from the create above until this write lands: the create payload carries the copied
+    // overwrites as they are, with no hide in them. It is a few requests, and closing it
+    // means sending the bot's allow, the owner's access and the deny in the create itself.
     if (startMode !== 'public') {
       try {
         await this.deps.makePrivateOnCreate?.(
@@ -964,14 +994,22 @@ export class VoiceFeature {
         // A refusal is a failure of the same kind as a missing permission: the plan will
         // not hide the room (a role the bot cannot edit would still show it), so the room
         // would be open to everyone. It is not a Discord error, so it needs its own check.
-        if (!isPermissionError(err) && !(err instanceof CreationRefusedError)) throw err;
+        const refused = isPermissionError(err) || err instanceof CreationRefusedError;
+        if (!refused && startMode !== 'hidden') throw err;
         // Same recovery as a failed move: a channel we can't finish locking
         // down is worse than no channel, since nobody (not even the owner) can
         // get into it, and a room meant to be hidden that is open is worse
         // still. Stop tracking it, best-effort delete, and notify.
-        await this.deps.secondaries.remove(newChannelId);
-        await this.deps.onSecondaryRemoved?.(guildId, newChannelId);
-        await this.deps.actions.deleteChannel(guildId, newChannelId).catch(() => undefined);
+        if (!refused) {
+          // Any OTHER failure to hide (a Discord 5xx, a dropped socket) leaves the same
+          // open room, named after its owner and in everyone's channel list, with nobody
+          // in it. It is empty because the owner is not moved until this succeeds, so
+          // deleting it loses nothing. The failure itself is still rethrown, so the
+          // guild's breaker counts it and no notice blames the admin for a fault of ours.
+          await this.discardUnfinishedRoom(guildId, newChannelId).catch(() => undefined);
+          throw err;
+        }
+        await this.discardUnfinishedRoom(guildId, newChannelId);
         this.deps.permissionProblems?.record(guildId, {
           channelId,
           operation: 'privacy',
@@ -1159,6 +1197,16 @@ export class VoiceFeature {
     );
     this.deps.serverLog?.(guildId, 1, `➕ <@${member.id}> created <#${newChannelId}>`);
     return { action: 'created', channelId: newChannelId };
+  }
+
+  /**
+   * Stops tracking a room that was just made and could not be finished, and deletes it
+   * from Discord, best effort. Idempotent, and tolerates a channel that is already gone.
+   */
+  private async discardUnfinishedRoom(guildId: string, roomId: string): Promise<void> {
+    await this.deps.secondaries.remove(roomId);
+    await this.deps.onSecondaryRemoved?.(guildId, roomId);
+    await this.deps.actions.deleteChannel(guildId, roomId).catch(() => undefined);
   }
 
   /**
