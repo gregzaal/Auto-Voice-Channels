@@ -645,10 +645,20 @@ export interface ExpressionVars {
   FULL: boolean;
   /**
    * The room is not public. This describes privacy without distinguishing
-   * locking from hiding, so a future narrower token can coexist with it.
+   * locking from hiding, so it stays true for a hidden room too, and
+   * {@link ExpressionVars.HIDDEN} narrows it.
    * Always false for an adopted standalone channel, which has no privacy model.
    */
   PRIVATE: boolean;
+  /**
+   * The room is hidden from the channel list. Narrower than `PRIVATE`, which is also true
+   * here, because a hidden room is a locked one.
+   *
+   * Earns a place for the reason `PRIVATE` does: it is a boolean fact about the room
+   * that no comparison of tokens can express. Always false for an adopted standalone
+   * channel.
+   */
+  HIDDEN: boolean;
   /**
    * Date, in the guild's zone, at day-or-coarser granularity.
    *
@@ -693,6 +703,7 @@ const CONDITION_VARIABLE_SET: Record<keyof ExpressionVars, true> = {
   OWNER: true,
   FULL: true,
   PRIVATE: true,
+  HIDDEN: true,
   WEEKDAY: true,
   MONTH: true,
   WEEKEND: true,
@@ -1182,6 +1193,7 @@ function buildExpressionVars(
     // fails open: it never claims a room is full on missing information.
     FULL: limit >= 1 && nonBot.length >= limit,
     PRIVATE: ctx.isPrivate ?? false,
+    HIDDEN: ctx.isHidden ?? false,
     WEEKDAY: clock.weekday,
     MONTH: clock.month,
     WEEKEND: clock.weekend,
@@ -1347,8 +1359,13 @@ export interface RenderContext {
    * and silently degraded to `0` on every re-render after that.
    */
   userLimit?: number;
-  /** Whether the room is locked, for `{{PRIVATE}}`. Adopted channels: false. */
+  /**
+   * Whether the room is not public, for `{{PRIVATE}}`: locked, or hidden, which is a kind
+   * of locked. Adopted channels: false.
+   */
   isPrivate?: boolean;
+  /** Whether the room is hidden from the channel list, for `{{HIDDEN}}`. Adopted channels: false. */
+  isHidden?: boolean;
   /**
    * Added to the sibling index before every number token renders, so a guild
    * can start its rooms at 4 (or at 0). Comes from the primary's `startAt`

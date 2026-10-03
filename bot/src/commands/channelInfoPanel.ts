@@ -121,6 +121,7 @@ export const BOOLEAN_VARIABLES: readonly string[] = [
   'RICH',
   'FULL',
   'PRIVATE',
+  'HIDDEN',
   'WEEKEND',
 ];
 

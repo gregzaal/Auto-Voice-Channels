@@ -204,6 +204,8 @@ describe('TemplateAssistant.propose', () => {
       '#1 - Halo',
       '#1 - Deep Rock Galactic',
       '#1 - General',
+      // The locked room and the hidden one.
+      '#1 - General',
       '#1 - General',
     ]);
     // Silent below the notice threshold.

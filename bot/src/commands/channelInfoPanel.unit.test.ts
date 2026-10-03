@@ -394,6 +394,27 @@ describe('buildTokenPanel', () => {
     expect(body).toMatch(/PRIVATE.*✅/s);
   });
 
+  /**
+   * HIDDEN is the narrower of the two, and a hidden room is private too: the readout probes
+   * the real engine with the room's own context, so it has to say yes to both for a hidden
+   * room and only to PRIVATE for a locked one.
+   */
+  it('reports HIDDEN for a hidden room, which is also PRIVATE, and not for a locked one', () => {
+    const conditions = (over: Partial<RenderContext>): string => {
+      const room = info({ render: { ...info().render!, ctx: ctx(over) } });
+      return fieldValues(buildTokenPanel(input({ info: room }))).join('\n');
+    };
+    const hidden = conditions({ isPrivate: true, isHidden: true });
+    expect(hidden).toContain('`{{HIDDEN}}` ✅ yes');
+    expect(hidden).toContain('`{{PRIVATE}}` ✅ yes');
+    const locked = conditions({ isPrivate: true, isHidden: false });
+    expect(locked).toContain('`{{HIDDEN}}` ❌ no');
+    expect(locked).toContain('`{{PRIVATE}}` ✅ yes');
+    const open = conditions({});
+    expect(open).toContain('`{{HIDDEN}}` ❌ no');
+    expect(open).toContain('`{{PRIVATE}}` ❌ no');
+  });
+
   it('says a creator channel preview is not a live channel', () => {
     const creator = info({
       kind: 'creator',

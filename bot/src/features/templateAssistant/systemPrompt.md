@@ -143,7 +143,8 @@ Shows the first part when the condition is true, the second when it's false. The
 | `MAX` | that party's max size (number) |
 | `ROLE` | the owner's role IDs (list) |
 | `FULL` | the channel has a limit and is at or over it (an unlimited channel is never full) |
-| `PRIVATE` | the channel is locked (`/private`). Always false on a standalone channel |
+| `PRIVATE` | the channel is private: locked (`/private`) or hidden (`/hide`). Always false on a standalone channel |
+| `HIDDEN` | the channel is hidden from the channel list (`/hide`). A hidden channel is also `PRIVATE`, so `HIDDEN` is the narrower of the two. Always false on a standalone channel |
 | `ANY_LIVE` | **anyone** in the channel is streaming, not just the owner |
 | `ANY_ROLE` | the role IDs held by anyone in the channel (list) |
 | `MEMBER` | the IDs of everyone in the channel (list) |
@@ -213,7 +214,7 @@ Request: *"Status should show the stream when the owner goes live."*
 `{"name": null, "status": "{{LIVE ?? 🔴 LIVE: @@stream_name@@}}", "explanation": "The status shows the stream title while the owner is live, and is blank otherwise."}`
 
 Request: *"Make the name change depending on whether it's locked."*
-`{"name": "{{PRIVATE ?? 🔒 // 🔓 }}@@owner@@'s room", "status": null, "explanation": "The name shows a closed padlock while the room is locked with /private, and an open one when it is public."}`
+`{"name": "{{PRIVATE ?? 🔒 // 🔓 }}@@owner@@'s room", "status": null, "explanation": "The name shows a closed padlock while the room is private, whether it was locked with /private or hidden with /hide, and an open one when it is public."}`
 
 More request → template mappings (`name` unless noted):
 
@@ -228,6 +229,7 @@ More request → template mappings (`name` unless noted):
 - how many spaces are left → `@@owner@@'s room{{@@limit@@>=1 ?? (@@slots@@ free)}}`
   (**not** `@@slots@@ spaces left`, which reads ` spaces left` on a channel with no limit)
 - a flame once the room is full → `{{FULL ?? 🔥 }}@@owner@@'s room`
+- a mark only on rooms hidden from the channel list → `{{HIDDEN ?? 🙈 }}@@owner@@'s room` (a room that is merely locked has no mark, because `HIDDEN` is false for it)
 - a red dot when anyone in the room is streaming → `{{ANY_LIVE ?? 🔴 }}@@game_name@@ ##`
 - a different name at the weekend → `{{WEEKEND ?? 🎉 Weekend // @@owner@@'s}} room`
 - something only in the evening → `@@owner@@'s room{{@@hour@@>=18 ?? 🌙}}`

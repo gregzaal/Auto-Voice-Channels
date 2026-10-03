@@ -161,12 +161,14 @@ describe('preview scenarios', () => {
       'party',
       'filling',
       'private',
+      'hidden',
     ]);
     // A standalone channel is the only kind that exists while empty, and has no
-    // privacy model, so it gets `empty` and not `private`.
+    // privacy model, so it gets `empty` and neither `private` nor `hidden`.
     const standalone = previewScenarios({ ...opts, standalone: true }).map((s) => s.key);
     expect(standalone).toContain('empty');
     expect(standalone).not.toContain('private');
+    expect(standalone).not.toContain('hidden');
   });
 
   it('renders the same template differently across scenarios', () => {
@@ -194,6 +196,26 @@ describe('preview scenarios', () => {
     );
     // Empty everywhere nobody is live, which is what the ANY_LIVE guard is for.
     expect(renderPair('x@@stream_game@@y', 'name', scenarios[1]!.ctx).rendered).toBe('xy');
+  });
+
+  /**
+   * A template keyed on PRIVATE has to be seen marking the hidden room as well as the locked
+   * one, and a template keyed on HIDDEN has to be seen marking only the hidden one: those two
+   * rows are the difference the variables exist to express, and the preview is where the
+   * admin sees it before accepting.
+   */
+  it('shows a locked room as private only, and a hidden room as both', () => {
+    const scenarios = previewScenarios(opts);
+    const render = (template: string, key: string) =>
+      renderPair(template, 'name', scenarios.find((s) => s.key === key)!.ctx).rendered;
+    expect(render('{{PRIVATE ?? P // O}}', 'private')).toBe('P');
+    expect(render('{{HIDDEN ?? H // V}}', 'private')).toBe('V');
+    expect(render('{{PRIVATE ?? P // O}}', 'hidden')).toBe('P');
+    expect(render('{{HIDDEN ?? H // V}}', 'hidden')).toBe('H');
+    // And nowhere else in the set.
+    for (const s of scenarios.filter((s) => s.key !== 'private' && s.key !== 'hidden')) {
+      expect(renderPair('{{HIDDEN ?? H // V}}', 'name', s.ctx).rendered, s.key).toBe('V');
+    }
   });
 
   it('shows `?` for numbering tokens on a standalone channel', () => {

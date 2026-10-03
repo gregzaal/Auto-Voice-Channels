@@ -3,6 +3,7 @@ import type { VoiceMember } from './types.js';
 import {
   applyStringTransforms,
   canonicalTimeZone,
+  CONDITION_VARIABLES,
   dateParts,
   DEFAULT_CHANNEL_NAME_TEMPLATE,
   DEFAULT_STATUS_TEMPLATE,
@@ -1130,6 +1131,71 @@ describe('PRIVATE', () => {
     // An adopted channel passes nothing, and must read as public rather than
     // rendering a padlock on a channel nobody locked.
     expect(renderChannelName('{{PRIVATE ?? L // U}}', ctx())).toBe('U');
+  });
+});
+
+describe('HIDDEN', () => {
+  const one = member({ id: 'a' });
+  /** What a locked, a hidden and an open room hand the engine, and what an adopted channel does. */
+  const ROOMS: Record<string, Partial<RenderContext>> = {
+    public: { isPrivate: false, isHidden: false },
+    locked: { isPrivate: true, isHidden: false },
+    // A hidden room is a locked one, so the caller hands over BOTH.
+    hidden: { isPrivate: true, isHidden: true },
+    // An adopted standalone channel passes neither.
+    adopted: {},
+  };
+  const ctx = (room: keyof typeof ROOMS): RenderContext => ({
+    index: 0,
+    members: [one],
+    creator: one,
+    creatorName: 'a',
+    ...ROOMS[room],
+  });
+
+  it('is true for a hidden room and for nothing else', () => {
+    expect(renderChannelName('{{HIDDEN ?? H // V}}', ctx('hidden'))).toBe('H');
+    expect(renderChannelName('{{HIDDEN ?? H // V}}', ctx('locked'))).toBe('V');
+    expect(renderChannelName('{{HIDDEN ?? H // V}}', ctx('public'))).toBe('V');
+    // Must read as visible, rather than render a mark on a channel nobody hid.
+    expect(renderChannelName('{{HIDDEN ?? H // V}}', ctx('adopted'))).toBe('V');
+  });
+
+  /** HIDDEN narrows PRIVATE and does not replace it: both are true for a hidden room. */
+  it('leaves PRIVATE true for a hidden room as well as a locked one', () => {
+    for (const room of ['locked', 'hidden'] as const) {
+      expect(renderChannelName('{{PRIVATE ?? P // O}}', ctx(room)), room).toBe('P');
+    }
+    expect(renderChannelName('{{PRIVATE ?? P // O}}', ctx('public'))).toBe('O');
+    expect(renderChannelName('{{PRIVATE ?? P // O}}', ctx('adopted'))).toBe('O');
+  });
+
+  it('is independent of PRIVATE when only one of them is handed over', () => {
+    // The engine does not infer one from the other: the caller owns the rule.
+    expect(renderChannelName('{{HIDDEN ?? H // V}}', { ...ctx('public'), isHidden: true })).toBe(
+      'H',
+    );
+    expect(renderChannelName('{{PRIVATE ?? P // O}}', { ...ctx('public'), isHidden: true })).toBe(
+      'O',
+    );
+  });
+
+  it('tells all three states apart with a nested condition', () => {
+    const template = '{{HIDDEN ?? 🙈 // {{PRIVATE ?? 🔒 // 🔓}}}}';
+    expect(renderChannelName(template, ctx('hidden'))).toBe('🙈');
+    expect(renderChannelName(template, ctx('locked'))).toBe('🔒');
+    expect(renderChannelName(template, ctx('public'))).toBe('🔓');
+  });
+
+  it('works with no else branch, as a bare mark', () => {
+    // The space after `??` belongs to the branch, so it is the mark's own separator.
+    expect(renderChannelName('Room{{HIDDEN ?? 🙈}}', ctx('hidden'))).toBe('Room 🙈');
+    expect(renderChannelName('Room{{HIDDEN ?? 🙈}}', ctx('public'))).toBe('Room');
+  });
+
+  it('is its own variable name, so a misspelling still takes the false branch', () => {
+    expect(renderChannelName('{{HIDEN ?? H // V}}', ctx('hidden'))).toBe('V');
+    expect(CONDITION_VARIABLES).toContain('HIDDEN');
   });
 });
 

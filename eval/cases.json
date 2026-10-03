@@ -115,6 +115,25 @@
       }
     },
     {
+      "$comment": "HIDDEN is its own variable and the narrower of the two, and the failure this guards is the model reaching for PRIVATE because it is the one it knows: a hidden room is also PRIVATE, so a name keyed on PRIVATE alone would mark every locked room too. `renders-empty` is allowed for the same reason as the case above.",
+      "group": "conditionals",
+      "request": "Add the word hidden to the name only when the room is hidden from the channel list.",
+      "expect": {
+        "field": "name",
+        "contains": ["HIDDEN"],
+        "allowIssues": ["renders-empty"]
+      }
+    },
+    {
+      "$comment": "Both variables in one reply: a lock for private rooms and a different mark for hidden ones. Passes only if the model knows HIDDEN exists and that PRIVATE alone cannot tell the two apart.",
+      "group": "conditionals",
+      "request": "Show a padlock on locked rooms, and an eye with a line through it on rooms that are hidden from the channel list.",
+      "expect": {
+        "field": "name",
+        "contains": ["HIDDEN", "PRIVATE"]
+      }
+    },
+    {
       "$comment": "§9 finding 4 inverted: a member-count conditional works now, so the model must reach for it. The risk this case guards has moved to the case below.",
       "group": "conditionals",
       "request": "Add the word busy to the name when 5 or more people are in the channel.",

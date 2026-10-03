@@ -34,8 +34,10 @@ describe('the assistant system prompt', () => {
 
   it('documents every conditional variable', () => {
     for (const variable of CONDITION_VARIABLES) {
+      // A row of the variable table, where the meaning is. A passing mention in an example
+      // would satisfy a bare name check and tell the model nothing about what it means.
       expect(TEMPLATE_ASSISTANT_SYSTEM_PROMPT, `${variable} is undocumented`).toContain(
-        `\`${variable}\``,
+        `| \`${variable}\` |`,
       );
     }
   });

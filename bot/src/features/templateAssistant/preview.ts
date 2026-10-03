@@ -242,13 +242,26 @@ export function previewScenarios(opts: ScenarioOptions): PreviewScenario[] {
     },
   });
 
-  // A locked room, so `{{PRIVATE}}` has a state to show. Standalone channels
-  // have no privacy model, so this is meaningless there.
+  // A locked room and a hidden one, so `{{PRIVATE}}` and `{{HIDDEN}}` each have a state to
+  // show. A hidden room is private too, which is what the second one hands the engine: a
+  // template that marks private rooms has to be seen marking this one. Standalone channels
+  // have no privacy model, so both are meaningless there.
   if (!standalone) {
     scenarios.push({
       key: 'private',
       label: 'the room is locked',
       ctx: { ...base, members: [owner, member('m2', 'Robin')], creator: owner, isPrivate: true },
+    });
+    scenarios.push({
+      key: 'hidden',
+      label: 'the room is hidden from the channel list',
+      ctx: {
+        ...base,
+        members: [owner, member('m2', 'Robin')],
+        creator: owner,
+        isPrivate: true,
+        isHidden: true,
+      },
     });
   }
 
