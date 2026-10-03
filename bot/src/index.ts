@@ -13,6 +13,7 @@ import {
   JoinChannelRepository,
   loadConfig,
   ManagedChannelRepository,
+  MemberAccessListRepository,
   MemberPoolGuildRepository,
   MemberPoolRepository,
   METRICS,
@@ -91,6 +92,7 @@ import {
   registerGuildOnboarding,
 } from './features/billing/index.js';
 import { backfillGuildIdentities, registerGuildIdentity } from './features/guildIdentity.js';
+import { readTextChannelRole } from './features/voice/guildSettings.js';
 import { COMMIT, VERSION } from './version.js';
 
 /**
@@ -356,6 +358,8 @@ async function main(): Promise<void> {
   const secondaries = new SecondaryChannelRepository(db, config.fleet);
   const managed = new ManagedChannelRepository(db, config.fleet);
   const joinChannelsRepo = new JoinChannelRepository(db, config.fleet);
+  // No fleet: an owner's saved lists are customer data every fleet reads.
+  const memberAccessListsRepo = new MemberAccessListRepository(db);
   const companionsRepo = new CompanionChannelRepository(db, config.fleet);
   const guildsRepo = new GuildRepository(db);
   const presenceRepo = new GuildFleetPresenceRepository(db, config.fleet ?? DEFAULT_FLEET);
@@ -473,6 +477,16 @@ async function main(): Promise<void> {
     // voiceFeature -> onSecondaryRemoved -> privacy) and both collapse to `any`.
     rerender: (gid: string, cid: string): Promise<unknown> =>
       voiceFeature.rerenderSecondary(gid, cid),
+    // Only known once the client has logged in, which is long before a command runs.
+    botUserId: () => client.user?.id,
+    memberAccessLists: memberAccessListsRepo,
+    // The same setting companion text reads: a hidden room shows to this role too.
+    moderatorRoleId: async (gid: string) =>
+      readTextChannelRole((await settingsCache.ensure(gid)).settings),
+    // Late-bound like `rerender`, for the same cycle.
+    ownerName: (gid: string, member): Promise<string> => voiceFeature.nameFor(gid, member),
+    permissionProblems,
+    serverLog: (gid, level, message) => serverLogger.log(gid, level, message),
   });
   /**
    * Per-room companion text channels. Constructed before the feature because
@@ -577,8 +591,8 @@ async function main(): Promise<void> {
       await companionText.removeForRoom(gid, cid);
       await privacy.cleanupForSecondary(gid, cid);
     },
-    onOwnerChanged: (gid, cid, ownerId, ownerName) =>
-      privacy.handleOwnerChanged(gid, cid, ownerId, ownerName),
+    onOwnerChanged: (gid, cid, ownerId, ownerName, opts) =>
+      privacy.handleOwnerChanged(gid, cid, ownerId, ownerName, opts),
     joinCompanionFor: async (cid) =>
       (await joinChannelsRepo.getBySecondary(cid))?.channelId ?? undefined,
     makePrivateOnCreate: (gid, cid, ownerId, ownerName) =>
@@ -660,7 +674,7 @@ async function main(): Promise<void> {
     actions,
     logger,
   });
-  const votekick = new VoteKickManager({ secondaries, voice, actions, logger });
+  const votekick = new VoteKickManager({ secondaries, voice, actions, logger, access: privacy });
   // The natural-language template assistant. One OpenAI-compatible endpoint,
   // enabled iff a key is configured — the self-host default is off, and in that
   // case `/templateassistant` is never even registered (see registerCommands).

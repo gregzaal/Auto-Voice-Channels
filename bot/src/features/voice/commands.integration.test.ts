@@ -2,6 +2,7 @@ import {
   AutoChannelRepository,
   GuildRepository,
   JoinChannelRepository,
+  MemberAccessListRepository,
   SecondaryChannelRepository,
   db,
 } from '@avc/core';
@@ -328,6 +329,173 @@ describe('VoiceCommands (integration)', () => {
       const res = await broken.transfer(GUILD, SEC, 'alice', 'bob');
       expect(res.ok).toBe(true);
       expect((await secondaries.get(SEC))!.ownerId).toBe('bob');
+    });
+  });
+
+  /**
+   * Whose saved lists apply to a room. The owner LEAVING never changes it, so a
+   * caretaker cannot revoke the creator's guests or blocks. A deliberate `/transfer`,
+   * a claim of an ownerless room and `/reclaim` do: the repository re-points the
+   * record's creator in the statement that moves the column, and the same hook that
+   * re-points the Join channel applies the new creator's lists.
+   */
+  describe('a handover changes whose saved lists apply', () => {
+    let lists: MemberAccessListRepository;
+    let privacy: PrivacyService;
+    let handoverCommands: VoiceCommands;
+    let feature: VoiceFeature;
+
+    const holds = (id: string) => actions.overwritesOf(SEC).find((o) => o.id === id);
+
+    beforeEach(async () => {
+      await env.handle.db.delete(db.schema.joinChannels);
+      await env.handle.db.delete(db.schema.memberAccessLists);
+      lists = new MemberAccessListRepository(env.handle.db);
+      privacy = new PrivacyService({
+        secondaries,
+        joinChannels: new JoinChannelRepository(env.handle.db),
+        actions,
+        voice,
+        logger: fakeLogger(),
+        botUserId: () => 'the-bot',
+        memberAccessLists: lists,
+      });
+      // As index.ts wires it: the options ride along, which is what says "handover".
+      feature = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+        onOwnerChanged: (gid, cid, ownerId, ownerName, opts) =>
+          privacy.handleOwnerChanged(gid, cid, ownerId, ownerName, opts),
+      });
+      handoverCommands = new VoiceCommands({
+        secondaries,
+        actions,
+        voice,
+        feature,
+        logger: fakeLogger(),
+      });
+      // Alice's room, locked, with her guest and her block in place.
+      await lists.add(GUILD, 'alice', 'carol', 'trusted');
+      await lists.add(GUILD, 'alice', 'mallory', 'blocked');
+      expect((await privacy.makePrivate(GUILD, SEC, 'alice')).ok).toBe(true);
+      await privacy.applyAccessLists(GUILD, SEC);
+      expect(holds('carol')).toBeDefined();
+      expect(holds('mallory')).toBeDefined();
+    });
+
+    it('/transfer revokes the giver’s entries and applies the recipient’s lists', async () => {
+      await lists.add(GUILD, 'bob', 'dave', 'trusted');
+      await lists.add(GUILD, 'bob', 'eve', 'blocked');
+      voice.put(SEC, member('bob'));
+
+      const res = await handoverCommands.transfer(GUILD, SEC, 'alice', 'bob');
+
+      expect(res.ok).toBe(true);
+      expect((await secondaries.getAccess(SEC))?.creatorId).toBe('bob');
+      expect(holds('carol')).toBeUndefined();
+      expect(holds('mallory')).toBeUndefined();
+      expect(holds('dave')?.allow).toBeGreaterThan(0n);
+      expect(holds('eve')?.deny).toBeGreaterThan(0n);
+    });
+
+    it('/transfer to somebody with no lists leaves no saved entries on the room', async () => {
+      voice.put(SEC, member('bob'));
+      await handoverCommands.transfer(GUILD, SEC, 'alice', 'bob');
+      expect(holds('carol')).toBeUndefined();
+      expect(holds('mallory')).toBeUndefined();
+      expect((await secondaries.getAccess(SEC))?.trusted).toBeUndefined();
+    });
+
+    it('a stranger’s claim of an ownerless room does the same', async () => {
+      await secondaries.updateState(SEC, { ...(await secondaries.get(SEC))!.state, private: true });
+      await env.handle.pool.query(
+        'UPDATE secondary_channels SET owner_id = NULL WHERE channel_id = $1',
+        [SEC],
+      );
+      voice.drop(SEC, 'alice');
+      voice.put(SEC, member('bob'));
+      await lists.add(GUILD, 'bob', 'eve', 'blocked');
+
+      const res = await handoverCommands.claim(GUILD, SEC, 'bob');
+
+      expect(res.ok).toBe(true);
+      expect((await secondaries.getAccess(SEC))?.creatorId).toBe('bob');
+      expect(holds('carol')).toBeUndefined();
+      expect(holds('eve')?.deny).toBeGreaterThan(0n);
+    });
+
+    it('/reclaim by the original creator gives the room back to their lists', async () => {
+      voice.put(SEC, member('bob'));
+      await handoverCommands.transfer(GUILD, SEC, 'alice', 'bob');
+      expect(holds('carol')).toBeUndefined();
+
+      // Bob hands it back by /transfer, and alice's lists apply again.
+      voice.put(SEC, member('alice'));
+      await handoverCommands.transfer(GUILD, SEC, 'bob', 'alice');
+
+      expect((await secondaries.getAccess(SEC))?.creatorId).toBe('alice');
+      expect(holds('carol')?.allow).toBeGreaterThan(0n);
+      expect(holds('mallory')?.deny).toBeGreaterThan(0n);
+    });
+
+    it('/reclaim from a caretaker restores the creator’s lists the same way', async () => {
+      // Alice leaves and bob inherits as a caretaker: nothing about the lists moves.
+      voice.put(SEC, member('bob'));
+      voice.drop(SEC, 'alice');
+      await feature.handleVoiceStateUpdate({
+        guildId: GUILD,
+        member: member('alice'),
+        beforeChannelId: SEC,
+      });
+      expect((await secondaries.get(SEC))!.ownerId).toBe('bob');
+      expect((await secondaries.get(SEC))!.originalCreator).toBe('alice');
+      expect((await secondaries.getAccess(SEC))?.creatorId).toBe('alice');
+      expect(holds('carol')).toBeDefined();
+      expect(holds('mallory')).toBeDefined();
+
+      voice.put(SEC, member('alice'));
+      const res = await handoverCommands.claim(GUILD, SEC, 'alice');
+
+      expect(res.ok).toBe(true);
+      expect((await secondaries.get(SEC))!.ownerId).toBe('alice');
+      expect((await secondaries.getAccess(SEC))?.creatorId).toBe('alice');
+      expect(holds('carol')?.allow).toBeGreaterThan(0n);
+      expect(holds('mallory')?.deny).toBeGreaterThan(0n);
+    });
+
+    it('the owner leaving never revokes the creator’s guests or blocks', async () => {
+      await lists.add(GUILD, 'bob', 'dave', 'trusted');
+      voice.put(SEC, member('bob'));
+      voice.drop(SEC, 'alice');
+
+      await feature.handleVoiceStateUpdate({
+        guildId: GUILD,
+        member: member('alice'),
+        beforeChannelId: SEC,
+      });
+
+      expect((await secondaries.get(SEC))!.ownerId).toBe('bob');
+      expect((await secondaries.getAccess(SEC))?.creatorId).toBe('alice');
+      expect(holds('carol')).toBeDefined();
+      expect(holds('mallory')).toBeDefined();
+      // And a caretaker’s own lists were not applied to a room that is not theirs.
+      expect(holds('dave')).toBeUndefined();
+    });
+
+    it('still completes the handover when applying the lists fails', async () => {
+      voice.put(SEC, member('bob'));
+      actions.failOverwrites = true;
+
+      const res = await handoverCommands.transfer(GUILD, SEC, 'alice', 'bob');
+
+      expect(res.ok).toBe(true);
+      expect((await secondaries.get(SEC))!.ownerId).toBe('bob');
+      expect((await secondaries.getAccess(SEC))?.creatorId).toBe('bob');
     });
   });
 

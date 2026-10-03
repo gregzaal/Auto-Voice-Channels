@@ -246,6 +246,11 @@ export interface VoiceFeatureDeps {
     channelId: string,
     newOwnerId: string,
     newOwnerName: string,
+    /**
+     * `handover` is set for a deliberate `/transfer` or claim, and not when the owner
+     * left. Only a handover changes whose saved lists apply to the room.
+     */
+    opts?: { handover?: boolean },
   ) => Promise<void>;
   /**
    * Resolves a secondary's "⇩ Join" companion channel id, if it has one (private
@@ -1179,6 +1184,10 @@ export class VoiceFeature {
    * naming the PREVIOUS owner, so only they can answer a knock and the new owner
    * is refused their own room's Approve button.
    *
+   * It also says this was a handover (the leave path does not), which is what makes
+   * the new owner's saved lists apply to the room: the repository has already moved
+   * the room's creator, and the hook applies the lists that creator has.
+   *
    * Never throws: the handover has already happened, and a failed rename of the
    * companion must not turn a successful `/transfer` into an error reply.
    */
@@ -1191,13 +1200,24 @@ export class VoiceFeature {
     try {
       const guild = await this.deps.guilds.ensure(guildId);
       const name = displayName(await this.voiceSettings(guild.settings, guildId), newOwner);
-      await this.deps.onOwnerChanged(guildId, channelId, newOwner.id, name);
+      await this.deps.onOwnerChanged(guildId, channelId, newOwner.id, name, { handover: true });
     } catch (err) {
       this.deps.logger.warn(
         { err, guildId, channelId, newOwnerId: newOwner.id },
         'could not re-point the join channel after a handover',
       );
     }
+  }
+
+  /**
+   * A member's name as rooms show it: their `/nick` applied, unless a restriction on
+   * Nickname now covers them. For a "⇩ Join {owner}" channel made by something other
+   * than this class, which should name its owner the way every other site does and
+   * not by the raw display name.
+   */
+  async nameFor(guildId: string, member: VoiceMember): Promise<string> {
+    const guild = await this.deps.guilds.ensure(guildId);
+    return displayName(await this.voiceSettings(guild.settings, guildId), member);
   }
 
   /** Appends a member to a secondary's arrival roster (no-op if already tracked). */

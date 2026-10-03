@@ -11,6 +11,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import type { PgTestEnv } from '../../test/pgContainer.js';
 import { startPostgres } from '../../test/pgContainer.js';
 import { fakeLogger } from '../../runtime/testUtils.js';
+import { BOT_ACCESS, CONNECT } from './accessPlan.js';
 import { RecordingVoiceActions } from './actions.js';
 import { CompanionTextService } from './companionText.js';
 import { ControlPanelPoster } from './controlPanelPoster.js';
@@ -1318,6 +1319,45 @@ describe('VoiceFeature (integration)', () => {
       );
 
       it.each([
+        ['a denied role', [DENIED_ROLE], 'bob'],
+        ['no restriction', ['999999999999999999'], 'Big Bob'],
+      ])('gives any other site the same name (%s)', async (_what, roleIds, expected) => {
+        const { f } = handovers();
+        expect(await f.nameFor(GUILD, { ...member('bob'), roleIds })).toBe(expected);
+      });
+
+      /**
+       * A deliberate handover changes whose saved lists apply to the room, and the
+       * owner leaving must not: the hook is the one place that tells them apart.
+       */
+      it('says a /transfer or /reclaim is a handover, and the owner leaving is not', async () => {
+        const seen: (boolean | undefined)[] = [];
+        const f = new VoiceFeature({
+          autoChannels,
+          secondaries,
+          guilds,
+          actions,
+          voice,
+          selfHosted: true,
+          logger: fakeLogger(),
+          onOwnerChanged: (_g, _c, _id, _name, opts) => {
+            seen.push(opts?.handover);
+            return Promise.resolve();
+          },
+        });
+        await ownedRoom('c1', 'alice', []);
+        voice.put('c1', member('bob'));
+        voice.drop('c1', 'alice');
+        await f.handleVoiceStateUpdate({
+          guildId: GUILD,
+          member: member('alice'),
+          beforeChannelId: 'c1',
+        });
+        await f.repointJoinCompanion(GUILD, 'c1', member('bob'));
+        expect(seen).toEqual([undefined, true]);
+      });
+
+      it.each([
         ['a denied role', [DENIED_ROLE], 'alice'],
         ['no restriction', ['999999999999999999'], 'Big Alice'],
       ])('names the creator of a room born private (%s)', async (_what, roleIds, expected) => {
@@ -1656,6 +1696,7 @@ describe('VoiceFeature (integration)', () => {
       actions,
       voice,
       logger: fakeLogger(),
+      botUserId: () => 'bot',
     });
     const f = new VoiceFeature({
       autoChannels,
@@ -1678,20 +1719,21 @@ describe('VoiceFeature (integration)', () => {
 
     const secondaryId = actions.ofType('create')[0]!.channelId;
     // Locked to @everyone, the creator granted Connect by id, and a companion spawned.
-    expect(actions.ofType('privacy')).toContainEqual(
-      expect.objectContaining({ channelId: secondaryId, isPrivate: true }),
-    );
-    expect(actions.ofType('connect')).toContainEqual(
-      expect.objectContaining({ channelId: secondaryId, memberId: 'alice', allow: true }),
-    );
+    // One overwrite write now, in place of the lock and the grant as two calls: the
+    // bot's own allow, the creator's Connect and the `@everyone` deny together.
+    const held = actions.overwritesOf(secondaryId);
+    expect(held).toContainEqual(expect.objectContaining({ id: 'bot', allow: BOT_ACCESS }));
+    expect(held).toContainEqual(expect.objectContaining({ id: 'alice', allow: CONNECT }));
+    expect(held).toContainEqual(expect.objectContaining({ id: GUILD, deny: CONNECT }));
     expect(actions.ofType('joinChannel')).toHaveLength(1);
     expect((await secondaries.get(secondaryId))!.state.private).toBe(true);
     // The channel is locked before the creator is moved into it.
-    const privacyIdx = actions.actions.findIndex(
-      (a) => a.type === 'privacy' && a.channelId === secondaryId,
+    const lockIdx = actions.actions.findIndex(
+      (a) => a.type === 'overwrites' && a.channelId === secondaryId,
     );
     const moveIdx = actions.actions.findIndex((a) => a.type === 'move' && a.memberId === 'alice');
-    expect(privacyIdx).toBeLessThan(moveIdx);
+    expect(lockIdx).toBeGreaterThanOrEqual(0);
+    expect(lockIdx).toBeLessThan(moveIdx);
   });
 
   it('deletes a default-private room it could not lock down, blaming the creator channel', async () => {
@@ -1703,6 +1745,7 @@ describe('VoiceFeature (integration)', () => {
       actions,
       voice,
       logger: fakeLogger(),
+      botUserId: () => 'bot',
     });
     const problems = new PermissionProblemTracker();
     const f = new VoiceFeature({
@@ -1722,7 +1765,8 @@ describe('VoiceFeature (integration)', () => {
 
     const alice = member('alice');
     voice.put(PRIMARY, alice);
-    actions.failPrivacy = true;
+    // The lock is an overwrite write now, so that is what has to fail.
+    actions.failOverwrites = true;
     await f.handleVoiceStateUpdate({ guildId: GUILD, member: alice, afterChannelId: PRIMARY });
 
     const secondaryId = actions.ofType('create')[0]!.channelId;

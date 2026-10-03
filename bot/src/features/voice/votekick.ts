@@ -2,11 +2,29 @@ import type { Logger, SecondaryChannelRepository } from '@avc/core';
 import type { VoiceActions } from './actions.js';
 import type { GuildVoiceView } from './types.js';
 
+/**
+ * What a votekick needs from the room's access record: to bar the member in a way no
+ * list edit and no grant can undo. `PrivacyService` is the implementation.
+ */
+export interface VoteKickAccess {
+  /**
+   * Records the member as removed from the room and denies them View and Connect
+   * together, in every mode. Resolves to whether that is in effect, or queued behind
+   * a rate limit: `false` leaves the bar to the caller. Never throws.
+   */
+  denyKicked(guildId: string, channelId: string, targetId: string): Promise<boolean>;
+}
+
 export interface VoteKickDeps {
   secondaries: SecondaryChannelRepository;
   voice: GuildVoiceView;
   actions: VoiceActions;
   logger: Logger;
+  /**
+   * Optional so a construction without the access record keeps working, and bars the
+   * member with a Connect deny alone, as it always has.
+   */
+  access?: VoteKickAccess;
 }
 
 interface VoteSession {
@@ -167,13 +185,31 @@ export class VoteKickManager {
   }
 
   private async kick(session: VoteSession): Promise<void> {
-    await this.deps.actions.setMemberConnect(
+    /**
+     * Recorded as a block that belongs to this room, with View denied as well as
+     * Connect. A Connect deny alone leaves a hidden room visible to the member who
+     * was just voted out, and an unrecorded deny is one the next apply for a trusted
+     * member replaces with a grant, which silently undoes the kick. If it cannot be
+     * recorded (a record this build cannot read, a permission the bot lacks), the
+     * member is still barred the old way.
+     */
+    const barred = await this.deps.access?.denyKicked(
       session.guildId,
       session.channelId,
       session.targetId,
-      false,
     );
-    await this.deps.actions.moveMember(session.guildId, session.targetId, null);
+    if (!barred) {
+      await this.deps.actions.setMemberConnect(
+        session.guildId,
+        session.channelId,
+        session.targetId,
+        false,
+      );
+    }
+    // From this room only: the target may have moved on since the vote began.
+    await this.deps.actions.moveMember(session.guildId, session.targetId, null, {
+      onlyFrom: session.channelId,
+    });
     this.deps.logger.info(
       { guildId: session.guildId, channelId: session.channelId, target: session.targetId },
       'votekick succeeded',

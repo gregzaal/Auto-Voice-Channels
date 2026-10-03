@@ -1,9 +1,16 @@
-import { SecondaryChannelRepository, db } from '@avc/core';
+import {
+  JoinChannelRepository,
+  MemberAccessListRepository,
+  SecondaryChannelRepository,
+  db,
+} from '@avc/core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { PgTestEnv } from '../../test/pgContainer.js';
 import { startPostgres } from '../../test/pgContainer.js';
 import { fakeLogger } from '../../runtime/testUtils.js';
+import { CONNECT, VIEW_CHANNEL } from './accessPlan.js';
 import { RecordingVoiceActions } from './actions.js';
+import { PrivacyService } from './privacy.js';
 import { VoteKickManager } from './votekick.js';
 import { FakeVoiceView, fakeMember as member } from './voiceTestUtils.js';
 
@@ -135,5 +142,133 @@ describe('VoteKickManager (integration)', () => {
     // B's own timer (matching epoch) ends it.
     kicks.cancel(SEC, second.epoch);
     expect(kicks.hasSession(SEC)).toBe(false);
+  });
+
+  /**
+   * With the room's access record behind it, a vote is a block that belongs to the
+   * room: View and Connect together, recorded, and no list edit or grant undoes it.
+   */
+  describe('with the room’s access record', () => {
+    const BOT = 'bot-1';
+    const VC = VIEW_CHANNEL | CONNECT;
+    let lists: MemberAccessListRepository;
+    let privacy: PrivacyService;
+    let kicksWithAccess: VoteKickManager;
+
+    const held = (id: string) => actions.overwritesOf(SEC).find((o) => o.id === id);
+    const vote = async (target = 'target') => {
+      for (const id of ['owner', 'alice', 'bob', target]) voice.put(SEC, member(id));
+      await kicksWithAccess.start(GUILD, SEC, 'alice', target, 'spam');
+      return kicksWithAccess.vote(SEC, 'bob');
+    };
+
+    beforeEach(async () => {
+      await env.handle.db.delete(db.schema.joinChannels);
+      await env.handle.db.delete(db.schema.memberAccessLists);
+      lists = new MemberAccessListRepository(env.handle.db);
+      privacy = new PrivacyService({
+        secondaries,
+        joinChannels: new JoinChannelRepository(env.handle.db),
+        actions,
+        voice,
+        logger: fakeLogger(),
+        botUserId: () => BOT,
+        memberAccessLists: lists,
+      });
+      kicksWithAccess = new VoteKickManager({
+        secondaries,
+        voice,
+        actions,
+        logger: fakeLogger(),
+        access: privacy,
+      });
+    });
+
+    it('denies View and Connect together and records the member, in a room with no record yet', async () => {
+      const res = await vote();
+
+      expect(res.kicked).toBe(true);
+      expect(held('target')).toMatchObject({ allow: 0n, deny: VC });
+      expect(await secondaries.getAccess(SEC)).toEqual({ creatorId: 'owner', kicked: ['target'] });
+      // Not the old Connect-only write.
+      expect(actions.ofType('connect')).toEqual([]);
+      expect(actions.ofType('move')).toContainEqual(
+        expect.objectContaining({ memberId: 'target', channelId: null, onlyFrom: SEC }),
+      );
+    });
+
+    it('is not undone by a trusted member’s grant, which used to replace the unrecorded deny', async () => {
+      await privacy.makePrivate(GUILD, SEC, 'owner');
+      await lists.add(GUILD, 'owner', 'target', 'trusted');
+      await privacy.applyAccessLists(GUILD, SEC);
+      expect(held('target')).toMatchObject({ allow: CONNECT });
+
+      await vote();
+      await privacy.applyAccessLists(GUILD, SEC);
+
+      expect(held('target')).toMatchObject({ allow: 0n, deny: VC });
+    });
+
+    it('takes the room out of the member’s channel list in a hidden room too', async () => {
+      await privacy.hide(GUILD, SEC, 'owner');
+      await privacy.admit(GUILD, SEC, 'owner', 'target');
+      expect(held('target')).toMatchObject({ allow: VC });
+
+      await vote();
+
+      expect(held('target')).toMatchObject({ allow: 0n, deny: VC });
+    });
+
+    it('bars them the old way when the record cannot be read, so a vote is never a no-op', async () => {
+      await env.handle.pool.query(
+        'UPDATE secondary_channels SET access = \'{"hidden":"sideways"}\'::jsonb WHERE channel_id = $1',
+        [SEC],
+      );
+
+      const res = await vote();
+
+      expect(res.kicked).toBe(true);
+      expect(actions.ofType('connect')).toContainEqual(
+        expect.objectContaining({ memberId: 'target', allow: false }),
+      );
+      expect(actions.ofType('move')).toContainEqual(
+        expect.objectContaining({ memberId: 'target', channelId: null }),
+      );
+    });
+
+    it('bars them the old way when Discord refuses the new write', async () => {
+      actions.failOverwrites = true;
+
+      const res = await vote();
+
+      expect(res.kicked).toBe(true);
+      expect(actions.ofType('connect')).toContainEqual(
+        expect.objectContaining({ memberId: 'target', allow: false }),
+      );
+    });
+
+    it('does not disconnect a target who has since moved to another channel', async () => {
+      for (const id of ['owner', 'alice', 'bob', 'target']) voice.put(SEC, member(id));
+      await kicksWithAccess.start(GUILD, SEC, 'alice', 'target');
+      actions.setMemberChannel('target', 'somewhere-else');
+
+      const res = await kicksWithAccess.vote(SEC, 'bob');
+
+      expect(res.kicked).toBe(true);
+      expect(actions.ofType('move')).toEqual([]);
+    });
+
+    it('still works without the record, as before, and now leaves a mover alone who has gone', async () => {
+      for (const id of ['owner', 'alice', 'bob', 'target']) voice.put(SEC, member(id));
+      await kicks.start(GUILD, SEC, 'alice', 'target');
+      actions.setMemberChannel('target', 'somewhere-else');
+
+      await kicks.vote(SEC, 'bob');
+
+      expect(actions.ofType('connect')).toContainEqual(
+        expect.objectContaining({ memberId: 'target', allow: false }),
+      );
+      expect(actions.ofType('move')).toEqual([]);
+    });
   });
 });
