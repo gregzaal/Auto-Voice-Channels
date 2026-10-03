@@ -115,16 +115,22 @@ export const RUNTIME_FLAGS = {
   /**
    * Stops remembering and restoring members' room settings on **this fleet**.
    *
-   * It stops BOTH directions, because stopping one would leave a worse state than either:
-   * while it is on, a member's `/name`, `/limit`, `/unlimit`, `/private`, `/hide`, `/public`
-   * and `/unhide` store nothing for next time, and a room is made without whatever its
-   * creator saved, so its name, size and privacy come from the creator channel's own defaults
-   * exactly as they do for a creator channel that never turned remembering on.
+   * It stops BOTH directions of putting something in, because stopping one would leave a
+   * worse state than either: while it is on, a member's `/name`, `/limit`, `/unlimit`,
+   * `/private`, `/hide` and `/unhide` store nothing for next time, and a room is made without
+   * whatever its creator saved, so its name, size and privacy come from the creator channel's
+   * own defaults exactly as they do for a creator channel that never turned remembering on.
    *
-   * It **freezes rather than strips**: nothing is deleted, so every saved setting stays and
-   * lifting it makes the next room restore them again. What a member changes while it is on is
-   * not remembered, and the room they leave is unaffected: this governs only what is stored
-   * and what a NEW room starts with.
+   * It does **not** stop a member taking something back out. A name reset and `/public` clear
+   * what they remembered while it is on, as a clear is not gated on the creator channel's
+   * opt-in either: it only removes what the member already has, and refusing it would leave
+   * a value they reset waiting to come back, unasked, the day the lever is lifted. So the
+   * save and restore paths consult the lever and the clear paths do not.
+   *
+   * It **freezes rather than strips**: it deletes nothing itself, so every saved setting stays
+   * and lifting it makes the next room restore them again. What a member changes while it is
+   * on is not remembered, and the room they leave is unaffected: this governs only what is
+   * stored and what a NEW room starts with.
    *
    * It does **not** stop the admin's controls in the `/template` editor: the Remember switch
    * and "Clear saved settings" still work, so an admin can still turn remembering off for a

@@ -173,7 +173,8 @@ export class RuntimeCreationGate implements CreationGate {
    * The remembered room settings lever alone, for the code that saves a member's settings
    * after a command and the code that restores them into a room as it is made. Neither is a
    * room create that may spend a throttle slot to ask, and the save runs after every `/name`,
-   * `/limit` and `/private` a member types.
+   * `/limit` and `/private` a member types. Code that only removes what a member saved (a name
+   * reset, `/public`) does not ask: see `MEMBER_PREFS_DISABLED`.
    *
    * Fails OPEN like the four above, and for their reason: remembering is something an admin
    * switched on for a creator channel, and a database blip must not quietly withdraw it, so a
