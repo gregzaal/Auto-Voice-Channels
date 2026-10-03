@@ -27,3 +27,32 @@ describe('the member_prefs.disabled lever is reported', () => {
     );
   });
 });
+
+/** The statement that starts at `marker`, up to the `});` that closes it at the same indent. */
+function statementFrom(marker: string): string {
+  const start = SOURCE.indexOf(marker);
+  expect(start, `${marker} is in index.ts`).toBeGreaterThanOrEqual(0);
+  const end = SOURCE.indexOf('\n  });', start);
+  expect(end, `${marker} is closed`).toBeGreaterThan(start);
+  return SOURCE.slice(start, end);
+}
+
+/**
+ * The orphan sweep is optional on the reconciler and silent when absent, so a wiring that
+ * dropped it would leave the table to grow with every test green: each reconciler test builds
+ * its own deps.
+ */
+describe('the remembered settings orphan sweep is wired', () => {
+  it('into the reconciler, with the grace period and a bounded pass', () => {
+    const reconciler = statementFrom('const reconciler = new Reconciler({');
+    expect(reconciler).toContain('sweepMemberPrefsOrphans: async () => ({');
+    expect(reconciler).toContain('memberRoomPrefsRepo.deleteOrphans({');
+    expect(reconciler).toContain('olderThanMs: MEMBER_PREFS_ORPHAN_GRACE_MS,');
+    expect(reconciler).toContain('limit: MEMBER_PREFS_ORPHAN_SWEEP_LIMIT,');
+  });
+
+  /** A fleet column would make a fleet's sweep invent orphans out of another fleet's creator channels. */
+  it('from a repository with no fleet', () => {
+    expect(SOURCE).toContain('const memberRoomPrefsRepo = new MemberRoomPrefsRepository(db);');
+  });
+});

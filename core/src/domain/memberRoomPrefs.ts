@@ -31,3 +31,10 @@ export const MAX_MEMBER_PREF_LIMIT = 99;
  * channel went would make the undo lose them for good, so they wait out this long first.
  */
 export const MEMBER_PREFS_ORPHAN_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * The most rows one pass of the orphan sweep deletes. A pass runs about once an hour, so a
+ * backlog (an import that dropped a busy creator channel, say) clears over a few hours and
+ * never as one large delete on a table other fleets are writing to.
+ */
+export const MEMBER_PREFS_ORPHAN_SWEEP_LIMIT = 500;

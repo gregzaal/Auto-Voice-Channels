@@ -59,9 +59,25 @@ export interface ReconcilerDeps {
    * predicate is a single SQL existence check, so it needs neither.
    */
   sweepCompanionOrphans?: () => Promise<{ removed: number }>;
+  /**
+   * The fleet-wide sweep of remembered room settings whose creator channel no longer exists,
+   * run once per tick outside the per-guild loop, beside {@link sweepCompanionOrphans} and
+   * for its reason: the rows it reaches belong to creator channels that are gone everywhere,
+   * which no per-guild pass can see, and its predicate is a single SQL check.
+   *
+   * It is the only thing that deletes those rows on its own, since nothing deletes them when
+   * a creator channel goes (see `memberRoomPrefs` in the schema), and it only ever takes a
+   * row after a grace period. Throttled here to {@link MEMBER_PREFS_SWEEP_INTERVAL_MS}: a row
+   * waits a week to become eligible, so asking every five minutes would read a table for
+   * nothing, and a sweep per instance per fleet would multiply that.
+   */
+  sweepMemberPrefsOrphans?: () => Promise<{ removed: number }>;
 }
 
 const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+
+/** How often one process may run the remembered settings orphan sweep. */
+const MEMBER_PREFS_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 
 /**
  * Guilds refusing reconcile on permissions before the operator hears about it,
@@ -95,6 +111,8 @@ const DEFAULT_RECONCILE_CONCURRENCY = 10;
  */
 export class Reconciler {
   private timer: ReturnType<typeof setInterval> | undefined;
+  /** When this process last asked for the remembered settings orphan sweep, success or not. */
+  private lastMemberPrefsSweepAt: number | undefined;
   private readonly sweepIntervalMs: number;
   private readonly reconcileConcurrency: number;
 
@@ -231,11 +249,41 @@ export class Reconciler {
         this.deps.logger.error({ err }, 'companion orphan sweep failed');
       }
     }
+    if (!opts.dryRun && this.deps.sweepMemberPrefsOrphans) await this.sweepMemberPrefsOrphans();
 
     const guildIds = await this.scopedGuildIds();
     if (guildIds.length === 0) return;
     this.deps.logger.debug({ count: guildIds.length }, 'running safety-net sweep');
     await this.reconcileGuilds(guildIds, opts);
+  }
+
+  /**
+   * Runs the remembered settings orphan sweep if this process has not asked within the last
+   * hour. Never throws, for the reason the companion pass has its own try and catch: it is
+   * unrelated work sharing a timer, and a failure here must not cost the guild sweep.
+   *
+   * Stamped before the attempt, so a database that is failing is asked once an hour and not
+   * every tick. Logs a count only, and only when something went: the rows hold member ids and
+   * the names they chose, and neither belongs in a log. It is never called from inside a
+   * dispatch or a room loop.
+   */
+  private async sweepMemberPrefsOrphans(): Promise<void> {
+    const now = Date.now();
+    if (
+      this.lastMemberPrefsSweepAt !== undefined &&
+      now - this.lastMemberPrefsSweepAt < MEMBER_PREFS_SWEEP_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.lastMemberPrefsSweepAt = now;
+    try {
+      const { removed } = await this.deps.sweepMemberPrefsOrphans!();
+      if (removed > 0) {
+        this.deps.logger.info({ removed }, 'swept orphaned remembered room settings');
+      }
+    } catch (err) {
+      this.deps.logger.error({ err }, 'remembered room settings orphan sweep failed');
+    }
   }
 
   /**
