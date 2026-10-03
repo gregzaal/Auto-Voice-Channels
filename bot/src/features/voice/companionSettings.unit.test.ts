@@ -120,16 +120,20 @@ describe('companion text settings', () => {
     /**
      * The same setting decides who sees a hidden room, so a confirmation that spoke only
      * of chat would leave an admin granting more than the sentence says. Both sentences
-     * are about rooms hidden FROM NOW ON: nothing re-converges a room that is already
-     * hidden when the setting changes, so a sentence about hidden rooms in general would
-     * promise a room the old role can still see that it no longer does.
+     * cover the hidden rooms that already exist, because the reconciler's sweep grants
+     * the role View on them and takes it back as the setting changes, and both say that
+     * they catch up within a few minutes rather than at once.
      */
-    it('says the role also sees hidden rooms, from now on, when it is set and when it is cleared', async () => {
+    it('says the role sees every hidden room, and that existing rooms catch up, when it is set and when it is cleared', async () => {
       const { service } = makeService();
       const set = await service.setTextChannelRole(GUILD, '555000111222333444');
-      expect(set.message).toContain('also sees any room that is hidden from now on');
+      expect(set.message).toContain('and see every hidden room');
+      expect(set.message).toContain('Existing channels are updated within a few minutes');
+      expect(set.message).not.toContain('from now on');
       const cleared = await service.setTextChannelRole(GUILD, null);
-      expect(cleared.message).toContain('a room hidden from now on is seen only by server admins');
+      expect(cleared.message).toContain('a hidden room is seen only by server admins');
+      expect(cleared.message).toContain('Existing channels are updated within a few minutes');
+      expect(cleared.message).not.toContain('from now on');
     });
 
     it('follows the copy rules in what it says', async () => {
