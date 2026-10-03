@@ -1,7 +1,10 @@
 import type { RoomAccess } from '@avc/core';
 import { describe, expect, it } from 'vitest';
-import type { AccessFacts } from './accessPlan.js';
+import type { AccessFacts, AccessMode } from './accessPlan.js';
 import {
+  PENDING_MAX_AGE_MS,
+  carriedMode,
+  isExit,
   recordWithFacts,
   sameFacts,
   withMember,
@@ -200,5 +203,65 @@ describe('a pending exit', () => {
     const plain = { hidden: true };
     expect(withoutPending(plain)).toBe(plain);
     expect(withoutPending(null)).toBeNull();
+  });
+});
+
+describe('isExit', () => {
+  it.each<[AccessMode, AccessMode, boolean]>([
+    ['hidden', 'locked', true],
+    ['hidden', 'public', true],
+    ['locked', 'public', true],
+    ['public', 'locked', false],
+    ['public', 'hidden', false],
+    ['locked', 'hidden', false],
+    ['public', 'public', false],
+    ['locked', 'locked', false],
+    ['hidden', 'hidden', false],
+  ])('says %s to %s is an exit: %s', (from, to, exit) => {
+    expect(isExit(from, to)).toBe(exit);
+  });
+});
+
+/**
+ * What the sweep and the commands that write over a room read to decide whether to
+ * carry a queued opening through. A wrong "yes" re-opens a room against what its owner
+ * last asked for, which is the unsafe direction, so every "no" is pinned.
+ */
+describe('carriedMode', () => {
+  const NOW = 10_000_000;
+  const at = (ageMs: number) => NOW - ageMs;
+
+  it('names the mode a queued opening is heading for', () => {
+    expect(carriedMode('hidden', { pending: { mode: 'locked', at: at(1000) } }, NOW)).toBe(
+      'locked',
+    );
+    expect(carriedMode('hidden', { pending: { mode: 'public', at: at(1000) } }, NOW)).toBe(
+      'public',
+    );
+    expect(carriedMode('locked', { pending: { mode: 'public', at: at(1000) } }, NOW)).toBe(
+      'public',
+    );
+  });
+
+  it.each<[string, AccessMode, RoomAccess | null]>([
+    ['no record', 'locked', null],
+    ['a record with no marker', 'locked', { hidden: true }],
+    ['a marker for the mode the room is already in', 'locked', { pending: { mode: 'locked' } }],
+    ['a marker for a way in, from public', 'public', { pending: { mode: 'hidden' } }],
+    ['a marker for a way in, from locked', 'locked', { pending: { mode: 'hidden' } }],
+    ['a marker for a more open mode than public', 'public', { pending: { mode: 'public' } }],
+  ])('is null for %s', (_what, mode, record) => {
+    expect(carriedMode(mode, record, NOW)).toBeNull();
+  });
+
+  it('believes a marker for exactly as long as a queued write can wait, and no longer', () => {
+    const marked = (ageMs: number): RoomAccess => ({ pending: { mode: 'public', at: at(ageMs) } });
+    expect(carriedMode('locked', marked(PENDING_MAX_AGE_MS - 1), NOW)).toBe('public');
+    expect(carriedMode('locked', marked(PENDING_MAX_AGE_MS), NOW)).toBeNull();
+    expect(carriedMode('locked', marked(PENDING_MAX_AGE_MS * 4), NOW)).toBeNull();
+  });
+
+  it('reads a marker with no time as current, which is what the schema promises', () => {
+    expect(carriedMode('locked', { pending: { mode: 'public' } }, NOW)).toBe('public');
   });
 });

@@ -215,6 +215,29 @@ describe('saved lists on a room as it is made (integration)', () => {
       expect(bits(held(room!, MALLORY))).toEqual({ allow: 0n, deny: VC });
     });
 
+    /**
+     * A block on somebody who has left is the commonest block there is. The first room finds
+     * out (a lookup on the path before the panel is posted), and every room after it, by the
+     * same creator, must not ask Discord again for the hour the answer is believed.
+     */
+    it('is looked for once when the member has left the server, and the creator’s next room does not ask again', async () => {
+      await lists.add(GUILD, ALICE, MALLORY, 'blocked');
+      actions.unknownMemberIds.add(MALLORY);
+      const feature = buildFeature();
+
+      const first = await join(feature);
+      const second = await join(feature);
+
+      const writes = actions.ofType('overwrites');
+      expect(writes.find((a) => a.channelId === first)?.droppedMemberIds).toEqual([MALLORY]);
+      expect(writes.find((a) => a.channelId === second)?.droppedMemberIds).toEqual([]);
+      for (const room of [first!, second!]) {
+        expect(held(room, MALLORY)).toBeUndefined();
+        expect(bits(held(room, BOT))).toEqual({ allow: BOT_ACCESS, deny: 0n });
+        expect((await access(room))?.blocked).toBeUndefined();
+      }
+    });
+
     it('reaches a room the catch-up pass makes for a member who was waiting in the creator channel', async () => {
       await lists.add(GUILD, ALICE, MALLORY, 'blocked');
       voice.put(PRIMARY, creator(ALICE));

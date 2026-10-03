@@ -72,6 +72,42 @@ export function withPending(current: RoomAccess | null, mode: AccessMode, at: nu
 }
 
 /**
+ * Whether going from one mode to another OPENS the room: out of hidden or locked, to a mode
+ * with fewer restrictions. The only direction whose queued write leaves the record naming
+ * the mode the room is leaving, which is what a pending marker is for. An entry records the
+ * mode it is entering ahead of its write, so a sweep that re-asserts it fights nothing.
+ */
+export function isExit(from: AccessMode, to: AccessMode): boolean {
+  return (from !== 'public' && to === 'public') || (from === 'hidden' && to === 'locked');
+}
+
+/**
+ * How long a queued exit is believed. Discord's rate limit holds a write for seconds, and
+ * a restart that lost one takes minutes, so a marker older than this was left by something
+ * that did not finish it, and what it describes is no longer what its owner last asked for.
+ * The room stays as its record says (closed) and the owner can run the command again, which
+ * is the direction that cannot expose anything.
+ */
+export const PENDING_MAX_AGE_MS = 15 * 60 * 1000;
+
+/**
+ * The mode a room's queued exit is carrying it to, or null when there is nothing to carry
+ * through: no marker, one for the mode the room is already in or for a way IN (written
+ * by something else, or already landed), or one older than {@link PENDING_MAX_AGE_MS}.
+ * A marker with no `at` is read as current, as the schema promises.
+ */
+export function carriedMode(
+  mode: AccessMode,
+  record: RoomAccess | null,
+  now: number,
+): AccessMode | null {
+  const pending = record?.pending;
+  if (pending === undefined || !isExit(mode, pending.mode)) return null;
+  if (pending.at !== undefined && now - pending.at >= PENDING_MAX_AGE_MS) return null;
+  return pending.mode;
+}
+
+/**
  * The record without its pending exit, because the change it described has been
  * finalised or the room has been seen to be in that mode. The same object when there
  * is none, so a caller can tell nothing changed.

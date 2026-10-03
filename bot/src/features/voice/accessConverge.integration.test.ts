@@ -5,6 +5,7 @@ import {
   MemberAccessListRepository,
   SecondaryChannelRepository,
   db,
+  type Logger,
 } from '@avc/core';
 import { DiscordAPIError } from 'discord.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -25,6 +26,7 @@ import { ChannelObfuscatedError } from './discordAdapter.js';
 import { VoiceFeature } from './handler.js';
 import { PermissionProblemTracker } from './permissionProblems.js';
 import { PrivacyService } from './privacy.js';
+import { admitNotInServer } from './roomAccessCopy.js';
 import { FakeVoiceView, fakeMember as member } from './voiceTestUtils.js';
 
 const GUILD = 'guild-converge-test';
@@ -80,6 +82,8 @@ describe('the sweep keeps saved lists and hidden rooms in line (integration)', (
   let actions: RecordingVoiceActions;
   let problems: PermissionProblemTracker;
   let serverLogs: string[];
+  /** The privacy service's logger, which a test spies on for what an operator is told. */
+  let logger: Logger;
   let privacy: PrivacyService;
   let feature: VoiceFeature;
   /** The moderator role setting, which a test changes like an admin would. */
@@ -112,12 +116,13 @@ describe('the sweep keeps saved lists and hidden rooms in line (integration)', (
     moderatorRole = null;
     leverOn = false;
     rules = {};
+    logger = fakeLogger();
     privacy = new PrivacyService({
       secondaries,
       joinChannels,
       actions,
       voice,
-      logger: fakeLogger(),
+      logger,
       botUserId: () => BOT,
       memberAccessLists: lists,
       moderatorRoleId: () => Promise.resolve(moderatorRole),
@@ -162,6 +167,8 @@ describe('the sweep keeps saved lists and hidden rooms in line (integration)', (
   };
 
   const sweep = (opts: { dryRun?: boolean } = {}) => feature.reconcileGuild(GUILD, opts);
+  /** The pass alone, without the sweep's other passes, which read rooms of their own. */
+  const pass = async () => privacy.convergeGuild(GUILD, await secondaries.listByGuild(GUILD));
   const held = (channel: string, id: string, type = OVERWRITE_MEMBER) =>
     actions.overwritesOf(channel).find((o) => o.id === id && o.type === type);
   const everyone = (channel: string) => held(channel, GUILD, OVERWRITE_ROLE);
@@ -231,6 +238,126 @@ describe('the sweep keeps saved lists and hidden rooms in line (integration)', (
       expect(read).not.toHaveBeenCalled();
       expect(actions.ofType('joinChannel')).toEqual([]);
       expect(actions.ofType('overwrites')).toEqual([]);
+    });
+  });
+
+  // -- what a room that holds what it should costs ----------------------------------
+
+  describe('a room that already holds what it should', () => {
+    /**
+     * Every locked or hidden room a build with this feature makes records a baseline, so
+     * it is in the pass for as long as it lives. What keeps that from being a request to
+     * Discord and two reads of the database per room every five minutes is that it is
+     * planned from the row the sweep listed and the channel cache.
+     */
+    it('costs a locked or hidden room with nothing saved no request to Discord and no read of the database', async () => {
+      moderatorRole = 'mods';
+      await room('r1');
+      await room('r2', 'bob');
+      await room('r3', 'carol');
+      await privacy.makePrivate(GUILD, 'r1', 'alice');
+      await privacy.makePrivate(GUILD, 'r2', 'bob');
+      await privacy.hide(GUILD, 'r3', 'carol');
+      await lists.add(GUILD, 'dave', 'mallory', 'blocked'); // somebody with no room
+      const rooms = await secondaries.listByGuild(GUILD);
+      const read = vi.spyOn(actions, 'readOverwrites');
+      const write = vi.spyOn(actions, 'applyOverwrites');
+      const getRow = vi.spyOn(secondaries, 'get');
+      const readAccess = vi.spyOn(secondaries, 'readAccess');
+      const transition = vi.spyOn(secondaries, 'transitionAccess');
+      const mutate = vi.spyOn(secondaries, 'mutateAccess');
+      const perOwner = vi.spyOn(lists, 'get');
+      const byGuild = vi.spyOn(lists, 'listByGuild');
+      const joins = vi.spyOn(joinChannels, 'listBySecondaries');
+
+      const result = await privacy.convergeGuild(GUILD, rooms);
+
+      expect(result).toMatchObject({ considered: 3, repaired: 0, completed: 0, failed: 0 });
+      expect(read).not.toHaveBeenCalled();
+      expect(write).not.toHaveBeenCalled();
+      expect(getRow).not.toHaveBeenCalled();
+      expect(readAccess).not.toHaveBeenCalled();
+      expect(transition).not.toHaveBeenCalled();
+      expect(mutate).not.toHaveBeenCalled();
+      expect(perOwner).not.toHaveBeenCalled();
+      // One query for the lists, of the owners who have a room and nobody else, and one for
+      // the Join channels of the rooms that are not open.
+      expect(byGuild).toHaveBeenCalledTimes(1);
+      const asked = byGuild.mock.calls[0]![1]!;
+      expect([...asked].sort()).toEqual(['alice', 'bob', 'carol']);
+      expect(joins).toHaveBeenCalledTimes(1);
+    });
+
+    it('reads the lists once for the guild and never one owner at a time, for the rooms it does act on', async () => {
+      await room('r1');
+      await room('r2', 'bob');
+      await lists.add(GUILD, 'alice', 'mallory', 'blocked');
+      await lists.add(GUILD, 'bob', 'mallory', 'blocked');
+      const perOwner = vi.spyOn(lists, 'get');
+      const byGuild = vi.spyOn(lists, 'listByGuild');
+      const getRow = vi.spyOn(secondaries, 'get');
+
+      const result = await pass();
+
+      expect(result).toMatchObject({ considered: 2, repaired: 2 });
+      expect(bits(held('r1', 'mallory'))).toEqual({ allow: 0n, deny: VC });
+      expect(byGuild).toHaveBeenCalledTimes(1);
+      expect(perOwner).not.toHaveBeenCalled();
+      // The row each room was listed with is what it is planned from.
+      expect(getRow).not.toHaveBeenCalled();
+    });
+
+    it('is read fresh, and written, only when the cache shows it differing, and then costs nothing again', async () => {
+      await room('r1');
+      await privacy.makePrivate(GUILD, 'r1', 'alice');
+      // Somebody removed the owner's overwrite by hand.
+      actions.seedOverwrites(
+        'r1',
+        actions.overwritesOf('r1').filter((o) => o.id !== 'alice'),
+      );
+      const read = vi.spyOn(actions, 'readOverwrites');
+
+      const first = await pass();
+      expect(first.repaired).toBe(1);
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(bits(held('r1', 'alice'))).toEqual({ allow: C, deny: 0n });
+
+      read.mockClear();
+      const second = await pass();
+      expect(second.repaired).toBe(0);
+      expect(read).not.toHaveBeenCalled();
+    });
+
+    it('is never written from the cache: a stale cache costs one fresh read, and no write when the room is fine', async () => {
+      await room('r1');
+      await lists.add(GUILD, 'alice', 'carol', 'trusted');
+      await privacy.makePrivate(GUILD, 'r1', 'alice');
+      expect(held('r1', 'carol')).toBeDefined();
+      // The cache lags: it has not seen carol's overwrite, which Discord already holds.
+      const real = actions.cachedOverwrites.bind(actions);
+      vi.spyOn(actions, 'cachedOverwrites').mockImplementation((guildId, id) =>
+        real(guildId, id)?.filter((o) => o.id !== 'carol'),
+      );
+      const read = vi.spyOn(actions, 'readOverwrites');
+      const write = vi.spyOn(actions, 'applyOverwrites');
+
+      const result = await pass();
+
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(write).not.toHaveBeenCalled();
+      expect(result.repaired).toBe(0);
+    });
+
+    it('is read fresh when the cache cannot say, which is what a channel the bot cannot see looks like', async () => {
+      await room('r1');
+      await privacy.makePrivate(GUILD, 'r1', 'alice');
+      vi.spyOn(actions, 'cachedOverwrites').mockReturnValue(undefined);
+      const read = vi.spyOn(actions, 'readOverwrites');
+
+      const result = await pass();
+
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(result.repaired).toBe(0);
     });
   });
 
@@ -804,20 +931,245 @@ describe('the sweep keeps saved lists and hidden rooms in line (integration)', (
       expect((await row('r1')).state.private).toBe(true);
     });
 
-    it('is not carried through while the lever is on, and is when it is lifted', async () => {
+    /**
+     * An opening is an undo, which the lever never blocks, and the owner was told it would
+     * land. A restart that lost the write would otherwise leave the room closed against
+     * their request for as long as the lever is on.
+     */
+    it('is carried through while the lever is on, which adds nothing, and the rest waits for it to be lifted', async () => {
       await room('r1');
+      await room('r2', 'bob');
       await privacy.hide(GUILD, 'r1', 'alice');
+      const hiddenSet = actions.overwritesOf('r1');
       actions.simulateOverwriteRateLimit = true;
       await privacy.unhide(GUILD, 'r1', 'alice');
+      actions.seedOverwrites('r1', hiddenSet); // still in Discord's queue
+      actions.simulateOverwriteRateLimit = false;
+      // Saved while it was queued, so the room does not hold it, and the lever must not add it.
+      await lists.add(GUILD, 'alice', 'mallory', 'blocked');
+      await lists.add(GUILD, 'bob', 'mallory', 'blocked');
+      leverOn = true;
+      const byGuild = vi.spyOn(lists, 'listByGuild');
+
+      await sweep();
+
+      // The opening landed: locked, with View no longer denied, and its Join channel.
+      expect(bits(everyone('r1'))).toEqual({ allow: 0n, deny: C });
+      expect((await access('r1'))?.hidden).toBeUndefined();
+      expect((await access('r1'))?.pending).toBeUndefined();
+      expect(liveJoins()).toHaveLength(1);
+      // And nothing was added to it, or to any other room.
+      expect(held('r1', 'mallory')).toBeUndefined();
+      expect((await access('r1'))?.blocked).toBeUndefined();
+      expect(held('r2', 'mallory')).toBeUndefined();
+      // Only the owner of the room that had something queued was asked about.
+      expect(byGuild).toHaveBeenCalledTimes(1);
+      expect(byGuild).toHaveBeenCalledWith(GUILD, ['alice']);
+
+      leverOn = false;
+      await sweep();
+      expect(bits(held('r1', 'mallory'))).toEqual({ allow: 0n, deny: VC });
+      expect(bits(held('r2', 'mallory'))).toEqual({ allow: 0n, deny: VC });
+    });
+
+    it('is carried through while the lever is on for a /public too, with no Join channel made', async () => {
+      await room('r1');
+      await privacy.makePrivate(GUILD, 'r1', 'alice');
+      const lockedSet = actions.overwritesOf('r1');
+      actions.simulateOverwriteRateLimit = true;
+      await privacy.makePublic(GUILD, 'r1', 'alice');
+      actions.seedOverwrites('r1', lockedSet);
       actions.simulateOverwriteRateLimit = false;
       leverOn = true;
 
       await sweep();
-      expect((await access('r1'))?.pending?.mode).toBe('locked');
 
-      leverOn = false;
-      await sweep();
+      expect(everyone('r1')).toBeUndefined();
+      expect((await row('r1')).state.private).toBeUndefined();
       expect((await access('r1'))?.pending).toBeUndefined();
+      expect(liveJoins()).toHaveLength(0);
+    });
+
+    it('leaves a marker the lever has no business with alone: one too old to believe waits for it to be lifted', async () => {
+      await room('r1');
+      await privacy.hide(GUILD, 'r1', 'alice');
+      const record = (await access('r1'))!;
+      await stageAccess('r1', { ...record, pending: { mode: 'locked', at: 1 } });
+      leverOn = true;
+      const writes = actions.ofType('overwrites').length;
+
+      await sweep();
+
+      expect((await access('r1'))?.pending).toBeDefined();
+      expect(actions.ofType('overwrites')).toHaveLength(writes);
+    });
+
+    /**
+     * Discord runs the writes of a channel in order, so a change queued behind the opening
+     * lands after it and is what the owner last asked for. The marker left standing would
+     * have the sweep open the room against it.
+     */
+    it('is superseded by a later change queued behind it, so the sweep does not open the room against it', async () => {
+      await room('r1');
+      await privacy.makePrivate(GUILD, 'r1', 'alice');
+      const lockedSet = actions.overwritesOf('r1');
+      actions.simulateOverwriteRateLimit = true;
+      expect((await privacy.makePublic(GUILD, 'r1', 'alice')).ok).toBe(false);
+      expect((await access('r1'))?.pending?.mode).toBe('public');
+      actions.seedOverwrites('r1', lockedSet); // the opening is still in the queue
+      // The owner changes their mind before it lands: hide the room instead.
+      const hidden = await privacy.hide(GUILD, 'r1', 'alice');
+      expect(hidden.ok).toBe(false); // queued as well
+      expect((await access('r1'))?.pending).toBeUndefined();
+      actions.simulateOverwriteRateLimit = false;
+      // Both have landed, in order, and the room is hidden.
+      expect(bits(everyone('r1'))).toEqual({ allow: 0n, deny: VC });
+
+      await sweep();
+
+      expect(bits(everyone('r1'))).toEqual({ allow: 0n, deny: VC });
+      expect((await access('r1'))?.hidden).toBe(true);
+      expect((await row('r1')).state.private).toBe(true);
+      expect(liveJoins()).toHaveLength(0);
+    });
+
+    it('is replaced by the marker of a later opening queued behind it', async () => {
+      await room('r1');
+      await privacy.hide(GUILD, 'r1', 'alice');
+      actions.simulateOverwriteRateLimit = true;
+      await privacy.unhide(GUILD, 'r1', 'alice');
+      expect((await access('r1'))?.pending?.mode).toBe('locked');
+      await privacy.makePublic(GUILD, 'r1', 'alice');
+      expect((await access('r1'))?.pending?.mode).toBe('public');
+    });
+
+    /**
+     * Written by something that did not finish it, and old enough that what it describes is
+     * no longer what the owner last asked for. The room stays as its record says, which is
+     * closed, and the owner can run the command again.
+     */
+    it('is not believed once it is older than a queued write can wait, and is only cleared', async () => {
+      await room('r1');
+      await privacy.hide(GUILD, 'r1', 'alice');
+      const record = (await access('r1'))!;
+      const before = actions.overwritesOf('r1');
+      await stageAccess('r1', {
+        ...record,
+        pending: { mode: 'locked', at: Date.now() - 16 * 60 * 1000 },
+      });
+
+      await sweep();
+
+      expect((await access('r1'))?.pending).toBeUndefined();
+      expect((await access('r1'))?.hidden).toBe(true);
+      expect(actions.overwritesOf('r1')).toEqual(before);
+      expect(liveJoins()).toHaveLength(0);
+    });
+
+    it('is still believed a little before that', async () => {
+      await room('r1');
+      await privacy.hide(GUILD, 'r1', 'alice');
+      const record = (await access('r1'))!;
+      await stageAccess('r1', {
+        ...record,
+        pending: { mode: 'locked', at: Date.now() - 14 * 60 * 1000 },
+      });
+
+      await sweep();
+
+      expect((await access('r1'))?.hidden).toBeUndefined();
+      expect(bits(everyone('r1'))).toEqual({ allow: 0n, deny: C });
+    });
+
+    /**
+     * A marker only ever names an exit. One naming a way IN was written by something else,
+     * and carrying it through would close a room the owner had opened.
+     */
+    it.each<[string, 'public' | 'locked' | 'hidden', 'public' | 'locked' | 'hidden']>([
+      ['more closed than a public room', 'public', 'hidden'],
+      ['locked, from a public room', 'public', 'locked'],
+      ['hidden, from a locked room', 'locked', 'hidden'],
+      ['the mode a hidden room is already in', 'hidden', 'hidden'],
+    ])('only clears a marker for %s', async (_what, mode, marked) => {
+      await room('r1');
+      if (mode === 'locked') await privacy.makePrivate(GUILD, 'r1', 'alice');
+      if (mode === 'hidden') await privacy.hide(GUILD, 'r1', 'alice');
+      // A room the bot made holds the bot's own overwrite, which is all a public one needs.
+      if (mode === 'public') actions.seedOverwrites('r1', [ow(BOT, BOT_ACCESS)]);
+      const record = (await access('r1')) ?? { creatorId: 'alice' };
+      await stageAccess('r1', { ...record, pending: { mode: marked, at: Date.now() } });
+      const before = actions.overwritesOf('r1');
+      const privateBefore = (await row('r1')).state.private;
+
+      await sweep();
+
+      expect((await access('r1'))?.pending).toBeUndefined();
+      expect(actions.overwritesOf('r1')).toEqual(before);
+      expect((await row('r1')).state.private).toBe(privateBefore);
+      expect((await access('r1'))?.hidden).toBe(mode === 'hidden' ? true : undefined);
+    });
+
+    /**
+     * An admit and a vote's removal both write the room over from what Discord holds now,
+     * which for a room with an opening still queued is the closed room. Planned as the mode
+     * the record still names they would close it again behind the opening and take the marker
+     * off, so the opening would never be finished.
+     */
+    it('is carried through by an admit that comes before it lands, not closed again behind it', async () => {
+      await room('r1');
+      await privacy.hide(GUILD, 'r1', 'alice');
+      const hiddenSet = actions.overwritesOf('r1');
+      actions.simulateOverwriteRateLimit = true;
+      await privacy.unhide(GUILD, 'r1', 'alice');
+      actions.seedOverwrites('r1', hiddenSet); // still queued
+      actions.simulateOverwriteRateLimit = false;
+
+      const admitted = await privacy.admit(GUILD, 'r1', 'alice', 'carol');
+
+      expect(admitted.ok).toBe(true);
+      // Locked and not hidden, with carol let in: what the owner asked for, plus the admit.
+      expect(bits(everyone('r1'))).toEqual({ allow: 0n, deny: C });
+      expect(bits(held('r1', 'carol'))).toEqual({ allow: C, deny: 0n });
+      expect((await access('r1'))?.hidden).toBeUndefined();
+      expect((await access('r1'))?.pending).toBeUndefined();
+      expect(liveJoins()).toHaveLength(1);
+    });
+
+    it('is told it is open to everyone by an admit when the room is on its way to public', async () => {
+      await room('r1');
+      await privacy.makePrivate(GUILD, 'r1', 'alice');
+      const lockedSet = actions.overwritesOf('r1');
+      actions.simulateOverwriteRateLimit = true;
+      await privacy.makePublic(GUILD, 'r1', 'alice');
+      actions.seedOverwrites('r1', lockedSet);
+      actions.simulateOverwriteRateLimit = false;
+      const before = actions.actions.length;
+
+      const admitted = await privacy.admit(GUILD, 'r1', 'alice', 'carol');
+
+      expect(admitted.ok).toBe(false);
+      expect(actions.actions).toHaveLength(before);
+      expect((await access('r1'))?.pending?.mode).toBe('public');
+      expect((await access('r1'))?.admitted).toBeUndefined();
+    });
+
+    it('is carried through by a vote that removes someone before it lands', async () => {
+      await room('r1');
+      await privacy.makePrivate(GUILD, 'r1', 'alice');
+      const lockedSet = actions.overwritesOf('r1');
+      actions.simulateOverwriteRateLimit = true;
+      await privacy.makePublic(GUILD, 'r1', 'alice');
+      actions.seedOverwrites('r1', lockedSet);
+      actions.simulateOverwriteRateLimit = false;
+
+      expect(await privacy.denyKicked(GUILD, 'r1', 'eve')).toBe(true);
+
+      // Open, as the owner asked, with the vote's removal in force in every mode.
+      expect(bits(held('r1', 'eve'))).toEqual({ allow: 0n, deny: VC });
+      expect(everyone('r1')).toBeUndefined();
+      expect((await row('r1')).state.private).toBeUndefined();
+      expect((await access('r1'))?.pending).toBeUndefined();
+      expect((await access('r1'))?.kicked).toEqual(['eve']);
     });
   });
 
@@ -985,6 +1337,414 @@ describe('the sweep keeps saved lists and hidden rooms in line (integration)', (
       await sweep();
 
       expect(bits(held('rO', 'mallory'))).toEqual({ allow: 0n, deny: VC });
+      // And the incident is over: nothing else would clear it, since a room that was fine all
+      // along has nothing to write.
+      expect(problems.recent(GUILD)).toEqual([]);
+    });
+
+    it('is not mistaken for a recovery by a retry that fails the same way', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      await room('rO', 'alice');
+      await lists.add(GUILD, 'alice', 'mallory', 'blocked');
+      const read = failFor('rO', new ChannelObfuscatedError('rO'));
+      await sweep();
+
+      vi.setSystemTime(Date.now() + 7 * 60 * 60 * 1000);
+      await sweep();
+
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(problems.recent(GUILD)).toEqual([
+        expect.objectContaining({ channelId: 'rO', operation: 'delete' }),
+      ]);
+    });
+
+    it('is forgotten when the room is cleaned up, so nothing lingers for a room that is gone', async () => {
+      await room('rO', 'alice');
+      await lists.add(GUILD, 'alice', 'mallory', 'blocked');
+      const read = failFor('rO', new ChannelObfuscatedError('rO'));
+      await sweep();
+      await sweep();
+      expect(read).toHaveBeenCalledTimes(1); // parked
+
+      await privacy.cleanupForSecondary(GUILD, 'rO');
+      await sweep();
+
+      expect(read).toHaveBeenCalledTimes(2); // no longer parked
+    });
+
+    it('is told once when the write fails, not once per sweep', async () => {
+      await room('rA', 'alice');
+      await lists.add(GUILD, 'alice', 'mallory', 'blocked');
+      actions.failOverwrites = true;
+      const recorded = vi.fn();
+      problems.onRecord = recorded;
+
+      await sweep();
+      await sweep();
+      await sweep();
+
+      expect(recorded).toHaveBeenCalledTimes(1);
+      expect(serverLogs).toHaveLength(1);
+      expect(problems.recent(GUILD)).toEqual([
+        expect.objectContaining({ channelId: 'rA', operation: 'access' }),
+      ]);
+    });
+
+    it('is told once when the record cannot be finalised, not once per sweep', async () => {
+      await room('rA', 'alice');
+      await lists.add(GUILD, 'alice', 'carol', 'trusted');
+      await privacy.makePrivate(GUILD, 'rA', 'alice');
+      expect(held('rA', 'carol')).toBeDefined();
+      // The take-back is what the finalising write records, and it keeps failing.
+      await lists.remove(GUILD, 'alice', 'carol');
+      const real = secondaries.transitionAccess.bind(secondaries);
+      let calls = 0;
+      vi.spyOn(secondaries, 'transitionAccess').mockImplementation((id, transition) =>
+        ++calls % 2 === 0 ? Promise.reject(apiError(50013)) : real(id, transition),
+      );
+      const recorded = vi.fn();
+      problems.onRecord = recorded;
+
+      await sweep();
+      await sweep();
+      await sweep();
+
+      expect(calls).toBeGreaterThanOrEqual(6); // tried every time
+      expect(recorded).toHaveBeenCalledTimes(1);
+      expect(serverLogs).toHaveLength(1);
+    });
+
+    it('is told once when its Join channel cannot be made, and is over when it can', async () => {
+      await room('rA', 'alice');
+      await privacy.makePrivate(GUILD, 'rA', 'alice');
+      await joinChannels.remove((await joinChannels.getBySecondary('rA'))!.channelId);
+      const create = vi.spyOn(actions, 'createJoinChannel').mockRejectedValue(apiError(50013));
+      const recorded = vi.fn();
+      problems.onRecord = recorded;
+
+      await sweep();
+      await sweep();
+      await sweep();
+
+      expect(create).toHaveBeenCalledTimes(3);
+      expect(recorded).toHaveBeenCalledTimes(1);
+      expect(serverLogs).toHaveLength(1);
+      expect(problems.recent(GUILD)).toEqual([
+        expect.objectContaining({ channelId: 'rA', operation: 'access' }),
+      ]);
+
+      // The room's own write has nothing to change, so making the channel is all that clears it.
+      create.mockRestore();
+      await sweep();
+      expect(await joinChannels.getBySecondary('rA')).toBeDefined();
+      expect(problems.recent(GUILD)).toEqual([]);
+    });
+
+    /**
+     * The guild's problem list keeps ten, so past ten broken rooms it evicts each one before
+     * its next sweep, and a memory that was only that list would tell them all again every
+     * five minutes (a line each in the log channel, and the notifier's backoff restarted).
+     */
+    it('is told once for each of more than ten rooms, though the guild keeps a list of ten', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      for (let i = 1; i <= 11; i++) {
+        await room(`r${i}`, `owner${i}`);
+        await lists.add(GUILD, `owner${i}`, 'mallory', 'blocked');
+      }
+      actions.failOverwrites = true;
+      const recorded = vi.fn();
+      problems.onRecord = recorded;
+
+      await sweep();
+      await sweep();
+      await sweep();
+
+      expect(recorded).toHaveBeenCalledTimes(11);
+      expect(serverLogs).toHaveLength(11);
+
+      // Still broken a long while later, which is worth saying again.
+      vi.setSystemTime(Date.now() + 7 * 60 * 60 * 1000);
+      await sweep();
+      expect(recorded).toHaveBeenCalledTimes(22);
+
+      // And over, for every room, once the permission is back.
+      actions.failOverwrites = false;
+      await sweep();
+      for (let i = 1; i <= 11; i++) {
+        expect(bits(held(`r${i}`, 'mallory'))).toEqual({ allow: 0n, deny: VC });
+      }
+      expect(problems.recent(GUILD)).toEqual([]);
+      recorded.mockClear();
+      actions.failOverwrites = true;
+      await lists.add(GUILD, 'owner1', 'trudy', 'blocked');
+      await sweep();
+      expect(recorded).toHaveBeenCalledTimes(1); // told again, since it broke again
+    });
+
+    it('never logs what a failed Join channel create was asked for, which is the owner’s name', async () => {
+      await room('rA', 'alice');
+      await privacy.makePrivate(GUILD, 'rA', 'alice');
+      await joinChannels.remove((await joinChannels.getBySecondary('rA'))!.channelId);
+      const failure = () =>
+        new DiscordAPIError(
+          { code: 50013, message: 'Missing Permissions' } as never,
+          50013,
+          403,
+          'POST',
+          'https://discord.test',
+          // What discord.js's REST layer hands the error: it keeps `body` as `json`.
+          { body: { name: '⇩ Join Alice Example' }, files: undefined } as never,
+        );
+      expect(JSON.stringify(failure())).toContain('Alice Example'); // so the test can see it
+      vi.spyOn(actions, 'createJoinChannel').mockImplementation(() => Promise.reject(failure()));
+      const warn = vi.spyOn(logger, 'warn');
+
+      await pass();
+      // And the same for a lock whose Join channel fails, the command's own path.
+      await privacy.makePublic(GUILD, 'rA', 'alice');
+      await privacy.makePrivate(GUILD, 'rA', 'alice');
+
+      expect(warn.mock.calls.length).toBeGreaterThanOrEqual(2);
+      for (const [fields] of warn.mock.calls) {
+        expect(JSON.stringify(fields)).not.toContain('Alice Example');
+      }
+    });
+  });
+
+  // -- a listed member who is not in the server ------------------------------------------
+
+  /**
+   * A saved list outlives its entries' membership, and the commonest block is somebody who
+   * was banned. A plan always wants an overwrite for each of them, and none can be written,
+   * so without a memory of it every sweep would look them up, write the record twice and
+   * count the room as repaired, to end where it began.
+   */
+  describe('a listed member who is no longer in the server', () => {
+    const GONE = 'gone';
+    beforeEach(() => {
+      actions.unknownMemberIds.add(GONE);
+    });
+
+    it('is looked for once, and a second pass writes nothing, reads nothing and repairs nothing', async () => {
+      await room('r1');
+      await lists.add(GUILD, 'alice', GONE, 'blocked');
+      const apply = vi.spyOn(actions, 'applyOverwrites');
+
+      const first = await pass();
+
+      // The bot's own overwrite is written, and the member gets none.
+      expect(first.repaired).toBe(1);
+      expect(held('r1', GONE)).toBeUndefined();
+      expect(apply).toHaveBeenCalledTimes(1);
+      const once = await snapshot('r1');
+      apply.mockClear();
+      const transition = vi.spyOn(secondaries, 'transitionAccess');
+      const read = vi.spyOn(actions, 'readOverwrites');
+
+      const second = await pass();
+
+      expect(second).toMatchObject({ considered: 1, repaired: 0, completed: 0, failed: 0 });
+      expect(apply).not.toHaveBeenCalled();
+      expect(read).not.toHaveBeenCalled();
+      expect(transition).not.toHaveBeenCalled();
+      expect(await snapshot('r1')).toEqual(once);
+      // The record names what was written, and nothing was written for them.
+      expect((await access('r1'))?.blocked).toBeUndefined();
+    });
+
+    it('costs a locked room the same, and its other entries are still applied', async () => {
+      await room('r1');
+      await lists.add(GUILD, 'alice', GONE, 'blocked');
+      await lists.add(GUILD, 'alice', 'carol', 'trusted');
+      await privacy.makePrivate(GUILD, 'r1', 'alice');
+      expect(bits(held('r1', 'carol'))).toEqual({ allow: C, deny: 0n });
+      const once = await snapshot('r1');
+      const apply = vi.spyOn(actions, 'applyOverwrites');
+
+      const result = await pass();
+
+      expect(result.repaired).toBe(0);
+      expect(apply).not.toHaveBeenCalled();
+      expect(await snapshot('r1')).toEqual(once);
+    });
+
+    it('is looked for again when they rejoin, which the member cache shows at once', async () => {
+      await room('r1');
+      await lists.add(GUILD, 'alice', GONE, 'blocked');
+      await pass();
+      expect(held('r1', GONE)).toBeUndefined();
+
+      actions.unknownMemberIds.delete(GONE);
+      voice.setMemberFacts(GONE, {}); // back in the server, and in the cache
+
+      const result = await pass();
+
+      expect(result.repaired).toBe(1);
+      expect(bits(held('r1', GONE))).toEqual({ allow: 0n, deny: VC });
+      expect((await access('r1'))?.blocked).toEqual([GONE]);
+    });
+
+    it('is looked for again after an hour, in case the cache missed their return', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      await room('r1');
+      await lists.add(GUILD, 'alice', GONE, 'blocked');
+      await pass();
+      const apply = vi.spyOn(actions, 'applyOverwrites');
+
+      vi.setSystemTime(Date.now() + 59 * 60 * 1000);
+      await pass();
+      expect(apply).not.toHaveBeenCalled();
+
+      actions.unknownMemberIds.delete(GONE);
+      vi.setSystemTime(Date.now() + 2 * 60 * 1000);
+      await pass();
+
+      expect(apply).toHaveBeenCalledTimes(1);
+      expect(bits(held('r1', GONE))).toEqual({ allow: 0n, deny: VC });
+    });
+
+    it('is still answered "not in the server" by an admit, from what was learned, with nothing recorded', async () => {
+      await room('r1');
+      await privacy.makePrivate(GUILD, 'r1', 'alice');
+      const first = await privacy.admit(GUILD, 'r1', 'alice', GONE);
+      const second = await privacy.admit(GUILD, 'r1', 'alice', GONE);
+
+      expect(first).toEqual({ ok: false, message: admitNotInServer(GONE) });
+      expect(second).toEqual({ ok: false, message: admitNotInServer(GONE) });
+      expect(held('r1', GONE)).toBeUndefined();
+      expect((await access('r1'))?.admitted).toBeUndefined();
+    });
+
+    it('keeps an overwrite it already wrote for them, and the block that outlives their membership', async () => {
+      await room('r1');
+      await lists.add(GUILD, 'alice', GONE, 'blocked');
+      actions.unknownMemberIds.delete(GONE);
+      await pass();
+      expect(bits(held('r1', GONE))).toEqual({ allow: 0n, deny: VC });
+      actions.unknownMemberIds.add(GONE); // and now they have left
+
+      await pass();
+      await pass();
+
+      expect(bits(held('r1', GONE))).toEqual({ allow: 0n, deny: VC });
+      expect((await access('r1'))?.blocked).toEqual([GONE]);
+    });
+  });
+
+  // -- what the pass says it did -------------------------------------------------------
+
+  describe('what the pass reports', () => {
+    it('counts an opening it carried through and a Join channel it made, in one line for the guild', async () => {
+      await room('r1');
+      await room('r2', 'bob');
+      await privacy.hide(GUILD, 'r1', 'alice');
+      const hiddenSet = actions.overwritesOf('r1');
+      actions.simulateOverwriteRateLimit = true;
+      await privacy.unhide(GUILD, 'r1', 'alice');
+      actions.seedOverwrites('r1', hiddenSet);
+      actions.simulateOverwriteRateLimit = false;
+      await privacy.makePrivate(GUILD, 'r2', 'bob');
+      await joinChannels.remove((await joinChannels.getBySecondary('r2'))!.channelId);
+      const info = vi.spyOn(logger, 'info');
+
+      const result = await pass();
+
+      // r1's opening was carried through (its write made its own Join channel), and r2 only
+      // needed one.
+      expect(result).toEqual({
+        considered: 2,
+        repaired: 1,
+        completed: 1,
+        joinsFixed: 1,
+        unreadable: [],
+        failed: 0,
+      });
+      expect(info).toHaveBeenCalledWith(
+        { guildId: GUILD, ...result, unreadable: 0 },
+        'converged room access',
+      );
+
+      info.mockClear();
+      await pass();
+      expect(info).not.toHaveBeenCalledWith(expect.anything(), 'converged room access');
+    });
+
+    it('says which room it could not plan a change for, and why, once and not every sweep', async () => {
+      await room('r1');
+      await privacy.hide(GUILD, 'r1', 'alice');
+      // A role above the bot was given View by hand: a hide it can neither undo nor leave.
+      actions.seedOverwrites('r1', [...actions.overwritesOf('r1'), roleOw('vip', V, 0n)]);
+      voice.setBotRoleAccess({ uneditableRoleIds: ['vip'] });
+      const warn = vi.spyOn(logger, 'warn');
+      const lines = () =>
+        warn.mock.calls.filter(([, message]) =>
+          /could not plan a room access change/.test(`${message}`),
+        );
+
+      const first = await pass();
+      await pass();
+      await pass();
+
+      expect(first.failed).toBe(1);
+      expect(lines()).toHaveLength(1);
+      expect(lines()[0]![0]).toEqual({
+        guildId: GUILD,
+        channelId: 'r1',
+        reason: 'role_defeats_hide',
+        defeatedBy: ['vip'],
+      });
+      // The room was left exactly as it was.
+      expect(bits(held('r1', 'vip', OVERWRITE_ROLE))).toEqual({ allow: V, deny: 0n });
+
+      // Fixed, and then broken again, which is worth saying again.
+      voice.setBotRoleAccess({ uneditableRoleIds: [] });
+      await pass();
+      expect(bits(held('r1', 'vip', OVERWRITE_ROLE))).toEqual({ allow: 0n, deny: V });
+      actions.seedOverwrites('r1', [...actions.overwritesOf('r1'), roleOw('vip2', V, 0n)]);
+      voice.setBotRoleAccess({ uneditableRoleIds: ['vip2'] });
+      await pass();
+      expect(lines()).toHaveLength(2);
+    });
+  });
+
+  // -- where it runs in the sweep ---------------------------------------------------------
+
+  describe('the order of the sweep', () => {
+    /**
+     * A hidden room is the one thing in the sweep that is a privacy fault when it is wrong, and
+     * the rename passes after it have no per-room catch: a rename the bot cannot make throws
+     * out of the sweep. The pass runs first so that cannot leave a hidden room visible.
+     */
+    it('repairs a hidden room even when a rename in the same sweep throws', async () => {
+      await room('r1');
+      await privacy.hide(GUILD, 'r1', 'alice');
+      // Made visible by hand, and the name is stale, so the sweep will try to rename it.
+      actions.seedOverwrites('r1', [ow('alice', VC), roleOw(GUILD, V, 0n)]);
+      await secondaries.updateState('r1', { ...(await row('r1')).state, name: 'stale name' });
+      actions.failRenameForChannel = 'r1';
+
+      await expect(sweep()).rejects.toThrow();
+
+      expect(bits(everyone('r1'))).toEqual({ allow: 0n, deny: VC });
+      expect(bits(held('r1', BOT))).toEqual({ allow: BOT_ACCESS, deny: 0n });
+    });
+
+    /** A repaired `private` is what `{{PRIVATE}}` reads, so the re-render has to come after it. */
+    it('has repaired a lost `private` flag by the time the name is worked out from it', async () => {
+      await autoChannels.upsert(GUILD, PRIMARY, { name: '{{PRIVATE ?? L // U}} room' });
+      await room('r1');
+      await privacy.hide(GUILD, 'r1', 'alice');
+      const { private: _private, ...rest } = (await row('r1')).state;
+      // A stale whole-state write dropped the flag, and the name was last worked out without it.
+      await secondaries.updateState('r1', rest);
+      await feature.rerenderSecondary(GUILD, 'r1');
+      expect((await row('r1')).state.private).toBeUndefined();
+      expect((await row('r1')).state.name).toMatch(/^U/);
+
+      await sweep();
+
+      expect((await row('r1')).state.private).toBe(true);
+      expect((await row('r1')).state.name).toMatch(/^L/);
     });
   });
 
