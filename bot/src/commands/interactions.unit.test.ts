@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DiscordAPIError, PermissionFlagsBits } from 'discord.js';
+import { DiscordAPIError, MessageFlags, PermissionFlagsBits } from 'discord.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fakeLogger } from '../runtime/testUtils.js';
 import { GuildDispatcher } from '../runtime/dispatcher.js';
@@ -20,6 +20,7 @@ import { ALIAS_SELECT_ID, aliasHash, aliasId } from './aliasPanel.js';
 import { controlPanelId } from '../features/voice/controlPanel.js';
 import { controlAppearanceId, controlSettingsId, controlToggleId } from './controlPanelSettings.js';
 import { botProfileResetId, botProfileSetId } from './botProfilePanel.js';
+import { joinId } from '../features/voice/joinPanel.js';
 
 /** A Discord "Missing Permissions" (50013) rejection, as thrown by a failed create. */
 function missingPermissions(): DiscordAPIError {
@@ -243,6 +244,7 @@ function fakeInteraction(opts: FakeInteractionOpts) {
       interaction.deferred = true;
       return Promise.resolve(undefined);
     }),
+    deleteReply: vi.fn().mockResolvedValue(undefined),
     update: vi.fn().mockResolvedValue(undefined),
     showModal: vi.fn().mockResolvedValue(undefined),
     values: opts.values ?? [],
@@ -1358,6 +1360,253 @@ describe('commands that talk to Discord acknowledge first', () => {
       if (!branch.includes('replyResult') || !branch.includes('await run(')) continue;
       expect(deferring, `${name} awaits work then replies, so it must defer`).toContain(name);
     }
+  });
+});
+
+/**
+ * The knock card and the two ways to kick answer after work that is no longer a
+ * pair of REST calls: a block saves to the owner's list, applies it to the room and
+ * moves the requester out, and a kick records itself, writes the room's overwrites
+ * and disconnects the member. None of them used to defer, and a token that lives
+ * 3 seconds is then the whole budget, so each acknowledges first and answers by
+ * editing or following up.
+ */
+describe('registerInteractionHandler (the knock card and the kick vote)', () => {
+  let dispose: (() => void) | undefined;
+  afterEach(() => dispose?.());
+
+  const OWNER = 'alice';
+  const joinContext = {
+    channelId: 'join-1',
+    guildId: 'g1',
+    secondaryChannelId: 'room-1',
+    creatorId: OWNER,
+  };
+
+  /** One knock-card click, with the service call and the acknowledgement put in order. */
+  async function click(
+    action: 'approve' | 'deny' | 'block',
+    over: { userId?: string; context?: typeof joinContext | undefined; result?: object } = {},
+  ) {
+    const fake = fakeInteraction({
+      kind: 'button',
+      customId: joinId(action, 'join-1', 'bob'),
+      userId: over.userId ?? OWNER,
+    });
+    const order: string[] = [];
+    let finish: (() => void) | undefined;
+    const settled = new Promise<void>((resolve) => (finish = resolve));
+    const decide = vi.fn().mockImplementation(async () => {
+      order.push(fake.interaction.deferred ? 'service after defer' : 'service before defer');
+      await settled;
+      return over.result ?? { ok: true, message: 'Done.' };
+    });
+    const env = setup({
+      privacy: {
+        getJoinContext: vi.fn().mockResolvedValue('context' in over ? over.context : joinContext),
+        approveJoin: decide,
+        denyJoin: decide,
+      } as never,
+    });
+    dispose = env.dispose;
+    env.client.emit('interactionCreate', fake.interaction);
+    await flush();
+    return { ...fake, order, decide, finish: () => finish?.() };
+  }
+
+  it.each(['approve', 'deny', 'block'] as const)(
+    'acknowledges %s before it does the work, then edits the card',
+    async (action) => {
+      const c = await click(action);
+      // The work is still running and the token is already answered.
+      expect(c.interaction.deferUpdate).toHaveBeenCalledTimes(1);
+      expect(c.order).toEqual(['service after defer']);
+      expect(c.interaction.update).not.toHaveBeenCalled();
+      expect(c.editReply).not.toHaveBeenCalled();
+
+      c.finish();
+      await flush();
+      expect(c.editReply).toHaveBeenCalledWith({
+        content: expect.stringContaining('Done.'),
+        components: [],
+      });
+      expect(c.interaction.update).not.toHaveBeenCalled();
+      expect(c.reply).not.toHaveBeenCalled();
+    },
+  );
+
+  it('passes the choice on: a block blocks, a deny does not', async () => {
+    const block = await click('block');
+    block.finish();
+    expect(block.decide).toHaveBeenCalledWith('join-1', 'bob', true);
+    dispose?.();
+    const deny = await click('deny');
+    deny.finish();
+    expect(deny.decide).toHaveBeenCalledWith('join-1', 'bob', false);
+  });
+
+  it('puts a failure on the card too, with the buttons gone', async () => {
+    const c = await click('block', { result: { ok: false, message: 'Could not block <@bob>.' } });
+    c.finish();
+    await flush();
+    expect(c.editReply).toHaveBeenCalledWith({
+      content: expect.stringContaining('Could not block <@bob>.'),
+      components: [],
+    });
+  });
+
+  it('turns away a click from anyone but the owner without deferring or doing anything', async () => {
+    const c = await click('block', { userId: 'mallory' });
+    expect(c.decide).not.toHaveBeenCalled();
+    expect(c.interaction.deferUpdate).not.toHaveBeenCalled();
+    expect(c.reply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: 'Only the channel owner can answer this request.',
+        ephemeral: true,
+      }),
+    );
+  });
+
+  it('says an expired request has expired, on the card, without doing anything', async () => {
+    const c = await click('approve', { context: undefined });
+    expect(c.decide).not.toHaveBeenCalled();
+    expect(c.interaction.deferUpdate).not.toHaveBeenCalled();
+    expect(c.interaction.update).toHaveBeenCalledWith({
+      content: 'This request has expired.',
+      components: [],
+    });
+  });
+
+  // -- /kick -----------------------------------------------------------------------
+
+  async function kick(
+    over: {
+      start?: object;
+      hasSession?: boolean;
+      startImpl?: () => Promise<object>;
+    } = {},
+  ) {
+    const order: string[] = [];
+    const start = vi.fn().mockImplementation(() => {
+      order.push('start');
+      return (
+        over.startImpl?.() ??
+        Promise.resolve(over.start ?? { ok: true, message: 'Vote started.', required: 2, epoch: 1 })
+      );
+    });
+    const env = setup({
+      votekick: {
+        start,
+        hasSession: vi.fn().mockReturnValue(over.hasSession ?? true),
+        cancel: vi.fn(),
+      } as never,
+    });
+    dispose = env.dispose;
+    const fake = fakeInteraction({
+      kind: 'command',
+      commandName: 'kick',
+      voiceChannelId: 'room-1',
+    });
+    fake.interaction.deferReply.mockImplementation(() => {
+      order.push('defer');
+      fake.interaction.deferred = true;
+      return Promise.resolve(undefined);
+    });
+    env.client.emit('interactionCreate', fake.interaction);
+    await flush();
+    return { ...fake, order, start };
+  }
+
+  it('/kick defers publicly before it starts the vote, and posts the vote by editing', async () => {
+    const k = await kick();
+    expect(k.order).toEqual(['defer', 'start']);
+    // Public: the vote is this message, so nothing makes it ephemeral.
+    expect(k.interaction.deferReply).toHaveBeenCalledWith();
+    expect(k.reply).not.toHaveBeenCalled();
+    const posted = k.editReply.mock.calls[0]?.[0] as { content: string; components: unknown[] };
+    expect(posted.content).toContain('started a vote to kick');
+    expect(posted.components).toHaveLength(1);
+  });
+
+  it('/kick answers a vote that resolved at once by editing, and arms no timer for it', async () => {
+    const k = await kick({
+      start: { ok: true, message: '<@u2> was kicked.', required: 1, epoch: 1 },
+      hasSession: false,
+    });
+    expect(k.order).toEqual(['defer', 'start']);
+    expect(k.editReply).toHaveBeenCalledWith({ content: '✅ <@u2> was kicked.' });
+  });
+
+  it('/kick takes the public acknowledgement back and tells only the caller about a refusal', async () => {
+    const k = await kick({ start: { ok: false, message: "That member isn't in this channel." } });
+    expect(k.order).toEqual(['defer', 'start']);
+    expect(k.interaction.deleteReply).toHaveBeenCalledTimes(1);
+    expect(k.followUp).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: "That member isn't in this channel.",
+        flags: MessageFlags.Ephemeral,
+      }),
+    );
+    expect(k.editReply).not.toHaveBeenCalled();
+  });
+
+  it('/kick takes the public acknowledgement back when starting the vote throws', async () => {
+    const k = await kick({ startImpl: () => Promise.reject(new Error('boom')) });
+    expect(k.interaction.deleteReply).toHaveBeenCalledTimes(1);
+  });
+
+  // -- the vote button -----------------------------------------------------------------
+
+  async function vote(result: object) {
+    const fake = fakeInteraction({ kind: 'button', customId: 'avc:kick:room-1' });
+    const order: string[] = [];
+    const cast = vi.fn().mockImplementation(() => {
+      order.push(fake.interaction.deferred ? 'vote after defer' : 'vote before defer');
+      return Promise.resolve(result);
+    });
+    const env = setup({ votekick: { vote: cast, cancel: vi.fn() } as never });
+    dispose = env.dispose;
+    env.client.emit('interactionCreate', fake.interaction);
+    await flush();
+    return { ...fake, order, cast };
+  }
+
+  it('the deciding vote defers before it kicks, then edits the vote message', async () => {
+    const v = await vote({ ok: true, resolved: true, kicked: true, message: '<@u2> was kicked.' });
+    expect(v.order).toEqual(['vote after defer']);
+    expect(v.editReply).toHaveBeenCalledWith({ content: '✅ <@u2> was kicked.', components: [] });
+    expect(v.interaction.update).not.toHaveBeenCalled();
+  });
+
+  it('a vote that does not decide it is acknowledged first and answered privately', async () => {
+    const v = await vote({
+      ok: true,
+      resolved: false,
+      kicked: false,
+      message: 'Vote recorded (2/3).',
+    });
+    expect(v.order).toEqual(['vote after defer']);
+    expect(v.followUp).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'Vote recorded (2/3).', flags: MessageFlags.Ephemeral }),
+    );
+    expect(v.reply).not.toHaveBeenCalled();
+    expect(v.editReply).not.toHaveBeenCalled();
+  });
+
+  it('a refused vote is acknowledged first and answered privately', async () => {
+    const v = await vote({
+      ok: false,
+      resolved: false,
+      kicked: false,
+      message: "You're not eligible to vote in this channel.",
+    });
+    expect(v.followUp).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: "You're not eligible to vote in this channel.",
+        flags: MessageFlags.Ephemeral,
+      }),
+    );
+    expect(v.editReply).not.toHaveBeenCalled();
   });
 });
 

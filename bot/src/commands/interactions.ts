@@ -3147,18 +3147,38 @@ Already subscribed? Add the new server ` +
     const target = interaction.options.getUser('member', true);
     const reason = interaction.options.getString('reason') ?? undefined;
 
-    const result = await run(guildId, 'cmd:kick', () =>
-      deps.votekick.start(guildId, channelId, interaction.user.id, target.id, reason),
-    );
+    /**
+     * Deferred before the vote is started, and PUBLIC because the vote message is
+     * this reply. A vote that resolves at once (one other person in the room) kicks
+     * before it answers, and a kick is a record write, an overwrite write and a
+     * disconnect against the room's channel bucket, which can outlast the 3 seconds
+     * an interaction token lives. A refusal cannot be made ephemeral after a public
+     * defer, so it is deleted and said again in a reply only the caller sees.
+     */
+    await interaction.deferReply();
+    let result;
+    try {
+      result = await run(guildId, 'cmd:kick', () =>
+        deps.votekick.start(guildId, channelId, interaction.user.id, target.id, reason),
+      );
+    } catch (err) {
+      // `route`'s catch follows up, and would leave this public spinner behind it.
+      await interaction.deleteReply().catch(() => undefined);
+      throw err;
+    }
     if (!result.ok) {
-      await interaction.reply({ content: result.message, ephemeral: true });
+      await interaction.deleteReply();
+      await interaction.followUp({ content: result.message, flags: MessageFlags.Ephemeral });
       return;
     }
     // `start` only succeeds with a channel, so narrow explicitly (no `!`).
-    if (!channelId) return;
+    if (!channelId) {
+      await interaction.deleteReply().catch(() => undefined);
+      return;
+    }
     if (!deps.votekick.hasSession(channelId)) {
       // Resolved immediately (1v1) — already kicked.
-      await interaction.reply({ content: `✅ ${result.message}` });
+      await interaction.editReply({ content: `✅ ${result.message}` });
       return;
     }
     // Arm the lapse timer (tagged with the session epoch) before replying, so a
@@ -3170,7 +3190,7 @@ Already subscribed? Add the new server ` +
         .setLabel('Vote to kick')
         .setStyle(ButtonStyle.Danger),
     );
-    await interaction.reply({
+    await interaction.editReply({
       content:
         `🗳️ <@${interaction.user.id}> started a vote to kick <@${target.id}>` +
         `${reason ? `, _${reason}_` : ''}.\n` +
@@ -3258,12 +3278,17 @@ Already subscribed? Add the new server ` +
       });
       return;
     }
+    // Deferred first. A block saves to the owner's list, applies it to the room and
+    // moves the requester out, and an approval grants and moves: several calls
+    // against the room's channel bucket, which can outlast the 3 seconds a token
+    // lives. The buttons stay on the card until there is a result to put there.
+    await interaction.deferUpdate();
     const result = await run(guildId, `join:${action}`, () =>
       action === 'approve'
         ? deps.privacy.approveJoin(joinChannelId, requesterId)
         : deps.privacy.denyJoin(joinChannelId, requesterId, action === 'block'),
     );
-    await interaction.update({
+    await interaction.editReply({
       content: formatResult(result),
       components: [],
     });
@@ -4227,19 +4252,23 @@ Already subscribed? Add the new server ` +
   async function handleKickVote(interaction: ButtonInteraction): Promise<void> {
     const guildId = interaction.guildId!;
     const channelId = interaction.customId.slice(KICK_PREFIX.length);
+    // Deferred first: the vote that decides it kicks before it answers (a record
+    // write, an overwrite write and a disconnect), which can outlast the 3 seconds
+    // a token lives. The message stays as it is until there is something to say.
+    await interaction.deferUpdate();
     const res = await run(guildId, 'kick:vote', () =>
       deps.votekick.vote(channelId, interaction.user.id),
     );
     if (!res.ok) {
-      await interaction.reply({ content: res.message, ephemeral: true });
+      await interaction.followUp({ content: res.message, flags: MessageFlags.Ephemeral });
       return;
     }
     if (res.resolved) {
       clearVoteTimeout(channelId);
-      await interaction.update({ content: `✅ ${res.message}`, components: [] });
+      await interaction.editReply({ content: `✅ ${res.message}`, components: [] });
       return;
     }
-    await interaction.reply({ content: res.message, ephemeral: true });
+    await interaction.followUp({ content: res.message, flags: MessageFlags.Ephemeral });
   }
 
   async function handleModal(
