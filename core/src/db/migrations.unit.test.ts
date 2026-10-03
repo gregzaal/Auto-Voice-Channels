@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { MIGRATIONS_FOLDER } from './migrate.js';
@@ -41,5 +41,33 @@ describe('migration journal', () => {
       if (!existsSync(join(MIGRATIONS_FOLDER, 'meta', snapshot))) missing.push(snapshot);
     }
     expect(missing).toEqual([]);
+  });
+
+  /**
+   * The other direction, which is the one a merge conflict in `_journal.json`
+   * produces: resolving it by dropping an entry leaves its SQL and snapshot on
+   * disk, and drizzle never applies a file the journal does not list.
+   */
+  it('lists every SQL file and snapshot on disk', () => {
+    const tags = journal.entries.map((e) => e.tag).sort();
+    const sqlOnDisk = readdirSync(MIGRATIONS_FOLDER)
+      .filter((f) => f.endsWith('.sql'))
+      .map((f) => f.slice(0, -'.sql'.length))
+      .sort();
+    expect(sqlOnDisk).toEqual(tags);
+
+    const snapshotsOnDisk = readdirSync(join(MIGRATIONS_FOLDER, 'meta'))
+      .filter((f) => f.endsWith('_snapshot.json'))
+      .sort();
+    expect(snapshotsOnDisk).toEqual(
+      journal.entries.map((e) => `${e.tag.slice(0, 4)}_snapshot.json`).sort(),
+    );
+  });
+
+  it('names each entry after its index', () => {
+    const misnamed = journal.entries.filter(
+      (e) => e.tag.slice(0, 4) !== String(e.idx).padStart(4, '0'),
+    );
+    expect(misnamed.map((e) => e.tag)).toEqual([]);
   });
 });

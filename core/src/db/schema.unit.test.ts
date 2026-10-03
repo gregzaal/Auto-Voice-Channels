@@ -79,7 +79,7 @@ describe('schema room access', () => {
   /**
    * Customer data shared by every fleet, like `aliases`: a per-fleet copy would
    * let a block hold on one bot and not on the other serving the same guild. The
-   * decision is recorded in the schema doc and in `plans/fleets.md`.
+   * decision is recorded in the doc comment on `memberAccessLists` in the schema.
    */
   it('keeps member_access_lists shared across fleets', () => {
     expect('fleet' in memberAccessLists).toBe(false);
