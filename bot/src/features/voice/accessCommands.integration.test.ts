@@ -502,6 +502,17 @@ describe('AccessCommands (integration)', () => {
       expect(actions.actions).toEqual([]);
     });
 
+    it('does not say the lists apply to a member whose lists are inert, and still shows them', async () => {
+      await lists.add(GUILD, 'alice', 'mallory', 'blocked');
+
+      const res = await access.list(GUILD, 'alice', { inert: true });
+
+      expect(res.ok).toBe(true);
+      expect(res.message).toContain('**Blocked** (1 of 25): <@mallory>');
+      expect(res.message).toContain('A server admin has turned off **Saved lists** for you');
+      expect(res.message).not.toContain('Blocked people cannot join');
+    });
+
     it('is per server: the same member’s list in another server is not shown', async () => {
       await lists.add('another-guild', 'alice', 'zed', 'blocked');
       expect((await access.list(GUILD, 'alice')).message).not.toContain('zed');

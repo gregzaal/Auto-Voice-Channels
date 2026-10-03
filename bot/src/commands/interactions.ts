@@ -199,6 +199,7 @@ import {
   nickFeatureFor,
   PANEL_ACTION_FEATURE,
   readCommandAccess,
+  savedListsInert,
   type CommandFeature,
   type RestrictTarget,
 } from '../features/voice/commandAccess.js';
@@ -560,15 +561,15 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       // the first click and the panel answers with the reactivation notice.
       if (interaction.customId.startsWith(CHANNELINFO_PREFIX)) return true;
       /**
-       * The room panel's Info button, and only that one.
+       * The room panel's Info button, and the two below it that only open: Unhide and
+       * Unlock. Every other button on the panel is a write and stays refused, which is
+       * why each of these matches its whole action id and not the namespace.
        *
-       * It runs `/channelinfo`, which is on the command list above for
+       * Info runs `/channelinfo`, which is on the command list above for
        * `/export`'s reason: refusing to tell somebody how their own server is
        * configured because a payment lapsed is not what the hard gate is for.
        * A button that did the same thing and was refused would make the
-       * exemption depend on which surface you reached it from. Every other
-       * button on the panel is a write and stays refused, which is why this
-       * matches the whole `info:` id rather than the namespace.
+       * exemption depend on which surface you reached it from.
        */
       if (interaction.customId.startsWith(`${CONTROL_PANEL_PREFIX}info:`)) return true;
       // Unhide, the button of the `/unhide` command above, for the same reason. Hide is
@@ -707,7 +708,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
           ),
         );
       case 'access':
-        return handleAccess(interaction, channelId);
+        return handleAccess(interaction, channelId, settings);
       case 'hide':
         return replyResult(
           interaction,
@@ -1491,6 +1492,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   async function handleAccess(
     interaction: ChatInputCommandInteraction,
     channelId: string | undefined,
+    settings: StoredSettings,
   ): Promise<void> {
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
@@ -1499,7 +1501,12 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       replyAccess(interaction, formatResult(result));
 
     if (sub === 'list') {
-      return answer(await run(guildId, 'cmd:access:list', () => deps.access.list(guildId, userId)));
+      // Open to a member who is denied the feature, as an undo direction, so the reply must
+      // not tell them their lists apply when they do not.
+      const inert = await listsInertFor(interaction, settings);
+      return answer(
+        await run(guildId, 'cmd:access:list', () => deps.access.list(guildId, userId, { inert })),
+      );
     }
     if (sub === 'clear') {
       // Client input even though Discord offers choices: anything else empties both.
@@ -2075,6 +2082,32 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     } catch (err) {
       deps.logger.warn({ err, guildId, feature }, 'could not check a restriction, allowing it');
       return null;
+    }
+  }
+
+  /**
+   * Whether the caller is denied Saved lists, so what they saved applies to nothing (the
+   * rule every place that applies a list asks, see `savedListsInert`), for the one reply
+   * that would otherwise say it does. Not a refusal, so it logs nothing as one. Fails open,
+   * like the guard, and is off while `command_access.disabled` is on, when nobody's lists
+   * are inert.
+   */
+  async function listsInertFor(
+    interaction: Interaction,
+    settings: StoredSettings,
+  ): Promise<boolean> {
+    const guildId = interaction.guildId;
+    try {
+      if (guildId === null) return false;
+      const inert = savedListsInert(readCommandAccess(settings ?? {}, guildId), {
+        userId: interaction.user.id,
+        roleIds: callerRoleIds(interaction),
+        canManage: callerCanManage(interaction),
+      });
+      return inert && !(await deps.commandAccessDisabled?.());
+    } catch (err) {
+      deps.logger.warn({ err, guildId }, 'could not check a restriction for a list, allowing it');
+      return false;
     }
   }
 

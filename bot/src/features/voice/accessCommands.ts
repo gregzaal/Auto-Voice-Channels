@@ -152,10 +152,18 @@ export class AccessCommands {
     });
   }
 
-  /** `/access list`: both lists, as the member sees them. Reads nothing from Discord. */
-  async list(guildId: string, ownerId: string): Promise<CommandResult> {
+  /**
+   * `/access list`: both lists, as the member sees them. Reads nothing from Discord.
+   * `inert` is for a member who is denied Saved lists, which only the interaction layer
+   * can say (it holds who they are), and which changes what the reply may claim.
+   */
+  async list(
+    guildId: string,
+    ownerId: string,
+    opts: { inert?: boolean } = {},
+  ): Promise<CommandResult> {
     return this.guarded('list', guildId, ownerId, async () =>
-      ok(listMessage(await this.deps.lists.get(guildId, ownerId))),
+      ok(listMessage(await this.deps.lists.get(guildId, ownerId), opts)),
     );
   }
 

@@ -124,7 +124,7 @@ export const FEATURE_COVERS: Record<CommandFeature, string> = {
     'the /name command, the Name button, the template editor for their own room and the voice status',
   transfer: 'the /transfer command and the Transfer button',
   access:
-    'the /access trust, block and admit commands and the Always allow button on a join request. Removing, clearing and listing stay open to everyone',
+    'the /access trust, block and admit commands and the Always allow button on a join request. The lists they have already saved are kept but stop applying to their rooms, and within a few minutes their entries come off the rooms they have now, so anyone they blocked can join again. Removing, clearing and listing stay open to everyone',
   nick: 'the /nick command, and a saved nickname showing in a room name. Removing a nickname stays open to everyone, and a room name that already shows one changes the next time the room refreshes its name',
 };
 
@@ -361,7 +361,11 @@ export function mayUse(
  *
  * A restricted feature is inert for a denied member, saved data included, and this is the
  * one rule every place that applies a saved list asks (a room being made, a sweep, a
- * lock or a hide, a knock, the card's Block), so they cannot disagree. Inert is not
+ * lock or a hide, a knock, the card's Block), so they apply the same rule. They can still
+ * differ in `standing`: a room being made has the member's own snapshot, which judges
+ * Manage Channels guild-wide, and every place after it reads the cache, which judges it
+ * against the room. A member who holds Manage Channels only through a category or room
+ * overwrite is therefore inert at creation and not from the first sweep. Inert is not
  * erased: the rows stay, and the lists apply again the moment the rule goes.
  *
  * **`standing` is who the list's owner is right now, and `undefined` means it could not

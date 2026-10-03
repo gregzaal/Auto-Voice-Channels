@@ -1568,7 +1568,7 @@ describe('registerInteractionHandler (/access)', () => {
     it("/access list reads the caller's own lists, with no member option", async () => {
       const e = accessEnv();
       await run(e, { subcommand: 'list' });
-      expect(e.access.list).toHaveBeenCalledWith('g1', KAY);
+      expect(e.access.list).toHaveBeenCalledWith('g1', KAY, { inert: false });
     });
 
     it.each([
@@ -1660,6 +1660,43 @@ describe('registerInteractionHandler (/access)', () => {
         expect(f.interaction.deferReply).toHaveBeenCalled();
       },
     );
+
+    /**
+     * `/access list` stays open to them, and its reply says their lists apply to their rooms,
+     * which is false while the rule stands. The interaction layer is the only place that knows
+     * who they are, so it says so, and says it only for a member the rule reaches.
+     */
+    it('tells /access list a member denied Saved lists has lists that apply to nothing', async () => {
+      const e = accessEnv(DENY);
+      await run(e, { subcommand: 'list' });
+      expect(e.access.list).toHaveBeenCalledWith('g1', KAY, { inert: true });
+    });
+
+    it.each([
+      ['a rule that names somebody else', { access: { users: [BOB] } }, {}],
+      ['a member who can manage channels', DENY, { manageChannels: true }],
+      ['no rules at all', undefined, {}],
+    ] as const)('does not for %s', async (_what, rules, opts) => {
+      const e = accessEnv(rules);
+      await run(e, { subcommand: 'list', ...opts });
+      expect(e.access.list).toHaveBeenCalledWith('g1', KAY, { inert: false });
+    });
+
+    it('does not while enforcement is paused, which withdraws every rule', async () => {
+      const e = accessEnv(DENY, { commandAccessDisabled: () => Promise.resolve(true) });
+      await run(e, { subcommand: 'list' });
+      expect(e.access.list).toHaveBeenCalledWith('g1', KAY, { inert: false });
+    });
+
+    it('is told by role too, in both shapes the member arrives in', async () => {
+      const ROLE = '333333333333333333';
+      for (const shape of ['guildMember', 'raw'] as const) {
+        const e = accessEnv({ access: { roles: [ROLE] } });
+        await run(e, { subcommand: 'list', memberRoles: [ROLE], memberShape: shape });
+        expect(e.access.list, shape).toHaveBeenCalledWith('g1', KAY, { inert: true });
+        dispose?.();
+      }
+    });
 
     it('lets a member through who is not denied, and one who can manage channels', async () => {
       const e = accessEnv({ access: { users: [BOB] } });
@@ -3710,9 +3747,11 @@ describe('registerInteractionHandler (room control panel)', () => {
    * `/channelinfo` is on the hard gate's exemption list because refusing to
    * tell somebody how their own server is configured over a lapsed payment is
    * not what the gate is for. The button does the same thing, so it is exempt
-   * too, and every OTHER panel button is a write and stays refused.
+   * too. Unhide and Unlock are exempt as the buttons of the two commands that only open
+   * a room (tested with `/public`, further up), and every OTHER panel button is a write
+   * and stays refused (the Lock button, in a test just below).
    */
-  it('lets Info through in an expired guild, and nothing else on the panel', async () => {
+  it('lets Info through in an expired guild', async () => {
     const env = setup({
       selfHosted: false,
       guilds: { get: vi.fn().mockResolvedValue({ authStatus: 'expired' }) } as never,

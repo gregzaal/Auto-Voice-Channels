@@ -119,6 +119,20 @@ describe('the feature list', () => {
   });
 
   /**
+   * A rule on Saved lists is more than the commands: it makes what the member already saved
+   * apply to nothing (see `savedListsInert`), and the sweep takes their entries off their
+   * live rooms, so a person they blocked can join again. An admin told only about the commands
+   * would not expect that, and it is the part that changes who is let into the rooms.
+   */
+  it('says Saved lists also stops what the member has already saved from applying, and what that lets in', () => {
+    expect(FEATURE_COVERS.access).toContain(
+      'already saved are kept but stop applying to their rooms',
+    );
+    expect(FEATURE_COVERS.access).toContain('within a few minutes their entries come off');
+    expect(FEATURE_COVERS.access).toContain('anyone they blocked can join again');
+  });
+
+  /**
    * A feature is more than one door, and the reply has to say which. A saved
    * nickname is the second door of Nickname: it stops showing in room names, and
    * for a role rule that lands at the next re-render, which an admin cannot see.

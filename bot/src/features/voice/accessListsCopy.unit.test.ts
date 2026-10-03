@@ -41,6 +41,8 @@ function everyReply(): string[] {
     ACCESS_REFUSALS.failed,
     listMessage({ trusted: [], blocked: [] }),
     listMessage({ trusted: ids(25), blocked: ids(25, 100) }),
+    listMessage({ trusted: [], blocked: [] }, { inert: true }),
+    listMessage({ trusted: ids(25), blocked: ids(25, 100) }, { inert: true }),
     removedMessage(ID, 'trusted'),
     removedMessage(ID, 'blocked'),
     removedMessage(ID, null),
@@ -194,6 +196,25 @@ describe('listMessage', () => {
     expect(text).toContain('Administrators can always enter');
     expect(text).toContain('`/access remove`');
     expect(text).toContain('`/access clear`');
+  });
+
+  /**
+   * A member an admin has denied Saved lists can still read their lists, and the sentence
+   * that says they apply to their rooms is contradicted by the code, so it is replaced, and
+   * says only that an admin turned it off for them, never why or who else.
+   */
+  it('says, for a member denied Saved lists, that the lists apply to nothing and are kept', () => {
+    const text = listMessage({ trusted: ['111'], blocked: ['222'] }, { inert: true });
+    expect(text).toContain('**Trusted** (1 of 25): <@111>');
+    expect(text).toContain('**Blocked** (1 of 25): <@222>');
+    expect(text).toContain('A server admin has turned off **Saved lists** for you');
+    expect(text).toContain('apply to none of your rooms right now');
+    expect(text).toContain('They are kept, and apply again if it is turned back on');
+    expect(text).toContain('`/access remove`');
+    expect(text).toContain('`/access clear`');
+    // The sentences that promise what the lists do are the ones that are not true for them.
+    expect(text).not.toContain('They apply to the rooms you create');
+    expect(text).not.toContain('Blocked people cannot join');
   });
 });
 

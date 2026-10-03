@@ -93,16 +93,28 @@ const mentions = (ids: readonly string[]): string =>
 /**
  * The `/access list` reply: both lists, with how full each is, and what a saved list
  * does. The caps are 25 and 25, so the longest reply is about 1,300 characters.
+ *
+ * `inert` is a member an admin has turned Saved lists off for, whose lists apply to nothing
+ * until it is turned back on. They can still read them, and the sentence that says the lists
+ * apply to their rooms would be false, so it is replaced and not added to.
  */
-export function listMessage(lists: { trusted: string[]; blocked: string[] }): string {
+export function listMessage(
+  lists: { trusted: string[]; blocked: string[] },
+  opts: { inert?: boolean } = {},
+): string {
   return [
     '**Your saved lists in this server**',
     `**Trusted** (${lists.trusted.length} of ${LIMITS.trusted}): ${mentions(lists.trusted)}`,
     `**Blocked** (${lists.blocked.length} of ${LIMITS.blocked}): ${mentions(lists.blocked)}`,
     '',
-    'They apply to the rooms you create in this server. Trusted people can join your locked and ' +
-      'hidden rooms. Blocked people cannot join any room you create, though Administrators can ' +
-      'always enter. Take someone off with `/access remove`, or empty a list with `/access clear`.',
+    opts.inert
+      ? 'A server admin has turned off **Saved lists** for you, so these apply to none of your ' +
+        'rooms right now. They are kept, and apply again if it is turned back on. Take someone ' +
+        'off with `/access remove`, or empty a list with `/access clear`.'
+      : 'They apply to the rooms you create in this server. Trusted people can join your locked ' +
+        'and hidden rooms. Blocked people cannot join any room you create, though Administrators ' +
+        'can always enter. Take someone off with `/access remove`, or empty a list with ' +
+        '`/access clear`.',
   ].join('\n');
 }
 
