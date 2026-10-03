@@ -14,6 +14,13 @@ export interface JoinRequestsDeps {
    * act on. Omitted → all guilds pass (tests, self-host).
    */
   entitled?: (guildId: string) => boolean;
+  /**
+   * Runs guild work through the guild's queue, which is where it is ordered with the
+   * rest of that guild's changes and counted by its breaker. The knock check can move
+   * a member out of voice, so it goes through here when this is given. Omitted (tests)
+   * it runs directly.
+   */
+  run?: <T>(guildId: string, name: string, task: () => Promise<T>) => Promise<T>;
 }
 
 /**
@@ -45,7 +52,19 @@ export function registerJoinRequests(deps: JoinRequestsDeps): () => void {
 
     // Somebody the owner has blocked, or a vote removed, gets no card: they are asked
     // to leave the lobby and the owner never hears about it. Before anything is posted.
-    if (await deps.privacy.refuseBlockedKnock(ctx, requesterId)) return;
+    // The check itself never throws, so a rejection is the guild's queue refusing the work
+    // (a tripped breaker, a drain). It is a safeguard and a card the owner did not need is
+    // better than none, so the knock goes through as it did before the check existed.
+    try {
+      const check = (): Promise<boolean> => deps.privacy.refuseBlockedKnock(ctx, requesterId);
+      const refused = deps.run ? await deps.run(ctx.guildId, 'join:knock', check) : await check();
+      if (refused) return;
+    } catch (err) {
+      deps.logger.debug(
+        { err, guildId: ctx.guildId, joinChannelId },
+        'knock check was not run, posting the card',
+      );
+    }
 
     // Post the request into the private channel's OWN integrated text chat: only
     // the owner (who is inside) and admitted members can see it — outsiders and

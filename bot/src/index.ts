@@ -13,7 +13,6 @@ import {
   JoinChannelRepository,
   loadConfig,
   ManagedChannelRepository,
-  MemberAccessListRepository,
   MemberPoolGuildRepository,
   MemberPoolRepository,
   METRICS,
@@ -358,8 +357,6 @@ async function main(): Promise<void> {
   const secondaries = new SecondaryChannelRepository(db, config.fleet);
   const managed = new ManagedChannelRepository(db, config.fleet);
   const joinChannelsRepo = new JoinChannelRepository(db, config.fleet);
-  // No fleet: an owner's saved lists are customer data every fleet reads.
-  const memberAccessListsRepo = new MemberAccessListRepository(db);
   const companionsRepo = new CompanionChannelRepository(db, config.fleet);
   const guildsRepo = new GuildRepository(db);
   const presenceRepo = new GuildFleetPresenceRepository(db, config.fleet ?? DEFAULT_FLEET);
@@ -479,7 +476,11 @@ async function main(): Promise<void> {
       voiceFeature.rerenderSecondary(gid, cid),
     // Only known once the client has logged in, which is long before a command runs.
     botUserId: () => client.user?.id,
-    memberAccessLists: memberAccessListsRepo,
+    // `memberAccessLists` is deliberately not passed yet. With it, the knock card's
+    // Block would start saving to an owner's list that nothing can show or erase
+    // (there is no `/access`), before the Privacy copy and the erasure SQL for that data
+    // are live. Whoever adds `/access` constructs `MemberAccessListRepository` (no fleet:
+    // an owner's lists are customer data every fleet reads) and passes it here with them.
     // The same setting companion text reads: a hidden room shows to this role too.
     moderatorRoleId: async (gid: string) =>
       readTextChannelRole((await settingsCache.ensure(gid)).settings),
@@ -657,6 +658,9 @@ async function main(): Promise<void> {
     privacy,
     logger,
     entitled: (guildId) => entitlementGate.check(guildId),
+    // The knock check can move a member out of voice, so it is ordered with the rest
+    // of the guild's work and counted by its breaker like every other write.
+    run: (guildId, name, task) => dispatcher.dispatch(guildId, name, task),
   });
 
   // Command / interaction surface (slash commands + /settings panel).

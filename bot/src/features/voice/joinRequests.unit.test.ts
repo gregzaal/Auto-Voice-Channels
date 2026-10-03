@@ -24,6 +24,7 @@ function setup(
     blocked?: boolean | (() => Promise<boolean>);
     entitled?: (guildId: string) => boolean;
     logger?: Logger;
+    run?: <T>(guildId: string, name: string, task: () => Promise<T>) => Promise<T>;
   } = {},
 ) {
   const sent: { channelId: string; payload: unknown }[] = [];
@@ -54,6 +55,7 @@ function setup(
     privacy: privacy as unknown as PrivacyService,
     logger: over.logger ?? fakeLogger(),
     ...(over.entitled ? { entitled: over.entitled } : {}),
+    ...(over.run ? { run: over.run } : {}),
   });
   /** A member moving into `channelId`, then everything the listener started finishing. */
   const knock = async (memberId: string, channelId: string = JOIN) => {
@@ -129,12 +131,49 @@ describe('registerJoinRequests', () => {
   it('contains an error and posts nothing rather than throwing into the voice listener', async () => {
     const error = vi.fn();
     const logger = { ...fakeLogger(), error } as unknown as Logger;
-    const { sent, knock } = setup({ logger, blocked: () => Promise.reject(new Error('db down')) });
+    const { sent, privacy, knock } = setup({ logger });
+    privacy.getJoinContext.mockRejectedValue(new Error('db down'));
 
     await knock('bob');
 
     expect(error).toHaveBeenCalledTimes(1);
     expect(sent).toEqual([]);
+  });
+
+  /**
+   * The check can move a member out of voice, so it is guild work: ordered with the
+   * rest of the guild's changes, and counted by its breaker.
+   */
+  it('runs the knock check through the guild queue, by guild', async () => {
+    const queued: { guildId: string; name: string }[] = [];
+    const { sent, knock } = setup({
+      blocked: true,
+      run: (guildId, name, task) => {
+        queued.push({ guildId, name });
+        return task();
+      },
+    });
+
+    await knock('mallory');
+
+    expect(queued).toEqual([{ guildId: GUILD, name: 'join:knock' }]);
+    // The answer still decides whether a card is posted.
+    expect(sent).toEqual([]);
+  });
+
+  /**
+   * The check never throws, so a rejection is the queue refusing the work (a tripped
+   * breaker, a drain). The check is a safeguard: the knock goes through as it always did.
+   */
+  it('posts the card when the guild queue refuses the check', async () => {
+    const { sent, privacy, knock } = setup({
+      run: () => Promise.reject(new Error('circuit open')),
+    });
+
+    await knock('bob');
+
+    expect(privacy.refuseBlockedKnock).not.toHaveBeenCalled();
+    expect(sent.map((s) => s.channelId)).toEqual([ROOM, JOIN]);
   });
 
   it('stops listening when disposed', async () => {
