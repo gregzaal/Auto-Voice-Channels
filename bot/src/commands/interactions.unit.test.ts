@@ -6381,3 +6381,309 @@ describe('registerInteractionHandler (/alwayshidden)', () => {
     expect(names).toContain('cmd:alwayshidden');
   });
 });
+
+/**
+ * The creator channel editor's two buttons for remembered room settings: the switch, and
+ * "Clear saved settings". The writes are the settings service's, so what is pinned here is the
+ * router: which id asks for what, who may press it, what a lapsed server gets, and that the
+ * panel is edited in place with what was stored and not stacked or left stale.
+ */
+describe('registerInteractionHandler (remembered room settings)', () => {
+  let dispose: (() => void) | undefined;
+  afterEach(() => dispose?.());
+
+  const CHANNEL = 'creator-9';
+  const IDS = ['remember_on', 'remember_off', 'forget'] as const;
+  const idFor = (action: string, scope: 'primary' | 'channel' = 'primary') =>
+    editorId(action, scope, 'name', CHANNEL);
+
+  const primaryState = (over: Record<string, unknown> = {}) => ({
+    found: true,
+    scope: 'primary',
+    name: { effectiveTemplate: 'T', preview: 'T' },
+    status: { effectiveTemplate: 'S', preview: 'S' },
+    ownerId: null,
+    primaryChannelId: CHANNEL,
+    rememberPrefs: false,
+    savedSettings: 0,
+    ...over,
+  });
+
+  function envWith(
+    opts: {
+      set?: { ok: boolean; message: string };
+      clear?: { ok: boolean; message: string };
+      state?: Record<string, unknown>;
+      over?: Partial<InteractionDeps>;
+    } = {},
+  ) {
+    const setRememberPrefs = vi
+      .fn()
+      .mockResolvedValue(opts.set ?? { ok: true, message: 'Remembering is on.' });
+    const clearRememberedPrefs = vi
+      .fn()
+      .mockResolvedValue(opts.clear ?? { ok: true, message: 'Removed 2 members.' });
+    const getEditorState = vi.fn().mockResolvedValue(opts.state ?? primaryState());
+    const env = setup({
+      settings: { setRememberPrefs, clearRememberedPrefs } as never,
+      feature: { getEditorState } as never,
+      ...opts.over,
+    });
+    dispose = env.dispose;
+    return { env, setRememberPrefs, clearRememberedPrefs, getEditorState };
+  }
+
+  async function press(
+    env: ReturnType<typeof setup>,
+    customId: string,
+    over: Partial<FakeInteractionOpts> = {},
+  ) {
+    const fake = fakeInteraction({ kind: 'button', customId, manageChannels: true, ...over });
+    env.client.emit('interactionCreate', fake.interaction);
+    await flush();
+    return fake;
+  }
+
+  const labelsOf = (payload: {
+    components: { toJSON: () => { components: { label: string }[] } }[];
+  }) => payload.components.map((row) => row.toJSON().components.map((b) => b.label));
+
+  it.each([
+    ['remember_on', true],
+    ['remember_off', false],
+  ] as const)('%s asks the service for exactly that state', async (action, enabled) => {
+    const { env, setRememberPrefs, clearRememberedPrefs } = envWith();
+    await press(env, idFor(action));
+    expect(setRememberPrefs).toHaveBeenCalledWith('g1', CHANNEL, enabled);
+    expect(clearRememberedPrefs).not.toHaveBeenCalled();
+  });
+
+  it('forget clears the creator channel and does not touch the switch', async () => {
+    const { env, setRememberPrefs, clearRememberedPrefs } = envWith();
+    await press(env, idFor('forget'));
+    expect(clearRememberedPrefs).toHaveBeenCalledWith('g1', CHANNEL);
+    expect(setRememberPrefs).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The target is in the id, not decided at click time, so a click on a stale panel, a
+   * double click and a retry all end in what the click asked for.
+   */
+  it('is idempotent: pressing the same id twice asks for the same state twice', async () => {
+    const { env, setRememberPrefs } = envWith();
+    await press(env, idFor('remember_on'));
+    await press(env, idFor('remember_on'));
+    expect(setRememberPrefs.mock.calls).toEqual([
+      ['g1', CHANNEL, true],
+      ['g1', CHANNEL, true],
+    ]);
+  });
+
+  /** Edited in place: acknowledged first, then the SAME message is edited, never a new one. */
+  it.each(IDS)(
+    '%s defers, then edits the panel in place with the service reply as its note',
+    async (action) => {
+      const { env, getEditorState } = envWith();
+      const fake = await press(env, idFor(action));
+
+      expect(fake.interaction.deferUpdate).toHaveBeenCalledTimes(1);
+      expect(fake.editReply).toHaveBeenCalledTimes(1);
+      expect(fake.followUp).not.toHaveBeenCalled();
+      expect(fake.reply).not.toHaveBeenCalled();
+      expect(fake.interaction.update).not.toHaveBeenCalled();
+      // The panel is re-read after the write, so it shows what is stored.
+      expect(getEditorState).toHaveBeenCalledWith('primary', 'g1', CHANNEL);
+
+      const payload = JSON.stringify(fake.editReply.mock.calls[0]?.[0]);
+      expect(payload).toContain(action === 'forget' ? 'Removed 2 members.' : 'Remembering is on.');
+      expect(payload).toContain('Saved');
+      // And it is the editor again, not a bare confirmation.
+      expect(payload).toContain('Edit name template');
+    },
+  );
+
+  it('draws the switch from what is stored, not from what the click asked for', async () => {
+    const { env } = envWith({ state: primaryState({ rememberPrefs: true, savedSettings: 4 }) });
+    const fake = await press(env, idFor('remember_on'));
+    const payload = fake.editReply.mock.calls[0]?.[0];
+    expect(labelsOf(payload)[2]).toEqual(['Remembered settings: on', 'Clear saved settings']);
+    expect(JSON.stringify(payload)).toContain('4 members have saved settings.');
+    expect(JSON.stringify(payload)).toContain(idFor('remember_off'));
+  });
+
+  it('keeps the editor at three rows after every press', async () => {
+    const { env } = envWith();
+    for (const action of IDS) {
+      const fake = await press(env, idFor(action));
+      expect(fake.editReply.mock.calls[0]?.[0].components).toHaveLength(3);
+    }
+  });
+
+  describe('who may press them', () => {
+    it.each(IDS)(
+      'refuses %s from a member without Manage Channels, and writes nothing',
+      async (action) => {
+        const { env, setRememberPrefs, clearRememberedPrefs, getEditorState } = envWith();
+        const fake = await press(env, idFor(action), { manageChannels: false });
+
+        expect(fake.reply).toHaveBeenCalledWith(
+          expect.objectContaining({ content: 'You need the Manage Channels permission.' }),
+        );
+        expect(setRememberPrefs).not.toHaveBeenCalled();
+        expect(clearRememberedPrefs).not.toHaveBeenCalled();
+        expect(getEditorState).not.toHaveBeenCalled();
+        // Refused before it is acknowledged, so the panel is not left spinning.
+        expect(fake.interaction.deferUpdate).not.toHaveBeenCalled();
+      },
+    );
+
+    /** No `/restrict` rule can stop somebody who can manage channels, so none is asked. */
+    it('is not subject to a /restrict rule, which no rule can apply to Manage Channels', async () => {
+      const { env, setRememberPrefs } = envWith({
+        over: {
+          guilds: {
+            get: vi.fn().mockResolvedValue({
+              authStatus: 'active',
+              settings: { command_access: { rename: { users: ['u1'] } } },
+            }),
+          } as never,
+        },
+      });
+      await press(env, idFor('remember_on'));
+      expect(setRememberPrefs).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  /**
+   * Both are writes, so a server that has lapsed gets the reactivation notice and nothing is
+   * touched. Nothing lists an `avc:tpl:` button as allowed while expired, so an editor that was
+   * already open when the server lapsed cannot keep either working.
+   */
+  describe('in a hard-gated guild', () => {
+    it.each(IDS)('refuses %s with the reactivation notice and writes nothing', async (action) => {
+      const { env, setRememberPrefs, clearRememberedPrefs, getEditorState } = envWith({
+        over: {
+          selfHosted: false,
+          guilds: { get: vi.fn().mockResolvedValue({ authStatus: 'expired' }) } as never,
+        },
+      });
+      const fake = await press(env, idFor(action));
+
+      expect(JSON.stringify(fake.reply.mock.calls[0]?.[0])).toContain('auto-voice.io');
+      expect(setRememberPrefs).not.toHaveBeenCalled();
+      expect(clearRememberedPrefs).not.toHaveBeenCalled();
+      expect(getEditorState).not.toHaveBeenCalled();
+      expect(fake.interaction.deferUpdate).not.toHaveBeenCalled();
+    });
+
+    /** The same ids, from an active server, work: the refusal above is the gate and nothing else. */
+    it('lets the same ids through for an entitled server', async () => {
+      const { env, setRememberPrefs } = envWith({
+        over: {
+          selfHosted: false,
+          guilds: { get: vi.fn().mockResolvedValue({ authStatus: 'active' }) } as never,
+        },
+      });
+      await press(env, idFor('remember_on'));
+      expect(setRememberPrefs).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('when something is wrong', () => {
+    it.each(IDS)(
+      'answers a refused %s privately and leaves the panel as it was',
+      async (action) => {
+        const { env } = envWith({
+          set: { ok: false, message: 'That creator channel no longer exists.' },
+          clear: { ok: false, message: 'That creator channel no longer exists.' },
+        });
+        const fake = await press(env, idFor(action));
+
+        expect(fake.followUp).toHaveBeenCalledWith({
+          content: '⚠️ That creator channel no longer exists.',
+          ephemeral: true,
+        });
+        expect(fake.editReply).not.toHaveBeenCalled();
+      },
+    );
+
+    it('says so, and edits nothing, when the creator channel is gone by the time it re-reads', async () => {
+      const { env } = envWith({ state: { found: false, scope: 'primary' } });
+      const fake = await press(env, idFor('remember_on'));
+      expect(fake.followUp).toHaveBeenCalledWith({
+        content: 'That channel is no longer bot-managed.',
+        ephemeral: true,
+      });
+      expect(fake.editReply).not.toHaveBeenCalled();
+    });
+
+    /** Only a creator channel's editor draws these, so any other scope is not from this build. */
+    it.each(IDS)(
+      'treats %s under a room scope as out of date and writes nothing',
+      async (action) => {
+        const { env, setRememberPrefs, clearRememberedPrefs } = envWith();
+        const fake = await press(env, idFor(action, 'channel'));
+        expect(JSON.stringify(fake.reply.mock.calls[0]?.[0])).toContain('out of date');
+        expect(setRememberPrefs).not.toHaveBeenCalled();
+        expect(clearRememberedPrefs).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  /** Routed through the guild's queue like every other settings write, so one guild's breaker is its own. */
+  it('runs through the guild dispatcher under its own names', async () => {
+    const names: string[] = [];
+    const { env } = envWith({
+      over: {
+        dispatcher: {
+          dispatch: (_g: string, name: string, task: () => Promise<unknown>) => {
+            names.push(name);
+            return task();
+          },
+        } as never,
+      },
+    });
+    await press(env, idFor('remember_on'));
+    await press(env, idFor('forget'));
+    expect(names).toContain('editor:primary:remember_on');
+    expect(names).toContain('editor:primary:forget');
+    expect(names).toContain('editor:refresh');
+  });
+
+  /** What the admin reads, rendered, held to the copy rules like every other reply. */
+  it('answers in words that keep to the copy rules', async () => {
+    const real = new GuildSettingsService({
+      guilds: {} as never,
+      autoChannels: {
+        get: vi.fn().mockResolvedValue({ channelId: CHANNEL, guildId: 'g1', template: {} }),
+        setRememberPrefs: vi.fn().mockResolvedValue({ channelId: CHANNEL }),
+      } as never,
+      secondaries: { get: vi.fn().mockResolvedValue(undefined) } as never,
+      actions: {} as never,
+      logger: fakeLogger(),
+      memberPrefs: { clearByPrimary: vi.fn().mockResolvedValue(3) } as never,
+    });
+    const { env } = envWith({ over: { settings: real as never } });
+    // Only what a member can read: a custom id says `primary` for the scope and is never shown.
+    const visible = (payload: {
+      embeds: { description?: string; fields: { name: string; value: string }[] }[];
+      components: { toJSON: () => { components: { label: string }[] } }[];
+    }): string[] => [
+      payload.embeds[0]!.description ?? '',
+      ...payload.embeds[0]!.fields.flatMap((f) => [f.name, f.value]),
+      ...payload.components.flatMap((row) => row.toJSON().components.map((b) => b.label)),
+    ];
+    const lines: string[] = [];
+    for (const action of IDS) {
+      const fake = await press(env, idFor(action));
+      lines.push(...visible(fake.editReply.mock.calls[0]?.[0]));
+    }
+    const text = lines.join('\n');
+    expect(text).toContain('Privacy page');
+    expect(text).toContain('Removed the saved settings of 3 members');
+    expect(text).not.toMatch(/[—–]/);
+    expect(text).not.toMatch(/[‘’“”]/);
+    expect(text).not.toMatch(/;/);
+    expect(text.toLowerCase()).not.toMatch(/primary|secondary/);
+  });
+});

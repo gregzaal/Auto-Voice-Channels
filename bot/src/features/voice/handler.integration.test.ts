@@ -4,6 +4,7 @@ import {
   GuildRepository,
   JoinChannelRepository,
   ManagedChannelRepository,
+  MemberRoomPrefsRepository,
   SecondaryChannelRepository,
   db,
   startModeOf,
@@ -22,7 +23,7 @@ import {
 import { RecordingVoiceActions } from './actions.js';
 import { CompanionTextService } from './companionText.js';
 import { ControlPanelPoster } from './controlPanelPoster.js';
-import { VoiceFeature } from './handler.js';
+import { VoiceFeature, type VoiceFeatureDeps } from './handler.js';
 import { renderChannelName } from './nameTemplate.js';
 import { PermissionProblemTracker } from './permissionProblems.js';
 import { PrivacyService } from './privacy.js';
@@ -1538,6 +1539,179 @@ describe('VoiceFeature (integration)', () => {
 
   it('/name is NOT given the creator-channel fallback: it edits a secondary override', async () => {
     expect((await feature.getEditorState('channel', GUILD, PRIMARY)).found).toBe(false);
+  });
+
+  /**
+   * What the creator channel editor and `/channelinfo` say about remembered room settings: the
+   * switch, and how many members have something saved. The count is a read of its own, so these
+   * pin when it is paid for and that it can never cost an admin their panel.
+   */
+  describe('remembered room settings readouts', () => {
+    let prefs: MemberRoomPrefsRepository;
+    let withPrefs: VoiceFeature;
+
+    const featureWith = (memberPrefs: VoiceFeatureDeps['memberPrefs'], logger = fakeLogger()) =>
+      new VoiceFeature({
+        autoChannels,
+        secondaries,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger,
+        ...(memberPrefs ? { memberPrefs } : {}),
+      });
+
+    beforeEach(async () => {
+      await env.handle.db.delete(db.schema.memberRoomPrefs);
+      prefs = new MemberRoomPrefsRepository(env.handle.db);
+      withPrefs = featureWith(prefs);
+      await secondaries.create({
+        channelId: 'rm-room',
+        guildId: GUILD,
+        primaryChannelId: PRIMARY,
+        ownerId: 'alice',
+        state: { index: 0 },
+      });
+      voice.put('rm-room', member('alice'));
+    });
+
+    const remember = (on: boolean) =>
+      autoChannels.upsert(GUILD, PRIMARY, {
+        name: '## [@@game_name@@]',
+        ...(on ? { rememberPrefs: true } : {}),
+      });
+
+    describe('the creator channel editor', () => {
+      it('says it does not remember, and that nobody has saved anything, by default', async () => {
+        const state = await withPrefs.getEditorState('primary', GUILD, PRIMARY);
+        expect(state).toMatchObject({ found: true, rememberPrefs: false, savedSettings: 0 });
+      });
+
+      it('says it remembers, and counts the members who have something saved', async () => {
+        await remember(true);
+        await prefs.saveName(GUILD, PRIMARY, 'alice', 'den');
+        await prefs.saveLimit(GUILD, PRIMARY, 'bob', 4);
+        const state = await withPrefs.getEditorState('primary', GUILD, PRIMARY);
+        expect(state).toMatchObject({ rememberPrefs: true, savedSettings: 2 });
+      });
+
+      /** Rows are kept when it is turned off, and the editor's Clear acts on them. */
+      it('still counts what is kept while it is off', async () => {
+        await remember(true);
+        await prefs.saveName(GUILD, PRIMARY, 'alice', 'den');
+        await remember(false);
+        const state = await withPrefs.getEditorState('primary', GUILD, PRIMARY);
+        expect(state).toMatchObject({ rememberPrefs: false, savedSettings: 1 });
+      });
+
+      it('reads the same through one of the rooms, which is how /template is usually reached', async () => {
+        await remember(true);
+        await prefs.saveName(GUILD, PRIMARY, 'alice', 'den');
+        const state = await withPrefs.getEditorState('primary', GUILD, 'rm-room');
+        expect(state).toMatchObject({
+          rememberPrefs: true,
+          savedSettings: 1,
+          primaryChannelId: PRIMARY,
+        });
+      });
+
+      it('counts this server only', async () => {
+        await remember(true);
+        await prefs.saveName(GUILD, PRIMARY, 'alice', 'den');
+        await env.handle.db.insert(db.schema.memberRoomPrefs).values({
+          primaryChannelId: PRIMARY,
+          userId: 'mallory',
+          guildId: 'another-guild',
+          nameTemplate: 'not yours',
+        });
+        const state = await withPrefs.getEditorState('primary', GUILD, PRIMARY);
+        expect(state.savedSettings).toBe(1);
+      });
+
+      /** A room's own editor has no switch to show, so it carries neither field. */
+      it('says nothing about it for a room editor', async () => {
+        await remember(true);
+        const state = await withPrefs.getEditorState('channel', GUILD, 'rm-room');
+        expect(state.found).toBe(true);
+        expect(state).not.toHaveProperty('rememberPrefs');
+        expect(state).not.toHaveProperty('savedSettings');
+      });
+
+      it('leaves the count out, and still reports the switch, when it cannot count', async () => {
+        await remember(true);
+        const noPrefs = featureWith(undefined);
+        const state = await noPrefs.getEditorState('primary', GUILD, PRIMARY);
+        expect(state).toMatchObject({ found: true, rememberPrefs: true });
+        expect(state).not.toHaveProperty('savedSettings');
+      });
+
+      /**
+       * A number on an admin's panel is not worth the panel. It fails open: the count is left
+       * out, which the panel shows as no count and never as nobody, and what is logged is ids.
+       */
+      it('fails open when the count throws, and logs ids and never anything typed', async () => {
+        await remember(true);
+        const warn = vi.fn();
+        const failing = featureWith(
+          { countByPrimary: () => Promise.reject(new Error('db down')) },
+          { ...fakeLogger(), warn } as never,
+        );
+        const state = await failing.getEditorState('primary', GUILD, PRIMARY);
+        expect(state).toMatchObject({ found: true, rememberPrefs: true });
+        expect(state).not.toHaveProperty('savedSettings');
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(Object.keys(warn.mock.calls[0]![0] as object).sort()).toEqual([
+          'channelId',
+          'err',
+          'guildId',
+        ]);
+      });
+    });
+
+    describe('/channelinfo', () => {
+      it('says it does not remember, and does not count, for a creator channel that never turned it on', async () => {
+        const countByPrimary = vi.fn().mockResolvedValue(9);
+        const counting = featureWith({ countByPrimary });
+        const info = await counting.channelInfo(GUILD, PRIMARY);
+        expect(info.primary?.rememberPrefs).toBeUndefined();
+        expect(info.primary?.savedSettings).toBeUndefined();
+        // Not paid for: this is a command any member can run.
+        expect(countByPrimary).not.toHaveBeenCalled();
+        await counting.channelInfo(GUILD, 'rm-room');
+        expect(countByPrimary).not.toHaveBeenCalled();
+      });
+
+      it('counts the members with something saved, for the creator channel and for a room of it', async () => {
+        await remember(true);
+        await prefs.saveName(GUILD, PRIMARY, 'alice', 'den');
+        await prefs.savePrivacy(GUILD, PRIMARY, 'bob', 'hidden');
+
+        const creator = await withPrefs.channelInfo(GUILD, PRIMARY);
+        expect(creator.kind).toBe('creator');
+        expect(creator.primary).toMatchObject({ rememberPrefs: true, savedSettings: 2 });
+
+        const room = await withPrefs.channelInfo(GUILD, 'rm-room');
+        expect(room.kind).toBe('room');
+        expect(room.primary).toMatchObject({ rememberPrefs: true, savedSettings: 2 });
+      });
+
+      it('leaves the count out when it cannot be read, and still answers', async () => {
+        await remember(true);
+        const failing = featureWith({ countByPrimary: () => Promise.reject(new Error('db down')) });
+        const info = await failing.channelInfo(GUILD, PRIMARY);
+        expect(info.primary?.rememberPrefs).toBe(true);
+        expect(info.primary).not.toHaveProperty('savedSettings');
+        expect(info.kind).toBe('creator');
+      });
+
+      it('says it remembers without a count when this feature has no way to count', async () => {
+        await remember(true);
+        const info = await featureWith(undefined).channelInfo(GUILD, PRIMARY);
+        expect(info.primary?.rememberPrefs).toBe(true);
+        expect(info.primary).not.toHaveProperty('savedSettings');
+      });
+    });
   });
 
   it('rerenderSecondary sets the voice status from the status template, and clears it when idle', async () => {

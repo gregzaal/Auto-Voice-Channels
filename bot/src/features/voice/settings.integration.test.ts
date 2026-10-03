@@ -1,4 +1,10 @@
-import { AutoChannelRepository, GuildRepository, SecondaryChannelRepository, db } from '@avc/core';
+import {
+  AutoChannelRepository,
+  GuildRepository,
+  MemberRoomPrefsRepository,
+  SecondaryChannelRepository,
+  db,
+} from '@avc/core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { PgTestEnv } from '../../test/pgContainer.js';
 import { startPostgres } from '../../test/pgContainer.js';
@@ -40,6 +46,7 @@ describe('GuildSettingsService (integration)', () => {
   });
 
   beforeEach(async () => {
+    await env.handle.db.delete(db.schema.memberRoomPrefs);
     await env.handle.db.delete(db.schema.secondaryChannels);
     await env.handle.db.delete(db.schema.autoChannels);
     await env.handle.db.delete(db.schema.guilds);
@@ -672,6 +679,179 @@ describe('GuildSettingsService (integration)', () => {
 
       expect(res.ok).toBe(false);
       expect(res.message).not.toContain('hidden');
+    });
+  });
+
+  /**
+   * The creator channel editor's switch for remembered room settings, and its "Clear saved
+   * settings". The service resolves the creator channel from a room or from the creator channel
+   * itself, as every other `/template` write does, and the switch is a DB-side merge.
+   */
+  describe('remembered room settings (the editor switch and clear)', () => {
+    const PRIMARY = 'creator-remember';
+    const OTHER_GUILD = 'guild-settings-other';
+
+    function serviceWith(prefs: MemberRoomPrefsRepository | undefined) {
+      return new GuildSettingsService({
+        guilds,
+        autoChannels,
+        secondaries,
+        actions,
+        logger: fakeLogger(),
+        ...(prefs ? { memberPrefs: prefs } : {}),
+      });
+    }
+
+    /** A creator channel, and one room it made, so both ways of naming it can be tried. */
+    async function creatorWith(template: Record<string, unknown> = { name: 'Room ##' }) {
+      await autoChannels.upsert(GUILD, PRIMARY, template);
+      await secondaries.create({
+        channelId: 'sec-remember',
+        guildId: GUILD,
+        primaryChannelId: PRIMARY,
+        state: {},
+      });
+    }
+
+    const stored = async () => (await autoChannels.get(PRIMARY))!.template;
+
+    it('turns it on and off from the creator channel or from one of its rooms', async () => {
+      const prefs = new MemberRoomPrefsRepository(env.handle.db);
+      const service = serviceWith(prefs);
+      await creatorWith();
+
+      expect((await service.setRememberPrefs(GUILD, PRIMARY, true)).ok).toBe(true);
+      expect(await stored()).toEqual({ name: 'Room ##', rememberPrefs: true });
+
+      expect((await service.setRememberPrefs(GUILD, 'sec-remember', false)).ok).toBe(true);
+      expect(await stored()).toEqual({ name: 'Room ##' });
+    });
+
+    /** What an admin reads when they turn it on: what it does, and what it stores. */
+    it('says what turning it on and off does', async () => {
+      const service = serviceWith(undefined);
+      await creatorWith();
+
+      const on = await service.setRememberPrefs(GUILD, PRIMARY, true);
+      expect(on.message).toContain('name, size and privacy');
+      expect(on.message).toContain('server defaults');
+      expect(on.message).toContain('only remembered when the member set one themselves');
+      expect(on.message).toContain("each member's id and the names they choose");
+      expect(on.message).toContain('/privacy');
+
+      const off = await service.setRememberPrefs(GUILD, PRIMARY, false);
+      expect(off.message).toContain('kept and not used');
+    });
+
+    it('is idempotent: a repeat, a retry and a click on a stale panel end where the click asked', async () => {
+      const service = serviceWith(undefined);
+      await creatorWith();
+      for (let i = 0; i < 3; i++) await service.setRememberPrefs(GUILD, PRIMARY, true);
+      expect(await stored()).toEqual({ name: 'Room ##', rememberPrefs: true });
+      for (let i = 0; i < 3; i++) await service.setRememberPrefs(GUILD, PRIMARY, false);
+      expect(await stored()).toEqual({ name: 'Room ##' });
+    });
+
+    it('leaves a /template edit and every other field alone', async () => {
+      const service = serviceWith(undefined);
+      await creatorWith({ name: 'Room ##', limit: 4, defaultPrivate: true, textChannel: true });
+      await service.setRememberPrefs(GUILD, PRIMARY, true);
+      expect(await stored()).toEqual({
+        name: 'Room ##',
+        limit: 4,
+        defaultPrivate: true,
+        textChannel: true,
+        rememberPrefs: true,
+      });
+    });
+
+    it('refuses a channel that is neither a creator channel nor one of its rooms', async () => {
+      const service = serviceWith(undefined);
+      await creatorWith();
+      expect((await service.setRememberPrefs(GUILD, 'not-a-channel', true)).ok).toBe(false);
+      expect((await service.clearRememberedPrefs(GUILD, 'not-a-channel')).ok).toBe(false);
+    });
+
+    /** Another server's admin naming this channel changes nothing here. */
+    it('is bound to the server, so naming another server channel changes and clears nothing', async () => {
+      const prefs = new MemberRoomPrefsRepository(env.handle.db);
+      const service = serviceWith(prefs);
+      await creatorWith({ name: 'Room ##', rememberPrefs: true });
+      await prefs.saveName(GUILD, PRIMARY, 'u1', 'den');
+
+      expect((await service.setRememberPrefs(OTHER_GUILD, PRIMARY, false)).ok).toBe(false);
+      expect((await service.clearRememberedPrefs(OTHER_GUILD, PRIMARY)).ok).toBe(false);
+      expect(await stored()).toEqual({ name: 'Room ##', rememberPrefs: true });
+      expect(await prefs.countByPrimary(GUILD, PRIMARY)).toBe(1);
+    });
+
+    it('does not touch what members saved when it is turned off or on', async () => {
+      const prefs = new MemberRoomPrefsRepository(env.handle.db);
+      const service = serviceWith(prefs);
+      await creatorWith({ name: 'Room ##', rememberPrefs: true });
+      await prefs.saveName(GUILD, PRIMARY, 'u1', 'den');
+
+      await service.setRememberPrefs(GUILD, PRIMARY, false);
+      expect(await prefs.get(PRIMARY, 'u1')).toMatchObject({ name: 'den' });
+      await service.setRememberPrefs(GUILD, PRIMARY, true);
+      expect(await prefs.get(PRIMARY, 'u1')).toMatchObject({ name: 'den' });
+    });
+
+    it('clears every member for the creator channel and says how many', async () => {
+      const prefs = new MemberRoomPrefsRepository(env.handle.db);
+      const service = serviceWith(prefs);
+      await creatorWith({ name: 'Room ##', rememberPrefs: true });
+      await prefs.saveName(GUILD, PRIMARY, 'u1', 'den');
+      await prefs.saveLimit(GUILD, PRIMARY, 'u2', 4);
+
+      const cleared = await service.clearRememberedPrefs(GUILD, 'sec-remember');
+      expect(cleared.ok).toBe(true);
+      expect(cleared.message).toContain('2 members');
+      expect(await prefs.countByPrimary(GUILD, PRIMARY)).toBe(0);
+
+      // And a second press has nothing to remove, which it says rather than claiming a clear.
+      const again = await service.clearRememberedPrefs(GUILD, PRIMARY);
+      expect(again.ok).toBe(true);
+      expect(again.message).toContain('nothing to clear');
+    });
+
+    /** What an admin who switched it off may now want gone. */
+    it('clears while the creator channel does not remember, since the rows are only dormant', async () => {
+      const prefs = new MemberRoomPrefsRepository(env.handle.db);
+      const service = serviceWith(prefs);
+      await creatorWith({ name: 'Room ##', rememberPrefs: true });
+      await prefs.saveName(GUILD, PRIMARY, 'u1', 'den');
+      await service.setRememberPrefs(GUILD, PRIMARY, false);
+
+      expect((await service.clearRememberedPrefs(GUILD, PRIMARY)).message).toContain('1 member');
+      expect(await prefs.countByPrimary(GUILD, PRIMARY)).toBe(0);
+    });
+
+    it('says clearing is not available when it was given nothing to clear', async () => {
+      const service = serviceWith(undefined);
+      await creatorWith();
+      const result = await service.clearRememberedPrefs(GUILD, PRIMARY);
+      expect(result.ok).toBe(false);
+    });
+
+    it('answers a refusal, not a success, when the creator channel was removed first', async () => {
+      await creatorWith();
+      const racy = new (class extends AutoChannelRepository {
+        override async get(channelId: string) {
+          const row = await super.get(channelId);
+          await autoChannels.remove(GUILD, PRIMARY);
+          return row;
+        }
+      })(env.handle.db);
+      const racing = new GuildSettingsService({
+        guilds,
+        autoChannels: racy,
+        secondaries,
+        actions,
+        logger: fakeLogger(),
+      });
+      const result = await racing.setRememberPrefs(GUILD, PRIMARY, true);
+      expect(result.ok).toBe(false);
     });
   });
 

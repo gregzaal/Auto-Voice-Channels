@@ -56,3 +56,30 @@ describe('the remembered settings orphan sweep is wired', () => {
     expect(SOURCE).toContain('const memberRoomPrefsRepo = new MemberRoomPrefsRepository(db);');
   });
 });
+
+/**
+ * Both readers take the repository as optional, and absent reads as "not counted" and "nothing
+ * to clear": a wiring that dropped either would leave the editor's "Clear saved settings"
+ * answering that clearing is not available, and the editor and `/channelinfo` showing no count,
+ * with every test green because each builds its own service.
+ */
+describe('the remembered settings repository reaches the admin readouts', () => {
+  it('the voice feature, which counts for the editor and /channelinfo', () => {
+    expect(statementFrom('const voiceFeature = new VoiceFeature({')).toContain(
+      'memberPrefs: memberRoomPrefsRepo,',
+    );
+  });
+
+  it('the settings service, which clears for the editor', () => {
+    expect(statementFrom('const settingsService = new GuildSettingsService({')).toContain(
+      'memberPrefs: memberRoomPrefsRepo,',
+    );
+  });
+
+  it('and nothing else is handed it yet, so a new consumer has to be added here too', () => {
+    expect(SOURCE.split('memberRoomPrefsRepo').length - 1).toBe(
+      // the declaration, the sweep, and the two readers
+      4,
+    );
+  });
+});

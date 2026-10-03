@@ -401,6 +401,79 @@ describe('the creator channel settings', () => {
     expect(all).not.toMatch(/[—–‘’“”;]/);
     expect(all.toLowerCase()).not.toMatch(/primary|secondary|profile|activity|invisible/);
   });
+
+  describe('remembered room settings', () => {
+    const remembered = (
+      extra: { rememberPrefs?: boolean; savedSettings?: number } = {},
+      isAdmin = true,
+    ): string | undefined => {
+      const reply = buildChannelInfoPanel(
+        input({
+          isAdmin,
+          info: info({
+            kind: 'creator',
+            primary: { channelId: 'p1', defaultMode: 'public', ...extra },
+          }),
+        }),
+      );
+      const field = (reply.embeds![0] as { fields: { name: string; value: string }[] }).fields.find(
+        (f) => f.name === 'Creator channel settings',
+      );
+      return field?.value
+        .split('\n')
+        .find((line) => line.startsWith('Returning members get their own saved name'));
+    };
+
+    it('says whether returning members get their own saved name, size and privacy', () => {
+      expect(remembered({})).toBe(
+        'Returning members get their own saved name, size and privacy: off',
+      );
+      expect(remembered({ rememberPrefs: false })).toBe(
+        'Returning members get their own saved name, size and privacy: off',
+      );
+      expect(remembered({ rememberPrefs: true })).toBe(
+        'Returning members get their own saved name, size and privacy: on',
+      );
+    });
+
+    it('says how many members have saved settings when it is on', () => {
+      expect(remembered({ rememberPrefs: true, savedSettings: 0 })).toContain(
+        'on, nobody has saved settings yet',
+      );
+      expect(remembered({ rememberPrefs: true, savedSettings: 1 })).toContain(
+        'on, 1 member has saved settings',
+      );
+      expect(remembered({ rememberPrefs: true, savedSettings: 12 })).toContain(
+        'on, 12 members have saved settings',
+      );
+    });
+
+    /** Rows kept while it is off are not what the line is about, and a count beside off would mislead. */
+    it('shows no count beside off', () => {
+      expect(remembered({ rememberPrefs: false, savedSettings: 12 })).toBe(
+        'Returning members get their own saved name, size and privacy: off',
+      );
+    });
+
+    /** It sits in the admin's section, so a member running the command never reads it. */
+    it('is part of the admin section and absent from a member view', () => {
+      expect(remembered({ rememberPrefs: true }, false)).toBeUndefined();
+    });
+
+    it('keeps to the copy rules and the vocabulary in every state', () => {
+      const all = [
+        {},
+        { rememberPrefs: true },
+        { rememberPrefs: true, savedSettings: 0 },
+        { rememberPrefs: true, savedSettings: 1 },
+        { rememberPrefs: true, savedSettings: 40 },
+      ]
+        .map((extra) => remembered(extra))
+        .join('\n');
+      expect(all).not.toMatch(/[—–‘’“”;]/);
+      expect(all.toLowerCase()).not.toMatch(/primary|secondary|profile|activity|invisible/);
+    });
+  });
 });
 
 describe('buildTokenPanel', () => {

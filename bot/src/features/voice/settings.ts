@@ -4,6 +4,7 @@ import type {
   AutoChannelRow,
   GuildSettingsStore,
   Logger,
+  MemberRoomPrefsRepository,
   PrimaryTemplate,
   SecondaryChannelRepository,
 } from '@avc/core';
@@ -74,6 +75,7 @@ import {
   restrictRemovedMessage,
 } from './commandAccessCopy.js';
 import { startModeMessage } from './roomAccessCopy.js';
+import { clearedNote, REMEMBER_OFF_NOTE, REMEMBER_ON_NOTE } from './memberPrefsCopy.js';
 
 /** Logging verbosity levels (legacy parity): 1 lifecycle, 2 changes, 3 joins/leaves. */
 export type LogLevel = 1 | 2 | 3;
@@ -239,6 +241,12 @@ export interface GuildSettingsServiceDeps {
   secondaries: SecondaryChannelRepository;
   actions: VoiceActions;
   logger: Logger;
+  /**
+   * What members have remembered about their own rooms, for the admin's "Clear saved
+   * settings". Optional so the service is testable without it, and a service with none
+   * answers that clearing is not available rather than pretending it cleared something.
+   */
+  memberPrefs?: MemberRoomPrefsRepository;
 }
 
 /** Valid `/inheritpermissions` modes (plus an arbitrary channel id). */
@@ -800,6 +808,44 @@ export class GuildSettingsService {
     // Removed between the read and the write: there is no creator channel left to report on.
     if (!row) return fail('You need to be in a bot-managed voice channel.');
     return ok(startModeMessage(after, before));
+  }
+
+  /**
+   * Turns remembered room settings on or off for the creator channel of the channel you name
+   * (the editor's switch). The caller says which, rather than this flipping what it reads, so a
+   * click on a stale panel, a double click and a retry all end in what the click asked for.
+   *
+   * The write is `AutoChannelRepository.setRememberPrefs`, a DB-side merge, so it cannot undo a
+   * `/template` edit made a moment before. Off keeps what members saved, dormant: the rows are
+   * another table and nothing here touches them.
+   */
+  async setRememberPrefs(
+    guildId: string,
+    channelId: string,
+    enabled: boolean,
+  ): Promise<CommandResult> {
+    const primary = await this.primaryFor(guildId, channelId);
+    if (!primary) return fail('That is not a creator channel or one of its rooms.');
+    const row = await this.deps.autoChannels.setRememberPrefs(guildId, primary.channelId, enabled);
+    // Removed between the read and the write: there is no creator channel left to change.
+    if (!row) return fail('That creator channel no longer exists.');
+    return ok(enabled ? REMEMBER_ON_NOTE : REMEMBER_OFF_NOTE);
+  }
+
+  /**
+   * Removes every member's remembered settings for the creator channel of the channel you name,
+   * and says how many members that was (the editor's "Clear saved settings").
+   *
+   * Works while remembering is off, since what is kept is exactly what an admin who switched
+   * it off may now want gone. Bound to the guild, so naming another server's channel clears
+   * nothing there.
+   */
+  async clearRememberedPrefs(guildId: string, channelId: string): Promise<CommandResult> {
+    if (!this.deps.memberPrefs) return fail('Clearing saved settings is not available here.');
+    const primary = await this.primaryFor(guildId, channelId);
+    if (!primary) return fail('That is not a creator channel or one of its rooms.');
+    const removed = await this.deps.memberPrefs.clearByPrimary(guildId, primary.channelId);
+    return ok(clearedNote(removed));
   }
 
   /**

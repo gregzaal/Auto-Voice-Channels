@@ -15,6 +15,7 @@ import {
   type TemplateSource,
 } from '../features/voice/index.js';
 import { permissionProblemSummary, type ProblemLike } from '../features/voice/index.js';
+import { rememberedInfoLine } from '../features/voice/memberPrefsCopy.js';
 import { previewScenarios, renderPair } from '../features/templateAssistant/preview.js';
 import { adviseTemplate, lintTemplate } from '../features/templateAssistant/validate.js';
 
@@ -570,6 +571,7 @@ function pushAdminFields(embed: APIEmbed, input: ChannelInfoPanelInput): void {
       `New rooms appear ${p.above === true ? 'above' : 'below'} it, numbered from ${p.startAt ?? 1}`,
       `Default limit: ${p.limit && p.limit > 0 ? p.limit : 'none'}`,
       `New rooms start: ${startModeWords(p.defaultMode)}`,
+      rememberedInfoLine(p.rememberPrefs === true, p.savedSettings),
       `Each room gets its own text channel: ${p.textChannel === true ? 'yes' : 'no'}`,
       `Permissions copied from: ${p.inheritperms ? `\`${escapeMarkdown(p.inheritperms)}\`` : 'the creator channel'}`,
     ];

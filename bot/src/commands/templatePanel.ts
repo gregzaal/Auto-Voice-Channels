@@ -11,9 +11,17 @@ import {
   type InteractionReplyOptions,
 } from 'discord.js';
 import type { EditorField, EditorScope, EditorState } from '../features/voice/index.js';
+import { rememberedFieldValue } from '../features/voice/memberPrefsCopy.js';
 import { PANEL_FOOTER, PANEL_LINKS_FIELD, panelFooterWith } from '../features/panelBranding.js';
 
-/** Custom-id namespace for the `/name` and `/template` editor panel. */
+/**
+ * Custom-id namespace for the `/name` and `/template` editor panel.
+ *
+ * The actions are `edit`, `save`, `reset`, `stop` and `close`, and, on a creator channel's
+ * editor only, `remember_on`, `remember_off` and `forget`. Those three act on the creator
+ * channel and not on a field, so they say `name` in the field slot as `close` does. The
+ * switch's id carries the state it asks for, so repeating one is harmless.
+ */
 export const EDITOR_PREFIX = 'avc:tpl:';
 export const editorId = (
   action: string,
@@ -131,7 +139,14 @@ function fieldValue(template: string | undefined, fallbackHint: string): string 
   return template === '' ? '_(empty, no status)_' : `\`${truncate(template)}\``;
 }
 
-/** Builds the ephemeral editor panel showing both the name and status templates. */
+/**
+ * Builds the ephemeral editor panel showing both the name and status templates.
+ *
+ * A creator channel's editor (`scope: 'primary'`) carries one more row, the switch for
+ * remembered room settings and the button that clears what members saved. Only that scope,
+ * because it is a property of the creator channel: a room's own editor and an adopted
+ * channel's have nothing to remember.
+ */
 export function renderEditorPanel(
   scope: EditorScope,
   channelId: string,
@@ -140,6 +155,8 @@ export function renderEditorPanel(
 ): InteractionReplyOptions {
   const isChannel = scope === 'channel';
   const isAdopted = scope === 'adopted';
+  const isPrimary = scope === 'primary';
+  const remembers = state.rememberPrefs === true;
   const embed: APIEmbed = new EmbedBuilder()
     .setTitle(
       isAdopted
@@ -170,6 +187,14 @@ export function renderEditorPanel(
           `${fieldValue(state.status.currentTemplate, '_(inheriting default)_')}\n` +
           `Preview: ${state.status.preview ? `\`${truncate(state.status.preview)}\`` : '_(none)_'}`,
       },
+      ...(isPrimary
+        ? [
+            {
+              name: '💾 Remembered settings',
+              value: rememberedFieldValue(remembers, state.savedSettings),
+            },
+          ]
+        : []),
       ...VARIABLE_FIELDS,
     )
     .setFooter(opts.updated ? panelFooterWith('✅ Saved') : PANEL_FOOTER)
@@ -213,7 +238,29 @@ export function renderEditorPanel(
       .setLabel('Close')
       .setStyle(ButtonStyle.Secondary),
   );
-  return { embeds: [embed], components: [editRow, manageRow], ephemeral: true };
+  const components = [editRow, manageRow];
+  if (isPrimary) {
+    // The switch shows its CURRENT state and its button asks for the other one. The target is
+    // in the id and not decided at click time, so a click on a panel that has since gone
+    // stale, a double click and a retry all end in what that click asked for.
+    components.push(
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(
+            editorId(remembers ? 'remember_off' : 'remember_on', scope, 'name', channelId),
+          )
+          .setLabel(remembers ? 'Remembered settings: on' : 'Remembered settings: off')
+          .setEmoji('💾')
+          .setStyle(remembers ? ButtonStyle.Success : ButtonStyle.Secondary),
+        new ButtonBuilder()
+          .setCustomId(editorId('forget', scope, 'name', channelId))
+          .setLabel('Clear saved settings')
+          .setEmoji('🧹')
+          .setStyle(ButtonStyle.Secondary),
+      ),
+    );
+  }
+  return { embeds: [embed], components, ephemeral: true };
 }
 
 /** The "Edit" modal for one field, prefilled with the current/effective value. */

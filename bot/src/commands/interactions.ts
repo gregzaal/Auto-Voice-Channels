@@ -584,6 +584,14 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       if (interaction.customId.startsWith(BOT_PROFILE_PREFIX)) {
         return parseBotProfileId(interaction.customId)?.action !== 'set';
       }
+      /**
+       * No `avc:tpl:` button is exempt, and that includes the creator channel editor's pair for
+       * remembered room settings (`remember_on`, `remember_off` and `forget`). The switch
+       * writes a creator channel's settings, and the clear removes what members saved, so an
+       * editor that was already open when a server lapsed must not keep either working: the
+       * hard gate stops writes, and the whole editor is a write path. They fall to the
+       * reactivation notice here like the template buttons beside them.
+       */
       return interaction.customId.startsWith(SETUP_PREFIX);
     }
     if (interaction.isStringSelectMenu()) {
@@ -1836,6 +1844,28 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       await refreshEditorPanel(interaction, scope, field, channelId, 'reset', settings);
       return;
     }
+    if (action === 'remember_on' || action === 'remember_off' || action === 'forget') {
+      /**
+       * A creator channel's remembered room settings: the switch, and the clear. They act on the
+       * creator channel and not on a field, so only its own editor ever draws them, and an id
+       * that names any other scope was not drawn by this build.
+       *
+       * Gated on Manage Channels HERE, and not only by the command that opened the panel,
+       * because an ephemeral panel outlives the permission of whoever holds it: a role taken
+       * away after `/template` was run must not leave these two buttons working. A `/restrict`
+       * rule is never consulted, since no rule can stop somebody who has Manage Channels.
+       */
+      if (scope !== 'primary') {
+        await safeReply(interaction, 'That button is out of date. Open the editor again.');
+        return;
+      }
+      if (!(await requireManageChannels(interaction))) return;
+      // Defer first, like a reset: the write and the count behind the re-render are two reads
+      // and a write, and the first response has three seconds.
+      await interaction.deferUpdate();
+      await refreshRememberedPanel(interaction, action, channelId);
+      return;
+    }
     if (action === 'stop') {
       // Adopted channels only: stop managing the name and close the panel.
       const res = await run(interaction.guildId!, 'editor:stop', () =>
@@ -1933,6 +1963,46 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     } else {
       await interaction.followUp({ content: `⚠️ ${applied.message}`, ephemeral: true });
     }
+  }
+
+  /**
+   * Turns remembered room settings on or off for a creator channel, or clears what members
+   * saved for it, and edits the (already-deferred) editor in place with what happened.
+   *
+   * The refresh re-reads the editor state rather than patching the old one, so the label of
+   * the switch, the count and the note all come from what is stored and not from what this
+   * click believed. A refusal is a private follow-up and leaves the panel as it was.
+   */
+  async function refreshRememberedPanel(
+    interaction: ButtonInteraction,
+    action: 'remember_on' | 'remember_off' | 'forget',
+    channelId: string,
+  ): Promise<void> {
+    const guildId = interaction.guildId!;
+    const result = await run(guildId, `editor:primary:${action}`, () =>
+      action === 'forget'
+        ? deps.settings.clearRememberedPrefs(guildId, channelId)
+        : deps.settings.setRememberPrefs(guildId, channelId, action === 'remember_on'),
+    );
+    if (!result.ok) {
+      await interaction.followUp({ content: `⚠️ ${result.message}`, ephemeral: true });
+      return;
+    }
+    const state = await run(guildId, 'editor:refresh', () =>
+      deps.feature.getEditorState('primary', guildId, channelId),
+    );
+    if (!state.found) {
+      await interaction.followUp({
+        content: 'That channel is no longer bot-managed.',
+        ephemeral: true,
+      });
+      return;
+    }
+    await interaction.editReply(
+      toUpdate(
+        renderEditorPanel('primary', channelId, state, { updated: true, note: result.message }),
+      ),
+    );
   }
 
   /**

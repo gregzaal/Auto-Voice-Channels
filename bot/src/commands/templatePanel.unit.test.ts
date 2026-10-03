@@ -1,5 +1,11 @@
+import { ButtonStyle } from 'discord.js';
 import { describe, expect, it } from 'vitest';
 import type { EditorState } from '../features/voice/index.js';
+import {
+  REMEMBER_OFF_NOTE,
+  REMEMBER_ON_NOTE,
+  clearedNote,
+} from '../features/voice/memberPrefsCopy.js';
 import {
   buildAdoptPrompt,
   buildEditorModal,
@@ -168,5 +174,216 @@ describe('templatePanel variables and branding', () => {
     const saved = embedOf({ updated: true }).footer!.text;
     expect(saved).toContain('✅ Saved');
     expect(saved).toContain('auto-voice.io');
+  });
+});
+
+/**
+ * A creator channel's editor carries one more row: the switch for remembered room settings
+ * and the button that clears what members saved. Only that scope has it.
+ */
+describe('templatePanel remembered settings', () => {
+  const CHANNEL = '123456789012345678';
+  const primaryState = (over: Partial<EditorState> = {}): EditorState => ({
+    found: true,
+    scope: 'primary',
+    name: { effectiveTemplate: '## room', preview: '1 room' },
+    status: { effectiveTemplate: '', preview: '' },
+    ownerId: null,
+    primaryChannelId: CHANNEL,
+    ...over,
+  });
+
+  interface ButtonData {
+    custom_id: string;
+    label: string;
+    style: number;
+  }
+  type Panel = ReturnType<typeof renderEditorPanel>;
+  const rowsOf = (panel: Panel): ButtonData[][] =>
+    (panel.components as unknown as { toJSON: () => { components: ButtonData[] } }[]).map(
+      (row) => row.toJSON().components,
+    );
+  const fieldsOf = (panel: Panel) =>
+    (panel.embeds![0]! as { fields: { name: string; value: string; inline?: boolean }[] }).fields;
+  const FIELD = '💾 Remembered settings';
+
+  it('adds a third row to a creator channel editor, after the template buttons', () => {
+    const rows = rowsOf(renderEditorPanel('primary', CHANNEL, primaryState()));
+    expect(rows.map((row) => row.map((b) => b.label))).toEqual([
+      ['Edit name template', 'Edit status template'],
+      ['Reset name', 'Reset status', 'Close'],
+      ['Remembered settings: off', 'Clear saved settings'],
+    ]);
+  });
+
+  it('adds nothing to a room editor or an adopted channel editor', () => {
+    for (const scope of ['channel', 'adopted'] as const) {
+      const panel = renderEditorPanel(scope, CHANNEL, { ...state, scope });
+      expect(rowsOf(panel)).toHaveLength(2);
+      expect(JSON.stringify(panel)).not.toContain('avc:tpl:remember');
+      expect(JSON.stringify(panel)).not.toContain('avc:tpl:forget');
+      expect(JSON.stringify(panel)).not.toContain('Remembered settings');
+    }
+  });
+
+  /** A switch reads as its current state, and its button asks for the other one. */
+  it('labels the switch with its current state and asks for the opposite', () => {
+    const off = rowsOf(
+      renderEditorPanel('primary', CHANNEL, primaryState({ rememberPrefs: false })),
+    );
+    expect(off[2]![0]).toMatchObject({
+      custom_id: editorId('remember_on', 'primary', 'name', CHANNEL),
+      label: 'Remembered settings: off',
+      style: ButtonStyle.Secondary,
+    });
+    const on = rowsOf(renderEditorPanel('primary', CHANNEL, primaryState({ rememberPrefs: true })));
+    expect(on[2]![0]).toMatchObject({
+      custom_id: editorId('remember_off', 'primary', 'name', CHANNEL),
+      label: 'Remembered settings: on',
+      style: ButtonStyle.Success,
+    });
+  });
+
+  it('treats a state with no flag as off, which is what a creator channel without one is', () => {
+    const rows = rowsOf(renderEditorPanel('primary', CHANNEL, primaryState()));
+    expect(rows[2]![0]!.custom_id).toBe(editorId('remember_on', 'primary', 'name', CHANNEL));
+  });
+
+  it('puts the clear button beside the switch, and routes it', () => {
+    const rows = rowsOf(
+      renderEditorPanel('primary', CHANNEL, primaryState({ rememberPrefs: true })),
+    );
+    expect(rows[2]![1]).toMatchObject({
+      custom_id: editorId('forget', 'primary', 'name', CHANNEL),
+      label: 'Clear saved settings',
+    });
+  });
+
+  it('round trips the three ids, which name the creator channel and no field', () => {
+    for (const action of ['remember_on', 'remember_off', 'forget']) {
+      expect(parseEditorId(editorId(action, 'primary', 'name', CHANNEL))).toEqual({
+        action,
+        scope: 'primary',
+        field: 'name',
+        channelId: CHANNEL,
+      });
+    }
+  });
+
+  it('shows what it is doing in a field of its own, with the count', () => {
+    const off = fieldsOf(renderEditorPanel('primary', CHANNEL, primaryState({ savedSettings: 3 })));
+    const offField = off.find((f) => f.name === FIELD)!;
+    expect(offField.value).toContain('**Off.**');
+    expect(offField.value).toContain('3 members have saved settings, which are kept and not used');
+    expect(offField.inline).toBeUndefined();
+
+    const on = fieldsOf(
+      renderEditorPanel(
+        'primary',
+        CHANNEL,
+        primaryState({ rememberPrefs: true, savedSettings: 1 }),
+      ),
+    ).find((f) => f.name === FIELD)!;
+    expect(on.value).toContain(
+      '**On.** A member who comes back gets a room that starts with their own saved name, size and privacy',
+    );
+    expect(on.value).toContain('1 member has saved settings.');
+  });
+
+  it('shows no such field on a room editor', () => {
+    expect(fieldsOf(renderEditorPanel('channel', CHANNEL, state)).map((f) => f.name)).not.toContain(
+      FIELD,
+    );
+  });
+
+  /**
+   * Discord allows five action rows of five buttons, an embed of 25 fields and a custom id of
+   * 100 characters, and refuses the whole message past any of them.
+   */
+  describe("stays inside Discord's ceilings", () => {
+    const panels = (): Panel[] =>
+      [false, true].flatMap((rememberPrefs) =>
+        [undefined, 0, 12345].map((savedSettings) =>
+          renderEditorPanel(
+            'primary',
+            CHANNEL,
+            primaryState({
+              rememberPrefs,
+              ...(savedSettings === undefined ? {} : { savedSettings }),
+            }),
+            { updated: true, note: REMEMBER_ON_NOTE },
+          ),
+        ),
+      );
+
+    it('keeps rows, buttons, custom ids and labels inside them', () => {
+      for (const panel of panels()) {
+        const rows = rowsOf(panel);
+        expect(rows.length).toBeLessThanOrEqual(5);
+        for (const row of rows) {
+          expect(row.length).toBeLessThanOrEqual(5);
+          for (const button of row) {
+            expect(button.custom_id.length).toBeLessThanOrEqual(100);
+            expect(button.label.length).toBeLessThanOrEqual(80);
+          }
+        }
+      }
+    });
+
+    it('keeps fields and their values inside them, with the longest note', () => {
+      for (const panel of panels()) {
+        const fields = fieldsOf(panel);
+        expect(fields.length).toBeLessThanOrEqual(25);
+        for (const field of fields) expect(field.value.length).toBeLessThanOrEqual(1024);
+      }
+    });
+
+    it('gives every button on the panel its own id', () => {
+      const ids = rowsOf(renderEditorPanel('primary', CHANNEL, primaryState())).flatMap((row) =>
+        row.map((b) => b.custom_id),
+      );
+      expect(new Set(ids).size).toBe(ids.length);
+    });
+  });
+
+  /**
+   * The copy rules, over what this adds to the panel in every state: its field, its buttons
+   * and the notes it is given. The punctuation rules are mechanical, and nothing else checks
+   * the strings an admin reads here.
+   */
+  describe('copy rules', () => {
+    const addedText = (): string => {
+      const pieces: string[] = [];
+      for (const rememberPrefs of [false, true]) {
+        for (const savedSettings of [undefined, 0, 1, 7]) {
+          for (const note of [undefined, REMEMBER_ON_NOTE, REMEMBER_OFF_NOTE, clearedNote(7)]) {
+            const panel = renderEditorPanel(
+              'primary',
+              CHANNEL,
+              primaryState({
+                rememberPrefs,
+                ...(savedSettings === undefined ? {} : { savedSettings }),
+              }),
+              note === undefined ? {} : { updated: true, note },
+            );
+            pieces.push(fieldsOf(panel).find((f) => f.name === FIELD)!.value, FIELD);
+            pieces.push(...rowsOf(panel)[2]!.map((b) => b.label));
+            if (note !== undefined) pieces.push(note);
+          }
+        }
+      }
+      return pieces.join('\n');
+    };
+
+    it('uses no em or en dashes, curly quotes, or prose semicolons', () => {
+      const text = addedText();
+      expect(text).not.toMatch(/[—–]/);
+      expect(text).not.toMatch(/[‘’“”]/);
+      expect(text).not.toMatch(/;/);
+    });
+
+    it('never says primary or secondary to an admin', () => {
+      expect(addedText().toLowerCase()).not.toMatch(/primary|secondary/);
+    });
   });
 });

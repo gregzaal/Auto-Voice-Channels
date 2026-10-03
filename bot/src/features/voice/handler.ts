@@ -1,9 +1,11 @@
 import type {
   AutoChannelRepository,
+  AutoChannelRow,
   GuildSettingsReader,
   Logger,
   ManagedChannelRepository,
   ManagedChannelRow,
+  MemberRoomPrefsRepository,
   PrimaryTemplate,
   SecondaryChannelRepository,
   SecondaryChannelRow,
@@ -209,6 +211,13 @@ export interface VoiceFeatureDeps {
   logger: Logger;
   /** Optional runtime gate for live creation (pause / throttle). */
   gate?: CreationGate;
+  /**
+   * What members have remembered about their own rooms, for the two admin readouts that count
+   * it: the creator channel editor and `/channelinfo`. Optional like every other repository
+   * here, so the feature is testable without it, and absent means "not counted" rather than
+   * "nobody".
+   */
+  memberPrefs?: Pick<MemberRoomPrefsRepository, 'countByPrimary'>;
   /**
    * Called after a secondary's record is removed (deletion or reconcile), so
    * dependent resources (e.g. a private channel's "⇩ Join" companion) can be
@@ -497,6 +506,15 @@ export interface PrimaryConfig {
   inheritperms?: string | undefined;
   /** Whether rooms from this creator channel get a private text channel. */
   textChannel?: boolean | undefined;
+  /** Whether a member who comes back gets the name, size and privacy they chose last time. */
+  rememberPrefs?: boolean | undefined;
+  /**
+   * How many members have something saved for this creator channel. Present only while it
+   * remembers and only when the count could be read: the line is an admin's, so the read is
+   * not paid for a creator channel that does not remember, and a count that failed is left out
+   * and not shown as nobody.
+   */
+  savedSettings?: number | undefined;
 }
 
 /** Lifts a creator channel's stored template into the reportable subset. */
@@ -509,6 +527,7 @@ function primaryConfig(row: { channelId: string; template: PrimaryTemplate }): P
     defaultMode: startModeOf(row.template),
     inheritperms: row.template.inheritperms,
     textChannel: row.template.textChannel,
+    rememberPrefs: row.template.rememberPrefs,
   };
 }
 
@@ -597,6 +616,17 @@ export interface EditorState {
   /** The secondary's owner (for the `/name` permission check). */
   ownerId?: string | null;
   primaryChannelId?: string;
+  /**
+   * Creator channel editors only (`scope: 'primary'`): whether this creator channel remembers
+   * members' room settings, which the editor's switch shows and flips.
+   */
+  rememberPrefs?: boolean;
+  /**
+   * Creator channel editors only: how many members have something saved for it. Counted
+   * whether or not it remembers, because what is saved is kept when it is turned off and the
+   * editor's "Clear saved settings" acts on it. Absent when it could not be counted.
+   */
+  savedSettings?: number;
 }
 
 /** What the room control panel's buttons need to know about a room. */
@@ -2534,7 +2564,7 @@ export class VoiceFeature {
                 ? 'creator'
                 : 'server',
         },
-        ...(primary ? { primary: primaryConfig(primary) } : {}),
+        ...(primary ? { primary: await this.primaryConfigOf(guildId, primary) } : {}),
         ...(companion ? { companion } : {}),
         ...(secondary.state.seed !== undefined ? { seed: secondary.state.seed } : {}),
         ...(secondary.state.index !== undefined ? { index: secondary.state.index } : {}),
@@ -2580,7 +2610,7 @@ export class VoiceFeature {
           statusTemplate: own.template.status ?? settings.channelStatusTemplate,
           statusSource: own.template.status !== undefined ? 'creator' : 'server',
         },
-        primary: primaryConfig(own),
+        primary: await this.primaryConfigOf(guildId, own),
       };
     }
 
@@ -2828,6 +2858,7 @@ export class VoiceFeature {
         },
         ownerId: null,
         primaryChannelId: channelId,
+        ...(await this.rememberedState(guildId, own)),
       };
     }
     const primary = await this.deps.autoChannels.get(secondary.primaryChannelId);
@@ -2877,7 +2908,61 @@ export class VoiceFeature {
       },
       ownerId: secondary.ownerId,
       primaryChannelId: secondary.primaryChannelId,
+      // The same creator channel's own switch, on the one editor scope that has buttons for it.
+      ...(scope === 'primary' && primary ? await this.rememberedState(guildId, primary) : {}),
     };
+  }
+
+  /**
+   * What a creator channel's editor shows about remembered room settings: whether it remembers,
+   * and how many members have something saved.
+   *
+   * The count is read whether or not it remembers (see {@link EditorState.savedSettings}), at
+   * the cost of one indexed count each time an admin opens or edits the panel.
+   */
+  private async rememberedState(
+    guildId: string,
+    primary: AutoChannelRow,
+  ): Promise<Pick<EditorState, 'rememberPrefs' | 'savedSettings'>> {
+    const savedSettings = await this.savedSettingsOf(guildId, primary.channelId);
+    return {
+      rememberPrefs: primary.template.rememberPrefs === true,
+      ...(savedSettings === undefined ? {} : { savedSettings }),
+    };
+  }
+
+  /**
+   * How many members have something saved for one creator channel, or `undefined` when this
+   * feature has no way to count or the count could not be read.
+   *
+   * Fails OPEN: a number on an admin's panel is not worth the panel, so a read error is logged
+   * by id and the count is left out, which the panel shows as no count and never as nobody.
+   */
+  private async savedSettingsOf(
+    guildId: string,
+    primaryChannelId: string,
+  ): Promise<number | undefined> {
+    if (!this.deps.memberPrefs) return undefined;
+    try {
+      return await this.deps.memberPrefs.countByPrimary(guildId, primaryChannelId);
+    } catch (err) {
+      this.deps.logger.warn(
+        { err, guildId, channelId: primaryChannelId },
+        'could not count remembered room settings',
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * A creator channel's own configuration for `/channelinfo`, with the count of members who
+   * have something saved when it remembers. Not paid for a creator channel that does not.
+   */
+  private async primaryConfigOf(guildId: string, row: AutoChannelRow): Promise<PrimaryConfig> {
+    const config = primaryConfig(row);
+    if (config.rememberPrefs !== true) return config;
+    const savedSettings = await this.savedSettingsOf(guildId, row.channelId);
+    return savedSettings === undefined ? config : { ...config, savedSettings };
   }
 
   /**

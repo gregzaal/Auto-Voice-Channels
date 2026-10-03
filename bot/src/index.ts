@@ -600,6 +600,8 @@ async function main(): Promise<void> {
     voice,
     selfHosted: config.selfHosted,
     gate: creationGate,
+    // Counts what members saved, for the creator channel editor and `/channelinfo`.
+    memberPrefs: memberRoomPrefsRepo,
     companionText,
     controlPanel,
     /**
@@ -700,6 +702,8 @@ async function main(): Promise<void> {
     secondaries,
     actions,
     logger,
+    // The editor's "Clear saved settings".
+    memberPrefs: memberRoomPrefsRepo,
   });
   const votekick = new VoteKickManager({ secondaries, voice, actions, logger, access: privacy });
   // `/access trust`, `block`, `remove`, `clear` and `list`, over the same lists the service reads.
