@@ -118,6 +118,48 @@ describe('PrivacyService (integration)', () => {
     );
   });
 
+  /**
+   * `moveMember` now swallows 40032 (the member is not in voice), for every caller.
+   * A requester who left voice while the card sat there is the ordinary case.
+   */
+  describe('a requester who has left voice', () => {
+    it('is still admitted: the grant stands and nobody is told it failed', async () => {
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      const joinId = actions.ofType('joinChannel')[0]!.channelId;
+      actions.notConnectedMemberIds.add('bob');
+
+      const res = await privacy.approveJoin(joinId, 'bob');
+      expect(res.ok).toBe(true);
+      expect(res.message).toContain('Admitted');
+      expect(actions.ofType('connect')).toContainEqual(
+        expect.objectContaining({ channelId: SEC, memberId: 'bob', allow: true }),
+      );
+      expect(actions.ofType('move')).not.toContainEqual(
+        expect.objectContaining({ memberId: 'bob' }),
+      );
+    });
+
+    it('is still blocked when the owner denies with a block', async () => {
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      const joinId = actions.ofType('joinChannel')[0]!.channelId;
+      actions.notConnectedMemberIds.add('carol');
+
+      // The disconnect used to throw before the block was applied, so the block was lost.
+      const res = await privacy.denyJoin(joinId, 'carol', true);
+      expect(res.ok).toBe(true);
+      expect(actions.ofType('connect')).toContainEqual(
+        expect.objectContaining({ channelId: joinId, memberId: 'carol', allow: false }),
+      );
+    });
+
+    it('is simply denied when the owner denies without a block', async () => {
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      const joinId = actions.ofType('joinChannel')[0]!.channelId;
+      actions.notConnectedMemberIds.add('carol');
+      await expect(privacy.denyJoin(joinId, 'carol', false)).resolves.toMatchObject({ ok: true });
+    });
+  });
+
   it('makes a channel public again: deletes the join channel and clears state', async () => {
     await privacy.makePrivate(GUILD, SEC, 'alice');
     const joinId = actions.ofType('joinChannel')[0]!.channelId;

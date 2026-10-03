@@ -67,6 +67,19 @@ describe('VoteKickManager (integration)', () => {
     expect(kicks.hasSession(SEC)).toBe(false);
   });
 
+  it('still bars a target who left voice as the vote passed, and does not fail', async () => {
+    // The disconnect swallows 40032, so the Connect deny is what is left to do, and is done.
+    for (const id of ['owner', 'alice', 'bob', 'target']) voice.put(SEC, member(id));
+    actions.notConnectedMemberIds.add('target');
+    await kicks.start(GUILD, SEC, 'alice', 'target', 'spam');
+    const res = await kicks.vote(SEC, 'bob');
+    expect(res.kicked).toBe(true);
+    expect(actions.ofType('connect')).toContainEqual(
+      expect.objectContaining({ memberId: 'target', allow: false }),
+    );
+    expect(actions.ofType('move')).toEqual([]);
+  });
+
   it('kicks immediately in a 1v1 channel (initiator is the only voter needed)', async () => {
     for (const id of ['alice', 'target']) voice.put(SEC, member(id));
     const start = await kicks.start(GUILD, SEC, 'alice', 'target');
