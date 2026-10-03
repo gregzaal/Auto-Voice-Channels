@@ -187,13 +187,21 @@ import {
 } from '../features/voice/controlPanel.js';
 import {
   FEATURE_LABELS,
+  featureForCommand,
   isAvailableFeature,
+  limitFeatureFor,
+  mayUse,
+  PANEL_ACTION_FEATURE,
+  readCommandAccess,
+  type CommandFeature,
   type RestrictTarget,
 } from '../features/voice/commandAccess.js';
 import {
   RESTRICT_NOTE,
+  RESTRICT_PAUSED,
   RESTRICT_REFUSALS,
   renderRestrictionList,
+  restrictedRefusal,
 } from '../features/voice/commandAccessCopy.js';
 import {
   buildAppearanceModal,
@@ -285,6 +293,18 @@ export interface InteractionDeps {
    * Optional so a test fixture stays small, and absent means nothing is posted.
    */
   serverLog?: (guildId: string, level: 1 | 2 | 3, message: string) => void;
+  /**
+   * Whether `/restrict` enforcement is switched off (`command_access.disabled`).
+   *
+   * A function over the creation gate's cached 2 second snapshot, and not
+   * {@link flags}: `RuntimeFlagsRepository.getBool` is an uncached SELECT per
+   * call, and a guard can run on every restricted interaction. Asked only when a
+   * refusal is about to happen, so a server with no rules never pays for it, and
+   * it never throws (a failed read counts as not disabled). Top level for the
+   * reason {@link flags} gives, and optional so a test fixture stays small:
+   * absent means not disabled.
+   */
+  commandAccessDisabled?: () => Promise<boolean>;
   selfHosted: boolean;
   /** Discord application id, for building the `/invite` link. */
   clientId: string;
@@ -325,6 +345,14 @@ const CHANNELINFO_BUSY =
 const GATED_INFO_NOTE =
   'AVC is paused on this server, so it is not creating or renaming anything right now. ' +
   'Everything below is still what it would use.';
+
+/**
+ * The guild's stored settings blob, as the router read it for this interaction.
+ *
+ * Undefined when the row carries none, which every guard reads as "no
+ * restrictions" and a test fixture without a `settings` field gets for free.
+ */
+type StoredSettings = Record<string, unknown> | undefined;
 
 /** One admin's in-flight `/templateassistant` conversation. */
 interface AssistantSession {
@@ -413,11 +441,18 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     // `entitled` rides along rather than being re-derived: it cost a guild-row
     // read here, and a handler that wants it would otherwise read the same row
     // again (see `buildChannelInfoInput`).
-    if (interaction.isChatInputCommand()) return handleCommand(interaction, entitled);
-    if (interaction.isButton()) return handleButton(interaction, entitled);
-    if (interaction.isChannelSelectMenu()) return handleChannelSelect(interaction);
-    if (interaction.isStringSelectMenu()) return handleStringSelect(interaction, entitled);
-    if (interaction.isModalSubmit()) return handleModal(interaction);
+    //
+    // So does the row's settings, for the restriction guards, for the same reason
+    // and a second one: this read is uncached, so it is never staler than the
+    // `/restrict` write that preceded this click, which a cache hit could be.
+    const settings = guildRow?.settings;
+    if (interaction.isChatInputCommand()) return handleCommand(interaction, entitled, settings);
+    if (interaction.isButton()) return handleButton(interaction, entitled, settings);
+    if (interaction.isChannelSelectMenu()) return handleChannelSelect(interaction, settings);
+    if (interaction.isStringSelectMenu()) {
+      return handleStringSelect(interaction, entitled, settings);
+    }
+    if (interaction.isModalSubmit()) return handleModal(interaction, settings);
   }
 
   /**
@@ -543,10 +578,37 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   async function handleCommand(
     interaction: ChatInputCommandInteraction,
     entitled: boolean,
+    settings: StoredSettings,
   ): Promise<void> {
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
     const channelId = currentVoiceChannelId(interaction);
+
+    /**
+     * `/restrict` rules, checked FIRST: before the usage count and before the
+     * defer below.
+     *
+     * Before the count, so a refused command is not counted. The number means
+     * "commands that ran", and an admin turning a feature off for somebody must
+     * not make it look busier.
+     *
+     * Before the defer, because a refusal is a plain ephemeral reply and a
+     * deferred interaction would have to be edited into one. The one thing this
+     * can wait on is the lever read, and only when a refusal is about to happen,
+     * through the creation gate's cached snapshot, so a server with no rules
+     * costs nothing. `/limit 0` is the undo direction and is never restricted.
+     */
+    if (
+      !(await allowed(
+        interaction,
+        settings,
+        interaction.commandName === 'limit'
+          ? limitFeatureFor(interaction.options.getInteger('count'))
+          : featureForCommand(interaction.commandName),
+      ))
+    ) {
+      return;
+    }
 
     /**
      * Counted here rather than in `route`, so the number means "commands that
@@ -596,7 +658,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
           ),
         );
       case 'name':
-        return openNamePanel(interaction);
+        return openNamePanel(interaction, settings);
       case 'private':
         return replyResult(
           interaction,
@@ -948,7 +1010,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   }
 
   /** Apply / Refine / Cancel on a proposal. */
-  async function handleAssistantButton(interaction: ButtonInteraction): Promise<void> {
+  async function handleAssistantButton(
+    interaction: ButtonInteraction,
+    settings: StoredSettings,
+  ): Promise<void> {
     const parsed = parseAssistantId(interaction.customId);
     if (!parsed) return;
     const found = assistantSessionFor(interaction);
@@ -997,6 +1062,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         field.field,
         session.channelId,
         field.template,
+        settings,
       );
       if (!applied.ok) {
         await interaction.followUp({ content: `⚠️ ${applied.message}`, ephemeral: true });
@@ -1238,7 +1304,11 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       const access = await run(guildId, 'cmd:restrict:list', () =>
         deps.settings.getCommandAccess(guildId),
       );
-      return replyRestrict(interaction, renderRestrictionList(access));
+      // Said at the top, because a list that shows rules which nobody is being
+      // refused by is a list that misleads. Asked here whatever the rules are: the
+      // lever is a fact about this fleet, and a rule added now is paused too.
+      const paused = (await deps.commandAccessDisabled?.()) === true;
+      return replyRestrict(interaction, renderRestrictionList(access, { paused }));
     }
     if (sub !== 'add' && sub !== 'remove' && sub !== 'clear') {
       await interaction.reply({ content: 'Unknown command.', ephemeral: true });
@@ -1273,7 +1343,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       const cleared = await run(guildId, 'cmd:restrict:clear', () =>
         deps.settings.clearCommandRestrictions(guildId, feature),
       );
-      if (cleared.changed) audit(`🔓 ${admin} lifted every restriction on **${label}**.`);
+      if (cleared.changed) {
+        audit(`🔓 ${admin} lifted every restriction on **${label}**.`);
+        refreshPanelsSoon(guildId);
+      }
       return replyRestrict(interaction, formatResult(cleared));
     }
 
@@ -1319,12 +1392,23 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
           : `🔓 ${admin} lifted a restriction on **${label}**.`,
       );
     }
+    // Every write that changed who is restricted brings the posted panels into
+    // line, as `/controlpanel` edits do: a room whose owner this rule now covers
+    // loses the button, and one it no longer covers gets it back. Detached and
+    // coalesced, so several edits in a row cost one sweep. A repeat that only
+    // removed a saved nickname changed no panel.
+    if (res.changed) refreshPanelsSoon(guildId);
     try {
       // The note rides on a successful add only: it is what an admin should hear
       // before relying on a rule, and a refusal put nothing in place to rely on.
+      // While enforcement is paused the same reply has to say so, or "can no
+      // longer use" would be untrue in the sentence above it.
+      const paused = sub === 'add' && res.ok && (await deps.commandAccessDisabled?.()) === true;
       await replyRestrict(
         interaction,
-        sub === 'add' && res.ok ? `${formatResult(res)}\n\n${RESTRICT_NOTE}` : formatResult(res),
+        sub === 'add' && res.ok
+          ? `${formatResult(res)}${paused ? `\n\n${RESTRICT_PAUSED}` : ''}\n\n${RESTRICT_NOTE}`
+          : formatResult(res),
       );
     } finally {
       if (res.nicknameCleared) {
@@ -1512,13 +1596,30 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     );
   }
 
-  async function openNamePanel(interaction: ChatInputCommandInteraction): Promise<void> {
+  async function openNamePanel(
+    interaction: ChatInputCommandInteraction,
+    settings: StoredSettings,
+  ): Promise<void> {
     const target = await resolveOrPick(interaction, 'name', '✏️ Pick a voice channel to rename:');
     if (!target) return;
-    await nameCore(interaction, target);
+    await nameCore(interaction, target, settings);
   }
 
-  async function nameCore(interaction: ManageableInteraction, channelId: string): Promise<void> {
+  /**
+   * Opens the `/name` editor for a channel.
+   *
+   * Guarded here as well as in `handleCommand`, because the out-of-voice-channel
+   * picker reaches this without passing through the command's guard: `/name`
+   * answers with a picker, and the chosen channel arrives as a separate select
+   * interaction. The editor's own buttons and modal are guarded in
+   * {@link applyEditor}, which every write goes through.
+   */
+  async function nameCore(
+    interaction: ManageableInteraction,
+    channelId: string,
+    settings: StoredSettings,
+  ): Promise<void> {
+    if (!(await allowed(interaction, settings, PANEL_ACTION_FEATURE.rename))) return;
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
     const state = await run(guildId, 'cmd:name', () =>
@@ -1540,7 +1641,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     await respond(interaction, renderEditorPanel('channel', channelId, state));
   }
 
-  async function handleEditorButton(interaction: ButtonInteraction): Promise<void> {
+  async function handleEditorButton(
+    interaction: ButtonInteraction,
+    settings: StoredSettings,
+  ): Promise<void> {
     const parsed = parseEditorId(interaction.customId);
     if (!parsed) return;
     const { action, scope, field, channelId } = parsed;
@@ -1549,6 +1653,16 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       return;
     }
     if (action === 'edit') {
+      // The panel may have been opened before a rule was added, and the modal is
+      // the first response, so a denied member is turned away before it opens
+      // rather than after they have typed something. `applyEditor` still checks
+      // the submit.
+      if (
+        scope === 'channel' &&
+        !(await allowed(interaction, settings, PANEL_ACTION_FEATURE.rename))
+      ) {
+        return;
+      }
       const state = await run(interaction.guildId!, 'editor:state', () =>
         deps.feature.getEditorState(scope, interaction.guildId!, channelId),
       );
@@ -1566,7 +1680,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     if (action === 'reset') {
       // Defer first: the rerender can hit the rate-limit probe and brush the 3s ack.
       await interaction.deferUpdate();
-      await refreshEditorPanel(interaction, scope, field, channelId, 'reset');
+      await refreshEditorPanel(interaction, scope, field, channelId, 'reset', settings);
       return;
     }
     if (action === 'stop') {
@@ -1630,13 +1744,23 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     );
   }
 
-  async function handleEditorModal(interaction: ModalSubmitInteraction): Promise<void> {
+  async function handleEditorModal(
+    interaction: ModalSubmitInteraction,
+    settings: StoredSettings,
+  ): Promise<void> {
     const parsed = parseEditorId(interaction.customId);
     if (!parsed || parsed.action !== 'save') return;
     if (!interaction.isFromMessage()) return; // editor modals are always panel-driven
     const value = interaction.fields.getTextInputValue('template');
     await interaction.deferUpdate();
-    await refreshEditorPanel(interaction, parsed.scope, parsed.field, parsed.channelId, value);
+    await refreshEditorPanel(
+      interaction,
+      parsed.scope,
+      parsed.field,
+      parsed.channelId,
+      value,
+      settings,
+    );
   }
 
   /** Applies a change and edits the (already-deferred) panel in place. */
@@ -1646,8 +1770,9 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     field: EditorField,
     channelId: string,
     value: string,
+    settings: StoredSettings,
   ): Promise<void> {
-    const applied = await applyEditor(interaction, scope, field, channelId, value);
+    const applied = await applyEditor(interaction, scope, field, channelId, value, settings);
     if (applied.ok) {
       await interaction.editReply(
         toUpdate(renderEditorPanel(scope, channelId, applied.state, applied.opts)),
@@ -1657,18 +1782,33 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     }
   }
 
-  /** Applies a name/status change for a channel override or a primary template. */
+  /**
+   * Applies a name/status change for a channel override or a primary template.
+   *
+   * **The `channel` scope is guarded here because it is the one write path for
+   * a room's name AND its voice status**, reached by `/name`'s editor, its
+   * buttons and its modal, so a restriction on Name has to hold at this seam and
+   * not only at the command. A refusal comes back as a failed result like every
+   * other, which the callers already answer ephemerally. The two admin scopes
+   * are not restrictable: they are governed by Manage Channels, which a rule
+   * cannot stop.
+   */
   async function applyEditor(
     interaction: ButtonInteraction | ModalSubmitInteraction,
     scope: EditorScope,
     field: EditorField,
     channelId: string,
     value: string,
+    settings: StoredSettings,
   ): Promise<
     | { ok: true; state: EditorState; opts: { updated: true; note?: string } }
     | { ok: false; message: string }
   > {
     const guildId = interaction.guildId!;
+    if (scope === 'channel') {
+      const refusal = await refusalFor(interaction, settings, PANEL_ACTION_FEATURE.rename);
+      if (refusal !== null) return { ok: false, message: refusal };
+    }
     const admin = hasManageChannels(interaction);
     let result: CommandResult;
     if (scope === 'channel') {
@@ -1771,6 +1911,70 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       content: 'You need the Manage Channels permission.',
       ephemeral: true,
     });
+    return false;
+  }
+
+  // -- /restrict : the guard -------------------------------------------------
+
+  /**
+   * The sentence to refuse the caller with, or null when they may proceed.
+   *
+   * **One guard, on every path that does what a restricted command does**: the
+   * slash command, the room panel's buttons, modals and pickers, and the
+   * `/template` channel editor that `/name` opens. A rule that stopped only the
+   * command would leave the same act one click away.
+   *
+   * **Fails OPEN on any read problem.** A rule that locks out people it was never
+   * meant to is the failure an admin cannot diagnose from inside Discord, so a
+   * thrown read, a settings blob of the wrong shape and a missing row all read as
+   * "no restriction" and are logged by id.
+   *
+   * **Ordered so the common case costs nothing.** The permission bit and the
+   * stored map are checked first and are pure. The `command_access.disabled`
+   * lever is asked about only once a refusal is certain, so a server with no
+   * rules, and every caller a rule does not name, never reads it.
+   *
+   * The reply says only that a server admin turned the feature off for this
+   * member: never why, and never who else is restricted.
+   */
+  async function refusalFor(
+    interaction: Interaction,
+    settings: StoredSettings,
+    feature: CommandFeature | null,
+  ): Promise<string | null> {
+    if (feature === null) return null;
+    const guildId = interaction.guildId;
+    try {
+      if (guildId === null) return null;
+      const caller = {
+        userId: interaction.user.id,
+        roleIds: callerRoleIds(interaction),
+        canManage: callerCanManage(interaction),
+      };
+      if (mayUse(feature, caller, readCommandAccess(settings ?? {}, guildId))) return null;
+      if (await deps.commandAccessDisabled?.()) return null;
+      return restrictedRefusal(feature);
+    } catch (err) {
+      deps.logger.warn({ err, guildId, feature }, 'could not check a restriction, allowing it');
+      return null;
+    }
+  }
+
+  /**
+   * Whether to proceed, answering a refusal ephemerally.
+   *
+   * `safeReply` rather than `interaction.reply`: the interaction may already be
+   * deferred or replied to, and it never edits or updates a message, which on the
+   * room panel would replace the one public message every occupant reads.
+   */
+  async function allowed(
+    interaction: Interaction,
+    settings: StoredSettings,
+    feature: CommandFeature | null,
+  ): Promise<boolean> {
+    const refusal = await refusalFor(interaction, settings, feature);
+    if (refusal === null) return true;
+    await safeReply(interaction, `⚠️ ${refusal}`);
     return false;
   }
 
@@ -2543,9 +2747,10 @@ Already subscribed? Add the new server ` +
   async function handleStringSelect(
     interaction: StringSelectMenuInteraction,
     entitled: boolean,
+    settings: StoredSettings,
   ): Promise<void> {
     if (interaction.customId.startsWith(CONTROL_PANEL_PREFIX))
-      return handleControlPanelSelect(interaction);
+      return handleControlPanelSelect(interaction, settings);
     if (interaction.customId === SETUP_SETTINGS_ID) {
       const chosen = interaction.values[0];
       if (!chosen || !chosen.startsWith(SETUP_PREFIX)) {
@@ -2904,7 +3109,10 @@ Already subscribed? Add the new server ` +
   ]);
 
   /** A voice-channel was chosen from a `avc:setup:pick:<command>` menu → run the command. */
-  async function handleChannelSelect(interaction: ChannelSelectMenuInteraction): Promise<void> {
+  async function handleChannelSelect(
+    interaction: ChannelSelectMenuInteraction,
+    settings: StoredSettings,
+  ): Promise<void> {
     const command = parseSetupPick(interaction.customId);
     if (!command) return;
     const channelId = interaction.values[0];
@@ -2930,7 +3138,7 @@ Already subscribed? Add the new server ` +
       case 'group':
         return groupCore(interaction, channelId);
       case 'name':
-        return nameCore(interaction, channelId);
+        return nameCore(interaction, channelId, settings);
       case 'templateassistant':
         return assistantCore(interaction, channelId);
     }
@@ -2974,7 +3182,11 @@ Already subscribed? Add the new server ` +
     });
   }
 
-  async function handleButton(interaction: ButtonInteraction, entitled: boolean): Promise<void> {
+  async function handleButton(
+    interaction: ButtonInteraction,
+    entitled: boolean,
+    settings: StoredSettings,
+  ): Promise<void> {
     if (interaction.customId === CREATE_AGAIN_ID) return openCreateModal(interaction);
     if (interaction.customId.startsWith(CREATE_RETRY_PREFIX)) return handleCreateRetry(interaction);
     if (interaction.customId.startsWith(KICK_PREFIX)) return handleKickVote(interaction);
@@ -2985,9 +3197,10 @@ Already subscribed? Add the new server ` +
     if (interaction.customId.startsWith(LISTS_PREFIX)) return handleListsButton(interaction);
     if (interaction.customId.startsWith(CHANNELINFO_PREFIX))
       return handleChannelInfoButton(interaction, entitled);
-    if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorButton(interaction);
+    if (interaction.customId.startsWith(EDITOR_PREFIX))
+      return handleEditorButton(interaction, settings);
     if (interaction.customId.startsWith(ASSISTANT_PREFIX))
-      return handleAssistantButton(interaction);
+      return handleAssistantButton(interaction, settings);
     if (interaction.customId.startsWith(IMPORT_PREFIX)) {
       const importDependencies = importDeps();
       if (!importDependencies) {
@@ -3000,7 +3213,7 @@ Already subscribed? Add the new server ` +
       return handleImportButton(interaction, importDependencies);
     }
     if (interaction.customId.startsWith(CONTROL_PANEL_PREFIX))
-      return handleControlPanelButton(interaction, entitled);
+      return handleControlPanelButton(interaction, entitled, settings);
     if (interaction.customId.startsWith(CONTROL_SETTINGS_PREFIX))
       return handleControlSettingsButton(interaction);
     if (interaction.customId.startsWith(BOT_PROFILE_PREFIX))
@@ -3096,6 +3309,7 @@ Already subscribed? Add the new server ` +
   async function handleControlPanelButton(
     interaction: ButtonInteraction,
     entitled: boolean,
+    settings: StoredSettings,
   ): Promise<void> {
     const parsed = parseControlPanelId(interaction.customId);
     if (!parsed) {
@@ -3129,6 +3343,19 @@ Already subscribed? Add the new server ` +
       await safeReply(interaction, 'That button is from an older version.');
       return;
     }
+
+    /**
+     * The `/restrict` guard for every button, before anything else is done with
+     * it. This is what makes the panel and the slash command one policy: the
+     * action decides the feature (`PANEL_ACTION_FEATURE`, which has a decision
+     * for every action), and the undo direction, Claim, Kick and Info map to
+     * none. It sits ahead of the switch so it covers `openPanelModal` and
+     * `openPanelPicker`, which are reachable only from here, and it runs before
+     * `showModal`, which has to be the first response. A refusal is a new
+     * ephemeral reply: this message is the shared panel, and no handler here may
+     * edit it.
+     */
+    if (!(await allowed(interaction, settings, PANEL_ACTION_FEATURE[action]))) return;
 
     switch (action) {
       case 'lock':
@@ -3281,7 +3508,10 @@ Already subscribed? Add the new server ` +
   }
 
   /** The Limit and Rename modal submits. */
-  async function handleControlPanelModal(interaction: ModalSubmitInteraction): Promise<void> {
+  async function handleControlPanelModal(
+    interaction: ModalSubmitInteraction,
+    settings: StoredSettings,
+  ): Promise<void> {
     const parsed = parseControlPanelId(interaction.customId);
     if (!parsed || (parsed.action !== 'limitset' && parsed.action !== 'renameset')) {
       /**
@@ -3302,6 +3532,10 @@ Already subscribed? Add the new server ` +
       // Blank is "no limit", which is what `/unlimit` does, so the panel needs
       // no ninth button for it.
       const limit = raw === '' ? 0 : Number(raw);
+      // Checked again here, not only at the button: a modal outlives the rule
+      // that was added after it opened. A limit of 0 or a blank box removes a
+      // limit, which is the undo direction and is never restricted.
+      if (!(await allowed(interaction, settings, limitFeatureFor(limit)))) return;
       if (!Number.isInteger(limit) || limit < 0 || limit > MAX_USER_LIMIT) {
         await interaction.reply({
           content: `⚠️ The limit must be a whole number between 0 and ${MAX_USER_LIMIT}.`,
@@ -3316,6 +3550,7 @@ Already subscribed? Add the new server ` +
       );
     }
     if (parsed.action === 'renameset') {
+      if (!(await allowed(interaction, settings, PANEL_ACTION_FEATURE.renameset))) return;
       return replyPanelResult(
         interaction,
         () =>
@@ -3370,7 +3605,10 @@ Already subscribed? Add the new server ` +
   }
 
   /** A choice from one of those pickers. */
-  async function handleControlPanelSelect(interaction: StringSelectMenuInteraction): Promise<void> {
+  async function handleControlPanelSelect(
+    interaction: StringSelectMenuInteraction,
+    settings: StoredSettings,
+  ): Promise<void> {
     const parsed = parseControlPanelId(interaction.customId);
     const targetId = interaction.values[0];
     if (!parsed || !targetId) {
@@ -3379,6 +3617,9 @@ Already subscribed? Add the new server ` +
     }
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
+    // A picker outlives the rule that was added after it opened, so the choice is
+    // checked again here. Kick maps to no feature, so this is Transfer's alone.
+    if (!(await allowed(interaction, settings, PANEL_ACTION_FEATURE[parsed.action]))) return;
 
     if (parsed.action === 'transferpick') {
       return replyPanelResult(
@@ -4004,7 +4245,10 @@ Already subscribed? Add the new server ` +
     await interaction.reply({ content: res.message, ephemeral: true });
   }
 
-  async function handleModal(interaction: ModalSubmitInteraction): Promise<void> {
+  async function handleModal(
+    interaction: ModalSubmitInteraction,
+    settings: StoredSettings,
+  ): Promise<void> {
     if (
       interaction.customId === CREATE_MODAL_ID ||
       interaction.customId === CREATE_FROM_SETUP_MODAL_ID
@@ -4020,14 +4264,15 @@ Already subscribed? Add the new server ` +
       if (channelId) return handleInheritSubmit(interaction, channelId);
     }
     if (interaction.customId === LOGGING_MODAL_ID) return handleLoggingSubmit(interaction);
-    if (interaction.customId.startsWith(EDITOR_PREFIX)) return handleEditorModal(interaction);
+    if (interaction.customId.startsWith(EDITOR_PREFIX))
+      return handleEditorModal(interaction, settings);
     if (interaction.customId.startsWith(ASSISTANT_PREFIX)) return handleAssistantModal(interaction);
     if (interaction.customId === GENERAL_MODAL_ID) return handleGeneralSubmit(interaction);
     if (interaction.customId === TIMEZONE_MODAL_ID) return handleTimeZoneSubmit(interaction);
     if (interaction.customId === TEXT_CHANNELS_MODAL_ID)
       return handleTextChannelsSubmit(interaction);
     if (interaction.customId.startsWith(CONTROL_PANEL_PREFIX))
-      return handleControlPanelModal(interaction);
+      return handleControlPanelModal(interaction, settings);
     if (interaction.customId.startsWith(CONTROL_SETTINGS_PREFIX))
       return handleControlAppearanceModal(interaction);
     if (interaction.customId.startsWith(BOT_PROFILE_PREFIX))
@@ -4364,6 +4609,33 @@ function carriesManageChannels(permissions: unknown): boolean {
   return (
     bits.has(PermissionFlagsBits.ManageChannels) || bits.has(PermissionFlagsBits.Administrator)
   );
+}
+
+/**
+ * The caller's role ids, without `@everyone`, from either member shape.
+ *
+ * `interaction.member` is a `GuildMember` when the guild is cached, whose roles
+ * are in `roles.cache` and include the guild id (that is `@everyone`), and the
+ * raw API member otherwise, whose `roles` is a plain id list without it. Both
+ * happen in production, and a null member (no guild context) has no roles. The
+ * guild id is dropped either way: a rule can never name it, so leaving it in
+ * would only ever matter if a stored one slipped past the writer.
+ */
+function callerRoleIds(interaction: Interaction): string[] {
+  const member = interaction.member;
+  if (!member) return [];
+  const roles = member.roles;
+  const ids = Array.isArray(roles) ? roles : [...roles.cache.keys()];
+  return ids.filter((id) => id !== interaction.guildId);
+}
+
+/**
+ * Whether the caller holds Manage Channels or Administrator, which no rule can
+ * stop. From the interaction's own resolved permissions, so it needs no member
+ * fetch and no cache.
+ */
+function callerCanManage(interaction: Interaction): boolean {
+  return carriesManageChannels(interaction.memberPermissions);
 }
 
 /** Renders a human-readable `/debug` summary (full detail goes to the logs). */

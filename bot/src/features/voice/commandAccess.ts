@@ -25,8 +25,8 @@ import { isSnowflake, SETTINGS_KEYS } from './guildSettings.js';
  * never lock themselves out.
  *
  * **Undo directions are never restricted.** Opening a room again, removing a
- * limit with `/unlimit` and (later) showing a room or removing a saved member
- * must always work:
+ * limit (`/unlimit`, or a limit of 0 by any door) and (later) showing a room or
+ * removing a saved member must always work:
  * a creator channel whose rooms start private has to leave its owner a way to
  * open one, and a saved list is something a member must be able to erase.
  */
@@ -57,18 +57,17 @@ export const COMMAND_FEATURES = [
 export type CommandFeature = (typeof COMMAND_FEATURES)[number];
 
 /**
- * Whether anything reads the restrictions yet, which decides whether `/restrict`
- * is registered.
+ * Whether the guard reads the restrictions, which decides whether `/restrict` is
+ * registered. True: every command and panel path in `interactions.ts` checks the
+ * map, and the room panel hides what a restricted owner cannot use.
  *
- * **Flip this in the commit that makes the guard read the map, and not before.**
- * `/restrict` tells an admin a member "can no longer use" something, and until a
- * guard stands behind that it is a claim the code contradicts, in a command
- * Discord would list for every server the day this build boots. The command and
- * its handler exist and are tested, and `buildCommandDefinitions` takes an
- * explicit `includeRestrict` for those tests, so the one thing this holds back is
- * the registration.
+ * A constant and not a flag, because it describes the CODE and not the runtime.
+ * `/restrict` tells an admin a member "can no longer use" something, so it must
+ * never be listed by a build in which nothing enforces that, and it stays false
+ * for any build that removes the guard. Stopping enforcement while the build
+ * still has it is `command_access.disabled`, which `/restrict list` reports.
  */
-export const RESTRICT_ENFORCED = false;
+export const RESTRICT_ENFORCED = true;
 
 /**
  * The features `/restrict` offers today.
@@ -119,7 +118,8 @@ export const FEATURE_COVERS: Record<CommandFeature, string> = {
   privacy:
     'the /private command and the Private button. Opening a room again stays open to everyone',
   hide: 'the /hide command and the Hide button. Showing a room again stays open to everyone',
-  limit: 'the /limit command and the Size button. The /unlimit command stays open to everyone',
+  limit:
+    'the /limit command and the Size button. The /unlimit command, and a limit of 0, stay open to everyone',
   rename:
     'the /name command, the Name button, the template editor for their own room and the voice status',
   transfer: 'the /transfer command and the Transfer button',
@@ -150,6 +150,19 @@ export function featureForCommand(commandName: string): CommandFeature | null {
   return Object.prototype.hasOwnProperty.call(COMMAND_FEATURE, commandName)
     ? COMMAND_FEATURE[commandName]!
     : null;
+}
+
+/**
+ * The feature a Size action belongs to: none when it removes the limit.
+ *
+ * A limit of 0 is "no limit", which is `/unlimit` by another name and so the undo
+ * direction. It is never restricted, whichever door it comes in by: `/limit 0`,
+ * and the panel's Size box submitted blank or as 0. Anything else, including a
+ * value that is not a number, is a Size action and a rule can stop it. `null` (a
+ * `/limit` with no count, which only a hand-built request sends) is not 0.
+ */
+export function limitFeatureFor(count: number | null): CommandFeature | null {
+  return count === 0 ? null : 'limit';
 }
 
 /**

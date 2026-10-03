@@ -7,10 +7,12 @@ import {
 } from './commandAccess.js';
 import {
   RESTRICT_NOTE,
+  RESTRICT_PAUSED,
   RESTRICT_REFUSALS,
   renderRestrictionList,
   restrictAddedMessage,
   restrictClearedMessage,
+  restrictedRefusal,
   restrictMention,
   restrictRemovedMessage,
 } from './commandAccessCopy.js';
@@ -36,8 +38,9 @@ const fullAccess = (): CommandAccess =>
  * what an admin reads and not on source text, where only a curly quote shows.
  */
 function everyReply(): string[] {
-  const replies: string[] = [RESTRICT_NOTE];
+  const replies: string[] = [RESTRICT_NOTE, RESTRICT_PAUSED];
   for (const feature of COMMAND_FEATURES) {
+    replies.push(restrictedRefusal(feature));
     for (const target of [USER, ROLE]) {
       for (const already of [false, true]) {
         for (const nicknameCleared of [false, true]) {
@@ -65,6 +68,7 @@ function everyReply(): string[] {
     renderRestrictionList({}),
     renderRestrictionList(fullAccess()),
     renderRestrictionList({ rename: { users: [USER.id], roles: [ROLE.id] } }),
+    renderRestrictionList(fullAccess(), { paused: true }),
   );
   return replies;
 }
@@ -221,6 +225,47 @@ describe('the refusals', () => {
   it('name the target as a mention, which nobody is pinged by', () => {
     expect(RESTRICT_REFUSALS.bot(USER)).toContain('<@111111111111111111>');
     expect(RESTRICT_REFUSALS.manager(ROLE)).toContain('<@&333333333333333333>');
+  });
+});
+
+/**
+ * What a member is told when a rule stops them, on every path. It says that a
+ * server admin turned the feature off for them and nothing else: never why, and
+ * never who else is restricted.
+ */
+describe('restrictedRefusal', () => {
+  it('names only the feature, and that a server admin turned it off for the member', () => {
+    expect(restrictedRefusal('rename')).toBe('A server admin has turned off **Name** for you.');
+    expect(restrictedRefusal('privacy')).toBe(
+      'A server admin has turned off **Private and Public** for you.',
+    );
+  });
+
+  it('never mentions anybody, so it cannot ping', () => {
+    for (const feature of COMMAND_FEATURES) {
+      expect(restrictedRefusal(feature)).not.toMatch(/<@|<#|@everyone|@here/);
+    }
+  });
+});
+
+describe('the paused note', () => {
+  it('says rules are kept and nobody is refused', () => {
+    expect(RESTRICT_PAUSED).toContain('nobody is being refused');
+    expect(RESTRICT_PAUSED).toContain('kept');
+  });
+
+  it('leads a list that is paused, and does not appear in one that is not', () => {
+    const paused = renderRestrictionList({}, { paused: true }).split('\n');
+    expect(paused[0]).toBe(RESTRICT_PAUSED);
+    expect(paused[1]).toBe('');
+    expect(paused[2]).toBe('**Restricted from room commands**');
+    expect(renderRestrictionList({})).not.toContain(RESTRICT_PAUSED);
+    expect(renderRestrictionList({}, { paused: false })).not.toContain(RESTRICT_PAUSED);
+  });
+
+  /** The note is added to the largest list the caps allow, which is the one that has to fit. */
+  it('still fits one Discord message at the largest size the caps allow', () => {
+    expect(renderRestrictionList(fullAccess(), { paused: true }).length).toBeLessThanOrEqual(2000);
   });
 });
 

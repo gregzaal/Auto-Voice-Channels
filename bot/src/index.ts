@@ -735,6 +735,8 @@ async function main(): Promise<void> {
       },
     },
     serverLog: (guildId, level, message) => serverLogger.log(guildId, level, message),
+    // The `/restrict` lever, through the creation gate's cached snapshot.
+    commandAccessDisabled: () => creationGate.commandAccessDisabled(),
     selfHosted: config.selfHosted,
     clientId: config.clientId,
     // Its own kind: interaction failures are the one of these that can storm.

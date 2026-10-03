@@ -38,6 +38,28 @@ export const RESTRICT_NOTE =
 const label = (feature: CommandFeature): string => `**${FEATURE_LABELS[feature]}**`;
 
 /**
+ * What a member is told when a rule stops them, from a command, a panel button, a
+ * modal or a picker alike.
+ *
+ * It says that a server admin turned the feature off for them, and nothing more:
+ * never why, and never who else is restricted, since the member who reads it may
+ * be the very person an admin is dealing with and everyone else is none of their
+ * business. No mention, so nothing here can ping.
+ */
+export function restrictedRefusal(feature: CommandFeature): string {
+  return `A server admin has turned off ${label(feature)} for you.`;
+}
+
+/**
+ * Said when the `command_access.disabled` lever is set, where an admin is looking
+ * at rules or has just added one. The rules are kept, which is the part an admin
+ * worries about, and nobody is being refused, which is the part that would
+ * otherwise be a false claim.
+ */
+export const RESTRICT_PAUSED =
+  'Enforcement is paused right now, so nobody is being refused. The restrictions are kept and apply again when it resumes.';
+
+/**
  * What a successful `add` says. `already` is a repeat, which changes nothing
  * except that it still removes a saved nickname an older build let through, and
  * then "so nothing changed" would be untrue in the same sentence.
@@ -127,11 +149,18 @@ const LIST_CAP = 8;
  * about 3,700 characters against Discord's 2,000, so the cap is what keeps the
  * reply deliverable, and it is sized so that every feature at the cap still
  * leaves room for the two lines at the bottom that an admin must not miss.
+ * `paused` puts {@link RESTRICT_PAUSED} first, ahead of the lists it qualifies.
  */
-export function renderRestrictionList(access: CommandAccess): string {
+export function renderRestrictionList(
+  access: CommandAccess,
+  opts: { paused?: boolean } = {},
+): string {
   // Headed by what the lists ARE: they name who is denied, and a heading that
   // reads "who can use" would be taken for the opposite.
-  const lines = ['**Restricted from room commands**'];
+  const lines = [
+    ...(opts.paused ? [RESTRICT_PAUSED, ''] : []),
+    '**Restricted from room commands**',
+  ];
   for (const feature of AVAILABLE_FEATURES) {
     const denied = access[feature];
     const entries: string[] = [

@@ -9,6 +9,7 @@ import {
   FEATURE_LABELS,
   featureForCommand,
   isAvailableFeature,
+  limitFeatureFor,
   MAX_RESTRICTED_ROLES,
   MAX_RESTRICTED_USERS,
   MAX_RESTRICTIONS,
@@ -98,10 +99,11 @@ describe('the feature list', () => {
     expect(FEATURE_COVERS.rename).toContain('template editor');
     expect(FEATURE_COVERS.rename).toContain('voice status');
     expect(FEATURE_COVERS.privacy).toContain('stays open to everyone');
-    // Not "removing a limit": `/limit 0` and the Size button's modal remove one
-    // too and are the restricted paths. Only `/unlimit` is the open one.
-    expect(FEATURE_COVERS.limit).toContain('The /unlimit command stays open to everyone');
-    expect(FEATURE_COVERS.limit.toLowerCase()).not.toContain('removing a limit');
+    // `/unlimit` and a limit of 0 (`/limit 0`, a blank or 0 Size box) both remove
+    // a limit, which is the undo direction, so both are named as the open ones.
+    expect(FEATURE_COVERS.limit).toContain(
+      'The /unlimit command, and a limit of 0, stay open to everyone',
+    );
   });
 
   /**
@@ -121,8 +123,8 @@ describe('the feature list', () => {
 });
 
 /**
- * `/restrict` tells an admin a member "can no longer use" something, so it is not
- * registered until a guard stands behind that.
+ * `/restrict` tells an admin a member "can no longer use" something, so it is
+ * registered only by a build whose guard stands behind that.
  */
 describe('registering /restrict', () => {
   const names = (options?: { includeRestrict?: boolean }): string[] =>
@@ -130,6 +132,12 @@ describe('registering /restrict', () => {
 
   it('follows RESTRICT_ENFORCED by default', () => {
     expect(names().includes('restrict')).toBe(RESTRICT_ENFORCED);
+  });
+
+  /** The guard reads the map on every path now, so the command is on by default. */
+  it('is registered by default now that the guard reads the restrictions', () => {
+    expect(RESTRICT_ENFORCED).toBe(true);
+    expect(names()).toContain('restrict');
   });
 
   it('can be asked for explicitly either way', () => {
@@ -213,6 +221,29 @@ describe('which commands a rule can stop', () => {
     for (const feature of Object.values(COMMAND_FEATURE)) {
       expect(COMMAND_FEATURES).toContain(feature);
     }
+  });
+});
+
+/**
+ * A limit of 0 is "no limit", which is `/unlimit` by another name, so it is the
+ * undo direction wherever it comes in: `/limit 0`, and the panel's Size box
+ * submitted blank or as 0.
+ */
+describe('limitFeatureFor', () => {
+  it('never restricts a limit of 0', () => {
+    expect(limitFeatureFor(0)).toBeNull();
+    expect(mayUse(limitFeatureFor(0), caller(), { limit: { users: [USER], roles: [] } })).toBe(
+      true,
+    );
+  });
+
+  it('restricts any other count, including one that is not a number or is missing', () => {
+    for (const count of [1, 5, 99, -1, Number.NaN, null]) {
+      expect(limitFeatureFor(count), String(count)).toBe('limit');
+    }
+    expect(mayUse(limitFeatureFor(5), caller(), { limit: { users: [USER], roles: [] } })).toBe(
+      false,
+    );
   });
 });
 

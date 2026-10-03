@@ -32,9 +32,9 @@ export interface CommandBuildOptions {
    */
   includeAssistant?: boolean;
   /**
-   * Include `/restrict`. Defaults to `RESTRICT_ENFORCED`, which is false until a
-   * guard reads the restrictions, so a build whose guard has not landed never
-   * lists a command that promises what nothing does. Tests pass it explicitly.
+   * Include `/restrict`. Defaults to `RESTRICT_ENFORCED`, which is true while the
+   * guard reads the restrictions, so a build without one never lists a command
+   * that promises what nothing does. Tests can pass it explicitly.
    */
   includeRestrict?: boolean;
 }
@@ -265,7 +265,7 @@ export function buildCommandDefinitions(
      * has filled with people who left and roles that were deleted, which `remove`
      * cannot name because Discord's picker cannot offer them.
      *
-     * Not registered until `RESTRICT_ENFORCED`: see the filter below.
+     * Registered only while `RESTRICT_ENFORCED`: see the filter below.
      */
     adminOnly(
       new SlashCommandBuilder()
@@ -351,9 +351,8 @@ export function buildCommandDefinitions(
     );
   }
 
-  // `/restrict` is built above so its shape is tested, and left out of what is
-  // registered until a guard reads the map. Its replies tell an admin a member
-  // "can no longer use" something, which no code makes true yet.
+  // `/restrict` is registered only by a build whose guard reads the map: its
+  // replies tell an admin a member "can no longer use" something.
   const includeRestrict = options.includeRestrict ?? RESTRICT_ENFORCED;
   return commands.filter((c) => includeRestrict || c.name !== 'restrict').map((c) => c.toJSON());
 }

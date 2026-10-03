@@ -61,6 +61,21 @@ interface FakeInteractionOpts {
   selectedChannelId?: string;
   /** Permission flags the bot member holds guild-wide. */
   botPerms?: bigint[];
+  /** The caller's user id. Defaults to `u1`, which is not a snowflake and so cannot be named by a rule. */
+  userId?: string;
+  /**
+   * The caller's role ids, which also decides whether there is a member at all:
+   * absent leaves `member` null, which is what most of these tests need.
+   */
+  memberRoles?: string[];
+  /**
+   * Which member shape discord.js hands over. `guildMember` (the default) keeps
+   * its roles in `roles.cache` AND includes the guild id as @everyone, as the
+   * real class does, and `raw` is the API member with a plain role id list.
+   */
+  memberShape?: 'guildMember' | 'raw';
+  /** Whether the caller holds Administrator, which the guard treats like Manage Channels. */
+  administrator?: boolean;
   /** A category present in the guild cache: name + the flags the bot holds there. */
   category?: { id: string; name: string; perms: bigint[] };
   /** The voice channel the caller is sitting in (drives the "act on it" path). */
@@ -133,8 +148,20 @@ function fakeInteraction(opts: FakeInteractionOpts) {
   const interaction = {
     id: opts.id ?? 'i1',
     guildId: opts.guildId ?? 'g1',
-    user: { id: 'u1', username: 'kay', displayName: 'Kay' },
-    member: null,
+    user: { id: opts.userId ?? 'u1', username: 'kay', displayName: 'Kay' },
+    member:
+      opts.memberRoles === undefined
+        ? null
+        : opts.memberShape === 'raw'
+          ? { roles: [...opts.memberRoles] }
+          : {
+              roles: {
+                cache: new Map([
+                  [opts.guildId ?? 'g1', {}],
+                  ...opts.memberRoles.map((id) => [id, {}] as const),
+                ]),
+              },
+            },
     locale: opts.locale,
     guild: {
       members: {
@@ -184,6 +211,7 @@ function fakeInteraction(opts: FakeInteractionOpts) {
     memberPermissions: {
       has: (p: bigint) =>
         (p === PermissionFlagsBits.ManageChannels && (opts.manageChannels ?? false)) ||
+        (p === PermissionFlagsBits.Administrator && (opts.administrator ?? false)) ||
         (p === PermissionFlagsBits.ManageGuild && (opts.manageGuild ?? false)),
     },
     replied: false,
@@ -3604,8 +3632,8 @@ describe('registerInteractionHandler (/botprofile)', () => {
  *
  * Driven through the real `GuildSettingsService` over an in-memory settings store,
  * so what an admin reads and what lands in the blob are both the real thing, and
- * the router around them is the real router. Nothing here is enforced yet: this
- * command only edits the map.
+ * the router around them is the real router. This command only edits the map, and
+ * enforcing it is the guard's job (see the restriction guard tests below).
  */
 describe('registerInteractionHandler (/restrict)', () => {
   let dispose: (() => void) | undefined;
@@ -3633,6 +3661,7 @@ describe('registerInteractionHandler (/restrict)', () => {
     const rerenderByOwner = vi
       .fn()
       .mockResolvedValue({ considered: 1, renamed: 1, rateLimited: 0 });
+    const refreshGuildPanels = vi.fn().mockResolvedValue({ considered: 0 });
     const warn = vi.fn();
     const mergeSettings = vi.fn(
       (
@@ -3659,12 +3688,20 @@ describe('registerInteractionHandler (/restrict)', () => {
     const env = setup({
       settings: settings as never,
       serverLog,
-      feature: { rerenderByOwner } as never,
+      feature: { rerenderByOwner, refreshGuildPanels } as never,
       logger: { ...fakeLogger(), warn } as never,
       ...overrides,
     });
     dispose = env.dispose;
-    return { env, blob: () => blob, serverLog, rerenderByOwner, warn, mergeSettings };
+    return {
+      env,
+      blob: () => blob,
+      serverLog,
+      rerenderByOwner,
+      refreshGuildPanels,
+      warn,
+      mergeSettings,
+    };
   }
 
   /** Runs one `/restrict` interaction and returns what the admin was sent. */
@@ -4161,6 +4198,98 @@ describe('registerInteractionHandler (/restrict)', () => {
    * who is restricted and lift a restriction, and cannot put a new one up. The
    * same split `/botprofile`'s resets and sets make.
    */
+  /**
+   * Every write that changes who is restricted brings the posted panels into line,
+   * as `/controlpanel` edits do: a room whose owner a rule now covers loses the
+   * button, and one it no longer covers gets it back. A write that changed nothing
+   * re-renders nothing, since proving it to every room in the server is traffic.
+   */
+  describe('refreshes the room panels', () => {
+    it.each([
+      ['an add', {}, addUser('rename')],
+      ['a remove', { command_access: { rename: { users: [TARGET] } } }, removeUser('rename')],
+      [
+        'a clear',
+        { command_access: { rename: { users: [TARGET] } } },
+        { subcommand: 'clear', optionFeature: 'rename' },
+      ],
+    ] as const)('after %s that changed something', async (_what, initial, opts) => {
+      const e = restrictEnv(initial as never);
+      await restrict(e, opts as never);
+      expect(e.refreshGuildPanels).toHaveBeenCalledTimes(1);
+      expect(e.refreshGuildPanels).toHaveBeenCalledWith(GUILD);
+    });
+
+    it.each([
+      ['a repeat add', { command_access: { rename: { users: [TARGET] } } }, addUser('rename')],
+      ['removing somebody who was not restricted', {}, removeUser('rename')],
+      [
+        'clearing a feature nobody was restricted from',
+        {},
+        { subcommand: 'clear', optionFeature: 'rename' },
+      ],
+    ] as const)('not after %s', async (_what, initial, opts) => {
+      const e = restrictEnv(initial as never);
+      await restrict(e, opts as never);
+      expect(e.refreshGuildPanels).not.toHaveBeenCalled();
+    });
+
+    it('not after a refused add', async () => {
+      const e = restrictEnv();
+      await restrict(e, addUser('rename', TARGET, { member: { permissions: holds(MANAGE) } }));
+      expect(e.refreshGuildPanels).not.toHaveBeenCalled();
+    });
+
+    it('and a refresh that fails does not fail the command', async () => {
+      const e = restrictEnv();
+      e.refreshGuildPanels.mockRejectedValue(new Error('discord is down'));
+      const { content } = await restrict(e, addUser('rename'));
+      await flush();
+      expect(content).toContain('can no longer use **Name**');
+      expect(e.env.reportError).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * While `command_access.disabled` is set the rules are kept and nothing is
+   * refused, and an admin reading a list or adding a rule has to be told, or "can
+   * no longer use" would be untrue in the sentence above it.
+   */
+  describe('while enforcement is paused', () => {
+    const paused = { commandAccessDisabled: vi.fn().mockResolvedValue(true) };
+
+    it('says so at the top of the list, above the rules it qualifies', async () => {
+      const e = restrictEnv({ command_access: { rename: { users: [TARGET] } } }, paused);
+      const { content } = await restrict(e, { subcommand: 'list' });
+      expect(content.startsWith('Enforcement is paused right now')).toBe(true);
+      expect(content).toContain(`**Name**: <@${TARGET}>`);
+      expect(content.length).toBeLessThanOrEqual(2000);
+    });
+
+    it('does not say so when enforcement is on', async () => {
+      const e = restrictEnv({}, { commandAccessDisabled: vi.fn().mockResolvedValue(false) });
+      const { content } = await restrict(e, { subcommand: 'list' });
+      expect(content).not.toContain('Enforcement is paused');
+    });
+
+    it('does not say so when the lever is not wired at all', async () => {
+      const e = restrictEnv();
+      const { content } = await restrict(e, { subcommand: 'list' });
+      expect(content).not.toContain('Enforcement is paused');
+    });
+
+    it('still lists, adds and removes, which the lever never blocks', async () => {
+      const e = restrictEnv({}, paused);
+      const added = await restrict(e, addUser('rename'));
+      expect(e.blob().command_access).toEqual({ rename: { users: [TARGET] } });
+      expect(added.content).toContain('Enforcement is paused right now');
+      expect(added.content).toContain('can no longer use **Name**');
+      const removed = await restrict(e, removeUser('rename'));
+      expect(e.blob().command_access).toBeUndefined();
+      expect(removed.content).not.toContain('Enforcement is paused');
+    });
+  });
+
   describe('in a hard-gated guild', () => {
     const gated = () => ({
       guilds: {
@@ -4258,5 +4387,635 @@ describe('registerInteractionHandler (/restrict)', () => {
       expect(text.toLowerCase()).not.toMatch(/primary|secondary/);
       expect(text.length).toBeLessThanOrEqual(2000);
     }
+  });
+});
+
+/**
+ * The restriction guard: one policy on every path that does what a restricted
+ * command does, so a rule that stops `/name` also stops the Name button, the
+ * `/template` channel editor `/name` opens, and the voice status.
+ *
+ * Driven through the real router with a settings blob on the guild row, because
+ * that row is where the guard reads the rules from. The things worth pinning are
+ * the ones a unit test of the policy cannot see: which doors exist, that none of
+ * them can edit the shared panel, that `showModal` is still the first response,
+ * that undo directions stay open, and that every read problem fails open.
+ */
+describe('registerInteractionHandler (the restriction guard)', () => {
+  let dispose: (() => void) | undefined;
+  afterEach(() => dispose?.());
+
+  const KAY = '111111111111111111';
+  const OTHER = '222222222222222222';
+  const DENIED_ROLE = '333333333333333333';
+  const OTHER_ROLE = '444444444444444444';
+  const EVERYONE = '460459401086763010';
+
+  /** Every feature `/restrict` offers, denied to Kay by id. */
+  const DENY_KAY = {
+    privacy: { users: [KAY] },
+    limit: { users: [KAY] },
+    rename: { users: [KAY] },
+    transfer: { users: [KAY] },
+    nick: { users: [KAY] },
+  };
+
+  /** The words a refusal uses, for the five features a command or a button can be stopped on. */
+  const REFUSAL = (label: string) => `A server admin has turned off **${label}** for you.`;
+
+  /** Spies for everything a restricted door would reach. */
+  function services() {
+    const ok = () => vi.fn().mockResolvedValue({ ok: true, message: 'done' });
+    return {
+      setLimit: ok(),
+      unlimit: ok(),
+      setName: ok(),
+      setStatus: ok(),
+      claim: ok(),
+      transfer: ok(),
+      makePrivate: ok(),
+      makePublic: ok(),
+      setNick: ok(),
+      getEditorState: vi.fn().mockResolvedValue({ found: false, scope: 'channel' }),
+      getRoomPanelState: vi.fn().mockResolvedValue({
+        ownerId: KAY,
+        members: [
+          { id: KAY, displayName: 'Kay', bot: false },
+          { id: OTHER, displayName: 'Ana', bot: false },
+        ],
+        userLimit: 4,
+      }),
+      rerenderByOwner: vi.fn().mockResolvedValue({ considered: 0, renamed: 0, rateLimited: 0 }),
+    };
+  }
+
+  function guardEnv(
+    rules: Record<string, unknown> | string | undefined,
+    overrides: Partial<InteractionDeps> = {},
+    row: Record<string, unknown> = {},
+  ) {
+    const s = services();
+    const countCommand = vi.fn();
+    const commandAccessDisabled = vi.fn().mockResolvedValue(false);
+    const warn = vi.fn();
+    const get = vi.fn().mockResolvedValue({
+      authStatus: 'active',
+      ...(rules === undefined ? {} : { settings: { command_access: rules } }),
+      ...row,
+    });
+    const env = setup({
+      guilds: { get, isEntitled: vi.fn().mockResolvedValue(true) } as never,
+      voiceCommands: {
+        setLimit: s.setLimit,
+        unlimit: s.unlimit,
+        setName: s.setName,
+        setStatus: s.setStatus,
+        claim: s.claim,
+        transfer: s.transfer,
+      } as never,
+      privacy: { makePrivate: s.makePrivate, makePublic: s.makePublic } as never,
+      settings: {
+        setNick: s.setNick,
+        getConfig: vi
+          .fn()
+          .mockResolvedValue({ enabled: true, primaries: [], aliases: {}, lists: {} }),
+        recordContact: vi.fn().mockResolvedValue(undefined),
+      } as never,
+      feature: {
+        getEditorState: s.getEditorState,
+        getRoomPanelState: s.getRoomPanelState,
+        rerenderByOwner: s.rerenderByOwner,
+      } as never,
+      logger: { ...fakeLogger(), warn } as never,
+      countCommand,
+      commandAccessDisabled,
+      ...overrides,
+    });
+    dispose = env.dispose;
+    return { env, s, countCommand, commandAccessDisabled, warn, get };
+  }
+
+  type Env = ReturnType<typeof guardEnv>;
+
+  /** Emits one interaction as Kay (by default) and waits for the router to settle. */
+  async function fire(env: Env, opts: FakeInteractionOpts) {
+    const fake = fakeInteraction({ userId: KAY, ...opts });
+    env.env.client.emit('interactionCreate', fake.interaction);
+    await flush();
+    return fake;
+  }
+
+  /** Everything the caller was sent, whichever way it was delivered. */
+  const sent = (f: ReturnType<typeof fakeInteraction>): string =>
+    [...f.reply.mock.calls, ...f.followUp.mock.calls, ...f.editReply.mock.calls]
+      .map((call) => JSON.stringify(call[0]))
+      .join('\n');
+
+  /**
+   * A refusal, and nothing else: an ephemeral answer that names the feature, and
+   * never an edit of the message the interaction came from, which on the room
+   * panel is the one public message every occupant reads.
+   */
+  function expectRefused(f: ReturnType<typeof fakeInteraction>, label: string): void {
+    expect(sent(f)).toContain(REFUSAL(label));
+    expect(f.interaction.update).not.toHaveBeenCalled();
+    expect(f.interaction.showModal).not.toHaveBeenCalled();
+    expect(f.interaction.deferUpdate).not.toHaveBeenCalled();
+    if (f.reply.mock.calls.length > 0) {
+      expect(f.reply).toHaveBeenCalledWith(expect.objectContaining({ ephemeral: true }));
+    }
+  }
+
+  const notRefused = (f: ReturnType<typeof fakeInteraction>): boolean =>
+    !sent(f).includes('A server admin has turned off');
+
+  // -- slash commands --------------------------------------------------------
+
+  const COMMANDS = [
+    { name: 'limit', label: 'Size', acted: (s: ReturnType<typeof services>) => s.setLimit },
+    {
+      name: 'private',
+      label: 'Private and Public',
+      acted: (s: ReturnType<typeof services>) => s.makePrivate,
+    },
+    { name: 'name', label: 'Name', acted: (s: ReturnType<typeof services>) => s.getEditorState },
+    { name: 'transfer', label: 'Transfer', acted: (s: ReturnType<typeof services>) => s.transfer },
+    { name: 'nick', label: 'Nickname', acted: (s: ReturnType<typeof services>) => s.setNick },
+  ] as const;
+
+  describe.each(COMMANDS)('/$name', ({ name, label, acted }) => {
+    it('refuses a member who is denied it, ephemerally, before anything is done', async () => {
+      const e = guardEnv(DENY_KAY);
+      const f = await fire(e, { kind: 'command', commandName: name, voiceChannelId: 'room-1' });
+      expectRefused(f, label);
+      expect(acted(e.s)).not.toHaveBeenCalled();
+      // Not deferred: a refusal is a plain reply and a deferred one would have
+      // to be edited into one, and nothing was going to take three seconds.
+      expect(f.interaction.deferReply).not.toHaveBeenCalled();
+      // And not counted: the number means "commands that ran".
+      expect(e.countCommand).not.toHaveBeenCalled();
+    });
+
+    it('lets a member through who is not named by the rule', async () => {
+      const e = guardEnv({
+        privacy: { users: [OTHER] },
+        limit: { users: [OTHER] },
+        rename: { users: [OTHER] },
+        transfer: { users: [OTHER] },
+        nick: { users: [OTHER] },
+      });
+      const f = await fire(e, { kind: 'command', commandName: name, voiceChannelId: 'room-1' });
+      expect(notRefused(f)).toBe(true);
+      expect(acted(e.s)).toHaveBeenCalled();
+      expect(e.countCommand).toHaveBeenCalledWith(name);
+    });
+
+    it('never restricts a member who can manage channels, or an administrator', async () => {
+      for (const holds of [{ manageChannels: true }, { administrator: true }]) {
+        const e = guardEnv(DENY_KAY);
+        const f = await fire(e, {
+          kind: 'command',
+          commandName: name,
+          voiceChannelId: 'room-1',
+          ...holds,
+        });
+        expect(notRefused(f)).toBe(true);
+        expect(acted(e.s)).toHaveBeenCalled();
+        dispose?.();
+      }
+    });
+  });
+
+  /** A rule on a ROLE reaches a member through whichever shape discord.js gave us. */
+  describe('a rule that names a role', () => {
+    const RULES = { limit: { roles: [DENIED_ROLE] } };
+
+    it.each(['guildMember', 'raw'] as const)(
+      'refuses a member holding it (%s shape)',
+      async (shape) => {
+        const e = guardEnv(RULES);
+        const f = await fire(e, {
+          kind: 'command',
+          commandName: 'limit',
+          voiceChannelId: 'room-1',
+          memberRoles: [OTHER_ROLE, DENIED_ROLE],
+          memberShape: shape,
+        });
+        expectRefused(f, 'Size');
+        expect(e.s.setLimit).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['guildMember', 'raw'] as const)(
+      'lets a member without it through (%s shape)',
+      async (shape) => {
+        const e = guardEnv(RULES);
+        const f = await fire(e, {
+          kind: 'command',
+          commandName: 'limit',
+          voiceChannelId: 'room-1',
+          memberRoles: [OTHER_ROLE],
+          memberShape: shape,
+        });
+        expect(notRefused(f)).toBe(true);
+        expect(e.s.setLimit).toHaveBeenCalled();
+      },
+    );
+
+    it('has no roles to match when there is no member, so a role rule cannot refuse', async () => {
+      const e = guardEnv(RULES);
+      const f = await fire(e, { kind: 'command', commandName: 'limit', voiceChannelId: 'room-1' });
+      expect(notRefused(f)).toBe(true);
+      expect(e.s.setLimit).toHaveBeenCalled();
+    });
+
+    /**
+     * A member's own role list includes \`@everyone\`, whose id is the guild id.
+     * A stored rule naming it would deny the whole server, so it is dropped both
+     * where it is read and where the caller's roles are built, and each shape
+     * is checked because the real class includes it and the raw one does not.
+     */
+    it.each(['guildMember', 'raw'] as const)(
+      'is not tripped by a stored @everyone rule (%s shape)',
+      async (shape) => {
+        const e = guardEnv({ limit: { roles: [EVERYONE] } });
+        const f = await fire(e, {
+          kind: 'command',
+          commandName: 'limit',
+          guildId: EVERYONE,
+          voiceChannelId: 'room-1',
+          memberRoles: [OTHER_ROLE],
+          memberShape: shape,
+        });
+        expect(notRefused(f)).toBe(true);
+        expect(e.s.setLimit).toHaveBeenCalled();
+      },
+    );
+  });
+
+  /**
+   * Undo directions are never restricted. An owner whose creator channel starts
+   * rooms private must always be able to open one, and a limit of 0 is what
+   * \`/unlimit\` does by another name.
+   */
+  describe('the undo directions', () => {
+    it('leaves /public, /unlimit and /reclaim open to a member denied everything', async () => {
+      for (const commandName of ['public', 'unlimit', 'reclaim']) {
+        const e = guardEnv(DENY_KAY);
+        const f = await fire(e, { kind: 'command', commandName, voiceChannelId: 'room-1' });
+        expect(notRefused(f), commandName).toBe(true);
+        dispose?.();
+      }
+      const e = guardEnv(DENY_KAY);
+      await fire(e, { kind: 'command', commandName: 'public', voiceChannelId: 'room-1' });
+      expect(e.s.makePublic).toHaveBeenCalled();
+    });
+
+    it('treats /limit 0 as removing a limit, so it is never restricted', async () => {
+      const e = guardEnv(DENY_KAY);
+      const f = await fire(e, {
+        kind: 'command',
+        commandName: 'limit',
+        voiceChannelId: 'room-1',
+        optionInteger: 0,
+      });
+      expect(notRefused(f)).toBe(true);
+      expect(e.s.setLimit).toHaveBeenCalledWith('g1', 'room-1', KAY, 0);
+    });
+
+    it('still refuses /limit with a real count', async () => {
+      const e = guardEnv(DENY_KAY);
+      const f = await fire(e, {
+        kind: 'command',
+        commandName: 'limit',
+        voiceChannelId: 'room-1',
+        optionInteger: 5,
+      });
+      expectRefused(f, 'Size');
+    });
+  });
+
+  // -- fail open -------------------------------------------------------------
+
+  describe('on any read problem it lets the member through', () => {
+    it.each([
+      ['a row with no settings at all', undefined],
+      ['a command_access that is not a map', 'garbage'],
+      ['an entry that is not a map', { limit: 'nope' }],
+      ['an entry whose lists are not lists', { limit: { users: 'u', roles: 5 } }],
+      ['ids that are not snowflakes', { limit: { users: ['kay'], roles: ['admins'] } }],
+    ])('%s', async (_what, rules) => {
+      const e = guardEnv(rules as never);
+      const f = await fire(e, { kind: 'command', commandName: 'limit', voiceChannelId: 'room-1' });
+      expect(notRefused(f)).toBe(true);
+      expect(e.s.setLimit).toHaveBeenCalled();
+    });
+
+    it('when reading the settings throws, and says so by id', async () => {
+      const poisoned = new Proxy(
+        {},
+        {
+          get() {
+            throw new Error('boom');
+          },
+        },
+      );
+      const e = guardEnv(undefined, {}, { settings: poisoned });
+      const f = await fire(e, { kind: 'command', commandName: 'limit', voiceChannelId: 'room-1' });
+      expect(notRefused(f)).toBe(true);
+      expect(e.s.setLimit).toHaveBeenCalled();
+      expect(e.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ guildId: 'g1', feature: 'limit' }),
+        expect.stringContaining('allowing it'),
+      );
+    });
+
+    it('when asking the lever throws', async () => {
+      const e = guardEnv(DENY_KAY, {
+        commandAccessDisabled: vi.fn().mockRejectedValue(new Error('db down')),
+      });
+      const f = await fire(e, { kind: 'command', commandName: 'limit', voiceChannelId: 'room-1' });
+      expect(notRefused(f)).toBe(true);
+      expect(e.s.setLimit).toHaveBeenCalled();
+    });
+  });
+
+  // -- the lever -------------------------------------------------------------
+
+  describe('command_access.disabled', () => {
+    it('refuses nobody while it is on', async () => {
+      const e = guardEnv(DENY_KAY, { commandAccessDisabled: vi.fn().mockResolvedValue(true) });
+      const f = await fire(e, { kind: 'command', commandName: 'limit', voiceChannelId: 'room-1' });
+      expect(notRefused(f)).toBe(true);
+      expect(e.s.setLimit).toHaveBeenCalled();
+    });
+
+    it('is asked once when a refusal is about to happen', async () => {
+      const e = guardEnv(DENY_KAY);
+      await fire(e, { kind: 'command', commandName: 'limit', voiceChannelId: 'room-1' });
+      expect(e.commandAccessDisabled).toHaveBeenCalledTimes(1);
+    });
+
+    /** A server with no rules, and a member no rule names, never pays for the read. */
+    it.each([
+      ['a server with no rules', undefined],
+      ['a member no rule names', { limit: { users: [OTHER] } }],
+      ['a feature nobody is denied', { rename: { users: [KAY] } }],
+    ])('is never read for %s', async (_what, rules) => {
+      const e = guardEnv(rules as never);
+      await fire(e, { kind: 'command', commandName: 'limit', voiceChannelId: 'room-1' });
+      expect(e.commandAccessDisabled).not.toHaveBeenCalled();
+    });
+
+    it('is never read for a member who can manage channels', async () => {
+      const e = guardEnv(DENY_KAY);
+      await fire(e, {
+        kind: 'command',
+        commandName: 'limit',
+        voiceChannelId: 'room-1',
+        manageChannels: true,
+      });
+      expect(e.commandAccessDisabled).not.toHaveBeenCalled();
+    });
+  });
+
+  // -- the room panel --------------------------------------------------------
+
+  describe('the room panel', () => {
+    const ROOM = 'room-9';
+
+    it.each([
+      ['lock', 'Private and Public', (s: ReturnType<typeof services>) => s.makePrivate],
+      ['limit', 'Size', (s: ReturnType<typeof services>) => s.getRoomPanelState],
+      ['rename', 'Name', (s: ReturnType<typeof services>) => s.getRoomPanelState],
+      ['transfer', 'Transfer', (s: ReturnType<typeof services>) => s.getRoomPanelState],
+    ] as const)(
+      'refuses the %s button for a denied member, without editing the panel',
+      async (action, label, acted) => {
+        const e = guardEnv(DENY_KAY);
+        const f = await fire(e, { kind: 'button', customId: controlPanelId(action, ROOM) });
+        expectRefused(f, label);
+        // Not even the room is read: the refusal comes first, so a modal is never
+        // opened for somebody who cannot use it and a picker never offered.
+        expect(acted(e.s)).not.toHaveBeenCalled();
+        expect(f.interaction.deferReply).not.toHaveBeenCalled();
+      },
+    );
+
+    it('leaves Public, Claim and Kick open to a member denied everything', async () => {
+      for (const action of ['unlock', 'claim', 'kick'] as const) {
+        const e = guardEnv(DENY_KAY);
+        const f = await fire(e, { kind: 'button', customId: controlPanelId(action, ROOM) });
+        expect(notRefused(f), action).toBe(true);
+        dispose?.();
+      }
+      const e = guardEnv(DENY_KAY);
+      await fire(e, { kind: 'button', customId: controlPanelId('unlock', ROOM) });
+      expect(e.s.makePublic).toHaveBeenCalledWith('g1', ROOM, KAY);
+    });
+
+    it('opens the modals and the picker for a member who is not denied', async () => {
+      const e = guardEnv({ limit: { users: [OTHER] } });
+      const limit = await fire(e, { kind: 'button', customId: controlPanelId('limit', ROOM) });
+      expect(limit.interaction.showModal).toHaveBeenCalled();
+      const rename = await fire(e, { kind: 'button', customId: controlPanelId('rename', ROOM) });
+      expect(rename.interaction.showModal).toHaveBeenCalled();
+      const transfer = await fire(e, {
+        kind: 'button',
+        customId: controlPanelId('transfer', ROOM),
+      });
+      expect(JSON.stringify(transfer.reply.mock.calls[0]?.[0])).toContain('transferpick');
+    });
+
+    it('never restricts a member who can manage channels', async () => {
+      const e = guardEnv(DENY_KAY);
+      const f = await fire(e, {
+        kind: 'button',
+        customId: controlPanelId('rename', ROOM),
+        manageChannels: true,
+      });
+      expect(f.interaction.showModal).toHaveBeenCalled();
+    });
+
+    /** A modal outlives the rule that was added after it opened. */
+    it('refuses a stale Size modal and a stale Name modal', async () => {
+      const e = guardEnv(DENY_KAY);
+      const size = await fire(e, {
+        kind: 'modal',
+        customId: controlPanelId('limitset', ROOM),
+        textInputs: { input: '5' },
+      });
+      expectRefused(size, 'Size');
+      expect(e.s.setLimit).not.toHaveBeenCalled();
+
+      const name = await fire(e, {
+        kind: 'modal',
+        customId: controlPanelId('renameset', ROOM),
+        textInputs: { input: 'my room' },
+      });
+      expectRefused(name, 'Name');
+      expect(e.s.setName).not.toHaveBeenCalled();
+    });
+
+    /**
+     * A blank box and a 0 both remove the limit, which is the undo direction, so
+     * a denied member whose Size modal was already open can still take one off.
+     */
+    it.each([
+      ['blank', '  '],
+      ['zero', '0'],
+    ])('lets a %s Size box through, since it only removes a limit', async (_what, input) => {
+      const e = guardEnv(DENY_KAY);
+      const f = await fire(e, {
+        kind: 'modal',
+        customId: controlPanelId('limitset', ROOM),
+        textInputs: { input },
+      });
+      expect(notRefused(f)).toBe(true);
+      expect(e.s.setLimit).toHaveBeenCalledWith('g1', ROOM, KAY, 0);
+    });
+
+    it('refuses a stale Transfer picker, and leaves the Kick picker alone', async () => {
+      const e = guardEnv(DENY_KAY);
+      const transfer = await fire(e, {
+        kind: 'stringSelect',
+        customId: controlPanelId('transferpick', ROOM),
+        values: [OTHER],
+      });
+      expectRefused(transfer, 'Transfer');
+      expect(e.s.transfer).not.toHaveBeenCalled();
+
+      const kick = await fire(e, {
+        kind: 'stringSelect',
+        customId: controlPanelId('kickpick', ROOM),
+        values: [OTHER],
+      });
+      expect(notRefused(kick)).toBe(true);
+    });
+
+    it('does not stop a member who is not denied from picking', async () => {
+      const e = guardEnv({ transfer: { users: [OTHER] } });
+      await fire(e, {
+        kind: 'stringSelect',
+        customId: controlPanelId('transferpick', ROOM),
+        values: [OTHER],
+      });
+      expect(e.s.transfer).toHaveBeenCalledWith('g1', ROOM, KAY, OTHER);
+    });
+  });
+
+  // -- /name and the /template channel editor --------------------------------
+
+  describe('the /name editor', () => {
+    const ROOM = 'room-9';
+
+    /**
+     * \`/name\` out of a voice channel answers with a picker, and the chosen
+     * channel arrives as a separate select interaction that never passes the
+     * command's guard.
+     */
+    it('refuses the out-of-voice-channel picker', async () => {
+      const e = guardEnv(DENY_KAY);
+      const f = await fire(e, { kind: 'select', customId: 'avc:setup:pick:name', values: [ROOM] });
+      expectRefused(f, 'Name');
+      expect(e.s.getEditorState).not.toHaveBeenCalled();
+    });
+
+    it('turns a denied member away from the editor before its modal opens', async () => {
+      const e = guardEnv(DENY_KAY);
+      const f = await fire(e, {
+        kind: 'button',
+        customId: editorId('edit', 'channel', 'name', ROOM),
+      });
+      expectRefused(f, 'Name');
+    });
+
+    it.each(['name', 'status'] as const)(
+      'refuses a submitted %s, which shares one write path, and a reset',
+      async (field) => {
+        const e = guardEnv(DENY_KAY);
+        const save = await fire(e, {
+          kind: 'modal',
+          customId: editorId('save', 'channel', field, ROOM),
+          fromMessage: true,
+          textInputs: { template: 'my room' },
+        });
+        expect(sent(save)).toContain(REFUSAL('Name'));
+        // The editor message is the member's own, but nothing was written.
+        expect(e.s.setName).not.toHaveBeenCalled();
+        expect(e.s.setStatus).not.toHaveBeenCalled();
+
+        const reset = await fire(e, {
+          kind: 'button',
+          customId: editorId('reset', 'channel', field, ROOM),
+        });
+        expect(sent(reset)).toContain(REFUSAL('Name'));
+        expect(e.s.setName).not.toHaveBeenCalled();
+        expect(e.s.setStatus).not.toHaveBeenCalled();
+      },
+    );
+
+    it('lets a member who is not denied save a name', async () => {
+      const e = guardEnv({ rename: { users: [OTHER] } });
+      e.s.getEditorState.mockResolvedValue({
+        found: true,
+        scope: 'channel',
+        ownerId: KAY,
+        name: { effectiveTemplate: 'T', preview: 'T' },
+        status: { effectiveTemplate: 'S', preview: 'S' },
+      });
+      await fire(e, {
+        kind: 'modal',
+        customId: editorId('save', 'channel', 'name', ROOM),
+        fromMessage: true,
+        textInputs: { template: 'my room' },
+      });
+      expect(e.s.setName).toHaveBeenCalledWith('g1', ROOM, KAY, 'my room', { admin: false });
+    });
+
+    it('never restricts a member who can manage channels', async () => {
+      const e = guardEnv(DENY_KAY);
+      await fire(e, {
+        kind: 'modal',
+        customId: editorId('save', 'channel', 'name', ROOM),
+        fromMessage: true,
+        manageChannels: true,
+        textInputs: { template: 'my room' },
+      });
+      expect(e.s.setName).toHaveBeenCalledWith('g1', ROOM, KAY, 'my room', { admin: true });
+    });
+  });
+
+  /**
+   * Nothing a member is told here may say why, or who else is restricted, and it
+   * is held to the same punctuation rules as every other reply, rendered rather
+   * than scanned out of the source.
+   */
+  describe('what a refused member reads', () => {
+    it('is the same plain sentence on every path, and names nobody', async () => {
+      const lines: string[] = [];
+      for (const [kind, extra] of [
+        ['command', { commandName: 'limit', voiceChannelId: 'room-1' }],
+        ['command', { commandName: 'private', voiceChannelId: 'room-1' }],
+        ['command', { commandName: 'name', voiceChannelId: 'room-1' }],
+        ['command', { commandName: 'transfer', voiceChannelId: 'room-1' }],
+        ['command', { commandName: 'nick', voiceChannelId: 'room-1' }],
+        ['button', { customId: controlPanelId('lock', 'room-9') }],
+        ['modal', { customId: controlPanelId('renameset', 'room-9'), textInputs: { input: 'x' } }],
+      ] as const) {
+        const e = guardEnv(DENY_KAY);
+        const f = await fire(e, { kind, ...extra } as FakeInteractionOpts);
+        lines.push(sent(f));
+        dispose?.();
+      }
+      const text = lines.join('\n');
+      expect(text.match(/A server admin has turned off/g)).toHaveLength(lines.length);
+      expect(text).not.toMatch(/[—–]/);
+      expect(text).not.toMatch(/[‘’“”]/);
+      expect(text).not.toMatch(/;/);
+      expect(text.toLowerCase()).not.toMatch(/primary|secondary|restrict/);
+      expect(text).not.toContain('<@');
+      expect(text).not.toContain(KAY);
+    });
   });
 });
