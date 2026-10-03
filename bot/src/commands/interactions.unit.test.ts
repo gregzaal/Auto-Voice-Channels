@@ -6120,3 +6120,189 @@ describe('registerInteractionHandler (the restriction guard)', () => {
     });
   });
 });
+
+/**
+ * `/alwayshidden`: the sibling of `/alwaysprivate` that starts a creator channel's rooms hidden.
+ * The toggle is the settings service's, so what is pinned here is the router: the in-code
+ * Manage Channels gate on the slash command AND on the picker it opens, the channel it acts
+ * on, what it answers with, and the hard gate.
+ */
+describe('registerInteractionHandler (/alwayshidden)', () => {
+  let dispose: (() => void) | undefined;
+  afterEach(() => dispose?.());
+
+  const toggle = () => vi.fn().mockResolvedValue({ ok: true, message: 'Now hidden.' });
+
+  function envWith(over: Partial<InteractionDeps> = {}, toggleDefaultHidden = toggle()) {
+    const env = setup({
+      settings: { toggleDefaultHidden } as never,
+      ...over,
+    });
+    dispose = env.dispose;
+    return { env, toggleDefaultHidden };
+  }
+
+  it('toggles the creator channel the admin is in, and says what the service says', async () => {
+    const { env, toggleDefaultHidden } = envWith();
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'alwayshidden',
+      voiceChannelId: 'v1',
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+
+    expect(toggleDefaultHidden).toHaveBeenCalledWith('g1', 'v1');
+    expect(reply).toHaveBeenCalledWith({ content: '✅ Now hidden.', ephemeral: true });
+  });
+
+  it('answers a refusal from the service as a warning, not a success', async () => {
+    const { env } = envWith(
+      {},
+      vi.fn().mockResolvedValue({
+        ok: false,
+        message: 'You need to be in a bot-managed voice channel.',
+      }),
+    );
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'alwayshidden',
+      voiceChannelId: 'v1',
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('⚠️');
+  });
+
+  /**
+   * Gated in code as well as by the command's default permission. That default is only a
+   * DEFAULT: a server admin can re-open the command to any role in Integrations, and it
+   * writes a creator channel's settings.
+   */
+  it('refuses a member without Manage Channels, and offers them no picker either', async () => {
+    const { env, toggleDefaultHidden } = envWith();
+    for (const voiceChannelId of ['v1', undefined]) {
+      const { interaction, reply } = fakeInteraction({
+        kind: 'command',
+        commandName: 'alwayshidden',
+        manageChannels: false,
+        ...(voiceChannelId ? { voiceChannelId } : {}),
+      });
+      env.client.emit('interactionCreate', interaction);
+      await flush();
+      expect(reply).toHaveBeenCalledTimes(1);
+      expect(reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: 'You need the Manage Channels permission.' }),
+      );
+      expect(JSON.stringify(reply.mock.calls[0]?.[0])).not.toContain('avc:setup:pick');
+    }
+    expect(toggleDefaultHidden).not.toHaveBeenCalled();
+  });
+
+  it('offers a channel picker outside a voice channel, which comes back to the same command', async () => {
+    const { env, toggleDefaultHidden } = envWith();
+    const { interaction, reply } = fakeInteraction({
+      kind: 'command',
+      commandName: 'alwayshidden',
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(JSON.stringify(reply.mock.calls[0]?.[0])).toContain('avc:setup:pick:alwayshidden');
+    expect(toggleDefaultHidden).not.toHaveBeenCalled();
+    // The prompt a member reads, rendered, held to the copy rules.
+    const prompt = (reply.mock.calls[0]?.[0] as { content: string }).content;
+    expect(prompt).toContain('creator channel');
+    expect(prompt).not.toMatch(/[—–‘’“”;]/);
+    expect(prompt.toLowerCase()).not.toMatch(/primary|secondary/);
+  });
+
+  it('toggles the channel chosen in the picker, and gates the picker on Manage Channels as well', async () => {
+    const { env, toggleDefaultHidden } = envWith();
+    const admin = fakeInteraction({
+      kind: 'select',
+      customId: 'avc:setup:pick:alwayshidden',
+      manageChannels: true,
+      values: ['vc9'],
+    });
+    env.client.emit('interactionCreate', admin.interaction);
+    await flush();
+    expect(toggleDefaultHidden).toHaveBeenCalledWith('g1', 'vc9');
+    expect(admin.interaction.update).toHaveBeenCalledWith(
+      expect.objectContaining({ content: '✅ Now hidden.' }),
+    );
+
+    toggleDefaultHidden.mockClear();
+    const member = fakeInteraction({
+      kind: 'select',
+      customId: 'avc:setup:pick:alwayshidden',
+      manageChannels: false,
+      values: ['vc9'],
+    });
+    env.client.emit('interactionCreate', member.interaction);
+    await flush();
+    expect(member.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'You need the Manage Channels permission.' }),
+    );
+    expect(toggleDefaultHidden).not.toHaveBeenCalled();
+  });
+
+  /**
+   * It writes a creator channel's settings, so a guild that has lapsed gets the
+   * reactivation notice and nothing is toggled. Nothing lists it as allowed while expired:
+   * the picker's select is not one of the carve-outs either, so both routes are refused.
+   */
+  it('is a write, refused in a hard-gated guild by the command and by its picker', async () => {
+    const { env, toggleDefaultHidden } = envWith({
+      selfHosted: false,
+      guilds: { get: vi.fn().mockResolvedValue({ authStatus: 'expired' }) } as never,
+    });
+    const command = fakeInteraction({
+      kind: 'command',
+      commandName: 'alwayshidden',
+      voiceChannelId: 'v1',
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', command.interaction);
+    await flush();
+    expect(JSON.stringify(command.reply.mock.calls[0]?.[0])).toContain('auto-voice.io');
+
+    const picked = fakeInteraction({
+      kind: 'select',
+      customId: 'avc:setup:pick:alwayshidden',
+      manageChannels: true,
+      values: ['vc9'],
+    });
+    env.client.emit('interactionCreate', picked.interaction);
+    await flush();
+    expect(JSON.stringify(picked.reply.mock.calls[0]?.[0])).toContain('auto-voice.io');
+    expect(toggleDefaultHidden).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Counted once, as the command that ran, and routed through the guild's queue like every
+   * other settings write, so a failing guild trips only its own breaker.
+   */
+  it('runs through the guild dispatcher under its own name', async () => {
+    const names: string[] = [];
+    const { env } = envWith({
+      dispatcher: {
+        dispatch: (_g: string, name: string, task: () => Promise<unknown>) => {
+          names.push(name);
+          return task();
+        },
+      } as never,
+    });
+    const { interaction } = fakeInteraction({
+      kind: 'command',
+      commandName: 'alwayshidden',
+      voiceChannelId: 'v1',
+      manageChannels: true,
+    });
+    env.client.emit('interactionCreate', interaction);
+    await flush();
+    expect(names).toContain('cmd:alwayshidden');
+  });
+});

@@ -14,6 +14,7 @@ describe('buildCommandDefinitions', () => {
       [
         'access',
         'alias',
+        'alwayshidden',
         'alwaysprivate',
         'botprofile',
         'channelinfo',
@@ -46,6 +47,9 @@ describe('buildCommandDefinitions', () => {
         'unlimit',
       ].sort(),
     );
+    // The number the release notes and the docs state. A command added or dropped has to
+    // change it here, where somebody is looking, and not only in the list above.
+    expect(defs).toHaveLength(33);
   });
 
   /**
@@ -74,6 +78,7 @@ describe('buildCommandDefinitions', () => {
       'template',
       'position',
       'alwaysprivate',
+      'alwayshidden',
       'controlpanel',
       'group',
       'inheritpermissions',
@@ -144,6 +149,7 @@ describe('buildCommandDefinitions', () => {
       'template',
       'position',
       'alwaysprivate',
+      'alwayshidden',
       'controlpanel',
       'botprofile',
       'group',
@@ -299,6 +305,37 @@ describe('buildCommandDefinitions', () => {
         expect(text).not.toMatch(/[—–‘’“”;]/);
         expect(text.toLowerCase()).not.toMatch(/primary|secondary/);
       }
+    });
+  });
+
+  /**
+   * The sibling of `/alwaysprivate`: the same admin gate, no options (it acts on the creator
+   * channel you are in, or offers a picker), and a description a customer can read.
+   */
+  describe('/alwayshidden', () => {
+    // Narrowed to a chat input command, which is what it is: a context menu command has no
+    // description, and that is what the union type says until it is told.
+    const def = byName.get('alwayshidden')! as unknown as {
+      description: string;
+      default_member_permissions?: string | null;
+      dm_permission?: boolean;
+      options?: unknown[];
+    };
+
+    it('is admin only like /alwaysprivate, guild only, and takes no options', () => {
+      expect(def.default_member_permissions).toBe(
+        byName.get('alwaysprivate')!.default_member_permissions,
+      );
+      expect(def.default_member_permissions).toBe(PermissionFlagsBits.ManageChannels.toString());
+      expect(def.dm_permission).toBe(false);
+      expect(def.options ?? []).toHaveLength(0);
+    });
+
+    it('says what it does in one short sentence a customer can read', () => {
+      expect(def.description.length).toBeLessThanOrEqual(100);
+      expect(def.description).not.toMatch(/[—–‘’“”;]/);
+      expect(def.description.toLowerCase()).not.toMatch(/primary|secondary/);
+      expect(def.description).toContain('hidden');
     });
   });
 

@@ -43,7 +43,7 @@ export interface CreatePrefill {
   name: string;
   nameTemplate: string;
   statusTemplate: string;
-  privacy: 'open' | 'private';
+  privacy: 'open' | 'private' | 'hidden';
   /** The chosen category id, if any (re-selected in the picker on retry). */
   parentId?: string;
 }
@@ -76,7 +76,7 @@ export function buildCreateModal(
     0,
     TEMPLATE_INPUT_MAX,
   );
-  const privatePicked = prefill?.privacy === 'private';
+  const privacyPicked = prefill?.privacy ?? 'open';
 
   const category = new ChannelSelectMenuBuilder()
     .setCustomId('category')
@@ -124,8 +124,9 @@ export function buildCreateModal(
             .setMaxLength(TEMPLATE_INPUT_MAX)
             .setValue(statusTemplate),
         ),
-      // The 5th (final) slot: whether new rooms are public or private by
-      // default. Editable per creator channel later with `/alwaysprivate`.
+      // The 5th (final) slot: whether new rooms are public, private or hidden by
+      // default. Editable per creator channel later with `/alwaysprivate` and
+      // `/alwayshidden`.
       new LabelBuilder()
         .setLabel('Default privacy (/alwaysprivate later)')
         .setStringSelectMenuComponent(
@@ -137,14 +138,23 @@ export function buildCreateModal(
               new StringSelectMenuOptionBuilder()
                 .setLabel('Open, anyone can join')
                 .setValue('open')
-                .setDefault(!privatePicked),
+                .setDefault(privacyPicked === 'open'),
               new StringSelectMenuOptionBuilder()
                 .setLabel('Private, others request to join')
                 .setValue('private')
-                .setDefault(privatePicked),
+                .setDefault(privacyPicked === 'private'),
+              new StringSelectMenuOptionBuilder()
+                .setLabel('Hidden, not in the channel list')
+                .setValue('hidden')
+                .setDefault(privacyPicked === 'hidden'),
             ),
         ),
     );
+}
+
+/** The modal's privacy choice, with anything unrecognised (a stale client) read as open. */
+function privacyOf(value: string | undefined): CreatePrefill['privacy'] {
+  return value === 'private' || value === 'hidden' ? value : 'open';
 }
 
 /**
@@ -159,7 +169,7 @@ export function readCreateModalRaw(fields: ModalSubmitFields): CreatePrefill {
     name: fields.getTextInputValue('name'),
     nameTemplate: fields.getTextInputValue('nameTemplate'),
     statusTemplate: fields.getTextInputValue('statusTemplate'),
-    privacy: fields.getStringSelectValues('privacy')[0] === 'private' ? 'private' : 'open',
+    privacy: privacyOf(fields.getStringSelectValues('privacy')[0]),
     ...(parentId ? { parentId } : {}),
   };
 }
@@ -178,13 +188,16 @@ export function parseCreateModal(
   const name = fields.getTextInputValue('name').trim();
   const nameTemplate = fields.getTextInputValue('nameTemplate').trim();
   const statusTemplate = fields.getTextInputValue('statusTemplate').trim();
-  const privacy = fields.getStringSelectValues('privacy')[0] ?? 'open';
+  const privacy = privacyOf(fields.getStringSelectValues('privacy')[0]);
   const parentId = fields.getSelectedChannels('category', false)?.first()?.id;
   return {
     ...(parentId ? { parentId } : {}),
     ...(name ? { name } : {}),
     ...(nameTemplate && nameTemplate !== defaults.nameTemplate ? { nameTemplate } : {}),
     ...(statusTemplate && statusTemplate !== defaults.statusTemplate ? { statusTemplate } : {}),
-    ...(privacy === 'private' ? { defaultPrivate: true } : {}),
+    // Hidden is a kind of private, so it stores both: an instance that predates hiding
+    // still starts the room locked rather than public.
+    ...(privacy === 'private' || privacy === 'hidden' ? { defaultPrivate: true } : {}),
+    ...(privacy === 'hidden' ? { defaultHidden: true } : {}),
   };
 }

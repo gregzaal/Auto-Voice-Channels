@@ -762,6 +762,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return openPositionModal(interaction);
       case 'alwaysprivate':
         return handleAlwaysPrivate(interaction);
+      case 'alwayshidden':
+        return handleAlwaysHidden(interaction);
       case 'textchannels':
         return handleTextChannels(interaction);
       case 'defaultlimit':
@@ -1254,6 +1256,37 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     const guildId = interaction.guildId!;
     const res = await run(guildId, 'cmd:alwaysprivate', () =>
       deps.settings.toggleDefaultPrivate(guildId, channelId),
+    );
+    await respond(interaction, { content: formatResult(res), ephemeral: true });
+  }
+
+  /**
+   * `/alwayshidden` → toggle default-hidden for a creator channel (yours, or picked).
+   *
+   * **Gated in code, not only by `default_member_permissions`.** That default is a DEFAULT:
+   * a server admin can re-open any command to any role in Server Settings > Integrations,
+   * and this one writes a creator channel's settings. The picker's own select is gated by
+   * `ADMIN_PICK_COMMANDS`, and the slash command has to be gated here, before the picker
+   * is offered, so a role that was never meant to configure the server is not shown one.
+   */
+  async function handleAlwaysHidden(interaction: ChatInputCommandInteraction): Promise<void> {
+    if (!(await requireManageChannels(interaction))) return;
+    const channelId = await resolveOrPick(
+      interaction,
+      'alwayshidden',
+      '🙈 Pick a creator channel to toggle default-hidden:',
+    );
+    if (!channelId) return;
+    await alwaysHiddenCore(interaction, channelId);
+  }
+
+  async function alwaysHiddenCore(
+    interaction: ManageableInteraction,
+    channelId: string,
+  ): Promise<void> {
+    const guildId = interaction.guildId!;
+    const res = await run(guildId, 'cmd:alwayshidden', () =>
+      deps.settings.toggleDefaultHidden(guildId, channelId),
     );
     await respond(interaction, { content: formatResult(res), ephemeral: true });
   }
@@ -3252,6 +3285,7 @@ Already subscribed? Add the new server ` +
     'manage',
     'position',
     'alwaysprivate',
+    'alwayshidden',
     'textchannels',
     'defaultlimit',
     'inheritpermissions',
@@ -3276,6 +3310,8 @@ Already subscribed? Add the new server ` +
         return positionCore(interaction, channelId);
       case 'alwaysprivate':
         return alwaysPrivateCore(interaction, channelId);
+      case 'alwayshidden':
+        return alwaysHiddenCore(interaction, channelId);
       case 'textchannels':
         return textChannelsCore(interaction, channelId);
       case 'defaultlimit': {

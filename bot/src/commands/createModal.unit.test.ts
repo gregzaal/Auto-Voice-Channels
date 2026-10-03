@@ -75,6 +75,71 @@ describe('createModal', () => {
     });
   });
 
+  /**
+   * Hidden is a kind of private, so it stores both keys: an instance that predates hiding
+   * still starts the room locked rather than public, and `defaultHidden` alone would read as
+   * public.
+   */
+  it('stores hidden as defaultPrivate and defaultHidden together, and private as the first alone', () => {
+    expect(parseCreateModal(fields({ privacy: 'hidden' }), defaults)).toEqual({
+      defaultPrivate: true,
+      defaultHidden: true,
+    });
+    expect(parseCreateModal(fields({ privacy: 'private' }), defaults)).not.toHaveProperty(
+      'defaultHidden',
+    );
+  });
+
+  it('reads a value it does not know, such as one from a stale client, as open', () => {
+    expect(parseCreateModal(fields({ privacy: 'somethingnew' }), defaults)).toEqual({});
+    expect(readCreateModalRaw(fields({ privacy: 'somethingnew' })).privacy).toBe('open');
+    expect(readCreateModalRaw(fields({})).privacy).toBe('open');
+  });
+
+  it('readCreateModalRaw keeps hidden, so a retry re-opens the modal on it', () => {
+    expect(readCreateModalRaw(fields({ privacy: 'hidden' })).privacy).toBe('hidden');
+  });
+
+  describe('the default privacy select', () => {
+    type Option = { value: string; label: string; default?: boolean };
+    const optionsOf = (prefill?: Parameters<typeof buildCreateModal>[1]): Option[] => {
+      const modal = buildCreateModal(defaults, prefill).toJSON();
+      const privacy = (
+        modal.components as { component: { custom_id?: string; options?: unknown[] } }[]
+      )
+        .map((c) => c.component)
+        .find((c) => c.custom_id === 'privacy');
+      return privacy!.options as Option[];
+    };
+    const prefillOf = (privacy: 'open' | 'private' | 'hidden') => ({
+      name: 'Lobby',
+      nameTemplate: 'x',
+      statusTemplate: 'y',
+      privacy,
+    });
+
+    it('offers open, private and hidden, in that order', () => {
+      expect(optionsOf().map((o) => o.value)).toEqual(['open', 'private', 'hidden']);
+    });
+
+    it('starts on open, and re-opens on whichever of the three was chosen', () => {
+      const defaultOf = (options: Option[]) => options.filter((o) => o.default).map((o) => o.value);
+      expect(defaultOf(optionsOf())).toEqual(['open']);
+      for (const choice of ['open', 'private', 'hidden'] as const) {
+        expect(defaultOf(optionsOf(prefillOf(choice))), choice).toEqual([choice]);
+      }
+    });
+
+    it('labels each option in words a customer can read, within Discord’s limit', () => {
+      for (const o of optionsOf()) {
+        expect(o.label.length).toBeLessThanOrEqual(100);
+        expect(o.label).not.toMatch(/[—–‘’“”;]/);
+        expect(o.label.toLowerCase()).not.toMatch(/primary|secondary/);
+      }
+      expect(optionsOf().find((o) => o.value === 'hidden')!.label).toContain('channel list');
+    });
+  });
+
   it('readCreateModalRaw keeps every value verbatim (no default-dropping)', () => {
     expect(
       readCreateModalRaw(

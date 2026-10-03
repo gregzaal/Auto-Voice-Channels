@@ -281,6 +281,11 @@ export function buildCommandDefinitions(
     ),
     adminOnly(
       new SlashCommandBuilder()
+        .setName('alwayshidden')
+        .setDescription('Toggle whether this creator channel spawns hidden rooms by default.'),
+    ),
+    adminOnly(
+      new SlashCommandBuilder()
         .setName('textchannels')
         .setDescription('Toggle a private text channel for each room from this creator channel.'),
     ),
