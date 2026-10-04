@@ -1,6 +1,7 @@
 import {
   DiscordAPIError,
   OverwriteType,
+  REST,
   PermissionFlagsBits,
   PermissionsBitField,
 } from 'discord.js';
@@ -2120,6 +2121,25 @@ describe('DiscordVoiceActions room overwrites', () => {
         return Promise.resolve(undefined);
       },
     );
+    /** The bulk write is a raw PATCH of `permission_overwrites`, answered by the same `set` it always was. */
+    const patch = vi.fn(
+      (
+        _route: string,
+        options: {
+          body: {
+            permission_overwrites: { id: string; type: number; allow: string; deny: string }[];
+          };
+        },
+      ) =>
+        set(
+          options.body.permission_overwrites.map((o) => ({
+            id: o.id,
+            type: o.type,
+            allow: BigInt(o.allow),
+            deny: BigInt(o.deny),
+          })),
+        ),
+    );
     const del = vi.fn((route: string) => {
       const id = route.split('/').pop()!;
       for (const k of [...overwrites.keys()]) if (k.endsWith(`:${id}`)) overwrites.delete(k);
@@ -2160,13 +2180,14 @@ describe('DiscordVoiceActions room overwrites', () => {
       user: { id: BOT },
       channels: { fetch, cache: new Map([[ROOM, channel]]) },
       guilds: { fetch: vi.fn().mockResolvedValue(guild) },
-      rest: { put, delete: del },
+      rest: { put, delete: del, patch },
     } as unknown as Client;
     return {
       actions: new DiscordVoiceActions(client, opts.logger as never),
       client,
       overwrites,
       set,
+      patch,
       put,
       del,
       lookup,
@@ -2397,6 +2418,104 @@ describe('DiscordVoiceActions room overwrites', () => {
       expect(room.put).not.toHaveBeenCalled();
       expect(room.del).not.toHaveBeenCalled();
       expect(result.requests).toBe(1);
+    });
+
+    /**
+     * @discordjs/rest decides a request belongs behind a rate-limited rename by whether its body
+     * HAS a `name` or `topic` key, and discord.js builds every channel edit from a literal that
+     * holds both. So `permissionOverwrites.set` waited out a rename's 429, for as long as ten
+     * minutes, and a hide sat there while the room stayed visible. The bulk write is a raw PATCH
+     * of `permission_overwrites` alone.
+     */
+    describe('the bulk write and a rename that is rate limited', () => {
+      const CHANNEL = '123456789012345678';
+      const MEMBERS = ['223456789012345678', '323456789012345678', '423456789012345678'];
+
+      it('is one raw PATCH with only the overwrites in its body, and never a discord.js edit', async () => {
+        const previous = [botOverwrite];
+        const room = makeRoom(previous, { inServer: MEMBERS });
+        const desired = [botOverwrite, ...MEMBERS.map((id) => person(id, VC))];
+
+        await apply(room, desired, previous);
+
+        expect(room.patch).toHaveBeenCalledTimes(1);
+        const [route, options] = room.patch.mock.calls[0]!;
+        expect(route).toBe(`/channels/${ROOM}`);
+        expect(Object.keys(options.body)).toEqual(['permission_overwrites']);
+        expect(options.body.permission_overwrites).toHaveLength(desired.length);
+        for (const o of options.body.permission_overwrites) {
+          expect(typeof o.allow).toBe('string');
+          expect(typeof o.deny).toBe('string');
+        }
+      });
+
+      /**
+       * Against the real request handler, with a rename answered by a 429 and nothing mocked of
+       * the queueing. The control is the other shape: if a library upgrade stops parking it, the
+       * reason for the raw call is gone and this should say so.
+       */
+      it('goes straight through while a rename waits out its 429, and the shape discord.js sends does not', async () => {
+        const headers = {
+          'content-type': 'application/json',
+          'x-ratelimit-limit': '10',
+          'x-ratelimit-remaining': '9',
+          'x-ratelimit-reset-after': '10',
+          'x-ratelimit-bucket': 'channel-edit',
+        };
+        const sentAt = new Map<string, number>();
+        let renames = 0;
+        const started = Date.now();
+        const rest = new REST({
+          version: '10',
+          makeRequest: ((_url: string, init: { method: string; body?: string }) => {
+            const body = (init.body ? JSON.parse(init.body) : {}) as Record<string, unknown>;
+            const kind =
+              typeof body.name === 'string'
+                ? 'rename'
+                : 'permission_overwrites' in body
+                  ? 'overwrites'
+                  : 'other';
+            if (kind !== 'other') sentAt.set(`${kind}${sentAt.size}`, Date.now() - started);
+            if (kind === 'rename' && ++renames === 2) {
+              return Promise.resolve(
+                new Response('{"message":"You are being rate limited.","retry_after":0.4}', {
+                  status: 429,
+                  headers: { ...headers, 'retry-after': '0.4' },
+                }),
+              );
+            }
+            return Promise.resolve(new Response('{}', { status: 200, headers }));
+          }) as never,
+        });
+        rest.setToken('token');
+        const route = `/channels/${CHANNEL}` as const;
+        await rest.patch(route, { body: { name: 'warm' } });
+
+        const previous = [botOverwrite];
+        const room = makeRoom(previous, { inServer: MEMBERS });
+        room.channel.id = CHANNEL;
+        (room.client as unknown as { rest: unknown }).rest = rest;
+        const desired = [botOverwrite, ...MEMBERS.map((id) => person(id, VC))];
+
+        // The second rename draws the 429 and the library sleeps on it.
+        const rename = rest.patch(route, { body: { name: 'x' } });
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        const before = Date.now();
+        await room.actions.applyOverwrites(GUILD, CHANNEL, desired, previous);
+        const applied = Date.now() - before;
+        const control = rest.patch(route, { body: { name: undefined, permission_overwrites: [] } });
+        const controlStarted = Date.now();
+        await Promise.all([rename, control]);
+
+        expect(applied).toBeLessThan(250);
+        // The overwrites were sent at once, ahead of the rename that retried after its wait.
+        const sent = [...sentAt.entries()];
+        const first = sent.find(([key]) => key.startsWith('overwrites'))!;
+        const retried = sent.filter(([key]) => key.startsWith('rename')).at(-1)!;
+        expect(first[1]).toBeLessThan(retried[1]);
+        // And the shape discord.js builds waited for it.
+        expect(Date.now() - controlStarted).toBeGreaterThan(150);
+      });
     });
 
     it('sends two changes one by one, whichever kind they are', async () => {

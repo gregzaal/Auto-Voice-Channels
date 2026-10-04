@@ -411,7 +411,15 @@ const STATUS_PROBE_MS = 2500;
  * yet, and the order the caller works in: the access record is written BEFORE the
  * request, so a write that lands late agrees with the record, and one that fails
  * late is repaired by the converge pass. A transition is one bulk request, so a
- * 429 needs a burst against one room to happen at all.
+ * 429 of this bucket needs a burst against one room to happen at all.
+ *
+ * **A rate-limited RENAME of the same channel is the other way in, and it is not rare**
+ * (two renames per ten minutes, and a template that reads `{{PRIVATE}}` spends one on
+ * every lock). The library queues every request that has a `name` or `topic` key in its
+ * body, and every request on a permissions route, behind it. The bulk write is sent raw so
+ * it has neither (see `writeChanges`), but a write of one or two changes is a `PUT` on a
+ * permissions route and still waits, which is what the probe and `deferred` are for. So a
+ * deferral can mean several minutes, and the copy says so.
  */
 const OVERWRITE_PROBE_MS = 2500;
 
@@ -1294,7 +1302,29 @@ export class DiscordVoiceActions implements VoiceActions {
     if (bulk && changes > SINGLE_WRITE_MAX) {
       state.requests += 1;
       state.sentBulk = true;
-      await channel.permissionOverwrites.set(state.wanted);
+      /**
+       * A raw PATCH carrying only `permission_overwrites`, and not `permissionOverwrites.set`.
+       *
+       * discord.js builds every channel edit from a literal that holds a `name` key (and
+       * `topic`), undefined when it is not being changed, and @discordjs/rest decides a request
+       * belongs behind a rate-limited rename by whether the body HAS one of those keys, whatever
+       * its value. Channel renames are limited to two per ten minutes and the library answers
+       * the 429 by queueing every such request behind it, so a hide or a lock written by `set`
+       * waited out the rename, for as long as ten minutes: the room stayed visible and the
+       * owner was told it would take a minute. A body without the keys goes straight through
+       * (pinned in the unit test against the real handler). The channel cache catches up from
+       * the gateway's update, which is all anything reads it for here.
+       */
+      await this.client.rest.patch(`/channels/${channel.id}`, {
+        body: {
+          permission_overwrites: state.wanted.map((o) => ({
+            id: o.id,
+            type: o.type,
+            allow: o.allow.toString(),
+            deny: o.deny.toString(),
+          })),
+        },
+      });
       return;
     }
     // The diff already puts the bot first, so a deny that would lock it out cannot

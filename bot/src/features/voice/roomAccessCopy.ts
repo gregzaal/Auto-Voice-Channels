@@ -88,7 +88,7 @@ export function deferredMessage(
   switch (command) {
     case 'private':
     case 'hide':
-      return `${QUEUED} It hasn't taken effect yet and should within a minute or so. If it still hasn't by then, run \`/public\` and try again.`;
+      return `${QUEUED} It hasn't taken effect yet and can take a few minutes. Look at the room before you ask again, because a second request waits in the same queue. If it still hasn't taken effect after that, run \`/public\` and try again.`;
     case 'public':
     case 'unhide':
       return `${QUEUED} It hasn't taken effect yet. Give it a minute, then run \`/${command}\` again to finish.`;
