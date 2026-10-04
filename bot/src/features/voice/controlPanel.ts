@@ -226,7 +226,7 @@ const PRIVACY_FACES: Record<'lock' | 'unlock', ControlFace> = {
  * list. Who still sees a hidden room is the `/hide` reply's to say.
  */
 const HIDE_FACES: Record<'hide' | 'unhide', ControlFace> = {
-  hide: { label: 'Hide', emoji: '🙈', blurb: 'Take the room off the channel list' },
+  hide: { label: 'Hide', emoji: '🙈', blurb: 'Hide the room in the channel list' },
   unhide: { label: 'Unhide', emoji: '👁️', blurb: 'Show the room in the channel list again' },
 };
 
@@ -301,7 +301,7 @@ export function settingsFaceOf(control: ControlPanelControl): ControlFace {
     return {
       label: 'Hide and Unhide',
       emoji: '🙈',
-      blurb: 'Take the room off the channel list, and show it again. One button, whichever applies',
+      blurb: 'Hide the room in the channel list, and show it again. One button, whichever applies',
     };
   }
   return CONTROL_PANEL_FACES[control];

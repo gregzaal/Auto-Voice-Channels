@@ -117,7 +117,7 @@ export function buildCommandDefinitions(
     guildOnly(
       new SlashCommandBuilder()
         .setName('hide')
-        .setDescription('Hide your room from the channel list.'),
+        .setDescription('Hide your room in the channel list.'),
     ),
     guildOnly(
       new SlashCommandBuilder()
