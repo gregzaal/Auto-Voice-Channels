@@ -6615,7 +6615,7 @@ describe('registerInteractionHandler (remembered room settings)', () => {
     const { env } = envWith({ state: primaryState({ rememberPrefs: true, savedSettings: 4 }) });
     const fake = await press(env, idFor('remember_on'));
     const payload = fake.editReply.mock.calls[0]?.[0];
-    expect(labelsOf(payload)[2]).toEqual(['Remembered settings: on', 'Clear saved settings']);
+    expect(labelsOf(payload)[2]).toEqual(['Remember user settings: on', 'Clear saved settings']);
     expect(JSON.stringify(payload)).toContain('4 members have saved settings.');
     expect(JSON.stringify(payload)).toContain(idFor('remember_off'));
   });
@@ -6857,7 +6857,7 @@ describe('registerInteractionHandler (remembered room settings)', () => {
       lines.push(...visible(fake.editReply.mock.calls[0]?.[0]));
     }
     const text = lines.join('\n');
-    expect(text).toContain('Privacy page');
+    expect(text).toContain('**Remember user settings** is on');
     expect(text).toContain('Removed the saved settings of 3 members');
     expect(text).not.toMatch(/[—–]/);
     expect(text).not.toMatch(/[‘’“”]/);

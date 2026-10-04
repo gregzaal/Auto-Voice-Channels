@@ -58,16 +58,20 @@ describe('what turning it on says', () => {
    * each thing it has to say is pinned: what members get, the one rule about names, and what
    * is stored, which is all three of the things members get.
    */
-  it('says what members get, that a name is only remembered when set, and what is stored', () => {
+  it('says what members get and that a name is only remembered when set', () => {
     expect(REMEMBER_ON_NOTE).toContain('name, size and privacy');
     expect(REMEMBER_ON_NOTE).toContain("instead of this creator channel's defaults");
     expect(REMEMBER_ON_NOTE).toContain(
       'A name is only remembered when the member set one themselves',
     );
-    expect(REMEMBER_ON_NOTE).toContain(
-      "each member's id and the name, size and privacy they choose",
-    );
-    expect(REMEMBER_ON_NOTE).toContain('[Privacy page](https://auto-voice.io/privacy)');
+  });
+
+  /** The owner cut the storage sentence and the "nothing until next time" one as redundant (2026-10-04). */
+  it('names the setting as the button does, and no longer repeats what is stored', () => {
+    expect(REMEMBER_ON_NOTE).toContain('**Remember user settings** is on');
+    expect(REMEMBER_OFF_NOTE).toContain('**Remember user settings** is off');
+    expect(REMEMBER_ON_NOTE).not.toContain('Privacy page');
+    expect(REMEMBER_ON_NOTE).not.toContain('Nothing is remembered until');
   });
 
   /** The note above says members get their settings back, which is not true while the lever is on. */
@@ -76,12 +80,6 @@ describe('what turning it on says', () => {
       'Remembering is switched off for now, so nothing is saved or restored yet.',
     );
     expect(`${REMEMBER_ON_NOTE} ${REMEMBER_PAUSED_NOTE}`.length).toBeLessThanOrEqual(1024);
-  });
-
-  it('says that nothing is remembered until a member next changes their room', () => {
-    expect(REMEMBER_ON_NOTE).toContain(
-      'Nothing is remembered until a member next changes their room',
-    );
   });
 
   it('says that turning it off keeps what members saved, and how to remove it', () => {

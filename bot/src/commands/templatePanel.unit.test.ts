@@ -205,14 +205,14 @@ describe('templatePanel remembered settings', () => {
     );
   const fieldsOf = (panel: Panel) =>
     (panel.embeds![0]! as { fields: { name: string; value: string; inline?: boolean }[] }).fields;
-  const FIELD = '💾 Remembered settings';
+  const FIELD = '💾 Remember user settings';
 
   it('adds a third row to a creator channel editor, after the template buttons', () => {
     const rows = rowsOf(renderEditorPanel('primary', CHANNEL, primaryState()));
     expect(rows.map((row) => row.map((b) => b.label))).toEqual([
       ['Edit name template', 'Edit status template'],
       ['Reset name', 'Reset status', 'Close'],
-      ['Remembered settings: off', 'Clear saved settings'],
+      ['Remember user settings: off', 'Clear saved settings'],
     ]);
   });
 
@@ -222,7 +222,7 @@ describe('templatePanel remembered settings', () => {
       expect(rowsOf(panel)).toHaveLength(2);
       expect(JSON.stringify(panel)).not.toContain('avc:tpl:remember');
       expect(JSON.stringify(panel)).not.toContain('avc:tpl:forget');
-      expect(JSON.stringify(panel)).not.toContain('Remembered settings');
+      expect(JSON.stringify(panel)).not.toContain('Remember user settings');
     }
   });
 
@@ -233,13 +233,13 @@ describe('templatePanel remembered settings', () => {
     );
     expect(off[2]![0]).toMatchObject({
       custom_id: editorId('remember_on', 'primary', 'name', CHANNEL),
-      label: 'Remembered settings: off',
+      label: 'Remember user settings: off',
       style: ButtonStyle.Secondary,
     });
     const on = rowsOf(renderEditorPanel('primary', CHANNEL, primaryState({ rememberPrefs: true })));
     expect(on[2]![0]).toMatchObject({
       custom_id: editorId('remember_off', 'primary', 'name', CHANNEL),
-      label: 'Remembered settings: on',
+      label: 'Remember user settings: on',
       style: ButtonStyle.Success,
     });
   });
@@ -331,7 +331,7 @@ describe('templatePanel remembered settings', () => {
       const rows = rowsOf(paused());
       expect(rows[2]![0]).toMatchObject({
         custom_id: editorId('remember_off', 'primary', 'name', CHANNEL),
-        label: 'Remembered settings: on',
+        label: 'Remember user settings: on',
       });
       expect(rows[2]![1]).toMatchObject({
         custom_id: editorId('forget', 'primary', 'name', CHANNEL),

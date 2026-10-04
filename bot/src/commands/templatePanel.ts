@@ -190,7 +190,7 @@ export function renderEditorPanel(
       ...(isPrimary
         ? [
             {
-              name: '💾 Remembered settings',
+              name: '💾 Remember user settings',
               value: rememberedFieldValue(
                 remembers,
                 state.savedSettings,
@@ -253,7 +253,7 @@ export function renderEditorPanel(
           .setCustomId(
             editorId(remembers ? 'remember_off' : 'remember_on', scope, 'name', channelId),
           )
-          .setLabel(remembers ? 'Remembered settings: on' : 'Remembered settings: off')
+          .setLabel(remembers ? 'Remember user settings: on' : 'Remember user settings: off')
           .setEmoji('💾')
           .setStyle(remembers ? ButtonStyle.Success : ButtonStyle.Secondary),
         new ButtonBuilder()

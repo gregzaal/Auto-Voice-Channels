@@ -1,5 +1,3 @@
-import { SITE_URL } from '../billing/messages.js';
-
 /**
  * What the creator channel editor and `/channelinfo` say about remembered room settings,
  * kept out of the panels and the service so each sentence is worded once and one render-time
@@ -7,17 +5,14 @@ import { SITE_URL } from '../billing/messages.js';
  *
  * **Who reads these.** An admin, on the editor panel they opened for a creator channel. The
  * words are about what a member's room starts with, so they say "room" and "creator
- * channel", and the one thing they have to say plainly is what is stored about people: a
- * member's id and the name, size and privacy they chose, which the Privacy page covers.
+ * channel". The setting itself is called "Remember user settings" (the owner's name for it,
+ * 2026-10-04), so an admin reads it as a switch about members rather than about the channel.
  *
  * **What is promised.** Name, size and privacy, and nothing else. A name is only remembered
  * when the member set one themselves, so a room that was merely named by the creator
  * channel's template never pins that name to a member. Privacy is private or hidden, never
  * public.
  */
-
-/** Where the Privacy page lives, for the sentence that says what is stored about members. */
-const PRIVACY_URL = `${SITE_URL}/privacy`;
 
 /** "1 member", "3 members". */
 const members = (n: number): string => `${n} ${n === 1 ? 'member' : 'members'}`;
@@ -62,19 +57,16 @@ export function rememberedFieldValue(
 }
 
 /**
- * What turning it on says, which is where an admin learns what it does and what it keeps.
+ * What turning it on says, which is where an admin learns what it does.
  *
- * The sentence about storage is not optional: this is the one place an admin chooses to have
- * member ids and the names, sizes and privacy they choose kept, and it has to be said where the
- * choice is made.
+ * It used to go on to say what is stored and that nothing is remembered until a member next
+ * changes their room. The owner cut both as redundant (2026-10-04): the first sentence already
+ * says what is kept, and the Privacy page covers the storage.
  */
 export const REMEMBER_ON_NOTE =
-  '💾 Remembered settings are on for this creator channel. A member who comes back gets a room ' +
-  'that starts with the name, size and privacy they chose last time, instead of this creator ' +
-  "channel's defaults. A name is only remembered when the member set one themselves. To do " +
-  "this I store each member's id and the name, size and privacy they choose, which the " +
-  `[Privacy page](${PRIVACY_URL}) covers. ` +
-  'Nothing is remembered until a member next changes their room.';
+  '💾 **Remember user settings** is on for this creator channel. A member who comes back gets a ' +
+  'room that starts with the name, size and privacy they chose last time, instead of this ' +
+  "creator channel's defaults. A name is only remembered when the member set one themselves.";
 
 /**
  * What is added to {@link REMEMBER_ON_NOTE} while remembering is switched off for now, because
@@ -86,7 +78,7 @@ export const REMEMBER_PAUSED_NOTE =
 
 /** What turning it off says, including that what members saved is kept. */
 export const REMEMBER_OFF_NOTE =
-  '💾 Remembered settings are off for this creator channel. New rooms start from its defaults ' +
+  '💾 **Remember user settings** is off for this creator channel. New rooms start from its defaults ' +
   'again. What members saved is kept and not used, and comes back if you turn this on again. ' +
   'Use "Clear saved settings" to remove it.';
 
