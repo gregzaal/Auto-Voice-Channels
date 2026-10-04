@@ -28,14 +28,16 @@ export function restrictMention(target: RestrictTarget): string {
 /**
  * Said under the reply to `allow`, `deny` and `list`.
  *
- * Both halves are true limits and an admin should hear them before relying on a
- * rule. A rule is read by the build that serves the room, and a server can be
- * served by more than one. And Discord's own Integrations screen can still
- * narrow a slash command on top of this, while a panel button is not a slash
- * command and so follows these rules alone.
+ * A true limit an admin should hear before relying on a rule: Discord's own
+ * Integrations screen can still narrow a slash command on top of this, while a
+ * panel button is not a slash command and so follows these rules alone.
+ *
+ * It used to open by saying restrictions apply only on builds that include them.
+ * True during a rolling deploy or a rollback, but nothing an admin can act on, so
+ * the owner cut it (2026-10-04). The operations guide's rolling-deploy notes keep it.
  */
 export const RESTRICT_NOTE =
-  "Restrictions only apply on versions of AVC that include them. Discord's own Integrations settings still apply to slash commands on top of this, and the room panel buttons ignore those settings.";
+  "Discord's own Integrations settings still apply to slash commands on top of this, and the room panel buttons ignore those settings.";
 
 const label = (feature: CommandFeature): string => `**${FEATURE_LABELS[feature]}**`;
 

@@ -148,9 +148,9 @@ describe('restrictMention', () => {
 });
 
 describe('the note under allow, deny and list', () => {
-  /** Both halves are true limits an admin should hear before relying on a rule. */
-  it('says the rules only apply on versions that include them', () => {
-    expect(RESTRICT_NOTE).toContain('Restrictions only apply on versions of AVC that include them');
+  /** The owner cut the build caveat (2026-10-04): an admin cannot act on it. */
+  it('no longer says the rules only apply on versions that include them', () => {
+    expect(RESTRICT_NOTE).not.toContain('versions of AVC');
   });
 
   it('says Discord Integrations still apply to slash commands and the panel ignores them', () => {

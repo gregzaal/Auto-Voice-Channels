@@ -4875,7 +4875,7 @@ describe('registerInteractionHandler (/restrict)', () => {
       expect(content).toContain(
         `✅ From now on only <@&${ROLE}> and members who can manage channels can use **Name**.`,
       );
-      expect(content).toContain('Restrictions only apply on versions of AVC that include them.');
+      expect(content).not.toContain('versions of AVC');
       expect(payload?.flags).toBe(EPHEMERAL);
       expect(payload?.allowedMentions).toEqual({ parse: [] });
       expect(interaction.deferReply).not.toHaveBeenCalled();
@@ -5026,7 +5026,7 @@ describe('registerInteractionHandler (/restrict)', () => {
   it('tells an admin what a restriction does not cover, on add', async () => {
     const e = restrictEnv();
     const { content } = await restrict(e, denyUser('rename'));
-    expect(content).toContain('Restrictions only apply on versions of AVC that include them.');
+    expect(content).not.toContain('versions of AVC');
     expect(content).toContain("Discord's own Integrations settings still apply to slash commands");
     expect(content).toContain('room panel buttons ignore those settings');
   });
@@ -5374,7 +5374,7 @@ describe('registerInteractionHandler (/restrict)', () => {
       const { content } = await restrict(e, { subcommand: 'list' });
       expect(content).toContain(`**Name**: everyone except <@&${ROLE}> and <@${TARGET}>`);
       expect(content).toContain(`**Nickname**: everyone except <@${OTHER}>`);
-      expect(content).toContain('Restrictions only apply on versions of AVC that include them.');
+      expect(content).not.toContain('versions of AVC');
       expect(content.length).toBeLessThanOrEqual(2000);
     });
 
