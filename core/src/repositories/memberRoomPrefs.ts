@@ -12,7 +12,8 @@ import {
 /**
  * What one member has remembered for rooms made from one creator channel. Each setting is
  * null when nothing is remembered for it, which is not the same as a value: a `limit` of 0
- * is a remembered "no limit", and a `status` of `''` a remembered "no status".
+ * is a remembered "no limit". A blank status is not remembered (the owner's call, 2026-10-04):
+ * it clears the status, so no caller stores a `status` of `''`.
  */
 export interface MemberRoomPrefs {
   name: string | null;
@@ -56,7 +57,7 @@ const isName = (value: string | null): value is string =>
 const isLimit = (value: number | null): value is number =>
   value !== null && Number.isInteger(value) && value >= 0 && value <= MAX_MEMBER_PREF_LIMIT;
 
-/** A status a save would have accepted, for the same reason. Empty is "no status", a value. */
+/** A status a save would have accepted, for the same reason. An empty one is accepted, though no caller saves one. */
 const isStatus = (value: string | null): value is string =>
   value !== null && value.length <= MAX_MEMBER_PREF_STATUS_LENGTH;
 
@@ -186,10 +187,10 @@ export class MemberRoomPrefsRepository {
   /**
    * Remembers the voice status template a member set, or forgets it (`null`).
    *
-   * Under the same rule as a name: only ever one the member set themselves. Unlike a name, an
-   * empty status is a value and not a reset. It is a room the member chose to leave without a
-   * status, which `/name` keeps apart from going back to the creator channel's status, so it is
-   * remembered as "no status" the way `/unlimit` is remembered as "no limit".
+   * Under the same rule as a name: only ever one the member set themselves. The caller passes
+   * `null` for a blank status, which clears what was remembered (the owner's call, 2026-10-04),
+   * so an empty string is never saved in practice. This method would still store one as "no
+   * status".
    */
   async saveStatus(
     guildId: string,

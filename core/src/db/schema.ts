@@ -474,7 +474,8 @@ export const memberRoomPrefs = pgTable(
     /**
      * The voice status template the member set themselves (migration 0045, added after the rest
      * of the table and nullable like it, so an insert that does not name it remembers nothing).
-     * An empty string is a remembered "no status", and null is nothing remembered.
+     * Null is nothing remembered. A blank status is not remembered (the owner's call,
+     * 2026-10-04): setting one clears this column, so no caller writes an empty string.
      */
     statusTemplate: text('status_template'),
     updatedAt: updatedAt(),

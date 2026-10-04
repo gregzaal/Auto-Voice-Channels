@@ -29,7 +29,7 @@ export interface RememberedStart {
   privacy?: Exclude<StartMode, 'public'>;
   /**
    * The member's own voice status template, which the room starts with in place of the creator
-   * channel's. `''` is a remembered "no status" and is a value like any other.
+   * channel's. Never empty in practice: a blank status clears it (the owner's call, 2026-10-04).
    */
   status?: string;
 }
