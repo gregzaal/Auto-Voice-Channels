@@ -123,6 +123,19 @@ export class ChannelObfuscatedError extends Error {
   }
 }
 
+/**
+ * Thrown when a write refuses to go ahead on what the cache says: a channel this
+ * instance does not hold, one of another guild, or a set that would leave the bot
+ * out of the room. Typed so a reply can say it plainly: the technical message is
+ * for the log, not for the member who pressed the button.
+ */
+export class ChannelRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ChannelRefusedError';
+  }
+}
+
 /** Whether Discord is showing us only the obfuscated shell of this channel. */
 function isObfuscated(channel: { flags?: { bitfield: number } | null }): boolean {
   return ((channel.flags?.bitfield ?? 0) & CHANNEL_OBFUSCATED) !== 0;
@@ -1013,9 +1026,11 @@ export class DiscordVoiceActions implements VoiceActions {
       if (isApiError(err, UNKNOWN_CHANNEL)) return null;
       throw err;
     }
-    if (!channel) throw new Error(`channel ${channelId} exists but its guild is not held here`);
+    if (!channel)
+      throw new ChannelRefusedError(`channel ${channelId} exists but its guild is not held here`);
     if (!channel.isVoiceBased()) return null;
-    if (channel.guildId !== guildId) throw new Error(`channel ${channelId} is not in ${guildId}`);
+    if (channel.guildId !== guildId)
+      throw new ChannelRefusedError(`channel ${channelId} is not in ${guildId}`);
     // The shell holds a single `@everyone` View deny and nothing else. Planning
     // against it would produce a "complete" set that is a falsehood.
     if (isObfuscated(channel)) throw new ChannelObfuscatedError(channelId);
@@ -1089,7 +1104,9 @@ export class DiscordVoiceActions implements VoiceActions {
     if (botId) {
       const mine = desired.find((o) => o.type === OVERWRITE_MEMBER && o.id === botId);
       if (!mine || (mine.allow & BOT_ACCESS) !== BOT_ACCESS) {
-        throw new Error(`refusing to write overwrites that leave the bot out of ${channelId}`);
+        throw new ChannelRefusedError(
+          `refusing to write overwrites that leave the bot out of ${channelId}`,
+        );
       }
     }
     let channel;
@@ -1100,11 +1117,13 @@ export class DiscordVoiceActions implements VoiceActions {
       throw err;
     }
     // Which is not "gone": see `readOverwrites`.
-    if (!channel) throw new Error(`channel ${channelId} exists but its guild is not held here`);
+    if (!channel)
+      throw new ChannelRefusedError(`channel ${channelId} exists but its guild is not held here`);
     // Not a voice channel any more is not one of ours to write to either.
     if (!channel.isVoiceBased()) return gone;
     // The only bulk replace here: a channel of another guild is not ours to replace.
-    if (channel.guildId !== guildId) throw new Error(`channel ${channelId} is not in ${guildId}`);
+    if (channel.guildId !== guildId)
+      throw new ChannelRefusedError(`channel ${channelId} is not in ${guildId}`);
     // Sending `desired` back to the shell would replace the real set with a lie.
     if (isObfuscated(channel)) throw new ChannelObfuscatedError(channelId);
 

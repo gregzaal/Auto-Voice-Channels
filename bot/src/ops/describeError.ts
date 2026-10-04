@@ -44,6 +44,15 @@ function detail(err: unknown): string {
     const technical = `Discord error ${err.code}: ${err.message}`;
     return hint ? `${hint} (${technical})` : technical;
   }
+  // By name, as `categorizeError` does for the breaker's error: this module does not import
+  // the voice feature. Both are our own refusals, so the member is told what it means, and
+  // the technical message stays in the log.
+  if (err instanceof Error && err.name === 'ChannelObfuscatedError') {
+    return 'I can no longer see that room, so I cannot change it';
+  }
+  if (err instanceof Error && err.name === 'ChannelRefusedError') {
+    return 'I could not safely change that room, so I left it as it was';
+  }
   if (err instanceof Error) {
     return err.message || err.name || 'an unknown error';
   }
@@ -81,6 +90,8 @@ export function categorizeError(err: unknown): string {
     // of its own, and lumping it in with real failures would make a guild that
     // is already failing look several times worse than it is.
     if (err.name === 'CircuitOpenError') return 'circuit_open';
+    // A channel the bot can no longer see is a permission failure, as `isPermissionError` has it.
+    if (err.name === 'ChannelObfuscatedError') return 'permission';
     return 'internal';
   }
   return 'unknown';

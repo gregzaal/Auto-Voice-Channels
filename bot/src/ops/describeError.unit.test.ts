@@ -1,5 +1,6 @@
 import { DiscordAPIError } from 'discord.js';
 import { describe, expect, it } from 'vitest';
+import { ChannelObfuscatedError, ChannelRefusedError } from '../features/voice/discordAdapter.js';
 import { categorizeError, describeError } from './describeError.js';
 
 function apiError(code: number, message: string, status = 403): DiscordAPIError {
@@ -46,6 +47,22 @@ describe('describeError', () => {
     expect(out).toBe('Discord error 40001: Unauthorized');
   });
 
+  /**
+   * Our own refusals are told plainly: the owner pressed a button, and "channel 123 is
+   * obfuscated" is a log line, not a reply. Coupled to the names the adapter's classes set.
+   */
+  it('says a room the bot can no longer see in words, not as an id and a flag', () => {
+    const out = describeError(new ChannelObfuscatedError('123456789012345678'));
+    expect(out).toBe('I can no longer see that room, so I cannot change it');
+    expect(out).not.toMatch(/d{5}|obfuscated/);
+  });
+
+  it('keeps the technical message of a refused write out of the reply', () => {
+    const out = describeError(new ChannelRefusedError('channel 123456789012345678 is not in 99'));
+    expect(out).toBe('I could not safely change that room, so I left it as it was');
+    expect(out).not.toMatch(/d{5}/);
+  });
+
   it('uses the message of a plain Error', () => {
     expect(describeError(new Error('boom'))).toBe('boom');
   });
@@ -88,6 +105,11 @@ describe('categorizeError', () => {
 
   it('reads a 429 as rate limiting whatever code rides with it', () => {
     expect(categorizeError(apiError(0, 'You are being rate limited', 429))).toBe('rate_limit');
+  });
+
+  it('counts a room the bot can no longer see as a permission failure', () => {
+    expect(categorizeError(new ChannelObfuscatedError('1'))).toBe('permission');
+    expect(categorizeError(new ChannelRefusedError('x'))).toBe('internal');
   });
 
   it('keeps any other Discord failure distinct from our own', () => {
