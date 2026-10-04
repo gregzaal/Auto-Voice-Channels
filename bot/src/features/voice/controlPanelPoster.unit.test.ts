@@ -321,11 +321,11 @@ describe('ControlPanelPoster and /restrict', () => {
   const denied = { userId: OWNER, roleIds: [DENIED_ROLE], canManage: false } as const;
   const RULES = {
     command_access: {
-      privacy: { roles: [DENIED_ROLE] },
-      hide: { roles: [DENIED_ROLE] },
-      limit: { roles: [DENIED_ROLE] },
-      rename: { roles: [DENIED_ROLE] },
-      transfer: { roles: [DENIED_ROLE] },
+      privacy: { deny: { roles: [DENIED_ROLE] } },
+      hide: { deny: { roles: [DENIED_ROLE] } },
+      limit: { deny: { roles: [DENIED_ROLE] } },
+      rename: { deny: { roles: [DENIED_ROLE] } },
+      transfer: { deny: { roles: [DENIED_ROLE] } },
     },
   };
   const WITH_RULES = { control_panel: { panel: true }, ...RULES };

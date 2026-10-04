@@ -271,7 +271,7 @@ describe('remembered room settings (integration)', () => {
   const createdLimit = () => actions.ofType('create').at(-1)?.userLimit;
   const restrict = (feat: 'rename' | 'limit' | 'privacy' | 'hide', rule: { users?: string[] }) =>
     guilds.updateSettings(GUILD, {
-      command_access: { [feat]: { users: rule.users ?? [], roles: [] } },
+      command_access: { [feat]: { deny: { users: rule.users ?? [], roles: [] } } },
     });
 
   // -- name ---------------------------------------------------------------------------

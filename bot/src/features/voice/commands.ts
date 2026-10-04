@@ -5,6 +5,7 @@ import type {
   SecondaryChannelRow,
 } from '@avc/core';
 import type { VoiceActions } from './actions.js';
+import { claimFeatureFor } from './commandAccess.js';
 import type { VoiceFeature } from './handler.js';
 import {
   isTruncatedPrefill,
@@ -244,21 +245,33 @@ export class VoiceCommands {
    * who is still present — because an owner leaving only reassigns the caretaker
    * owner, never the original creator. Always explicit: rejoining a channel never
    * reassigns ownership on its own.
+   *
+   * **A `/restrict` rule on Claim is checked here**, through `refuseClaim`, which
+   * answers the sentence to refuse with or null. Only this row says whether the
+   * caller is the original creator, who is never restricted (`claimFeatureFor`), so
+   * the router cannot decide it before the command runs. It is asked first, as the
+   * guard is for every other command, so a member a rule covers is told that before
+   * anything about the room. Absent, nobody is refused.
    */
   async claim(
     guildId: string,
     channelId: string | undefined,
     userId: string,
+    opts: { refuseClaim?: () => Promise<string | null> } = {},
   ): Promise<CommandResult> {
     const found = await this.resolveSecondary(guildId, channelId);
     if ('error' in found) return found.error;
     const row = found.row;
+    const isOriginalCreator = row.originalCreator === userId;
+    if (claimFeatureFor(isOriginalCreator) !== null) {
+      const refusal = (await opts.refuseClaim?.()) ?? null;
+      if (refusal !== null) return fail(refusal);
+    }
     const present = this.deps.voice.membersInChannel(row.channelId);
     if (!present.some((m) => m.id === userId)) {
       return fail('You need to be in the channel to claim it.');
     }
     if (row.ownerId === userId) return fail('You already own this channel.');
-    const isOriginalCreator = row.originalCreator === userId;
     const ownerPresent = row.ownerId !== null && present.some((m) => m.id === row.ownerId);
     // A present owner blocks a claim — unless the caller is the original creator
     // reclaiming the channel from a caretaker.

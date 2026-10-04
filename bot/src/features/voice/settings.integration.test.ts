@@ -1041,39 +1041,42 @@ describe('GuildSettingsService (integration)', () => {
     const user = (n: number) => ({ kind: 'user' as const, id: `7${String(n).padStart(17, '0')}` });
 
     it('loses no restriction when concurrent admins edit the map at once', async () => {
-      await settings.addCommandRestriction(SERVER, 'rename', user(0));
+      await settings.addCommandRestriction(SERVER, 'rename', 'deny', user(0));
       await Promise.all([
-        settings.addCommandRestriction(SERVER, 'rename', user(1)),
-        settings.addCommandRestriction(SERVER, 'rename', user(2)),
-        settings.addCommandRestriction(SERVER, 'limit', user(3)),
-        settings.addCommandRestriction(SERVER, 'nick', { kind: 'role', id: '8'.repeat(18) }),
-        settings.addCommandRestriction(SERVER, 'rename', user(4)),
+        settings.addCommandRestriction(SERVER, 'rename', 'deny', user(1)),
+        settings.addCommandRestriction(SERVER, 'rename', 'deny', user(2)),
+        settings.addCommandRestriction(SERVER, 'limit', 'deny', user(3)),
+        settings.addCommandRestriction(SERVER, 'nick', 'deny', {
+          kind: 'role',
+          id: '8'.repeat(18),
+        }),
+        settings.addCommandRestriction(SERVER, 'rename', 'deny', user(4)),
       ]);
       const access = await settings.getCommandAccess(SERVER);
-      expect([...(access.rename?.users ?? [])].sort()).toEqual(
+      expect([...(access.rename?.deny?.users ?? [])].sort()).toEqual(
         [0, 1, 2, 4].map((n) => user(n).id).sort(),
       );
-      expect(access.limit?.users).toEqual([user(3).id]);
-      expect(access.nick?.roles).toEqual(['8'.repeat(18)]);
+      expect(access.limit?.deny?.users).toEqual([user(3).id]);
+      expect(access.nick?.deny?.roles).toEqual(['8'.repeat(18)]);
     });
 
     it('does not let concurrent adds of one user stack', async () => {
       await Promise.all([
-        settings.addCommandRestriction(SERVER, 'rename', user(1)),
-        settings.addCommandRestriction(SERVER, 'rename', user(1)),
-        settings.addCommandRestriction(SERVER, 'rename', user(1)),
+        settings.addCommandRestriction(SERVER, 'rename', 'deny', user(1)),
+        settings.addCommandRestriction(SERVER, 'rename', 'deny', user(1)),
+        settings.addCommandRestriction(SERVER, 'rename', 'deny', user(1)),
       ]);
-      expect((await settings.getCommandAccess(SERVER)).rename?.users).toEqual([user(1).id]);
+      expect((await settings.getCommandAccess(SERVER)).rename?.deny?.users).toEqual([user(1).id]);
     });
 
     it('enforces the per-feature cap under concurrency', async () => {
       const results = await Promise.all(
         Array.from({ length: 55 }, (_, n) =>
-          settings.addCommandRestriction(SERVER, 'rename', user(n)),
+          settings.addCommandRestriction(SERVER, 'rename', 'deny', user(n)),
         ),
       );
       expect(results.filter((r) => r.ok)).toHaveLength(50);
-      expect((await settings.getCommandAccess(SERVER)).rename?.users).toHaveLength(50);
+      expect((await settings.getCommandAccess(SERVER)).rename?.deny?.users).toHaveLength(50);
     });
 
     /** Denying /nick and leaving the name in every room they own would defeat the rule. */
@@ -1082,17 +1085,17 @@ describe('GuildSettingsService (integration)', () => {
       const other = user(2);
       await guilds.updateSettings(SERVER, { custom_nicks: { [who.id]: 'Kay', [other.id]: 'Sam' } });
 
-      const result = await settings.addCommandRestriction(SERVER, 'nick', who);
+      const result = await settings.addCommandRestriction(SERVER, 'nick', 'deny', who);
 
       expect(result).toMatchObject({ ok: true, changed: true, nicknameCleared: true });
       const row = await guilds.ensure(SERVER);
       expect(row.settings.custom_nicks).toEqual({ [other.id]: 'Sam' });
-      expect(row.settings.command_access).toEqual({ nick: { users: [who.id] } });
+      expect(row.settings.command_access).toEqual({ nick: { deny: { users: [who.id] } } });
     });
 
     it('takes the key off the blob when the last restriction goes, and keeps the rest', async () => {
       await guilds.updateSettings(SERVER, { general: 'Voice rooms' });
-      await settings.addCommandRestriction(SERVER, 'rename', user(1));
+      await settings.addCommandRestriction(SERVER, 'rename', 'deny', user(1));
       await settings.removeCommandRestriction(SERVER, 'rename', user(1));
       const row = await guilds.ensure(SERVER);
       expect(row.settings).not.toHaveProperty('command_access');
@@ -1103,7 +1106,7 @@ describe('GuildSettingsService (integration)', () => {
       await guilds.updateSettings(SERVER, {
         command_access: { somethingnew: { users: [user(9).id], until: 1800000000 } },
       });
-      await settings.addCommandRestriction(SERVER, 'rename', user(1));
+      await settings.addCommandRestriction(SERVER, 'rename', 'deny', user(1));
       await settings.removeCommandRestriction(SERVER, 'rename', user(1));
       expect((await guilds.ensure(SERVER)).settings.command_access).toEqual({
         somethingnew: { users: [user(9).id], until: 1800000000 },
@@ -1117,37 +1120,42 @@ describe('GuildSettingsService (integration)', () => {
      */
     it('clears one feature, leaves the rest of the blob, and frees the list for a new add', async () => {
       await guilds.updateSettings(SERVER, { general: 'Voice rooms' });
-      for (let n = 0; n < 50; n++) await settings.addCommandRestriction(SERVER, 'rename', user(n));
-      await settings.addCommandRestriction(SERVER, 'limit', user(60));
-      expect((await settings.addCommandRestriction(SERVER, 'rename', user(70))).ok).toBe(false);
+      for (let n = 0; n < 50; n++)
+        await settings.addCommandRestriction(SERVER, 'rename', 'deny', user(n));
+      await settings.addCommandRestriction(SERVER, 'limit', 'deny', user(60));
+      expect((await settings.addCommandRestriction(SERVER, 'rename', 'deny', user(70))).ok).toBe(
+        false,
+      );
 
       const cleared = await settings.clearCommandRestrictions(SERVER, 'rename');
 
       expect(cleared).toMatchObject({ ok: true, changed: true });
       expect(cleared.message).toContain('Removed 50 restrictions');
       const row = await guilds.ensure(SERVER);
-      expect(row.settings.command_access).toEqual({ limit: { users: [user(60).id] } });
+      expect(row.settings.command_access).toEqual({ limit: { deny: { users: [user(60).id] } } });
       expect(row.settings.general).toBe('Voice rooms');
-      expect((await settings.addCommandRestriction(SERVER, 'rename', user(70))).ok).toBe(true);
+      expect((await settings.addCommandRestriction(SERVER, 'rename', 'deny', user(70))).ok).toBe(
+        true,
+      );
     });
 
     it('takes the key off the blob when a clear leaves nothing', async () => {
-      await settings.addCommandRestriction(SERVER, 'rename', user(1));
+      await settings.addCommandRestriction(SERVER, 'rename', 'deny', user(1));
       await settings.clearCommandRestrictions(SERVER, 'rename');
       expect((await guilds.ensure(SERVER)).settings).not.toHaveProperty('command_access');
     });
 
     it('does not lose a restriction added while another admin clears a different feature', async () => {
-      await settings.addCommandRestriction(SERVER, 'rename', user(1));
+      await settings.addCommandRestriction(SERVER, 'rename', 'deny', user(1));
       await Promise.all([
         settings.clearCommandRestrictions(SERVER, 'rename'),
-        settings.addCommandRestriction(SERVER, 'limit', user(2)),
-        settings.addCommandRestriction(SERVER, 'nick', user(3)),
+        settings.addCommandRestriction(SERVER, 'limit', 'deny', user(2)),
+        settings.addCommandRestriction(SERVER, 'nick', 'deny', user(3)),
       ]);
       const access = await settings.getCommandAccess(SERVER);
       expect(access.rename).toBeUndefined();
-      expect(access.limit?.users).toEqual([user(2).id]);
-      expect(access.nick?.users).toEqual([user(3).id]);
+      expect(access.limit?.deny?.users).toEqual([user(2).id]);
+      expect(access.nick?.deny?.users).toEqual([user(3).id]);
     });
 
     /**
@@ -1156,22 +1164,60 @@ describe('GuildSettingsService (integration)', () => {
      */
     it('refuses an add onto a list of a shape it cannot read, and leaves it as it was', async () => {
       const newer = { [user(9).id]: 1700000000 };
-      await guilds.updateSettings(SERVER, { command_access: { rename: { users: newer } } });
+      await guilds.updateSettings(SERVER, {
+        command_access: { rename: { deny: { users: newer } } },
+      });
 
-      const result = await settings.addCommandRestriction(SERVER, 'rename', user(1));
+      const result = await settings.addCommandRestriction(SERVER, 'rename', 'deny', user(1));
 
       expect(result).toMatchObject({ ok: false, changed: false });
       expect((await guilds.ensure(SERVER)).settings.command_access).toEqual({
-        rename: { users: newer },
+        rename: { deny: { users: newer } },
       });
     });
 
     it('writes a guild with no row yet', async () => {
-      const result = await settings.addCommandRestriction('999999999999999999', 'limit', user(1));
+      const result = await settings.addCommandRestriction(
+        '999999999999999999',
+        'limit',
+        'allow',
+        user(1),
+      );
       expect(result.ok).toBe(true);
-      expect((await settings.getCommandAccess('999999999999999999')).limit?.users).toEqual([
+      expect((await settings.getCommandAccess('999999999999999999')).limit?.allow?.users).toEqual([
         user(1).id,
       ]);
+    });
+
+    /**
+     * Allowing somebody takes them off the deny list in the same write, so concurrent
+     * edits of both lists of one feature must still all land, each id on one list.
+     */
+    it('loses nothing when admins edit both lists of one feature at once', async () => {
+      await settings.addCommandRestriction(SERVER, 'kick', 'deny', user(1));
+      await Promise.all([
+        settings.addCommandRestriction(SERVER, 'kick', 'allow', user(1)),
+        settings.addCommandRestriction(SERVER, 'kick', 'allow', user(2)),
+        settings.addCommandRestriction(SERVER, 'kick', 'deny', user(3)),
+        settings.addCommandRestriction(SERVER, 'kick', 'allow', {
+          kind: 'role',
+          id: '8'.repeat(18),
+        }),
+      ]);
+      const access = await settings.getCommandAccess(SERVER);
+      expect([...(access.kick?.allow?.users ?? [])].sort()).toEqual(
+        [1, 2].map((n) => user(n).id).sort(),
+      );
+      expect(access.kick?.allow?.roles).toEqual(['8'.repeat(18)]);
+      expect(access.kick?.deny?.users).toEqual([user(3).id]);
+    });
+
+    it('clears both lists of a feature against the real row', async () => {
+      await settings.addCommandRestriction(SERVER, 'claim', 'allow', user(1));
+      await settings.addCommandRestriction(SERVER, 'claim', 'deny', user(2));
+      const cleared = await settings.clearCommandRestrictions(SERVER, 'claim');
+      expect(cleared.message).toContain('Removed 2 restrictions');
+      expect((await guilds.ensure(SERVER)).settings).not.toHaveProperty('command_access');
     });
   });
 });

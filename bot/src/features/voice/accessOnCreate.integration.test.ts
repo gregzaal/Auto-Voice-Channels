@@ -170,7 +170,7 @@ describe('saved lists on a room as it is made (integration)', () => {
   const access = (channel: string) => secondaries.getAccess(channel);
   const restrict = (rule: { users?: string[]; roles?: string[] }) =>
     guilds.updateSettings(GUILD, {
-      command_access: { access: { users: rule.users ?? [], roles: rule.roles ?? [] } },
+      command_access: { access: { deny: { users: rule.users ?? [], roles: rule.roles ?? [] } } },
     });
 
   // -- the block that reaches a public room --------------------------------------------

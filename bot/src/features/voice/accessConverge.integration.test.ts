@@ -536,7 +536,7 @@ describe('the sweep keeps saved lists and hidden rooms in line (integration)', (
   // -- a creator who is denied saved lists --------------------------------------------
 
   describe('a creator denied Saved lists', () => {
-    const DENIED = { access: { users: ['alice'], roles: [] } };
+    const DENIED = { access: { deny: { users: ['alice'], roles: [] } } };
 
     it('has lists that apply to nothing, and what they wrote is taken back', async () => {
       await room('r1');
@@ -591,7 +591,7 @@ describe('the sweep keeps saved lists and hidden rooms in line (integration)', (
       await room('r1');
       await lists.add(GUILD, 'alice', 'mallory', 'blocked');
       voice.setOwnerAccess('alice', { roleIds: ['role-bad'] });
-      rules = { access: { users: [], roles: ['role-bad'] } };
+      rules = { access: { deny: { users: [], roles: ['role-bad'] } } };
 
       await sweep();
 

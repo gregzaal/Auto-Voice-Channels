@@ -211,6 +211,47 @@ describe('VoiceCommands (integration)', () => {
     expect((await secondaries.get(SEC))!.ownerId).toBe('bob');
   });
 
+  /**
+   * A `/restrict` rule on Claim is asked here, through `refuseClaim`, because only the
+   * row says whether the caller is the original creator, who is never restricted.
+   */
+  describe('a rule on Claim', () => {
+    const REFUSAL = 'A server admin has turned off **Claim** for you.';
+
+    it('refuses a member it covers, before anything changes', async () => {
+      voice.drop(SEC, 'alice');
+      voice.put(SEC, member('bob'));
+      const refuseClaim = vi.fn().mockResolvedValue(REFUSAL);
+      const res = await commands.claim(GUILD, SEC, 'bob', { refuseClaim });
+      expect(res).toEqual({ ok: false, message: REFUSAL });
+      expect(refuseClaim).toHaveBeenCalledTimes(1);
+      const row = await secondaries.get(SEC);
+      expect(row!.ownerId).toBe('alice');
+      expect(row!.originalCreator).toBe('alice');
+    });
+
+    it('lets a member it does not cover take an ownerless room', async () => {
+      voice.drop(SEC, 'alice');
+      voice.put(SEC, member('bob'));
+      const res = await commands.claim(GUILD, SEC, 'bob', {
+        refuseClaim: vi.fn().mockResolvedValue(null),
+      });
+      expect(res.ok).toBe(true);
+      expect((await secondaries.get(SEC))!.ownerId).toBe('bob');
+    });
+
+    /** Taking your own room back is never restricted, so the rule is not even asked. */
+    it('never asks it for the original creator taking their room back', async () => {
+      await secondaries.setOwner(SEC, 'bob');
+      voice.put(SEC, member('bob'));
+      const refuseClaim = vi.fn().mockResolvedValue(REFUSAL);
+      const res = await commands.claim(GUILD, SEC, 'alice', { refuseClaim });
+      expect(res.ok).toBe(true);
+      expect(refuseClaim).not.toHaveBeenCalled();
+      expect((await secondaries.get(SEC))!.ownerId).toBe('alice');
+    });
+  });
+
   it('lets the original creator reclaim the channel from a caretaker owner', async () => {
     // Alice leaves; the caretaker handoff (setOwner, as handleSecondaryLeave does)
     // makes bob the owner but keeps alice as the original creator.

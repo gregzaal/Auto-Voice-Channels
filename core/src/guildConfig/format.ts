@@ -147,9 +147,10 @@ export const exportedSettingsSchema = z.object({
    */
   control_panel_style: z.record(z.string(), z.union([z.string(), z.number()])).nullable(),
   /**
-   * Who may not use which room command: a feature id to `{ users, roles }`, each a
-   * list of snowflakes. Only departures are stored, so absent means nobody is
-   * denied anything.
+   * Who may use which room command: a feature id to `{ allow?, deny? }`, each list
+   * a `{ users, roles }` of snowflakes. An allow list keeps the feature to whoever
+   * it names, a deny list names who may never use it, and deny wins. Only
+   * departures are stored, so absent means everyone may use everything.
    *
    * A key of its own for the reason `control_panel_style` is one, and `unknown`
    * where that one is a union, because the entry's SHAPE is the part most likely
@@ -159,7 +160,7 @@ export const exportedSettingsSchema = z.object({
    * entry and `validateSettingsValue` checks the shape, where a value it cannot
    * read costs one entry and an issue instead of the whole file.
    *
-   * The denied ids are member data. Every import surface that prints a setting
+   * The listed ids are member data. Every import surface that prints a setting
    * reports a count for this key and never an id.
    */
   command_access: z.record(z.string(), z.unknown()).nullable(),

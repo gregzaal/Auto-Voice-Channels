@@ -237,23 +237,25 @@ describe('import and export flow (integration)', () => {
     });
 
     /**
-     * The file carries the ids of the members an admin restricted, so the reply has
+     * The file carries the ids of the members an admin allowed or restricted, so the reply has
      * to say so in plain words: "anyone who gets the file gets all of that" is only
      * true of what the sentence before it lists.
      */
-    it('says the file lists who is restricted from room commands', async () => {
+    it('says the file lists who can or cannot use some room commands', async () => {
       await configureGuild();
       await guilds.updateSettings(GUILD, {
-        command_access: { rename: { users: ['555555555555555551'] } },
+        command_access: { rename: { deny: { users: ['555555555555555551'] } } },
       });
       const { interaction, replies } = fakeCommand(fakeGuild());
 
       await handleExport(interaction, deps);
 
       const file = JSON.parse(replies.at(-1)!.files![0]!.attachment!.toString('utf8'));
-      expect(file.settings.command_access).toEqual({ rename: { users: ['555555555555555551'] } });
+      expect(file.settings.command_access).toEqual({
+        rename: { deny: { users: ['555555555555555551'] } },
+      });
       expect(text(replies)).toContain(
-        'the names members chose for themselves with /nick, and who is restricted from room commands.',
+        'the names members chose for themselves with /nick, and who can or cannot use some room commands.',
       );
       expect(text(replies)).toContain('Anyone who gets the file gets all of that');
     });
@@ -263,14 +265,15 @@ describe('import and export flow (integration)', () => {
      * map past the importer's caps is dropped whole, like the nickname map.
      */
     it.each([
-      ['users on one feature', { rename: { users: ids(1, 51) } }],
-      ['roles on one feature', { rename: { roles: ids(2, 26) } }],
+      ['users on one feature', { rename: { deny: { users: ids(1, 51) } } }],
+      ['users on one allow list', { rename: { allow: { users: ids(1, 51) } } }],
+      ['roles on one feature', { rename: { deny: { roles: ids(2, 26) } } }],
       [
         'restrictions in all',
         {
-          privacy: { users: ids(1, 50), roles: ids(2, 25) },
-          limit: { users: ids(3, 50), roles: ids(4, 25) },
-          rename: { users: ids(5, 1) },
+          privacy: { deny: { users: ids(1, 50), roles: ids(2, 25) } },
+          limit: { allow: { users: ids(3, 50), roles: ids(4, 25) } },
+          rename: { deny: { users: ids(5, 1) } },
         },
       ],
     ])('warns that the file is past what /import accepts: %s', async (_name, access) => {
@@ -288,7 +291,7 @@ describe('import and export flow (integration)', () => {
     it('does not warn for a map inside the importer caps, at the caps', async () => {
       await configureGuild();
       await guilds.updateSettings(GUILD, {
-        command_access: { rename: { users: ids(1, 50), roles: ids(2, 25) } },
+        command_access: { rename: { deny: { users: ids(1, 50), roles: ids(2, 25) } } },
       });
       const { interaction, replies } = fakeCommand(fakeGuild());
 
@@ -434,16 +437,18 @@ describe('import and export flow (integration)', () => {
       ];
       await configureGuild();
       await guilds.updateSettings(GUILD, {
-        command_access: { rename: { users: [USER_A, USER_B], roles: [ROLE_A] } },
+        command_access: {
+          rename: { allow: { roles: [ROLE_A] }, deny: { users: [USER_A, USER_B] } },
+        },
       });
       const exported = fakeCommand(fakeGuild());
       await handleExport(exported.interaction, deps);
       const edited = JSON.parse(exported.replies.at(-1)!.files![0]!.attachment!.toString('utf8'));
       // The export carries the stored map, which is what a round trip needs.
       expect(edited.settings.command_access).toEqual({
-        rename: { users: [USER_A, USER_B], roles: [ROLE_A] },
+        rename: { allow: { roles: [ROLE_A] }, deny: { users: [USER_A, USER_B] } },
       });
-      edited.settings.command_access = { nick: { users: [USER_C] } };
+      edited.settings.command_access = { nick: { deny: { users: [USER_C] } } };
       serveFile(JSON.stringify(edited));
 
       const previewed = fakeCommand(fakeGuild(), [
@@ -451,7 +456,9 @@ describe('import and export flow (integration)', () => {
       ]);
       await handleImportCommand(previewed.interaction, deps);
       const preview = previewed.replies.at(-1)!.content!;
-      expect(preview).toContain('Who can use room commands: 1 restriction (was 3 restrictions)');
+      expect(preview).toContain(
+        'Who can use room commands: 1 deny rule (was 1 allow rule and 2 deny rules)',
+      );
 
       const guild = fakeGuild();
       const confirmed = fakeButton(guild, importId('confirm', 'i-1'));
@@ -467,14 +474,17 @@ describe('import and export flow (integration)', () => {
         expect(audit).not.toContain(id);
       }
       expect(announcement).toContain('Who can use room commands');
-      expect(audit).toContain('"redactedEntryCount":3');
+      // jsonb orders the keys its own way, so each is asserted alone.
+      expect(audit).toContain('"redactedAllowCount":1');
+      expect(audit).toContain('"redactedDenyCount":2');
 
       // The undo is real: the snapshot the admin is handed still names who.
       const snapshot = confirmed.replies.find((r) => r.files?.[0]?.name?.includes('before-import'));
       const before = JSON.parse(snapshot!.files![0]!.attachment!.toString('utf8'));
-      expect(before.settings.command_access.rename.users).toEqual([USER_A, USER_B]);
+      expect(before.settings.command_access.rename.deny.users).toEqual([USER_A, USER_B]);
+      expect(before.settings.command_access.rename.allow.roles).toEqual([ROLE_A]);
       expect((await guilds.ensure(GUILD)).settings.command_access).toEqual({
-        nick: { users: [USER_C] },
+        nick: { deny: { users: [USER_C] } },
       });
     });
 

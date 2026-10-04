@@ -285,7 +285,7 @@ const NOTE_LABELS: Record<ImportNoteCode, string> = {
   other_bot_may_be_present: 'Another AVC bot may still be managing these channels',
   legacy_field_dropped: 'is an old setting AVC no longer has',
   legacy_restriction_replaced:
-    'was an old rule that let only certain roles use a command, and it was not carried over. /restrict works the other way round: it names a person or a role that may not use a room command',
+    'was an old rule that let only certain roles use a command, and it was not carried over. /restrict allow works the same way: it keeps a room command to the people and roles you name',
   legacy_marked_left: 'This file was saved after the old bot was removed',
   orphaned_text_channel:
     'was left behind by the old bot and is not used. If you turn text channels back on with /textchannels, AVC makes its own',
@@ -422,8 +422,8 @@ const PREVIEW_FOOTER = [
 ];
 
 /**
- * How many people and roles a stored `command_access` value restricts, and
- * nothing else about it.
+ * How many people and roles a stored `command_access` value names on its allow
+ * lists and on its deny lists, and nothing else about it.
  *
  * `features` narrows the count to those feature ids, for the removal line.
  * Defensive about shape because the argument is a raw settings value, which is
@@ -431,22 +431,41 @@ const PREVIEW_FOOTER = [
  * would say "2 entries" for two features, which is a number nobody can read as
  * two features with a few people each.
  */
-export function commandAccessCount(value: unknown, features?: readonly string[]): number {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return 0;
-  let count = 0;
+export function commandAccessCounts(
+  value: unknown,
+  features?: readonly string[],
+): { allow: number; deny: number } {
+  const counts = { allow: 0, deny: 0 };
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return counts;
   for (const [feature, entry] of Object.entries(value as Record<string, unknown>)) {
     if (features && !features.includes(feature)) continue;
     if (typeof entry !== 'object' || entry === null) continue;
-    const { users, roles } = entry as { users?: unknown; roles?: unknown };
-    if (Array.isArray(users)) count += users.length;
-    if (Array.isArray(roles)) count += roles.length;
+    for (const list of ['allow', 'deny'] as const) {
+      const ids = (entry as Record<string, unknown>)[list];
+      if (typeof ids !== 'object' || ids === null) continue;
+      const { users, roles } = ids as { users?: unknown; roles?: unknown };
+      if (Array.isArray(users)) counts[list] += users.length;
+      if (Array.isArray(roles)) counts[list] += roles.length;
+    }
   }
-  return count;
+  return counts;
 }
 
-function restrictions(count: number): string {
-  if (count === 0) return 'none';
-  return count === 1 ? '1 restriction' : `${count} restrictions`;
+/** Both lists together, for a ceiling. */
+export function commandAccessCount(value: unknown, features?: readonly string[]): number {
+  const counts = commandAccessCounts(value, features);
+  return counts.allow + counts.deny;
+}
+
+/** "2 allow rules and 1 deny rule": a count per list, which is all any surface may say. */
+function restrictions(counts: { allow: number; deny: number }): string {
+  const parts = [
+    ...(counts.allow > 0
+      ? [counts.allow === 1 ? '1 allow rule' : `${counts.allow} allow rules`]
+      : []),
+    ...(counts.deny > 0 ? [counts.deny === 1 ? '1 deny rule' : `${counts.deny} deny rules`] : []),
+  ];
+  return parts.length > 0 ? parts.join(' and ') : 'none';
 }
 
 function settingLine(change: SettingChange): string {
@@ -459,9 +478,9 @@ function settingLine(change: SettingChange): string {
    * future change to the shape should not be able to break it.
    */
   if (change.key === 'command_access') {
-    const was = commandAccessCount(change.before);
+    const was = commandAccessCounts(change.before);
     if (change.cleared) return `${label}: cleared (${restrictions(was)} removed)`;
-    return `${label}: ${restrictions(commandAccessCount(change.after))} (was ${restrictions(was)})`;
+    return `${label}: ${restrictions(commandAccessCounts(change.after))} (was ${restrictions(was)})`;
   }
   if (change.cleared) {
     const removed = change.entriesRemoved.length;
@@ -510,8 +529,8 @@ function removalSection(plan: ImportPlan, isPublic: boolean): string[] {
      * values are objects), so it is counted from `before` here rather than from the entries.
      */
     if (change.key === 'command_access' && change.cleared) {
-      const cleared = commandAccessCount(change.before);
-      if (cleared > 0) out.push(`${restrictions(cleared)} on room commands`);
+      const cleared = commandAccessCounts(change.before);
+      if (cleared.allow + cleared.deny > 0) out.push(`${restrictions(cleared)} on room commands`);
       continue;
     }
     if (change.entriesRemoved.length === 0) continue;
@@ -522,7 +541,7 @@ function removalSection(plan: ImportPlan, isPublic: boolean): string[] {
     }
     if (change.key === 'command_access') {
       out.push(
-        `${restrictions(commandAccessCount(change.before, change.entriesRemoved))} on room commands`,
+        `${restrictions(commandAccessCounts(change.before, change.entriesRemoved))} on room commands`,
       );
       continue;
     }

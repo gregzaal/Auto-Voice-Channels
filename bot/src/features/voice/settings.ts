@@ -58,20 +58,24 @@ import type {
 import type { GameNameMode } from './nameTemplate.js';
 import { type CommandResult } from './commands.js';
 import {
+  ACCESS_LISTS,
   MAX_RESTRICTED_ROLES,
   MAX_RESTRICTED_USERS,
   MAX_RESTRICTIONS,
   isNickReset,
   readCommandAccess,
+  readFeatureRules,
   readIds,
+  type AccessList,
   type CommandAccess,
   type CommandFeature,
   type RestrictTarget,
 } from './commandAccess.js';
 import {
   RESTRICT_REFUSALS,
-  restrictAddedMessage,
+  restrictAllowedMessage,
   restrictClearedMessage,
+  restrictDeniedMessage,
   restrictRemovedMessage,
 } from './commandAccessCopy.js';
 import { startModeMessage } from './roomAccessCopy.js';
@@ -86,11 +90,14 @@ export type LogLevel = 1 | 2 | 3;
  * `changed` and `nicknameCleared` are the facts the caller needs and cannot get
  * from the message: whether the stored map really moved, which decides whether
  * there is anything to log, and whether a saved nickname went with it, which
- * decides whether the owner's rooms need re-rendering.
+ * decides whether the owner's rooms need re-rendering. `from` is the lists an edit
+ * took the target off, so the log can tell taking somebody off an allow list,
+ * which narrows who may use the feature, from lifting a deny.
  */
 export interface RestrictionResult extends CommandResult {
   changed: boolean;
   nicknameCleared: boolean;
+  from?: readonly AccessList[];
 }
 
 const ok = (message: string): CommandResult => ({ ok: true, message });
@@ -176,6 +183,43 @@ const isMap = (value: unknown): value is Record<string, unknown> =>
  */
 function copyMap(value: unknown): Record<string, unknown> {
   return isMap(value) ? Object.fromEntries(Object.entries(value)) : {};
+}
+
+/**
+ * Most ids a list may hold of one kind: `MAX_RESTRICTED_USERS` people or
+ * `MAX_RESTRICTED_ROLES` roles, on each list of each feature.
+ */
+const listCap = (field: 'users' | 'roles'): number =>
+  field === 'users' ? MAX_RESTRICTED_USERS : MAX_RESTRICTED_ROLES;
+
+/**
+ * How many ids the whole stored map holds, on every list of every feature, including
+ * features this build does not know, since the importer counts them too.
+ */
+function countRestrictions(current: Record<string, unknown>): number {
+  let total = 0;
+  for (const value of Object.values(current)) {
+    const entry = copyMap(value);
+    for (const list of ACCESS_LISTS) {
+      const each = copyMap(entry[list]);
+      total += readIds(each.users).length + readIds(each.roles).length;
+    }
+  }
+  return total;
+}
+
+/**
+ * Puts `list` back on `entry` as `key`, or takes it off once nothing is left in it.
+ * "Nothing left" counts a field this build cannot read as something, so a newer
+ * build's field on a list is never swept away with the ids beside it.
+ */
+function storeList(
+  entry: Record<string, unknown>,
+  key: AccessList,
+  list: Record<string, unknown>,
+): void {
+  if (Object.keys(list).length > 0) entry[key] = list;
+  else delete entry[key];
 }
 
 /**
@@ -1112,71 +1156,102 @@ export class GuildSettingsService {
   }
 
   /**
-   * Stops a user or a role from using a feature. `/restrict add`.
+   * Puts a user or a role on one list of a feature. `/restrict allow` and
+   * `/restrict deny`.
    *
-   * **A restriction on Nickname for a USER also removes their saved nickname, in
-   * the same write.** Denying `/nick` and leaving the name somebody already chose
-   * in every room they own would defeat the point of the rule, and it is one
-   * write so this command never leaves them restricted and still named. A `/nick`
-   * already in flight is the exception: `setNick` replaces the whole map from a
-   * read it made earlier, outside the row lock, and can put the name back until
-   * the guard refuses `/nick` for them. It converges on a repeat, so adding a
-   * restriction that already exists still clears a name an older build let
-   * through. Only a USER: a role's members keep what they saved, since this
-   * command has no list of them to clear.
+   * **The same id sits on one list of a feature at most.** Putting somebody on one
+   * list takes them off the other, in the same write, because the latest thing an
+   * admin said about them is what they meant: allowing a person who was denied
+   * lets them in, and denying one who was allowed shuts them out. Deny would win
+   * anyway, so the move only matters for what `/restrict list` shows and for an
+   * allow list that the move empties, which opens the feature again and which the
+   * reply says.
    *
-   * Refuses the everyone role, whose id is the guild id: it would restrict the
-   * whole server, and Discord's role picker offers it, so it is one click away
-   * and not only a hand-edited import. The caller refuses bots and anyone who can
-   * manage channels, which need Discord to answer and so cannot be decided here.
+   * **A deny on Nickname for a USER also removes their saved nickname, in the same
+   * write.** Denying `/nick` and leaving the name somebody already chose in every
+   * room they own would defeat the point of the rule, and it is one write so this
+   * command never leaves them denied and still named. A `/nick` already in flight
+   * is the exception: `setNick` replaces the whole map from a read it made earlier,
+   * outside the row lock, and can put the name back until the guard refuses `/nick`
+   * for them. It converges on a repeat, so a deny that already exists still clears
+   * a name an older build let through. Only a USER on a deny list: a role's members
+   * and everyone an allow list leaves out keep what they saved, since this command
+   * has no list of them to clear, and the render path stops showing it instead.
+   *
+   * Refuses the everyone role, whose id is the guild id, on both lists: on a deny
+   * list it would restrict the whole server, on an allow list it would be no rule
+   * at all, and Discord's role picker offers it, so it is one click away and not
+   * only a hand-edited import. The caller refuses bots, and a deny on anyone who
+   * can manage channels, which need Discord to answer and so cannot be decided
+   * here. `manager` is the caller's answer for the allow list, which accepts them
+   * (allowing a role of admins is how a feature is kept to admins) and only words
+   * the reply differently.
    */
   addCommandRestriction(
     guildId: string,
     feature: CommandFeature,
+    list: AccessList,
     target: RestrictTarget,
+    opts: { manager?: boolean } = {},
   ): Promise<RestrictionResult> {
     if (target.kind === 'role' && target.id === guildId) {
-      return Promise.resolve(refused(RESTRICT_REFUSALS.everyone));
+      return Promise.resolve(
+        refused(list === 'allow' ? RESTRICT_REFUSALS.everyoneAllowed : RESTRICT_REFUSALS.everyone),
+      );
     }
-    return this.editCommandAccess(guildId, feature, target, 'add');
+    return this.editCommandAccess(guildId, feature, target, {
+      op: 'add',
+      list,
+      manager: opts.manager === true,
+    });
   }
 
   /**
-   * Lets a user or a role use a feature again. `/restrict remove`.
+   * Takes a user or a role off whichever list of a feature holds them.
+   * `/restrict remove`.
    *
    * Never refuses on who the target is, since removing is the way out of a rule
    * that no longer makes sense: the person may since have become a manager, or the
-   * role the everyone role. It reports a nothing-to-do as success.
+   * role the everyone role. It reports a nothing-to-do as success. Taking the last
+   * entry off an allow list opens the feature to everyone the deny list does not
+   * name, and the reply says so.
    */
   removeCommandRestriction(
     guildId: string,
     feature: CommandFeature,
     target: RestrictTarget,
   ): Promise<RestrictionResult> {
-    return this.editCommandAccess(guildId, feature, target, 'remove');
+    return this.editCommandAccess(guildId, feature, target, { op: 'remove' });
   }
 
   /**
-   * Takes every user and role off one feature. `/restrict clear`.
+   * Takes every user and role off both lists of one feature. `/restrict clear`.
    *
    * **The way out of a list nobody can pick from.** `remove` needs the person or
    * role in Discord's picker, and neither a member who has left the server nor a
-   * deleted role can be picked, but both still count toward the caps. A list that
-   * fills with them could otherwise never take another name.
+   * deleted role can be picked, but both still count toward the caps, and a
+   * deleted role on an allow list keeps the feature closed to everyone it was
+   * meant to let in. A list that fills with them could otherwise never take
+   * another name or be emptied.
    *
-   * Takes the two lists this build reads and nothing else: a field it cannot read
-   * is a newer build's, and stays for the same reason an edit leaves it. Never
-   * refuses, and reports a nothing-to-do as success.
+   * Takes the lists this build reads and nothing else: a field it cannot read is a
+   * newer build's, and stays for the same reason an edit leaves it. Never refuses,
+   * and reports a nothing-to-do as success.
    */
   clearCommandRestrictions(guildId: string, feature: CommandFeature): Promise<RestrictionResult> {
     return this.deps.guilds.mergeSettings(guildId, (existing) => {
       const current = copyMap((existing?.settings ?? {})[SETTINGS_KEYS.commandAccess]);
       const entry = copyMap(current[feature]);
       let removed = 0;
-      for (const field of ['users', 'roles'] as const) {
-        if (!Array.isArray(entry[field])) continue;
-        removed += readIds(entry[field]).length;
-        delete entry[field];
+      for (const key of ACCESS_LISTS) {
+        if (!isMap(entry[key])) continue;
+        const list = copyMap(entry[key]);
+        for (const field of ['users', 'roles'] as const) {
+          if (!Array.isArray(list[field])) continue;
+          removed += readIds(list[field]).length;
+          delete list[field];
+        }
+        storeList(entry, key, list);
       }
       const changed = removed > 0;
       return {
@@ -1194,7 +1269,7 @@ export class GuildSettingsService {
   }
 
   /**
-   * One edit of the restriction map, under the row lock.
+   * One edit of the rule map, under the row lock.
    *
    * **`mergeSettings`, not `updateSettings`, for the reason `setControlPanelEntry`
    * documents**: the map is replaced wholesale by a top-level merge, so a
@@ -1202,82 +1277,108 @@ export class GuildSettingsService {
    * at once or an `/import` running against a live guild are both writers in that
    * window.
    *
-   * **Only the one id being added or removed is touched.** Every other entry is
-   * copied whole, values and all (golden rule 3): a feature id this build does not
-   * know, a field a newer build added to an entry and an element of a list this
-   * build cannot read all survive another admin's edit on an older instance.
+   * **Only the one id being added or removed is touched.** Every other entry, list
+   * and field is copied whole, values and all (golden rule 3): a feature id this
+   * build does not know, a field a newer build added to an entry or a list, and an
+   * element of a list this build cannot read all survive another admin's edit on
+   * an older instance.
    *
-   * **An `add` onto a shape this build cannot read is refused, not rewritten.** A
-   * map, an entry or a list that is there and is not the shape this build writes
-   * can only have come from a newer build, and replacing it with this build's
-   * would destroy what that build stored. A `remove` has nothing to take off it.
+   * **An add onto a shape this build cannot read is refused, not rewritten.** A
+   * map, an entry, a list or an id list that is there and is not the shape this
+   * build writes can only have come from a newer build, and replacing it with this
+   * build's would destroy what that build stored. A `remove`, and the move off the
+   * other list, have nothing to take off one, and leave it alone.
    *
-   * A list that empties is removed from its entry, an entry that empties is
-   * removed from the map, and the key is removed once nothing is left, so "nobody
-   * is restricted" is the absence of the key on an export round trip. "Nothing
-   * left" counts what this build cannot read as something, so it is never swept
-   * away with the rest.
+   * An id list that empties is removed from its list, a list that empties from its
+   * entry, an entry that empties from the map, and the key once nothing is left,
+   * so "nobody is restricted" is the absence of the key on an export round trip.
+   * "Nothing left" counts what this build cannot read as something, so it is never
+   * swept away with the rest.
    *
-   * The caps count what the reader would read, across every feature, including
-   * ones this build does not know, since the importer counts them too.
+   * The caps count what the reader would read, across every list of every feature,
+   * including features this build does not know, since the importer counts them too.
+   * A move from the other list frees the slot it fills, so it is never refused for
+   * the whole-map cap.
    */
   private editCommandAccess(
     guildId: string,
     feature: CommandFeature,
     target: RestrictTarget,
-    op: 'add' | 'remove',
+    edit: { op: 'add'; list: AccessList; manager: boolean } | { op: 'remove' },
   ): Promise<RestrictionResult> {
     if (!isSnowflake(target.id)) return Promise.resolve(refused(RESTRICT_REFUSALS.unusable));
     return this.deps.guilds.mergeSettings(guildId, (existing) => {
       const settings = existing?.settings ?? {};
-      const current = copyMap(settings[SETTINGS_KEYS.commandAccess]);
+      const stored = settings[SETTINGS_KEYS.commandAccess];
+      const current = copyMap(stored);
       const entry = copyMap(current[feature]);
       const field = target.kind === 'role' ? 'roles' : 'users';
-      let list = Array.isArray(entry[field]) ? [...(entry[field] as unknown[])] : [];
-      const present = list.includes(target.id);
+      const lists: Record<AccessList, Record<string, unknown>> = {
+        allow: copyMap(entry.allow),
+        deny: copyMap(entry.deny),
+      };
+      // The ids of the target's kind on a list, as stored, when they are a list.
+      const idsOn = (list: AccessList): unknown[] | undefined =>
+        Array.isArray(lists[list][field]) ? [...(lists[list][field] as unknown[])] : undefined;
+      const holds = (list: AccessList): boolean => idsOn(list)?.includes(target.id) === true;
+      const allowBefore = readFeatureRules(entry, guildId)?.allow !== undefined;
 
-      if (op === 'add' && !present) {
-        // Absent and null are nothing stored. Anything else that is not the shape
-        // this build writes is somebody else's data, at the level the write would
-        // replace.
-        const absent = (value: unknown): boolean => value === undefined || value === null;
-        const stored = settings[SETTINGS_KEYS.commandAccess];
-        if (
-          !(absent(stored) || isMap(stored)) ||
-          !(absent(current[feature]) || isMap(current[feature])) ||
-          !(absent(entry[field]) || Array.isArray(entry[field]))
-        ) {
-          return { patch: {}, result: refused(RESTRICT_REFUSALS.unreadable(feature)) };
+      let addTo: AccessList | undefined;
+      let takeOff: AccessList[];
+      if (edit.op === 'add') {
+        const other: AccessList = edit.list === 'allow' ? 'deny' : 'allow';
+        if (!holds(edit.list)) {
+          // Absent and null are nothing stored. Anything else that is not the shape
+          // this build writes is somebody else's data, at the level the write would
+          // replace.
+          const absent = (value: unknown): boolean => value === undefined || value === null;
+          if (
+            !(absent(stored) || isMap(stored)) ||
+            !(absent(current[feature]) || isMap(current[feature])) ||
+            !(absent(entry[edit.list]) || isMap(entry[edit.list])) ||
+            !(absent(lists[edit.list][field]) || Array.isArray(lists[edit.list][field]))
+          ) {
+            return { patch: {}, result: refused(RESTRICT_REFUSALS.unreadable(feature)) };
+          }
+          if (readIds(lists[edit.list][field]).length >= listCap(field)) {
+            const full =
+              field === 'users' ? RESTRICT_REFUSALS.tooManyUsers : RESTRICT_REFUSALS.tooManyRoles;
+            return { patch: {}, result: refused(full(feature, edit.list)) };
+          }
+          if (countRestrictions(current) - (holds(other) ? 1 : 0) >= MAX_RESTRICTIONS) {
+            return { patch: {}, result: refused(RESTRICT_REFUSALS.tooMany) };
+          }
+          addTo = edit.list;
         }
-        const held = (key: 'users' | 'roles'): number => readIds(entry[key]).length;
-        if (target.kind === 'user' && held('users') >= MAX_RESTRICTED_USERS) {
-          return { patch: {}, result: refused(RESTRICT_REFUSALS.tooManyUsers(feature)) };
-        }
-        if (target.kind === 'role' && held('roles') >= MAX_RESTRICTED_ROLES) {
-          return { patch: {}, result: refused(RESTRICT_REFUSALS.tooManyRoles(feature)) };
-        }
-        const total = Object.values(current).reduce<number>((sum, value) => {
-          const each = copyMap(value);
-          return sum + readIds(each.users).length + readIds(each.roles).length;
-        }, 0);
-        if (total >= MAX_RESTRICTIONS) {
-          return { patch: {}, result: refused(RESTRICT_REFUSALS.tooMany) };
-        }
-        list.push(target.id);
+        takeOff = holds(other) ? [other] : [];
+      } else {
+        takeOff = ACCESS_LISTS.filter(holds);
       }
-      if (op === 'remove') list = list.filter((id) => id !== target.id);
 
-      const changed = op === 'add' ? !present : present;
+      const changed = addTo !== undefined || takeOff.length > 0;
       let patch: Record<string, unknown> = {};
       let remove: string[] = [];
       if (changed) {
-        if (list.length > 0) entry[field] = list;
-        else delete entry[field];
+        if (addTo !== undefined) lists[addTo][field] = [...(idsOn(addTo) ?? []), target.id];
+        for (const list of takeOff) {
+          const left = idsOn(list)!.filter((id) => id !== target.id);
+          if (left.length > 0) lists[list][field] = left;
+          else delete lists[list][field];
+        }
+        for (const list of ACCESS_LISTS) {
+          if (list === addTo || takeOff.includes(list)) storeList(entry, list, lists[list]);
+        }
         ({ patch, remove } = storeEntry(current, feature, entry));
       }
+      const allowAfter = readFeatureRules(entry, guildId)?.allow !== undefined;
 
       let nicknameCleared = false;
-      if (op === 'add' && feature === 'nick' && target.kind === 'user') {
+      if (
+        edit.op === 'add' &&
+        edit.list === 'deny' &&
+        feature === 'nick' &&
+        target.kind === 'user'
+      ) {
         const nicks = settings[SETTINGS_KEYS.customNicks];
         if (isStringMap(nicks) && has(nicks, target.id)) {
           const next = { ...nicks };
@@ -1287,11 +1388,29 @@ export class GuildSettingsService {
         }
       }
 
+      const moved = edit.op === 'add' && takeOff.length > 0;
+      const allowEmptied = allowBefore && !allowAfter;
       const message =
-        op === 'add'
-          ? restrictAddedMessage(target, feature, { already: !changed, nicknameCleared })
-          : restrictRemovedMessage(target, feature, { was: changed });
-      return { patch, remove, result: { ok: true, message, changed, nicknameCleared } };
+        edit.op === 'remove'
+          ? restrictRemovedMessage(target, feature, { from: takeOff, allowEmptied, allowAfter })
+          : edit.list === 'allow'
+            ? restrictAllowedMessage(target, feature, {
+                already: addTo === undefined,
+                created: !allowBefore && allowAfter,
+                manager: edit.manager,
+                moved,
+              })
+            : restrictDeniedMessage(target, feature, {
+                already: addTo === undefined,
+                nicknameCleared,
+                moved,
+                allowEmptied,
+              });
+      return {
+        patch,
+        remove,
+        result: { ok: true, message, changed, nicknameCleared, from: takeOff },
+      };
     });
   }
 

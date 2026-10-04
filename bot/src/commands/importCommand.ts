@@ -42,6 +42,7 @@ import { CircuitOpenError } from '../runtime/circuitBreaker.js';
 import { missingBotPermissions, missingRenamePermissions } from './setupPanel.js';
 import {
   commandAccessCount,
+  commandAccessCounts,
   destructiveCount,
   importButtons,
   ImportSessionStore,
@@ -194,7 +195,7 @@ export async function handleExport(
     '',
     `Creator channels: ${file.creator_channels.length}. Adopted channels: ${file.adopted_channels.length}.`,
     'The file lists channel ids, your templates and game aliases, the recorded server contact, ' +
-      'the names members chose for themselves with /nick, and who is restricted from room commands.',
+      'the names members chose for themselves with /nick, and who can or cannot use some room commands.',
     'Anyone who gets the file gets all of that, so treat it the way you would treat a server backup.',
   ];
   if (otherFleets.length > 0) {
@@ -263,13 +264,17 @@ function importCeilingsExceeded(file: GuildConfigFile, text: string): string[] {
   // guild, and a cap that moves on one fleet and not another is the day it is not.
   const access = file.settings.command_access;
   if (access) {
+    // The longest id list of one kind on any one list of any one feature.
     const widest = (field: 'users' | 'roles'): number =>
       Math.max(
         0,
-        ...Object.values(access).map((entry) => {
-          const list = (entry as Record<string, unknown> | null)?.[field];
-          return Array.isArray(list) ? list.length : 0;
-        }),
+        ...Object.values(access).flatMap((entry) =>
+          (['allow', 'deny'] as const).map((kind) => {
+            const list = (entry as Record<string, unknown> | null)?.[kind];
+            const ids = (list as Record<string, unknown> | null | undefined)?.[field];
+            return Array.isArray(ids) ? ids.length : 0;
+          }),
+        ),
       );
     if (
       Object.keys(access).length > IMPORT_LIMITS.commandAccessTotal ||
@@ -1007,6 +1012,9 @@ function auditDetails(
   ctx: RenderContext,
   snapshot: ReturnType<typeof buildExportFile>,
 ): Record<string, unknown> {
+  const accessCounts = snapshot.settings.command_access
+    ? commandAccessCounts(snapshot.settings.command_access)
+    : null;
   const redacted = {
     ...snapshot,
     settings: {
@@ -1021,9 +1029,10 @@ function auditDetails(
         ? { redactedEntryCount: Object.keys(snapshot.settings.custom_nicks).length }
         : null,
       // The same rule for the same reason: these are the ids of members an admin
-      // restricted, so the row keeps how many and drops who.
-      command_access: snapshot.settings.command_access
-        ? { redactedEntryCount: commandAccessCount(snapshot.settings.command_access) }
+      // allowed or restricted, so the row keeps how many on each kind of list and
+      // drops who.
+      command_access: accessCounts
+        ? { redactedAllowCount: accessCounts.allow, redactedDenyCount: accessCounts.deny }
         : null,
     },
   };

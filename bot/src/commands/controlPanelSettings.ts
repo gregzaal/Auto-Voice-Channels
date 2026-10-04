@@ -181,8 +181,8 @@ export function buildAppearanceModal(
 const WHAT_IT_IS =
   'The control panel is a message posted in every room this server makes, so members can see, and ' +
   'easily reach, the things they can do with their own room. Each button can be switched off here. ' +
-  'Private, Hide, Size, Name and Transfer can also be withheld from a person or a role with ' +
-  '/restrict.';
+  'With /restrict, Private, Hide, Size, Name, Transfer, Kick and Claim can also be kept to some ' +
+  'people and roles, or withheld from some.';
 
 /**
  * What this server's rooms actually get, in three states rather than two.

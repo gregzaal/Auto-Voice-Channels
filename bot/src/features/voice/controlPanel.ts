@@ -23,6 +23,7 @@ import {
 } from './guildSettings.js';
 import {
   mayUse,
+  OCCUPANT_LEVEL_ACTIONS,
   PANEL_ACTION_FEATURE,
   type CommandAccess,
   type CommandCaller,
@@ -311,11 +312,14 @@ export function settingsFaceOf(control: ControlPanelControl): ControlFace {
  *
  * Three answers, which is the point of reading the owner as raw access:
  *
- * - **A resolved owner** is judged exactly as the slash command would judge them.
- * - **An ownerless room** hides every control whose feature anybody is denied.
- *   There is nobody to judge, and the panel cannot tell who will press it, so the
- *   control that some members would be refused on is withdrawn. The slash
- *   commands still gate by the caller's own identity.
+ * - **A resolved owner** is judged exactly as the slash command would judge them,
+ *   so an owner an allow list leaves out loses the control as one a deny list
+ *   names does.
+ * - **An ownerless room** hides every control whose feature has any rule, an allow
+ *   list or a deny list, since either can refuse somebody. There is nobody to
+ *   judge, and the panel cannot tell who will press it, so the control that some
+ *   members would be refused on is withdrawn. The slash commands still gate by
+ *   the caller's own identity.
  * - **An owner who could not be resolved** hides nothing. A cold member cache is
  *   routine, and withdrawing a button on a guess is worse than leaving one that
  *   the click-time guard will refuse for the people it applies to.
@@ -341,7 +345,9 @@ function ownerRestricted(
  * hidden only while the room is public. The same goes for Hide: an already
  * hidden room shows Unhide to everyone, and Hide is withdrawn only while the room
  * is not hidden. Size, Name and Transfer are hidden when the owner is denied.
- * Claim, Kick and Info are occupant-level and never hidden.
+ * Claim, Kick and Info are occupant-level ({@link OCCUPANT_LEVEL_ACTIONS}) and
+ * never hidden, whatever the owner's standing: anyone in the room presses them, so
+ * a rule on Kick or Claim is refused at the click, for whoever it covers.
  * `PANEL_ACTION_FEATURE` is a `Record` over every action, so a control added
  * later cannot reach here without a decision about it.
  */
@@ -352,7 +358,7 @@ export function hiddenControls(
   const hidden = new Set<ControlPanelControl>();
   for (const control of CONTROL_PANEL_CONTROLS) {
     const face = faceOf(control, view);
-    if (face === null) continue;
+    if (face === null || OCCUPANT_LEVEL_ACTIONS.has(face.action)) continue;
     const feature = PANEL_ACTION_FEATURE[face.action];
     if (feature !== null && ownerRestricted(feature, view, access)) hidden.add(control);
   }

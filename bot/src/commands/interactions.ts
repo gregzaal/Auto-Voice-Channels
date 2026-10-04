@@ -475,14 +475,18 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   function allowedWhileExpired(interaction: Interaction): boolean {
     if (interaction.isChatInputCommand()) {
       /**
-       * `/restrict list`, `remove` and `clear` stay open and `add` is refused,
-       * which is `/botprofile`'s resets and sets over again: the hard gate stops
-       * writes and destroys nothing, so a gated admin can still see who is
-       * restricted and lift a restriction, and cannot put a new one up. Decided
-       * here and not in the list below because it is the subcommand that differs.
+       * `/restrict list`, `remove` and `clear` stay open and `allow` and `deny` are
+       * refused, which is `/botprofile`'s resets and sets over again: the hard gate
+       * stops writes that add and leaves the ones that only take away, so a gated
+       * admin can still see who is restricted and take people and roles off the
+       * lists, and cannot put anyone new on one. Taking somebody off an allow list
+       * narrows who may use the feature, and it stays open all the same: it only
+       * removes, and refusing it would leave an admin unable to undo an allow they
+       * regret. Decided here and not in the list below because it is the subcommand
+       * that differs.
        */
       if (interaction.commandName === 'restrict') {
-        return interaction.options.getSubcommand(false) !== 'add';
+        return ['remove', 'clear', 'list'].includes(interaction.options.getSubcommand(false) ?? '');
       }
       /**
        * `/unhide` is open and `/hide` is not: the hard gate stops writes and destroys
@@ -745,11 +749,20 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
           ),
         );
       }
+      /**
+       * A rule on Claim is checked inside `claim`, not by the guard above: the room's
+       * original creator taking it back is never restricted, and only the row the
+       * command reads says who that is (`claimFeatureFor`). So unlike the guarded
+       * commands a refused `/reclaim` has been counted and deferred, and its refusal
+       * arrives as the edited reply, in the same words.
+       */
       case 'reclaim':
         return replyResult(
           interaction,
           await run(guildId, 'cmd:reclaim', () =>
-            deps.voiceCommands.claim(guildId, channelId, userId),
+            deps.voiceCommands.claim(guildId, channelId, userId, {
+              refuseClaim: () => refusalFor(interaction, settings, 'claim'),
+            }),
           ),
         );
       case 'transfer':
@@ -1375,8 +1388,9 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   // -- /restrict ------------------------------------------------------------
 
   /**
-   * `/restrict add`, `remove`, `clear` and `list`: who may not use which room
-   * command.
+   * `/restrict allow`, `deny`, `remove`, `clear` and `list`: who may use which room
+   * command. `allow` keeps a feature to the people and roles it names, `deny` names
+   * people and roles who may never use it, and deny wins (see `commandAccess.ts`).
    *
    * **Re-gated in code, not only by `default_member_permissions`.** That default
    * is a DEFAULT: a server admin can re-open any command to any role in Server
@@ -1413,15 +1427,25 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       // refused by is a list that misleads. Asked here whatever the rules are: the
       // lever is a fact about this fleet, and a rule added now is paused too.
       const paused = (await deps.commandAccessDisabled?.()) === true;
-      return replyRestrict(interaction, renderRestrictionList(access, { paused }));
+      // The guild's role cache, so a role that was deleted is flagged rather than
+      // shown as a mention Discord renders as "@deleted-role" and nothing else. It
+      // is filled at login with the guild, so an empty one is a guild the cache
+      // does not hold, and nothing is flagged on a guess.
+      const roles = interaction.guild?.roles.cache;
+      const roleExists =
+        roles && roles.size > 0 ? (id: string): boolean => roles.has(id) : undefined;
+      return replyRestrict(
+        interaction,
+        renderRestrictionList(access, { paused, ...(roleExists ? { roleExists } : {}) }),
+      );
     }
-    if (sub !== 'add' && sub !== 'remove' && sub !== 'clear') {
+    if (sub !== 'allow' && sub !== 'deny' && sub !== 'remove' && sub !== 'clear') {
       await interaction.reply({ content: 'Unknown command.', ephemeral: true });
       return;
     }
 
     // Client input even though Discord offers choices: a hand-built request can
-    // send anything, and `hide` has an id but no command yet.
+    // send anything, including an id this build does not offer.
     const feature = interaction.options.getString('feature', true);
     if (!isAvailableFeature(feature)) {
       return replyRestrict(
@@ -1465,17 +1489,25 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     const { target } = picked;
 
     /**
-     * Only `add` is refused on who the target is. Removing is the way out of a
-     * rule that no longer makes sense, and the person may since have become a
-     * manager, so it must never be blocked by a check that only applies going in.
+     * Only `allow` and `deny` are refused on who the target is. Removing is the way
+     * out of a rule that no longer makes sense, and the person may since have become
+     * a manager, so it must never be blocked by a check that only applies going in.
+     *
+     * A target who can manage channels is refused on `deny` alone, where the rule
+     * would do nothing. On `allow` it is the natural way to say a feature is for
+     * admins only ("allow Name to @Admins"), so it is accepted and the reply says
+     * that members who can manage channels can always use it.
      */
-    if (sub === 'add') {
+    const manager = carriesManageChannels(picked.permissions);
+    if (sub === 'allow' || sub === 'deny') {
       const refusal =
         target.kind === 'role' && target.id === guildId
-          ? RESTRICT_REFUSALS.everyone
+          ? sub === 'allow'
+            ? RESTRICT_REFUSALS.everyoneAllowed
+            : RESTRICT_REFUSALS.everyone
           : picked.isBot
             ? RESTRICT_REFUSALS.bot(target)
-            : carriesManageChannels(picked.permissions)
+            : sub === 'deny' && manager
               ? RESTRICT_REFUSALS.manager(target)
               : null;
       if (refusal) {
@@ -1484,17 +1516,21 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     }
 
     const res = await run(guildId, `cmd:restrict:${sub}`, () =>
-      sub === 'add'
-        ? deps.settings.addCommandRestriction(guildId, feature, target)
-        : deps.settings.removeCommandRestriction(guildId, feature, target),
+      sub === 'remove'
+        ? deps.settings.removeCommandRestriction(guildId, feature, target)
+        : deps.settings.addCommandRestriction(guildId, feature, sub, target, { manager }),
     );
     // A repeat that still removed a saved nickname changed stored data, so it is
-    // logged too, as the same line.
+    // logged too, as the same line. Taking somebody off an allow list narrows who may
+    // use the feature, so it is logged as a change to that list and not as a lift.
     if (res.changed || res.nicknameCleared) {
+      const offAllowOnly = res.from?.includes('allow') === true && !res.from.includes('deny');
       audit(
-        sub === 'add'
-          ? `🔒 ${admin} added a restriction on **${label}**.`
-          : `🔓 ${admin} lifted a restriction on **${label}**.`,
+        sub === 'allow' || (sub === 'remove' && offAllowOnly)
+          ? `🔒 ${admin} changed the allow list for **${label}**.`
+          : sub === 'deny'
+            ? `🔒 ${admin} added a restriction on **${label}**.`
+            : `🔓 ${admin} lifted a restriction on **${label}**.`,
       );
     }
     // Every write that changed who is restricted brings the posted panels into
@@ -1504,14 +1540,15 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     // removed a saved nickname changed no panel.
     if (res.changed) refreshPanelsSoon(guildId);
     try {
-      // The note rides on a successful add only: it is what an admin should hear
-      // before relying on a rule, and a refusal put nothing in place to rely on.
-      // While enforcement is paused the same reply has to say so, or "can no
-      // longer use" would be untrue in the sentence above it.
-      const paused = sub === 'add' && res.ok && (await deps.commandAccessDisabled?.()) === true;
+      // The note rides on a successful allow or deny only: it is what an admin
+      // should hear before relying on a rule, and a refusal put nothing in place to
+      // rely on. While enforcement is paused the same reply has to say so, or "can
+      // no longer use" would be untrue in the sentence above it.
+      const adds = sub !== 'remove' && res.ok;
+      const paused = adds && (await deps.commandAccessDisabled?.()) === true;
       await replyRestrict(
         interaction,
-        sub === 'add' && res.ok
+        adds
           ? `${formatResult(res)}${paused ? `\n\n${RESTRICT_PAUSED}` : ''}\n\n${RESTRICT_NOTE}`
           : formatResult(res),
       );
@@ -3711,12 +3748,15 @@ Already subscribed? Add the new server ` +
      * The `/restrict` guard for every button, before anything else is done with
      * it. This is what makes the panel and the slash command one policy: the
      * action decides the feature (`PANEL_ACTION_FEATURE`, which has a decision
-     * for every action), and the undo direction, Claim, Kick and Info map to
-     * none. It sits ahead of the switch so it covers `openPanelModal` and
-     * `openPanelPicker`, which are reachable only from here, and it runs before
-     * `showModal`, which has to be the first response. A refusal is a new
-     * ephemeral reply: this message is the shared panel, and no handler here may
-     * edit it.
+     * for every action), and the undo directions and Info map to none. Kick is
+     * refused here like any other, though the panel never hides it, since anyone
+     * in the room may press it. Claim maps to none here and is checked inside
+     * `claim`, as `/reclaim` is, because its original creator is never restricted
+     * and only the room's row says who that is. It sits ahead of the switch so it
+     * covers `openPanelModal` and `openPanelPicker`, which are reachable only from
+     * here, and it runs before `showModal`, which has to be the first response. A
+     * refusal is a new ephemeral reply: this message is the shared panel, and no
+     * handler here may edit it.
      */
     if (!(await allowed(interaction, settings, PANEL_ACTION_FEATURE[action]))) return;
 
@@ -3753,7 +3793,10 @@ Already subscribed? Add the new server ` +
       case 'claim':
         return replyPanelResult(
           interaction,
-          () => deps.voiceCommands.claim(guildId, roomId, userId),
+          () =>
+            deps.voiceCommands.claim(guildId, roomId, userId, {
+              refuseClaim: () => refusalFor(interaction, settings, 'claim'),
+            }),
           'panel:claim',
         );
       case 'limit':
@@ -3999,7 +4042,7 @@ Already subscribed? Add the new server ` +
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
     // A picker outlives the rule that was added after it opened, so the choice is
-    // checked again here. Kick maps to no feature, so this is Transfer's alone.
+    // checked again here, for Transfer and for Kick alike.
     if (!(await allowed(interaction, settings, PANEL_ACTION_FEATURE[parsed.action]))) return;
 
     if (parsed.action === 'transferpick') {

@@ -505,11 +505,11 @@ const standing = (over: Partial<{ roleIds: string[]; canManage: boolean }> = {})
 
 /** Every owner-level feature denied to one role. */
 const DENY_ALL: CommandAccess = {
-  privacy: { users: [], roles: [DENIED_ROLE] },
-  hide: { users: [], roles: [DENIED_ROLE] },
-  limit: { users: [], roles: [DENIED_ROLE] },
-  rename: { users: [], roles: [DENIED_ROLE] },
-  transfer: { users: [], roles: [DENIED_ROLE] },
+  privacy: { deny: { users: [], roles: [DENIED_ROLE] } },
+  hide: { deny: { users: [], roles: [DENIED_ROLE] } },
+  limit: { deny: { users: [], roles: [DENIED_ROLE] } },
+  rename: { deny: { users: [], roles: [DENIED_ROLE] } },
+  transfer: { deny: { users: [], roles: [DENIED_ROLE] } },
 };
 
 /** Only the five restrictable controls enabled, so hiding them all leaves nothing. */
@@ -541,7 +541,7 @@ describe('buildControlPanel and /restrict', () => {
   });
 
   it('hides only the features the owner is denied', () => {
-    const access: CommandAccess = { rename: { users: [OWNER], roles: [] } };
+    const access: CommandAccess = { rename: { deny: { users: [OWNER], roles: [] } } };
     const panel = buildControlPanel(
       ROOM,
       allOn(),
@@ -628,7 +628,7 @@ describe('buildControlPanel and /restrict', () => {
   });
 
   it('hides nothing from an ownerless room for a feature nobody is denied', () => {
-    const access: CommandAccess = { limit: { users: [], roles: [DENIED_ROLE] } };
+    const access: CommandAccess = { limit: { deny: { users: [], roles: [DENIED_ROLE] } } };
     const panel = buildControlPanel(ROOM, allOn(), view({ ownerId: null }), access);
     expect(actionsOf(panel)).toEqual([
       'rename',
@@ -698,6 +698,94 @@ describe('buildControlPanel and /restrict', () => {
     const before = buildControlPanel(ROOM, allOn(), view({ ownerAccess: standing() }), {});
     const after = buildControlPanel(ROOM, allOn(), view({ ownerAccess: standing() }), DENY_ALL);
     expect(controlPanelFingerprint(after)).not.toBe(controlPanelFingerprint(before));
+  });
+
+  /**
+   * An allow list judges the owner the way the slash command would: an owner it leaves
+   * out loses the button, and one it names, by id or by role, keeps it.
+   */
+  describe('an allow list', () => {
+    const KEPT_ROLE = '623456789012345678';
+    const access: CommandAccess = {
+      rename: { allow: { users: [], roles: [KEPT_ROLE] } },
+      limit: { allow: { users: [OWNER], roles: [] } },
+    };
+
+    it('hides a control from an owner it leaves out', () => {
+      const panel = buildControlPanel(
+        ROOM,
+        allOn(),
+        view({ ownerAccess: standing({ roleIds: [OTHER_ROLE] }) }),
+        access,
+      );
+      expect(actionsOf(panel)).not.toContain('rename');
+      // Kept to the owner by id, so Size stays.
+      expect(actionsOf(panel)).toContain('limit');
+    });
+
+    it('keeps a control for an owner it names by role, and for a manager', () => {
+      for (const owner of [standing({ roleIds: [KEPT_ROLE] }), standing({ canManage: true })]) {
+        const panel = buildControlPanel(ROOM, allOn(), view({ ownerAccess: owner }), access);
+        expect(actionsOf(panel)).toContain('rename');
+      }
+    });
+
+    it('hides the control from an ownerless room, and nothing for an unresolved owner', () => {
+      const ownerless = buildControlPanel(ROOM, allOn(), view({ ownerId: null }), access);
+      expect(actionsOf(ownerless)).not.toContain('rename');
+      expect(actionsOf(ownerless)).not.toContain('limit');
+      const unknown = buildControlPanel(ROOM, allOn(), view({ ownerAccess: 'unknown' }), access);
+      expect(actionsOf(unknown)).toContain('rename');
+      expect(actionsOf(unknown)).toContain('limit');
+    });
+  });
+
+  /**
+   * Kick and Claim are pressed by whoever is in the room, so the owner's standing says
+   * nothing about them. A rule on either, against the owner, by deny or by an allow list
+   * that leaves them out, or on an ownerless room, never takes the button off the panel:
+   * the click is refused for whoever the rule covers.
+   */
+  describe('Kick and Claim', () => {
+    const rules: [string, CommandAccess][] = [
+      [
+        'denied to the owner',
+        {
+          kick: { deny: { users: [OWNER], roles: [] } },
+          claim: { deny: { users: [], roles: [DENIED_ROLE] } },
+        },
+      ],
+      [
+        'kept to somebody else',
+        {
+          kick: { allow: { users: [], roles: [OTHER_ROLE] } },
+          claim: { allow: { users: ['723456789012345678'], roles: [] } },
+        },
+      ],
+    ];
+
+    it.each(rules)('stays on the panel when %s', (_what, access) => {
+      for (const over of [
+        { ownerAccess: standing() },
+        { ownerId: null },
+        { ownerAccess: 'unknown' as const },
+      ]) {
+        const panel = buildControlPanel(ROOM, allOn(), view(over), access);
+        expect(actionsOf(panel)).toContain('kick');
+        expect(actionsOf(panel)).toContain('claim');
+        expect([...hiddenControls(view(over), access)]).toEqual([]);
+      }
+    });
+
+    it('stays on the panel when every feature is denied to the owner', () => {
+      const everything: CommandAccess = {
+        ...DENY_ALL,
+        kick: { deny: { users: [], roles: [DENIED_ROLE] } },
+        claim: { deny: { users: [], roles: [DENIED_ROLE] } },
+      };
+      const panel = buildControlPanel(ROOM, allOn(), view({ ownerAccess: standing() }), everything);
+      expect(actionsOf(panel)).toEqual(['info', 'kick', 'claim']);
+    });
   });
 });
 
@@ -809,7 +897,7 @@ describe('the hide control', () => {
   });
 
   describe('and /restrict', () => {
-    const access: CommandAccess = { hide: { users: [], roles: [DENIED_ROLE] } };
+    const access: CommandAccess = { hide: { deny: { users: [], roles: [DENIED_ROLE] } } };
     const denied = view({ ownerAccess: standing() });
 
     it('withdraws Hide from a denied owner, on a public room and on a locked one', () => {

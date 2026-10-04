@@ -163,8 +163,8 @@ describe('buildCommandDefinitions', () => {
 
   /**
    * The first command with subcommands, and the first with a mentionable option,
-   * so the shape is pinned: `/restrict add` and `remove` take a required feature
-   * and a required who, and `list` takes nothing.
+   * so the shape is pinned: `/restrict allow`, `deny` and `remove` take a required
+   * feature and a required who, and `list` takes nothing.
    */
   describe('/restrict', () => {
     type Sub = { type: number; name: string; options?: Record<string, unknown>[] };
@@ -174,9 +174,11 @@ describe('buildCommandDefinitions', () => {
     const STRING = 3;
     const MENTIONABLE = 9;
 
-    it('has an add, a remove, a clear and a list subcommand, and nothing else', () => {
+    /** `deny` replaced `add` on 2026-10-04, when allow lists were built beside it. */
+    it('has an allow, a deny, a remove, a clear and a list subcommand, and nothing else', () => {
       expect(subs.map((s) => [s.name, s.type])).toEqual([
-        ['add', SUBCOMMAND],
+        ['allow', SUBCOMMAND],
+        ['deny', SUBCOMMAND],
         ['remove', SUBCOMMAND],
         ['clear', SUBCOMMAND],
         ['list', SUBCOMMAND],
@@ -187,15 +189,15 @@ describe('buildCommandDefinitions', () => {
      * `clear` is the way out of a list full of members who left and roles that were
      * deleted, which the picker cannot offer to `remove`, so it must not ask who.
      */
-    it('takes only a required feature on clear, the same one add takes', () => {
+    it('takes only a required feature on clear, the same one deny takes', () => {
       expect(sub('clear').options, 'clear').toMatchObject([
         { name: 'feature', type: STRING, required: true },
       ]);
-      expect(sub('clear').options).toEqual([sub('add').options![0]]);
+      expect(sub('clear').options).toEqual([sub('deny').options![0]]);
     });
 
-    it('takes a required feature and a required person or role on add and remove', () => {
-      for (const name of ['add', 'remove']) {
+    it('takes a required feature and a required person or role on allow, deny and remove', () => {
+      for (const name of ['allow', 'deny', 'remove']) {
         expect(sub(name).options, name).toMatchObject([
           { name: 'feature', type: STRING, required: true },
           { name: 'who', type: MENTIONABLE, required: true },
@@ -208,7 +210,7 @@ describe('buildCommandDefinitions', () => {
     });
 
     it('offers exactly the features that exist, labelled as the panel labels them', () => {
-      const choices = (sub('add').options![0] as { choices: { name: string; value: string }[] })
+      const choices = (sub('deny').options![0] as { choices: { name: string; value: string }[] })
         .choices;
       expect(choices).toEqual([
         { name: 'Private and Public', value: 'privacy' },
@@ -218,12 +220,15 @@ describe('buildCommandDefinitions', () => {
         { name: 'Transfer', value: 'transfer' },
         { name: 'Saved lists', value: 'access' },
         { name: 'Nickname', value: 'nick' },
+        { name: 'Kick', value: 'kick' },
+        { name: 'Claim', value: 'claim' },
       ]);
       expect(choices.map((c) => c.value)).toEqual([...AVAILABLE_FEATURES]);
     });
 
-    it('offers the same choices on remove as on add', () => {
-      expect(sub('remove').options![0]).toEqual(sub('add').options![0]);
+    it('offers the same choices on allow and remove as on deny', () => {
+      expect(sub('allow').options![0]).toEqual(sub('deny').options![0]);
+      expect(sub('remove').options![0]).toEqual(sub('deny').options![0]);
     });
 
     it('is not open to every member by default, and is guild only', () => {

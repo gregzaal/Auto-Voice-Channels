@@ -85,14 +85,16 @@ describe('restoreRemembered', () => {
       ['limit', 'limit'],
       ['privacy', 'privacy'],
     ] as const)('withholds only the field for %s from a denied member', (feature, field) => {
-      const out = restore(SAVED, { access: { [feature]: { users: [ALICE], roles: [] } } });
+      const out = restore(SAVED, {
+        access: { [feature]: { deny: { users: [ALICE], roles: [] } } },
+      });
       expect(out).not.toHaveProperty(field);
       const kept = ['name', 'limit', 'privacy'].filter((f) => f !== field);
       for (const f of kept) expect(out).toHaveProperty(f);
     });
 
     it('denies by role as well as by member', () => {
-      const access: CommandAccess = { rename: { users: [], roles: ['muted'] } };
+      const access: CommandAccess = { rename: { deny: { users: [], roles: ['muted'] } } };
       expect(
         restore(SAVED, { access, standing: standing({ roleIds: ['muted'] }) }),
       ).not.toHaveProperty('name');
@@ -105,9 +107,9 @@ describe('restoreRemembered', () => {
     /** Members who can manage channels can already rename any room, so no rule applies to them. */
     it('lets a member who can manage channels keep all of it', () => {
       const access: CommandAccess = {
-        rename: { users: [ALICE], roles: [] },
-        limit: { users: [ALICE], roles: [] },
-        privacy: { users: [ALICE], roles: [] },
+        rename: { deny: { users: [ALICE], roles: [] } },
+        limit: { deny: { users: [ALICE], roles: [] } },
+        privacy: { deny: { users: [ALICE], roles: [] } },
       };
       expect(restore(SAVED, { access, standing: standing({ canManage: true }) })).toEqual({
         name: 'Den',
@@ -122,28 +124,42 @@ describe('restoreRemembered', () => {
      * undone by a command they are always allowed.
      */
     it('still restores a remembered limit of 0 for a member denied Size', () => {
-      const access: CommandAccess = { limit: { users: [ALICE], roles: [] } };
+      const access: CommandAccess = { limit: { deny: { users: [ALICE], roles: [] } } };
       expect(restore(prefs({ limit: 0 }), { access })).toEqual({ limit: 0 });
       expect(restore(prefs({ limit: 5 }), { access })).toEqual({});
     });
 
     it('restores a remembered limit of 0 under a Size rule even when the member cannot be resolved', () => {
-      const access: CommandAccess = { limit: { users: [ALICE], roles: [] } };
+      const access: CommandAccess = { limit: { deny: { users: [ALICE], roles: [] } } };
       expect(restore(prefs({ limit: 0 }), { access, standing: undefined })).toEqual({ limit: 0 });
     });
 
     it('is not affected by a rule on a feature the field does not belong to', () => {
       const access: CommandAccess = {
-        transfer: { users: [ALICE], roles: [] },
-        nick: { users: [ALICE], roles: [] },
-        access: { users: [ALICE], roles: [] },
+        transfer: { deny: { users: [ALICE], roles: [] } },
+        nick: { deny: { users: [ALICE], roles: [] } },
+        access: { deny: { users: [ALICE], roles: [] } },
       };
       expect(restore(SAVED, { access })).toEqual({ name: 'Den', limit: 5, privacy: 'locked' });
     });
 
     it('does not read a rule about somebody else as a rule about this member', () => {
-      const access: CommandAccess = { rename: { users: ['bob'], roles: ['other-role'] } };
+      const access: CommandAccess = { rename: { deny: { users: ['bob'], roles: ['other-role'] } } };
       expect(restore(SAVED, { access })).toHaveProperty('name', 'Den');
+    });
+
+    /** An allow list withholds the field from a member it leaves out, and keeps it for one it names. */
+    it('withholds the field from a member an allow list leaves out', () => {
+      const access: CommandAccess = { rename: { allow: { users: [], roles: ['mods'] } } };
+      expect(
+        restore(SAVED, { access, standing: standing({ roleIds: ['other'] }) }),
+      ).not.toHaveProperty('name');
+      expect(restore(SAVED, { access, standing: standing({ roleIds: ['mods'] }) })).toHaveProperty(
+        'name',
+        'Den',
+      );
+      const byId: CommandAccess = { rename: { allow: { users: [ALICE], roles: [] } } };
+      expect(restore(SAVED, { access: byId })).toHaveProperty('name', 'Den');
     });
   });
 
@@ -155,7 +171,7 @@ describe('restoreRemembered', () => {
     const SAVED = prefs({ name: 'Den', limit: 5, privacy: 'private' });
 
     it('is skipped for a field a rule names, and still restored for one no rule names', () => {
-      const access: CommandAccess = { rename: { users: ['somebody-else'], roles: [] } };
+      const access: CommandAccess = { rename: { deny: { users: ['somebody-else'], roles: [] } } };
       expect(restore(SAVED, { access, standing: undefined })).toEqual({
         limit: 5,
         privacy: 'locked',
@@ -164,9 +180,9 @@ describe('restoreRemembered', () => {
 
     it('is skipped for every field when a rule names every feature', () => {
       const access: CommandAccess = {
-        rename: { users: ['x'], roles: [] },
-        limit: { users: ['x'], roles: [] },
-        privacy: { users: ['x'], roles: [] },
+        rename: { deny: { users: ['x'], roles: [] } },
+        limit: { deny: { users: ['x'], roles: [] } },
+        privacy: { deny: { users: ['x'], roles: [] } },
       };
       expect(restore(SAVED, { access, standing: undefined })).toEqual({});
     });
@@ -191,8 +207,8 @@ describe('restoreRemembered', () => {
     });
 
     it('applies a remembered privacy only when the member may use that mode', () => {
-      const denyHide: CommandAccess = { hide: { users: [ALICE], roles: [] } };
-      const denyPrivate: CommandAccess = { privacy: { users: [ALICE], roles: [] } };
+      const denyHide: CommandAccess = { hide: { deny: { users: [ALICE], roles: [] } } };
+      const denyPrivate: CommandAccess = { privacy: { deny: { users: [ALICE], roles: [] } } };
       // Hide is its own feature: a member denied it is not given a hidden room...
       expect(restore(prefs({ privacy: 'hidden' }), { access: denyHide }).privacy).toBeUndefined();
       // ...and is not quietly given a locked one in its place.

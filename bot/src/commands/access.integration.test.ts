@@ -271,7 +271,7 @@ describe('/hide, /unhide, /public and /access, end to end', () => {
   });
 
   it('refuses /hide for a member a rule denies, and lets /unhide through for them', async () => {
-    settings = { command_access: { hide: { users: [ALICE] } } };
+    settings = { command_access: { hide: { deny: { users: [ALICE] } } } };
     const refused = await type('hide');
     expect(refused.content).toContain('A server admin has turned off **Hide** for you.');
     expect(actions.actions).toEqual([]);
@@ -280,7 +280,7 @@ describe('/hide, /unhide, /public and /access, end to end', () => {
     paused = false;
     settings = {};
     await type('hide');
-    settings = { command_access: { hide: { users: [ALICE] } } };
+    settings = { command_access: { hide: { deny: { users: [ALICE] } } } };
     const shown = await type('unhide');
     expect(shown.content.startsWith('✅')).toBe(true);
   });
@@ -373,7 +373,7 @@ describe('/hide, /unhide, /public and /access, end to end', () => {
   });
 
   it('refuses /access trust for a member a rule denies Saved lists, and still lets them list and clear', async () => {
-    settings = { command_access: { access: { users: [ALICE] } } };
+    settings = { command_access: { access: { deny: { users: [ALICE] } } } };
     const refused = await type('access', { subcommand: 'trust', memberId: CAROL });
     expect(refused.content).toContain('A server admin has turned off **Saved lists** for you.');
     expect(await lists.get(GUILD, ALICE)).toEqual({ trusted: [], blocked: [] });
@@ -397,7 +397,7 @@ describe('/hide, /unhide, /public and /access, end to end', () => {
 
   it('keeps its role in the member shape the router actually receives', async () => {
     // A member whose roles are a plain list is the raw API shape; the guard must read it.
-    settings = { command_access: { access: { roles: [ROLE] } } };
+    settings = { command_access: { access: { deny: { roles: [ROLE] } } } };
     const refused = await type('access', {
       subcommand: 'trust',
       memberId: CAROL,

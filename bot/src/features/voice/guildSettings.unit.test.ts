@@ -266,7 +266,8 @@ describe('controlPanelConfirmation', () => {
 /**
  * A restricted feature is inert for a denied member, saved data included. The
  * nickname is the one saved datum a rule has to reach at render time, because
- * `/restrict add` can clear a USER's saved name but cannot list a ROLE's members.
+ * `/restrict deny` can clear a USER's saved name but cannot list a ROLE's members,
+ * or everyone an allow list leaves out.
  */
 describe('displayName and a restriction on Nickname', () => {
   const OWNER = '223456789012345678';
@@ -280,19 +281,21 @@ describe('displayName and a restriction on Nickname', () => {
   it('keeps a saved nickname for a member nobody has restricted', () => {
     expect(displayName(settingsWith({}), member([OTHER_ROLE]))).toBe('Big G');
     expect(
-      displayName(settingsWith({ nick: { roles: [DENIED_ROLE] } }), member([OTHER_ROLE])),
+      displayName(settingsWith({ nick: { deny: { roles: [DENIED_ROLE] } } }), member([OTHER_ROLE])),
     ).toBe('Big G');
   });
 
   it('shows the Discord name for an owner whose ROLE is restricted, without clearing the nickname', () => {
-    const settings = settingsWith({ nick: { roles: [DENIED_ROLE] } });
+    const settings = settingsWith({ nick: { deny: { roles: [DENIED_ROLE] } } });
     expect(displayName(settings, member([OTHER_ROLE, DENIED_ROLE]))).toBe('Greg');
     // Kept, not cleared: lifting the rule brings the name back.
     expect(settings.customNicks).toEqual({ [OWNER]: 'Big G' });
   });
 
   it('shows the Discord name for an owner who is restricted by id', () => {
-    expect(displayName(settingsWith({ nick: { users: [OWNER] } }), member([]))).toBe('Greg');
+    expect(displayName(settingsWith({ nick: { deny: { users: [OWNER] } } }), member([]))).toBe(
+      'Greg',
+    );
   });
 
   /**
@@ -302,19 +305,31 @@ describe('displayName and a restriction on Nickname', () => {
    */
   it('keeps the nickname of a member who can manage channels, whatever names them', () => {
     const manager = { ...member([DENIED_ROLE]), canManage: true };
-    expect(displayName(settingsWith({ nick: { roles: [DENIED_ROLE] } }), manager)).toBe('Big G');
-    expect(displayName(settingsWith({ nick: { users: [OWNER] } }), manager)).toBe('Big G');
+    expect(displayName(settingsWith({ nick: { deny: { roles: [DENIED_ROLE] } } }), manager)).toBe(
+      'Big G',
+    );
+    expect(displayName(settingsWith({ nick: { deny: { users: [OWNER] } } }), manager)).toBe(
+      'Big G',
+    );
     // Absent and false are the same: only a snapshot that says so is exempt.
     const plain = { ...member([DENIED_ROLE]), canManage: false };
-    expect(displayName(settingsWith({ nick: { roles: [DENIED_ROLE] } }), plain)).toBe('Greg');
+    expect(displayName(settingsWith({ nick: { deny: { roles: [DENIED_ROLE] } } }), plain)).toBe(
+      'Greg',
+    );
     expect(
-      displayName(settingsWith({ nick: { roles: [DENIED_ROLE] } }), member([DENIED_ROLE])),
+      displayName(
+        settingsWith({ nick: { deny: { roles: [DENIED_ROLE] } } }),
+        member([DENIED_ROLE]),
+      ),
     ).toBe('Greg');
   });
 
   it('only restricts Nickname, not another feature', () => {
     expect(
-      displayName(settingsWith({ rename: { roles: [DENIED_ROLE] } }), member([DENIED_ROLE])),
+      displayName(
+        settingsWith({ rename: { deny: { roles: [DENIED_ROLE] } } }),
+        member([DENIED_ROLE]),
+      ),
     ).toBe('Big G');
   });
 
@@ -324,10 +339,12 @@ describe('displayName and a restriction on Nickname', () => {
    * the direction that fails open, while a rule naming THEM still applies.
    */
   it('cannot check a role it was not given, and still applies a rule naming the person', () => {
-    expect(displayName(settingsWith({ nick: { roles: [DENIED_ROLE] } }), member(undefined))).toBe(
-      'Big G',
-    );
-    expect(displayName(settingsWith({ nick: { users: [OWNER] } }), member(undefined))).toBe('Greg');
+    expect(
+      displayName(settingsWith({ nick: { deny: { roles: [DENIED_ROLE] } } }), member(undefined)),
+    ).toBe('Big G');
+    expect(
+      displayName(settingsWith({ nick: { deny: { users: [OWNER] } } }), member(undefined)),
+    ).toBe('Greg');
   });
 
   /**
@@ -336,11 +353,43 @@ describe('displayName and a restriction on Nickname', () => {
    * server, so the reader drops it and it cannot match.
    */
   it('does not let a stored @everyone rule deny every member', () => {
-    expect(displayName(settingsWith({ nick: { roles: [GUILD] } }), member([GUILD]))).toBe('Big G');
+    expect(displayName(settingsWith({ nick: { deny: { roles: [GUILD] } } }), member([GUILD]))).toBe(
+      'Big G',
+    );
+  });
+
+  /** An allow list on Nickname shows the nickname of whoever it names and nobody else's. */
+  it('shows the nickname of an owner an allow list names, and not of one it leaves out', () => {
+    const settings = settingsWith({ nick: { allow: { roles: [OTHER_ROLE] } } });
+    expect(displayName(settings, member([OTHER_ROLE]))).toBe('Big G');
+    expect(displayName(settings, member([DENIED_ROLE]))).toBe('Greg');
+    expect(displayName(settings, { ...member([]), canManage: true })).toBe('Big G');
+    expect(displayName(settingsWith({ nick: { allow: { users: [OWNER] } } }), member([]))).toBe(
+      'Big G',
+    );
+    // Kept, not cleared, as under a deny.
+    expect(settings.customNicks).toEqual({ [OWNER]: 'Big G' });
+  });
+
+  /**
+   * An owner nobody could resolve has no roles to show, so an allow list by role
+   * cannot let their nickname through: the allow list's closed direction, and a
+   * cosmetic one. Named by id, it shows.
+   */
+  it('shows an unresolved owner their own name under an allow list unless it names them by id', () => {
+    expect(
+      displayName(settingsWith({ nick: { allow: { roles: [OTHER_ROLE] } } }), member(undefined)),
+    ).toBe('Greg');
+    expect(
+      displayName(settingsWith({ nick: { allow: { users: [OWNER] } } }), member(undefined)),
+    ).toBe('Big G');
   });
 
   it('has no effect for a member who never set a nickname', () => {
-    const settings = parseVoiceSettings({ command_access: { nick: { users: [OWNER] } } }, GUILD);
+    const settings = parseVoiceSettings(
+      { command_access: { nick: { deny: { users: [OWNER] } } } },
+      GUILD,
+    );
     expect(displayName(settings, member([]))).toBe('Greg');
   });
 });

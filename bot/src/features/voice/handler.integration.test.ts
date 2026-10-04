@@ -1351,7 +1351,7 @@ describe('VoiceFeature (integration)', () => {
           carol: 'Big Carol',
           [DENIED_USER]: 'Big Dan',
         },
-        command_access: { nick: { roles: [DENIED_ROLE] } },
+        command_access: { nick: { deny: { roles: [DENIED_ROLE] } } },
       });
     });
 
@@ -1449,7 +1449,9 @@ describe('VoiceFeature (integration)', () => {
       });
 
       it('still applies a rule that names a departed creator themselves, with nothing to look up', async () => {
-        await guilds.updateSettings(GUILD, { command_access: { nick: { users: [DENIED_USER] } } });
+        await guilds.updateSettings(GUILD, {
+          command_access: { nick: { deny: { users: [DENIED_USER] } } },
+        });
         await roomMadeBy(DENIED_USER, null);
         expect(await rendered()).toEqual([DENIED_USER]);
       });
@@ -3871,7 +3873,7 @@ describe('VoiceFeature (integration)', () => {
         });
       }
 
-      const RULE = { command_access: { rename: { roles: [DENIED_ROLE] } } };
+      const RULE = { command_access: { rename: { deny: { roles: [DENIED_ROLE] } } } };
       const has = (payload: unknown, action: string): boolean =>
         JSON.stringify(payload).includes(`avc:panel:${action}:`);
 
@@ -3928,7 +3930,7 @@ describe('VoiceFeature (integration)', () => {
         const room = await makeRoom();
         expect(has(posted[0]!.payload, 'rename')).toBe(true);
 
-        // An admin runs `/restrict add`, which refreshes every panel.
+        // An admin runs `/restrict deny`, which refreshes every panel.
         await guilds.updateSettings(GUILD, RULE);
         await feature.refreshGuildPanels(GUILD);
         expect(edited).toHaveLength(1);
@@ -3949,11 +3951,11 @@ describe('VoiceFeature (integration)', () => {
         await guilds.updateSettings(GUILD, {
           control_panel: { panel: true, claim: false, kick: false, info: false },
           command_access: {
-            privacy: { roles: [DENIED_ROLE] },
-            hide: { roles: [DENIED_ROLE] },
-            limit: { roles: [DENIED_ROLE] },
-            rename: { roles: [DENIED_ROLE] },
-            transfer: { roles: [DENIED_ROLE] },
+            privacy: { deny: { roles: [DENIED_ROLE] } },
+            hide: { deny: { roles: [DENIED_ROLE] } },
+            limit: { deny: { roles: [DENIED_ROLE] } },
+            rename: { deny: { roles: [DENIED_ROLE] } },
+            transfer: { deny: { roles: [DENIED_ROLE] } },
           },
         });
         voice.setOwnerAccess('alice', { roleIds: [DENIED_ROLE] });
@@ -4114,7 +4116,7 @@ describe('VoiceFeature (integration)', () => {
         it('withdraws Hide from a denied owner and keeps Unhide for the same owner once hidden', async () => {
           buildCapturing();
           await guilds.updateSettings(GUILD, {
-            command_access: { hide: { roles: [DENIED_ROLE] } },
+            command_access: { hide: { deny: { roles: [DENIED_ROLE] } } },
           });
           voice.setOwnerAccess('alice', { roleIds: [DENIED_ROLE] });
           const room = await makeRoom();

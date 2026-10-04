@@ -262,11 +262,12 @@ describe('buildAppearanceModal', () => {
 
   /**
    * A switched-on control looks plainly on here, so the one place an admin reads
-   * what the panel is has to say a control can also be withheld from people. The
-   * list says Private and not Private and Public, because opening a room again is
-   * never restricted.
+   * what the panel is has to say a control can also be kept to some people or
+   * withheld from some, in both directions `/restrict` offers. The list says Private
+   * and not Private and Public, because opening a room again is never restricted,
+   * and it names Kick and Claim, which became restrictable on 2026-10-04.
    */
-  it('says Private, Hide, Size, Name and Transfer can be restricted with /restrict', () => {
+  it('says Private, Hide, Size, Name, Transfer, Kick and Claim can be restricted with /restrict', () => {
     const none = Object.fromEntries(CONTROL_PANEL_CONTROLS.map((c) => [c, false]));
     for (const settings of [ON, {}, { control_panel: { ...none, panel: true } }]) {
       const description = (
@@ -275,7 +276,7 @@ describe('buildAppearanceModal', () => {
         }
       ).description;
       expect(description).toContain(
-        'Private, Hide, Size, Name and Transfer can also be withheld from a person or a role with /restrict.',
+        'With /restrict, Private, Hide, Size, Name, Transfer, Kick and Claim can also be kept to some people and roles, or withheld from some.',
       );
     }
   });

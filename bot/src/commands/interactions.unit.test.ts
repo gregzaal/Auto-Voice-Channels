@@ -130,6 +130,8 @@ interface FakeInteractionOpts {
   botNickname?: string;
   /** `guild.ownerId`, which the guild always knows, cached members or not. */
   guildOwnerId?: string;
+  /** Role ids in the guild's role cache. Absent = an empty (unpopulated) cache. */
+  guildRoles?: string[];
 }
 
 /** The bot's own guild member, with only what `/botprofile` reads. */
@@ -175,6 +177,7 @@ function fakeInteraction(opts: FakeInteractionOpts) {
     locale: opts.locale,
     guild: {
       ownerId: opts.guildOwnerId,
+      roles: { cache: new Map((opts.guildRoles ?? []).map((id) => [id, {}] as const)) },
       members: {
         cache: {
           get: () =>
@@ -1663,7 +1666,7 @@ describe('registerInteractionHandler (/access)', () => {
    * list they filled before the rule, and read it.
    */
   describe('and /restrict', () => {
-    const DENY = { access: { users: [KAY] } };
+    const DENY = { access: { deny: { users: [KAY] } } };
     const REFUSAL = 'A server admin has turned off **Saved lists** for you.';
 
     it.each(['trust', 'block', 'admit'])(
@@ -1703,7 +1706,7 @@ describe('registerInteractionHandler (/access)', () => {
     });
 
     it.each([
-      ['a rule that names somebody else', { access: { users: [BOB] } }, {}],
+      ['a rule that names somebody else', { access: { deny: { users: [BOB] } } }, {}],
       ['a member who can manage channels', DENY, { manageChannels: true }],
       ['no rules at all', undefined, {}],
     ] as const)('does not for %s', async (_what, rules, opts) => {
@@ -1721,7 +1724,7 @@ describe('registerInteractionHandler (/access)', () => {
     it('is told by role too, in both shapes the member arrives in', async () => {
       const ROLE = '333333333333333333';
       for (const shape of ['guildMember', 'raw'] as const) {
-        const e = accessEnv({ access: { roles: [ROLE] } });
+        const e = accessEnv({ access: { deny: { roles: [ROLE] } } });
         await run(e, { subcommand: 'list', memberRoles: [ROLE], memberShape: shape });
         expect(e.access.list, shape).toHaveBeenCalledWith('g1', KAY, { inert: true });
         dispose?.();
@@ -1729,7 +1732,7 @@ describe('registerInteractionHandler (/access)', () => {
     });
 
     it('lets a member through who is not denied, and one who can manage channels', async () => {
-      const e = accessEnv({ access: { users: [BOB] } });
+      const e = accessEnv({ access: { deny: { users: [BOB] } } });
       await run(e, { subcommand: 'trust', ...member() });
       expect(e.access.save).toHaveBeenCalledTimes(1);
       dispose?.();
@@ -1741,7 +1744,7 @@ describe('registerInteractionHandler (/access)', () => {
     it('applies to the command in the role shape too', async () => {
       const ROLE = '333333333333333333';
       for (const shape of ['guildMember', 'raw'] as const) {
-        const e = accessEnv({ access: { roles: [ROLE] } });
+        const e = accessEnv({ access: { deny: { roles: [ROLE] } } });
         const f = await run(e, {
           subcommand: 'block',
           memberRoles: [ROLE],
@@ -1963,7 +1966,7 @@ describe('registerInteractionHandler (the knock card and the kick vote)', () => 
 
   describe('Always allow and /restrict', () => {
     const KAY = '111111111111111111';
-    const DENY_SAVED = { access: { users: [KAY] } };
+    const DENY_SAVED = { access: { deny: { users: [KAY] } } };
 
     /** It saves to the owner's trusted list, so the rule that stops `/access trust` stops it. */
     it('is refused for an owner denied Saved lists, before it is acknowledged, and nothing is done', async () => {
@@ -4737,7 +4740,7 @@ describe('registerInteractionHandler (/botprofile)', () => {
 });
 
 /**
- * `/restrict`: who may not use which room command.
+ * `/restrict`: who may use which room command, by an allow list and a deny list.
  *
  * Driven through the real `GuildSettingsService` over an in-memory settings store,
  * so what an admin reads and what lands in the blob are both the real thing, and
@@ -4831,13 +4834,23 @@ describe('registerInteractionHandler (/restrict)', () => {
     return { ...fake, payload, content: (payload?.content as string | undefined) ?? '' };
   }
 
-  const addUser = (feature: string, id = TARGET, extra: Record<string, unknown> = {}) => ({
-    subcommand: 'add',
+  const denyUser = (feature: string, id = TARGET, extra: Record<string, unknown> = {}) => ({
+    subcommand: 'deny',
     optionFeature: feature,
     optionWho: { user: { id }, ...extra },
   });
-  const addRole = (feature: string, id: string, permissions: unknown = '0') => ({
-    subcommand: 'add',
+  const denyRole = (feature: string, id: string, permissions: unknown = '0') => ({
+    subcommand: 'deny',
+    optionFeature: feature,
+    optionWho: { role: { id, permissions } },
+  });
+  const allowUser = (feature: string, id = TARGET, extra: Record<string, unknown> = {}) => ({
+    subcommand: 'allow',
+    optionFeature: feature,
+    optionWho: { user: { id }, ...extra },
+  });
+  const allowRole = (feature: string, id: string, permissions: unknown = '0') => ({
+    subcommand: 'allow',
     optionFeature: feature,
     optionWho: { role: { id, permissions } },
   });
@@ -4848,11 +4861,160 @@ describe('registerInteractionHandler (/restrict)', () => {
     },
   ) => ({ subcommand: 'remove', optionFeature: feature, optionWho });
 
+  /**
+   * `allow` keeps a feature to the people and roles it names, plus anyone who can
+   * manage channels. The first entry is the moment the feature closes to everybody
+   * else, so that reply says it plainly.
+   */
+  describe('allow', () => {
+    it('keeps a feature to a role, says so plainly, and answers only the admin', async () => {
+      const e = restrictEnv();
+      const { content, payload, interaction } = await restrict(e, allowRole('rename', ROLE));
+      expect(e.blob().command_access).toEqual({ rename: { allow: { roles: [ROLE] } } });
+      expect(content).toContain(
+        `✅ From now on only <@&${ROLE}> and members who can manage channels can use **Name**.`,
+      );
+      expect(content).toContain('Restrictions only apply on versions of AVC that include them.');
+      expect(payload?.flags).toBe(EPHEMERAL);
+      expect(payload?.allowedMentions).toEqual({ parse: [] });
+      expect(interaction.deferReply).not.toHaveBeenCalled();
+    });
+
+    /** "Allow Name to @Admins" is the natural way to say admins only, so it is accepted. */
+    it('accepts a role or a user that can manage channels, and says what that means', async () => {
+      const role = restrictEnv();
+      const byRole = await restrict(role, allowRole('rename', ROLE, String(MANAGE)));
+      expect(role.blob().command_access).toEqual({ rename: { allow: { roles: [ROLE] } } });
+      expect(byRole.content).toContain(
+        `From now on only members who can manage channels, like <@&${ROLE}>, can use **Name**.`,
+      );
+      dispose?.();
+      const user = restrictEnv();
+      await restrict(user, allowUser('kick', TARGET, { member: { permissions: holds(MANAGE) } }));
+      expect(user.blob().command_access).toEqual({ kick: { allow: { users: [TARGET] } } });
+    });
+
+    it('refuses the everyone role and a bot, and writes nothing', async () => {
+      const everyone = restrictEnv();
+      const refused = await restrict(everyone, allowRole('rename', GUILD));
+      expect(refused.content).toContain('⚠️ That is the everyone role');
+      expect(refused.content).toContain('/restrict clear');
+      expect(everyone.blob()).not.toHaveProperty('command_access');
+      dispose?.();
+      const bot = restrictEnv();
+      const botReply = await restrict(
+        bot,
+        allowUser('rename', TARGET, { user: { id: TARGET, bot: true } }),
+      );
+      expect(botReply.content).toContain(`<@${TARGET}> is a bot`);
+      expect(bot.blob()).not.toHaveProperty('command_access');
+    });
+
+    it('posts an audit line naming the admin and the feature, and nobody else', async () => {
+      const e = restrictEnv();
+      await restrict(e, allowRole('claim', ROLE));
+      expect(e.serverLog).toHaveBeenCalledWith(
+        GUILD,
+        1,
+        `🔒 <@${ADMIN}> changed the allow list for **Claim**.`,
+      );
+      expect(e.serverLog.mock.calls[0]![2]).not.toContain(ROLE);
+      expect(e.refreshGuildPanels).toHaveBeenCalledWith(GUILD);
+    });
+
+    /** Allowing never clears a nickname: the render path stops showing it for whoever is left out. */
+    it('does not remove a saved nickname, even on Nickname', async () => {
+      const e = restrictEnv({ custom_nicks: { [TARGET]: 'Kay', [OTHER]: 'Sam' } });
+      const { content } = await restrict(e, allowUser('nick', OTHER));
+      expect(e.blob().custom_nicks).toEqual({ [TARGET]: 'Kay', [OTHER]: 'Sam' });
+      expect(content).not.toContain('nickname was removed');
+      expect(e.rerenderByOwner).not.toHaveBeenCalled();
+    });
+
+    it('takes somebody it allows off the deny list, and says so', async () => {
+      const e = restrictEnv({ command_access: { rename: { deny: { users: [TARGET] } } } });
+      const { content } = await restrict(e, allowUser('rename'));
+      expect(e.blob().command_access).toEqual({ rename: { allow: { users: [TARGET] } } });
+      expect(content).toContain(`<@${TARGET}> is no longer on its deny list.`);
+    });
+
+    it('says a deny that empties the allow list opens the feature again', async () => {
+      const e = restrictEnv({ command_access: { rename: { allow: { roles: [ROLE] } } } });
+      const { content } = await restrict(e, denyRole('rename', ROLE));
+      expect(e.blob().command_access).toEqual({ rename: { deny: { roles: [ROLE] } } });
+      expect(content).toContain(
+        'Its allow list is empty now, so everyone who is not denied can use it again.',
+      );
+    });
+
+    it('takes somebody off the allow list on remove, and says when that opens the feature', async () => {
+      const e = restrictEnv({ command_access: { rename: { allow: { users: [TARGET] } } } });
+      const { content } = await restrict(e, removeUser('rename'));
+      expect(e.blob()).not.toHaveProperty('command_access');
+      expect(content).toBe(
+        `✅ <@${TARGET}> is off the allow list for **Name**. Its allow list is empty now, so everyone who is not denied can use it again.`,
+      );
+      // Off an allow list is a change to that list, which can narrow who may use it,
+      // so it is not logged as a restriction lifted.
+      expect(e.serverLog).toHaveBeenCalledWith(
+        GUILD,
+        1,
+        `🔒 <@${ADMIN}> changed the allow list for **Name**.`,
+      );
+    });
+
+    it('lists the allow list as only, beside the deny list as never', async () => {
+      const e = restrictEnv({
+        command_access: {
+          rename: { allow: { roles: [ROLE] }, deny: { users: [TARGET] } },
+          kick: { allow: { users: [OTHER] } },
+        },
+      });
+      const { content } = await restrict(e, { subcommand: 'list' });
+      expect(content).toContain(`**Name**: only <@&${ROLE}>, never <@${TARGET}>`);
+      expect(content).toContain(`**Kick**: only <@${OTHER}>`);
+      expect(content).toContain('**Claim**: everyone');
+    });
+  });
+
+  /**
+   * A deleted role on an allow list keeps the feature closed to everyone it was meant
+   * to let in, and Discord renders its mention as "@deleted-role" with nothing said,
+   * so the list flags it, resolved through the guild's role cache, and says the way out.
+   */
+  describe('list and a role the server no longer has', () => {
+    const stored = {
+      command_access: {
+        rename: { allow: { roles: [ROLE, OTHER] } },
+        limit: { deny: { roles: [ROLE] } },
+      },
+    };
+
+    it('flags it on either list when the role cache does not hold it', async () => {
+      const e = restrictEnv(stored);
+      const { content } = await restrict(e, { subcommand: 'list', guildRoles: [OTHER, GUILD] });
+      expect(content).toContain(`**Name**: only a deleted role and <@&${OTHER}>`);
+      expect(content).toContain('**Size**: everyone except a deleted role');
+      expect(content).not.toContain(`<@&${ROLE}>`);
+      expect(content).toContain('A deleted role on an allow list lets nobody in');
+    });
+
+    it('flags nothing when the role cache holds it, or holds nothing at all', async () => {
+      for (const guildRoles of [[ROLE, OTHER], undefined]) {
+        const e = restrictEnv(stored);
+        const { content } = await restrict(e, { subcommand: 'list', guildRoles });
+        expect(content).toContain(`<@&${ROLE}>`);
+        expect(content).not.toContain('deleted');
+        dispose?.();
+      }
+    });
+  });
+
   it('adds a restriction, and answers only the admin and pings nobody', async () => {
     const e = restrictEnv();
-    const { content, payload, interaction } = await restrict(e, addUser('rename'));
+    const { content, payload, interaction } = await restrict(e, denyUser('rename'));
 
-    expect(e.blob().command_access).toEqual({ rename: { users: [TARGET] } });
+    expect(e.blob().command_access).toEqual({ rename: { deny: { users: [TARGET] } } });
     expect(content).toContain(`✅ <@${TARGET}> can no longer use **Name**`);
     expect(payload?.flags).toBe(EPHEMERAL);
     expect(payload?.allowedMentions).toEqual({ parse: [] });
@@ -4862,7 +5024,7 @@ describe('registerInteractionHandler (/restrict)', () => {
 
   it('tells an admin what a restriction does not cover, on add', async () => {
     const e = restrictEnv();
-    const { content } = await restrict(e, addUser('rename'));
+    const { content } = await restrict(e, denyUser('rename'));
     expect(content).toContain('Restrictions only apply on versions of AVC that include them.');
     expect(content).toContain("Discord's own Integrations settings still apply to slash commands");
     expect(content).toContain('room panel buttons ignore those settings');
@@ -4870,8 +5032,8 @@ describe('registerInteractionHandler (/restrict)', () => {
 
   it('resolves a picked role as a role, and stores it as one', async () => {
     const e = restrictEnv();
-    const { content } = await restrict(e, addRole('limit', ROLE));
-    expect(e.blob().command_access).toEqual({ limit: { roles: [ROLE] } });
+    const { content } = await restrict(e, denyRole('limit', ROLE));
+    expect(e.blob().command_access).toEqual({ limit: { deny: { roles: [ROLE] } } });
     expect(content).toContain(`<@&${ROLE}> can no longer use **Size**`);
   });
 
@@ -4882,8 +5044,8 @@ describe('registerInteractionHandler (/restrict)', () => {
    */
   it('posts a line to the server log naming the admin and the feature, and nobody else', async () => {
     for (const [initial, opts] of [
-      [{}, addUser('transfer')],
-      [{}, addRole('transfer', ROLE)],
+      [{}, denyUser('transfer')],
+      [{}, denyRole('transfer', ROLE)],
     ] as const) {
       const e = restrictEnv(initial);
       await restrict(e, opts);
@@ -4913,13 +5075,13 @@ describe('registerInteractionHandler (/restrict)', () => {
       commandName: 'restrict',
       guildId: GUILD,
       manageChannels: true,
-      ...addUser('transfer'),
+      ...denyUser('transfer'),
     });
     fake.reply.mockRejectedValue(new Error('Unknown interaction'));
     e.env.client.emit('interactionCreate', fake.interaction);
     await flush();
 
-    expect(e.blob().command_access).toEqual({ transfer: { users: [TARGET] } });
+    expect(e.blob().command_access).toEqual({ transfer: { deny: { users: [TARGET] } } });
     expect(e.serverLog).toHaveBeenCalledWith(
       GUILD,
       1,
@@ -4930,7 +5092,7 @@ describe('registerInteractionHandler (/restrict)', () => {
   it('writes no ops_audit row, which this command has no way to reach', async () => {
     const record = vi.fn();
     const e = restrictEnv({}, { configTransfer: { opsAudit: { record } } as never });
-    await restrict(e, addUser('rename'));
+    await restrict(e, denyUser('rename'));
     expect(record).not.toHaveBeenCalled();
   });
 
@@ -4942,23 +5104,23 @@ describe('registerInteractionHandler (/restrict)', () => {
      * every room command.
      */
     it.each([
-      ['add', addUser('rename')],
+      ['add', denyUser('rename')],
       ['remove', removeUser('rename')],
       ['list', { subcommand: 'list' }],
     ])('on %s', async (_name, opts) => {
-      const e = restrictEnv({ command_access: { rename: { users: [OTHER] } } });
+      const e = restrictEnv({ command_access: { rename: { deny: { users: [OTHER] } } } });
       const { content } = await restrict(e, { ...opts, manageChannels: false });
       expect(content).toBe('You need the Manage Channels permission.');
       expect(e.mergeSettings).not.toHaveBeenCalled();
       expect(e.serverLog).not.toHaveBeenCalled();
-      expect(e.blob().command_access).toEqual({ rename: { users: [OTHER] } });
+      expect(e.blob().command_access).toEqual({ rename: { deny: { users: [OTHER] } } });
     });
   });
 
   describe('refuses a target that would do nothing, or everything', () => {
     it('refuses the everyone role, whose id is the guild id', async () => {
       const e = restrictEnv();
-      const { content } = await restrict(e, addRole('rename', GUILD));
+      const { content } = await restrict(e, denyRole('rename', GUILD));
       expect(content).toContain('⚠️ That is the everyone role');
       expect(e.blob()).not.toHaveProperty('command_access');
       expect(e.serverLog).not.toHaveBeenCalled();
@@ -4968,7 +5130,7 @@ describe('registerInteractionHandler (/restrict)', () => {
       const e = restrictEnv();
       const { content } = await restrict(
         e,
-        addUser('rename', TARGET, { user: { id: TARGET, bot: true } }),
+        denyUser('rename', TARGET, { user: { id: TARGET, bot: true } }),
       );
       expect(content).toContain(`<@${TARGET}> is a bot`);
       expect(e.blob()).not.toHaveProperty('command_access');
@@ -4982,7 +5144,10 @@ describe('registerInteractionHandler (/restrict)', () => {
       ['Manage Channels among others', String(MANAGE | PermissionFlagsBits.KickMembers)],
     ])('refuses a user who has %s, and says why', async (_name, permissions) => {
       const e = restrictEnv();
-      const { content } = await restrict(e, addUser('rename', TARGET, { member: { permissions } }));
+      const { content } = await restrict(
+        e,
+        denyUser('rename', TARGET, { member: { permissions } }),
+      );
       expect(content).toContain(
         `⚠️ <@${TARGET}> has the Manage Channels or Administrator permission`,
       );
@@ -4997,7 +5162,7 @@ describe('registerInteractionHandler (/restrict)', () => {
       ['Manage Channels as a bit field', holds(MANAGE)],
     ])('refuses a role that has %s', async (_name, permissions) => {
       const e = restrictEnv();
-      const { content } = await restrict(e, addRole('rename', ROLE, permissions));
+      const { content } = await restrict(e, denyRole('rename', ROLE, permissions));
       expect(content).toContain(`<@&${ROLE}> has the Manage Channels or Administrator permission`);
       expect(e.blob()).not.toHaveProperty('command_access');
     });
@@ -5005,16 +5170,18 @@ describe('registerInteractionHandler (/restrict)', () => {
     it('accepts a user and a role with neither permission', async () => {
       const e = restrictEnv();
       const kick = String(PermissionFlagsBits.KickMembers);
-      await restrict(e, addUser('rename', TARGET, { member: { permissions: kick } }));
-      await restrict(e, addRole('rename', ROLE, kick));
-      expect(e.blob().command_access).toEqual({ rename: { users: [TARGET], roles: [ROLE] } });
+      await restrict(e, denyUser('rename', TARGET, { member: { permissions: kick } }));
+      await restrict(e, denyRole('rename', ROLE, kick));
+      expect(e.blob().command_access).toEqual({
+        rename: { deny: { users: [TARGET], roles: [ROLE] } },
+      });
     });
 
     /** A rule on a manager is harmless, since the guard skips them, and refusing on a guess is not. */
     it('lets a user through when nothing can say what they hold', async () => {
       const e = restrictEnv();
-      await restrict(e, addUser('rename'));
-      expect(e.blob().command_access).toEqual({ rename: { users: [TARGET] } });
+      await restrict(e, denyUser('rename'));
+      expect(e.blob().command_access).toEqual({ rename: { deny: { users: [TARGET] } } });
     });
   });
 
@@ -5025,10 +5192,10 @@ describe('registerInteractionHandler (/restrict)', () => {
    */
   describe('remove', () => {
     it('lets the person use the feature again, without the note', async () => {
-      const e = restrictEnv({ command_access: { rename: { users: [TARGET, OTHER] } } });
+      const e = restrictEnv({ command_access: { rename: { deny: { users: [TARGET, OTHER] } } } });
       const { content } = await restrict(e, removeUser('rename'));
       expect(content).toBe(`✅ <@${TARGET}> can use **Name** again.`);
-      expect(e.blob().command_access).toEqual({ rename: { users: [OTHER] } });
+      expect(e.blob().command_access).toEqual({ rename: { deny: { users: [OTHER] } } });
       expect(e.serverLog).toHaveBeenCalledWith(
         GUILD,
         1,
@@ -5038,7 +5205,10 @@ describe('registerInteractionHandler (/restrict)', () => {
     });
 
     it('takes the key off the blob when the last restriction goes', async () => {
-      const e = restrictEnv({ general: 'Voice', command_access: { rename: { users: [TARGET] } } });
+      const e = restrictEnv({
+        general: 'Voice',
+        command_access: { rename: { deny: { users: [TARGET] } } },
+      });
       await restrict(e, removeUser('rename'));
       expect(e.blob()).toEqual({ general: 'Voice' });
     });
@@ -5051,12 +5221,14 @@ describe('registerInteractionHandler (/restrict)', () => {
         { role: { id: GUILD, permissions: String(ADMINISTRATOR) } },
       ]) {
         const { content } = await restrict(e, removeUser('rename', who));
-        expect(content).toContain('was not restricted from **Name**, so nothing changed');
+        expect(content).toContain(
+          'was not on the allow list or the deny list for **Name**, so nothing changed',
+        );
       }
     });
 
     it('can clear a stored everyone rule that a hand edit put there', async () => {
-      const e = restrictEnv({ command_access: { rename: { roles: [GUILD] } } });
+      const e = restrictEnv({ command_access: { rename: { deny: { roles: [GUILD] } } } });
       await restrict(e, removeUser('rename', { role: { id: GUILD, permissions: '0' } }));
       expect(e.blob()).not.toHaveProperty('command_access');
     });
@@ -5076,8 +5248,8 @@ describe('registerInteractionHandler (/restrict)', () => {
     const clear = (feature: string) => ({ subcommand: 'clear', optionFeature: feature });
     const stored = {
       command_access: {
-        rename: { users: [TARGET, OTHER], roles: [ROLE] },
-        limit: { users: [TARGET] },
+        rename: { deny: { users: [TARGET, OTHER], roles: [ROLE] } },
+        limit: { deny: { users: [TARGET] } },
       },
     };
 
@@ -5085,7 +5257,7 @@ describe('registerInteractionHandler (/restrict)', () => {
       const e = restrictEnv(stored);
       const { content, payload } = await restrict(e, clear('rename'));
       expect(content).toBe('✅ Removed 3 restrictions on **Name**. Everyone can use it again.');
-      expect(e.blob().command_access).toEqual({ limit: { users: [TARGET] } });
+      expect(e.blob().command_access).toEqual({ limit: { deny: { users: [TARGET] } } });
       expect(payload?.flags).toBe(EPHEMERAL);
       expect(payload?.allowedMentions).toEqual({ parse: [] });
     });
@@ -5116,34 +5288,34 @@ describe('registerInteractionHandler (/restrict)', () => {
       expect(denied.blob()).toEqual(stored);
 
       const hand = restrictEnv(stored);
-      const refused = await restrict(hand, clear('claim'));
+      const refused = await restrict(hand, clear('info'));
       expect(refused.content).toContain('Pick one of the room commands from the list.');
       expect(hand.blob()).toEqual(stored);
     });
   });
 
   it('answers a repeat add as a success that changed nothing, and logs nothing', async () => {
-    const e = restrictEnv({ command_access: { rename: { users: [TARGET] } } });
-    const { content } = await restrict(e, addUser('rename'));
+    const e = restrictEnv({ command_access: { rename: { deny: { users: [TARGET] } } } });
+    const { content } = await restrict(e, denyUser('rename'));
     expect(content).toContain('is already restricted from **Name**, so nothing changed');
     expect(e.serverLog).not.toHaveBeenCalled();
   });
 
   it("refuses past the cap in the writer's words, with no note and no log line", async () => {
     const full = Array.from({ length: 50 }, (_, i) => `4${String(i).padStart(17, '0')}`);
-    const e = restrictEnv({ command_access: { rename: { users: full } } });
-    const { content } = await restrict(e, addUser('rename'));
-    expect(content).toContain('⚠️ **Name** already restricts 50 people');
+    const e = restrictEnv({ command_access: { rename: { deny: { users: full } } } });
+    const { content } = await restrict(e, denyUser('rename'));
+    expect(content).toContain('⚠️ The deny list for **Name** already holds 50 people');
     expect(content).not.toContain('Restrictions only apply');
     expect(e.serverLog).not.toHaveBeenCalled();
   });
 
   describe('treats its options as client input', () => {
-    it.each(['claim', 'kick', 'constructor'])(
+    it.each(['info', 'reclaim', 'constructor'])(
       'refuses the feature %j, which /restrict does not offer',
       async (feature) => {
         const e = restrictEnv();
-        const { content } = await restrict(e, addUser(feature));
+        const { content } = await restrict(e, denyUser(feature));
         expect(content).toContain('⚠️ Pick one of the room commands from the list.');
         expect(e.mergeSettings).not.toHaveBeenCalled();
       },
@@ -5152,7 +5324,7 @@ describe('registerInteractionHandler (/restrict)', () => {
     it('refuses an option that is neither a user nor a role', async () => {
       const e = restrictEnv();
       const { content } = await restrict(e, {
-        subcommand: 'add',
+        subcommand: 'deny',
         optionFeature: 'rename',
         optionWho: {},
       });
@@ -5169,7 +5341,7 @@ describe('registerInteractionHandler (/restrict)', () => {
   });
 
   describe('list', () => {
-    it('says nobody is restricted for every feature when nothing is stored', async () => {
+    it('says everyone can use every feature when nothing is stored', async () => {
       const e = restrictEnv();
       const { content, payload } = await restrict(e, { subcommand: 'list' });
       for (const label of [
@@ -5180,8 +5352,10 @@ describe('registerInteractionHandler (/restrict)', () => {
         'Transfer',
         'Saved lists',
         'Nickname',
+        'Kick',
+        'Claim',
       ]) {
-        expect(content).toContain(`**${label}**: nobody is restricted`);
+        expect(content).toContain(`**${label}**: everyone`);
       }
       expect(payload?.flags).toBe(EPHEMERAL);
       expect(payload?.allowedMentions).toEqual({ parse: [] });
@@ -5191,29 +5365,35 @@ describe('registerInteractionHandler (/restrict)', () => {
 
     it('shows who is restricted from what, as mentions, with the note', async () => {
       const e = restrictEnv({
-        command_access: { rename: { users: [TARGET], roles: [ROLE] }, nick: { users: [OTHER] } },
+        command_access: {
+          rename: { deny: { users: [TARGET], roles: [ROLE] } },
+          nick: { deny: { users: [OTHER] } },
+        },
       });
       const { content } = await restrict(e, { subcommand: 'list' });
-      expect(content).toContain(`**Name**: <@&${ROLE}>, <@${TARGET}>`);
-      expect(content).toContain(`**Nickname**: <@${OTHER}>`);
+      expect(content).toContain(`**Name**: everyone except <@&${ROLE}> and <@${TARGET}>`);
+      expect(content).toContain(`**Nickname**: everyone except <@${OTHER}>`);
       expect(content).toContain('Restrictions only apply on versions of AVC that include them.');
       expect(content.length).toBeLessThanOrEqual(2000);
     });
 
-    it('does not show a feature that has no restriction, whatever is stored', async () => {
-      const e = restrictEnv({ command_access: { claim: { users: [TARGET] } } });
+    it('does not show a feature /restrict does not offer, whatever is stored', async () => {
+      const e = restrictEnv({ command_access: { info: { deny: { users: [TARGET] } } } });
       const { content } = await restrict(e, { subcommand: 'list' });
       expect(content).not.toContain(TARGET);
-      expect(content).not.toContain('Claim');
+      expect(content).not.toContain('Info');
     });
 
     it('shows Hide and Saved lists, which have commands now', async () => {
       const e = restrictEnv({
-        command_access: { hide: { users: [TARGET] }, access: { roles: [ROLE] } },
+        command_access: {
+          hide: { deny: { users: [TARGET] } },
+          access: { deny: { roles: [ROLE] } },
+        },
       });
       const { content } = await restrict(e, { subcommand: 'list' });
-      expect(content).toContain(`**Hide**: <@${TARGET}>`);
-      expect(content).toContain(`**Saved lists**: <@&${ROLE}>`);
+      expect(content).toContain(`**Hide**: everyone except <@${TARGET}>`);
+      expect(content).toContain(`**Saved lists**: everyone except <@&${ROLE}>`);
     });
   });
 
@@ -5235,7 +5415,7 @@ describe('registerInteractionHandler (/restrict)', () => {
         commandName: 'restrict',
         guildId: GUILD,
         manageChannels: true,
-        ...addUser('nick'),
+        ...denyUser('nick'),
       });
       fake.reply.mockImplementation(() => {
         order.push('reply');
@@ -5248,7 +5428,7 @@ describe('registerInteractionHandler (/restrict)', () => {
         'Their saved nickname was removed.',
       );
       expect(e.blob().custom_nicks).toEqual({ [OTHER]: 'Sam' });
-      expect(e.blob().command_access).toEqual({ nick: { users: [TARGET] } });
+      expect(e.blob().command_access).toEqual({ nick: { deny: { users: [TARGET] } } });
       expect(e.rerenderByOwner).toHaveBeenCalledWith(GUILD, TARGET);
       expect(order).toEqual(['reply', 'render']);
     });
@@ -5256,9 +5436,9 @@ describe('registerInteractionHandler (/restrict)', () => {
     it('does not fail the command when the re-render does, since the restriction landed', async () => {
       const e = restrictEnv({ custom_nicks: { [TARGET]: 'Kay' } });
       e.rerenderByOwner.mockRejectedValue(new Error('discord is down'));
-      const { content, followUp } = await restrict(e, addUser('nick'));
+      const { content, followUp } = await restrict(e, denyUser('nick'));
       expect(content).toContain('Their saved nickname was removed.');
-      expect(e.blob().command_access).toEqual({ nick: { users: [TARGET] } });
+      expect(e.blob().command_access).toEqual({ nick: { deny: { users: [TARGET] } } });
       expect(e.warn).toHaveBeenCalledOnce();
       expect(followUp).not.toHaveBeenCalled();
       expect(e.env.reportError).not.toHaveBeenCalled();
@@ -5270,10 +5450,10 @@ describe('registerInteractionHandler (/restrict)', () => {
      */
     it('says so, and logs it, on a repeat that still removed a saved nickname', async () => {
       const e = restrictEnv({
-        command_access: { nick: { users: [TARGET] } },
+        command_access: { nick: { deny: { users: [TARGET] } } },
         custom_nicks: { [TARGET]: 'Kay' },
       });
-      const { content } = await restrict(e, addUser('nick'));
+      const { content } = await restrict(e, denyUser('nick'));
       expect(content).toContain(
         `<@${TARGET}> is already restricted from **Nickname**. Their saved nickname was removed.`,
       );
@@ -5294,7 +5474,7 @@ describe('registerInteractionHandler (/restrict)', () => {
         commandName: 'restrict',
         guildId: GUILD,
         manageChannels: true,
-        ...addUser('nick'),
+        ...denyUser('nick'),
       });
       fake.reply.mockRejectedValue(new Error('Unknown interaction'));
       e.env.client.emit('interactionCreate', fake.interaction);
@@ -5306,14 +5486,14 @@ describe('registerInteractionHandler (/restrict)', () => {
 
     it('does not re-render when there was no nickname to remove', async () => {
       const e = restrictEnv({ custom_nicks: { [OTHER]: 'Sam' } });
-      await restrict(e, addUser('nick'));
+      await restrict(e, denyUser('nick'));
       expect(e.rerenderByOwner).not.toHaveBeenCalled();
     });
 
     it('does not re-render for a role, or for another feature', async () => {
       const e = restrictEnv({ custom_nicks: { [TARGET]: 'Kay' } });
-      await restrict(e, addRole('nick', ROLE));
-      await restrict(e, addUser('rename'));
+      await restrict(e, denyRole('nick', ROLE));
+      await restrict(e, denyUser('rename'));
       expect(e.rerenderByOwner).not.toHaveBeenCalled();
       expect(e.blob().custom_nicks).toEqual({ [TARGET]: 'Kay' });
     });
@@ -5332,11 +5512,15 @@ describe('registerInteractionHandler (/restrict)', () => {
    */
   describe('refreshes the room panels', () => {
     it.each([
-      ['an add', {}, addUser('rename')],
-      ['a remove', { command_access: { rename: { users: [TARGET] } } }, removeUser('rename')],
+      ['an add', {}, denyUser('rename')],
+      [
+        'a remove',
+        { command_access: { rename: { deny: { users: [TARGET] } } } },
+        removeUser('rename'),
+      ],
       [
         'a clear',
-        { command_access: { rename: { users: [TARGET] } } },
+        { command_access: { rename: { deny: { users: [TARGET] } } } },
         { subcommand: 'clear', optionFeature: 'rename' },
       ],
     ] as const)('after %s that changed something', async (_what, initial, opts) => {
@@ -5347,7 +5531,11 @@ describe('registerInteractionHandler (/restrict)', () => {
     });
 
     it.each([
-      ['a repeat add', { command_access: { rename: { users: [TARGET] } } }, addUser('rename')],
+      [
+        'a repeat add',
+        { command_access: { rename: { deny: { users: [TARGET] } } } },
+        denyUser('rename'),
+      ],
       ['removing somebody who was not restricted', {}, removeUser('rename')],
       [
         'clearing a feature nobody was restricted from',
@@ -5362,14 +5550,14 @@ describe('registerInteractionHandler (/restrict)', () => {
 
     it('not after a refused add', async () => {
       const e = restrictEnv();
-      await restrict(e, addUser('rename', TARGET, { member: { permissions: holds(MANAGE) } }));
+      await restrict(e, denyUser('rename', TARGET, { member: { permissions: holds(MANAGE) } }));
       expect(e.refreshGuildPanels).not.toHaveBeenCalled();
     });
 
     it('and a refresh that fails does not fail the command', async () => {
       const e = restrictEnv();
       e.refreshGuildPanels.mockRejectedValue(new Error('discord is down'));
-      const { content } = await restrict(e, addUser('rename'));
+      const { content } = await restrict(e, denyUser('rename'));
       await flush();
       expect(content).toContain('can no longer use **Name**');
       expect(e.env.reportError).not.toHaveBeenCalled();
@@ -5385,10 +5573,10 @@ describe('registerInteractionHandler (/restrict)', () => {
     const paused = { commandAccessDisabled: vi.fn().mockResolvedValue(true) };
 
     it('says so at the top of the list, above the rules it qualifies', async () => {
-      const e = restrictEnv({ command_access: { rename: { users: [TARGET] } } }, paused);
+      const e = restrictEnv({ command_access: { rename: { deny: { users: [TARGET] } } } }, paused);
       const { content } = await restrict(e, { subcommand: 'list' });
       expect(content.startsWith('Enforcement is paused right now')).toBe(true);
-      expect(content).toContain(`**Name**: <@${TARGET}>`);
+      expect(content).toContain(`**Name**: everyone except <@${TARGET}>`);
       expect(content.length).toBeLessThanOrEqual(2000);
     });
 
@@ -5406,8 +5594,8 @@ describe('registerInteractionHandler (/restrict)', () => {
 
     it('still lists, adds and removes, which the lever never blocks', async () => {
       const e = restrictEnv({}, paused);
-      const added = await restrict(e, addUser('rename'));
-      expect(e.blob().command_access).toEqual({ rename: { users: [TARGET] } });
+      const added = await restrict(e, denyUser('rename'));
+      expect(e.blob().command_access).toEqual({ rename: { deny: { users: [TARGET] } } });
       expect(added.content).toContain('Enforcement is paused right now');
       expect(added.content).toContain('can no longer use **Name**');
       const removed = await restrict(e, removeUser('rename'));
@@ -5425,29 +5613,32 @@ describe('registerInteractionHandler (/restrict)', () => {
       selfHosted: false,
     });
 
-    it('refuses add with the reactivation notice, and writes nothing', async () => {
-      const e = restrictEnv({}, gated());
-      const { content } = await restrict(e, addUser('rename'));
-      expect(content).toContain('auto-voice.io');
-      expect(e.mergeSettings).not.toHaveBeenCalled();
+    it('refuses allow and deny with the reactivation notice, and writes nothing', async () => {
+      for (const opts of [denyUser('rename'), allowRole('rename', ROLE)]) {
+        const e = restrictEnv({}, gated());
+        const { content } = await restrict(e, opts);
+        expect(content, opts.subcommand).toContain('auto-voice.io');
+        expect(e.mergeSettings).not.toHaveBeenCalled();
+        dispose?.();
+      }
     });
 
     it('still lists', async () => {
-      const e = restrictEnv({ command_access: { rename: { users: [TARGET] } } }, gated());
+      const e = restrictEnv({ command_access: { rename: { deny: { users: [TARGET] } } } }, gated());
       const { content } = await restrict(e, { subcommand: 'list' });
       expect(content).not.toContain('auto-voice.io');
-      expect(content).toContain(`**Name**: <@${TARGET}>`);
+      expect(content).toContain(`**Name**: everyone except <@${TARGET}>`);
     });
 
     it('still removes', async () => {
-      const e = restrictEnv({ command_access: { rename: { users: [TARGET] } } }, gated());
+      const e = restrictEnv({ command_access: { rename: { deny: { users: [TARGET] } } } }, gated());
       const { content } = await restrict(e, removeUser('rename'));
       expect(content).toBe(`✅ <@${TARGET}> can use **Name** again.`);
       expect(e.blob()).not.toHaveProperty('command_access');
     });
 
     it('still clears, which is a removal too', async () => {
-      const e = restrictEnv({ command_access: { rename: { users: [TARGET] } } }, gated());
+      const e = restrictEnv({ command_access: { rename: { deny: { users: [TARGET] } } } }, gated());
       const { content } = await restrict(e, { subcommand: 'clear', optionFeature: 'rename' });
       expect(content).not.toContain('auto-voice.io');
       expect(content).toContain('Removed 1 restriction on **Name**');
@@ -5460,38 +5651,61 @@ describe('registerInteractionHandler (/restrict)', () => {
    * quote, and every reply here is assembled from a mention, a label and a clause.
    */
   it('follows the copy rules in every reply it gives', async () => {
-    const stored = { command_access: { rename: { users: [TARGET] } } };
+    const stored = { command_access: { rename: { deny: { users: [TARGET] } } } };
     const scenarios: [
       Record<string, unknown>,
       Partial<FakeInteractionOpts> & { subcommand: string },
     ][] = [
-      [{}, addUser('privacy')],
-      [{}, addUser('limit')],
-      [{}, addUser('rename')],
-      [{}, addUser('transfer')],
-      [{ custom_nicks: { [TARGET]: 'Kay' } }, addUser('nick')],
-      [{}, addRole('rename', ROLE)],
-      [{}, addRole('rename', GUILD)],
-      [{}, addRole('rename', ROLE, String(MANAGE))],
-      [{}, addUser('rename', TARGET, { user: { id: TARGET, bot: true } })],
-      [{}, addUser('rename', TARGET, { member: { permissions: holds(MANAGE) } })],
-      [{}, addUser('claim')],
-      [stored, addUser('rename')],
+      [{}, denyUser('privacy')],
+      [{}, denyUser('limit')],
+      [{}, denyUser('rename')],
+      [{}, denyUser('transfer')],
+      [{ custom_nicks: { [TARGET]: 'Kay' } }, denyUser('nick')],
+      [{}, denyRole('rename', ROLE)],
+      [{}, denyRole('rename', GUILD)],
+      [{}, denyRole('rename', ROLE, String(MANAGE))],
+      [{}, denyUser('rename', TARGET, { user: { id: TARGET, bot: true } })],
+      [{}, denyUser('rename', TARGET, { member: { permissions: holds(MANAGE) } })],
+      [{}, denyUser('claim')],
+      [{}, denyUser('info')],
+      [{}, allowRole('rename', ROLE)],
+      [{}, allowRole('rename', ROLE, String(MANAGE))],
+      [{}, allowRole('rename', GUILD)],
+      [{}, allowUser('kick', TARGET, { user: { id: TARGET, bot: true } })],
+      [{ command_access: { rename: { allow: { roles: [ROLE] } } } }, allowUser('rename')],
+      [{ command_access: { rename: { allow: { users: [TARGET] } } } }, allowUser('rename')],
+      [{ command_access: { rename: { allow: { roles: [ROLE] } } } }, denyRole('rename', ROLE)],
+      [{ command_access: { rename: { allow: { users: [TARGET] } } } }, removeUser('rename')],
+      [
+        { command_access: { rename: { allow: { roles: [ROLE] }, deny: { users: [TARGET] } } } },
+        removeUser('rename'),
+      ],
+      [
+        { command_access: { rename: { allow: { roles: [ROLE] }, deny: { users: [TARGET] } } } },
+        { subcommand: 'list', guildRoles: [OTHER] },
+      ],
+      [stored, denyUser('rename')],
       [stored, removeUser('rename')],
       [{}, removeUser('rename')],
       [
-        { command_access: { rename: { roles: [ROLE] } } },
+        { command_access: { rename: { deny: { roles: [ROLE] } } } },
         removeUser('rename', { role: { id: ROLE, permissions: '0' } }),
       ],
       [stored, { subcommand: 'clear', optionFeature: 'rename' }],
       [{}, { subcommand: 'clear', optionFeature: 'rename' }],
       [
-        { command_access: { nick: { users: [TARGET] } }, custom_nicks: { [TARGET]: 'Kay' } },
-        addUser('nick'),
+        {
+          command_access: { nick: { deny: { users: [TARGET] } } },
+          custom_nicks: { [TARGET]: 'Kay' },
+        },
+        denyUser('nick'),
       ],
       [{}, { subcommand: 'list' }],
-      [{ command_access: { rename: { users: [TARGET], roles: [ROLE] } } }, { subcommand: 'list' }],
-      [{}, { ...addUser('rename'), manageChannels: false }],
+      [
+        { command_access: { rename: { deny: { users: [TARGET], roles: [ROLE] } } } },
+        { subcommand: 'list' },
+      ],
+      [{}, { ...denyUser('rename'), manageChannels: false }],
     ];
     const replies: string[] = [];
     const logLines: string[] = [];
@@ -5502,10 +5716,10 @@ describe('registerInteractionHandler (/restrict)', () => {
       dispose?.();
     }
     expect(replies.every((r) => r.length > 0)).toBe(true);
-    // Add, remove and clear, for a person and for a role: the lines go to a channel
-    // other people read, so they are held to the same rules as the replies.
-    expect(logLines.length).toBeGreaterThanOrEqual(8);
-    expect(new Set(logLines.map((l) => l.replace(/\*\*.*\*\*/, '**X**'))).size).toBe(3);
+    // Allow, deny, remove and clear, for a person and for a role: the lines go to a
+    // channel other people read, so they are held to the same rules as the replies.
+    expect(logLines.length).toBeGreaterThanOrEqual(12);
+    expect(new Set(logLines.map((l) => l.replace(/\*\*.*\*\*/, '**X**'))).size).toBe(4);
     for (const text of [...replies, ...logLines]) {
       expect(text, 'no em or en dashes').not.toMatch(/[—–]/);
       expect(text, 'straight quotes only').not.toMatch(/[‘’“”]/);
@@ -5537,15 +5751,22 @@ describe('registerInteractionHandler (the restriction guard)', () => {
   const OTHER_ROLE = '444444444444444444';
   const EVERYONE = '460459401086763010';
 
-  /** Every feature `/restrict` offers, denied to Kay by id. */
+  /** Every feature a command or a button is stopped on by the guard, denied to Kay by id. */
   const DENY_KAY = {
-    privacy: { users: [KAY] },
-    hide: { users: [KAY] },
-    limit: { users: [KAY] },
-    rename: { users: [KAY] },
-    transfer: { users: [KAY] },
-    nick: { users: [KAY] },
+    privacy: { deny: { users: [KAY] } },
+    hide: { deny: { users: [KAY] } },
+    limit: { deny: { users: [KAY] } },
+    rename: { deny: { users: [KAY] } },
+    transfer: { deny: { users: [KAY] } },
+    nick: { deny: { users: [KAY] } },
+    kick: { deny: { users: [KAY] } },
+    claim: { deny: { users: [KAY] } },
   };
+
+  /** The same features kept to somebody else by an allow list, which leaves Kay out. */
+  const KEEP_FROM_KAY = Object.fromEntries(
+    Object.keys(DENY_KAY).map((feature) => [feature, { allow: { users: [OTHER] } }]),
+  );
 
   /** The words a refusal uses, for the five features a command or a button can be stopped on. */
   const REFUSAL = (label: string) => `A server admin has turned off **${label}** for you.`;
@@ -5565,6 +5786,12 @@ describe('registerInteractionHandler (the restriction guard)', () => {
       hide: ok(),
       unhide: ok(),
       setNick: ok(),
+      startVote: vi
+        .fn()
+        .mockResolvedValue({ ok: true, message: 'Vote started.', required: 2, epoch: 1 }),
+      castVote: vi
+        .fn()
+        .mockResolvedValue({ ok: true, resolved: false, message: 'Vote recorded (2/3).' }),
       getEditorState: vi.fn().mockResolvedValue({ found: false, scope: 'channel' }),
       getRoomPanelState: vi.fn().mockResolvedValue({
         ownerId: KAY,
@@ -5620,6 +5847,12 @@ describe('registerInteractionHandler (the restriction guard)', () => {
         getEditorState: s.getEditorState,
         getRoomPanelState: s.getRoomPanelState,
         rerenderByOwner: s.rerenderByOwner,
+      } as never,
+      votekick: {
+        start: s.startVote,
+        vote: s.castVote,
+        hasSession: vi.fn().mockReturnValue(false),
+        cancel: vi.fn(),
       } as never,
       logger: { ...fakeLogger(), warn, info } as never,
       countCommand,
@@ -5677,6 +5910,7 @@ describe('registerInteractionHandler (the restriction guard)', () => {
     { name: 'name', label: 'Name', acted: (s: ReturnType<typeof services>) => s.getEditorState },
     { name: 'transfer', label: 'Transfer', acted: (s: ReturnType<typeof services>) => s.transfer },
     { name: 'nick', label: 'Nickname', acted: (s: ReturnType<typeof services>) => s.setNick },
+    { name: 'kick', label: 'Kick', acted: (s: ReturnType<typeof services>) => s.startVote },
   ] as const;
 
   describe.each(COMMANDS)('/$name', ({ name, label, acted }) => {
@@ -5692,14 +5926,64 @@ describe('registerInteractionHandler (the restriction guard)', () => {
       expect(e.countCommand).not.toHaveBeenCalled();
     });
 
+    /** An allow list that leaves the member out refuses them through the same door. */
+    it('refuses a member an allow list leaves out, the same way', async () => {
+      const e = guardEnv(KEEP_FROM_KAY);
+      const f = await fire(e, { kind: 'command', commandName: name, voiceChannelId: 'room-1' });
+      expectRefused(f, label);
+      expect(acted(e.s)).not.toHaveBeenCalled();
+      expect(e.countCommand).not.toHaveBeenCalled();
+    });
+
+    it('lets in a member an allow list names, by id or by role', async () => {
+      for (const [rules, extra] of [
+        [{ users: [KAY] }, {}],
+        [{ roles: [OTHER_ROLE] }, { memberRoles: [OTHER_ROLE] }],
+      ] as const) {
+        const e = guardEnv(
+          Object.fromEntries(Object.keys(DENY_KAY).map((feature) => [feature, { allow: rules }])),
+        );
+        const f = await fire(e, {
+          kind: 'command',
+          commandName: name,
+          voiceChannelId: 'room-1',
+          ...extra,
+        });
+        expect(notRefused(f)).toBe(true);
+        expect(acted(e.s)).toHaveBeenCalled();
+        dispose?.();
+      }
+    });
+
+    /** Deny wins: a member both lists name is refused. */
+    it('refuses a member the allow list names when the deny list names them too', async () => {
+      const e = guardEnv(
+        Object.fromEntries(
+          Object.keys(DENY_KAY).map((feature) => [
+            feature,
+            { allow: { users: [KAY] }, deny: { roles: [DENIED_ROLE] } },
+          ]),
+        ),
+      );
+      const f = await fire(e, {
+        kind: 'command',
+        commandName: name,
+        voiceChannelId: 'room-1',
+        memberRoles: [DENIED_ROLE],
+      });
+      expectRefused(f, label);
+      expect(acted(e.s)).not.toHaveBeenCalled();
+    });
+
     it('lets a member through who is not named by the rule', async () => {
       const e = guardEnv({
-        privacy: { users: [OTHER] },
-        hide: { users: [OTHER] },
-        limit: { users: [OTHER] },
-        rename: { users: [OTHER] },
-        transfer: { users: [OTHER] },
-        nick: { users: [OTHER] },
+        privacy: { deny: { users: [OTHER] } },
+        hide: { deny: { users: [OTHER] } },
+        limit: { deny: { users: [OTHER] } },
+        rename: { deny: { users: [OTHER] } },
+        transfer: { deny: { users: [OTHER] } },
+        nick: { deny: { users: [OTHER] } },
+        kick: { deny: { users: [OTHER] } },
       });
       const f = await fire(e, { kind: 'command', commandName: name, voiceChannelId: 'room-1' });
       expect(notRefused(f)).toBe(true);
@@ -5708,8 +5992,12 @@ describe('registerInteractionHandler (the restriction guard)', () => {
     });
 
     it('never restricts a member who can manage channels, or an administrator', async () => {
-      for (const holds of [{ manageChannels: true }, { administrator: true }]) {
-        const e = guardEnv(DENY_KAY);
+      for (const [holds, rules] of [
+        [{ manageChannels: true }, DENY_KAY],
+        [{ administrator: true }, DENY_KAY],
+        [{ manageChannels: true }, KEEP_FROM_KAY],
+      ] as const) {
+        const e = guardEnv(rules);
         const f = await fire(e, {
           kind: 'command',
           commandName: name,
@@ -5725,7 +6013,7 @@ describe('registerInteractionHandler (the restriction guard)', () => {
 
   /** A rule on a ROLE reaches a member through whichever shape discord.js gave us. */
   describe('a rule that names a role', () => {
-    const RULES = { limit: { roles: [DENIED_ROLE] } };
+    const RULES = { limit: { deny: { roles: [DENIED_ROLE] } } };
 
     it.each(['guildMember', 'raw'] as const)(
       'refuses a member holding it (%s shape)',
@@ -5775,7 +6063,7 @@ describe('registerInteractionHandler (the restriction guard)', () => {
     it.each(['guildMember', 'raw'] as const)(
       'is not tripped by a stored @everyone rule (%s shape)',
       async (shape) => {
-        const e = guardEnv({ limit: { roles: [EVERYONE] } });
+        const e = guardEnv({ limit: { deny: { roles: [EVERYONE] } } });
         const f = await fire(e, {
           kind: 'command',
           commandName: 'limit',
@@ -5796,8 +6084,8 @@ describe('registerInteractionHandler (the restriction guard)', () => {
    * `/unlimit` does by another name.
    */
   describe('the undo directions', () => {
-    it('leaves /public, /unhide, /unlimit and /reclaim open to a member denied everything', async () => {
-      for (const commandName of ['public', 'unhide', 'unlimit', 'reclaim']) {
+    it('leaves /public, /unhide and /unlimit open to a member denied everything', async () => {
+      for (const commandName of ['public', 'unhide', 'unlimit']) {
         const e = guardEnv(DENY_KAY);
         const f = await fire(e, { kind: 'command', commandName, voiceChannelId: 'room-1' });
         expect(notRefused(f), commandName).toBe(true);
@@ -5828,21 +6116,21 @@ describe('registerInteractionHandler (the restriction guard)', () => {
 
       describe.each(Object.entries(via))('through the %s', (_door, press) => {
         it('opens the room to everyone, and is not refused', async () => {
-          const e = guardEnv({ privacy: { users: [KAY] } });
+          const e = guardEnv({ privacy: { deny: { users: [KAY] } } });
           const f = await press(e);
           expect(notRefused(f)).toBe(true);
           expect(e.s.unhide).toHaveBeenCalledWith('g1', 'room-1', KAY, { open: true });
         });
 
         it('opens it for a member whose ROLE is denied Private', async () => {
-          const e = guardEnv({ privacy: { roles: [OTHER_ROLE] } });
+          const e = guardEnv({ privacy: { deny: { roles: [OTHER_ROLE] } } });
           await press(e, { memberRoles: [OTHER_ROLE] });
           expect(e.s.unhide).toHaveBeenCalledWith('g1', 'room-1', KAY, { open: true });
         });
 
         it.each([
-          ['a rule for somebody else', { privacy: { users: [OTHER] } }],
-          ['a rule on Hide alone', { hide: { users: [KAY] } }],
+          ['a rule for somebody else', { privacy: { deny: { users: [OTHER] } } }],
+          ['a rule on Hide alone', { hide: { deny: { users: [KAY] } } }],
           ['no rules at all', undefined],
         ])('leaves it locked, as before, with %s', async (_name, rules) => {
           const e = guardEnv(rules);
@@ -5851,20 +6139,20 @@ describe('registerInteractionHandler (the restriction guard)', () => {
         });
 
         it('leaves it locked for a member who can manage channels', async () => {
-          const e = guardEnv({ privacy: { users: [KAY] } });
+          const e = guardEnv({ privacy: { deny: { users: [KAY] } } });
           await press(e, { manageChannels: true });
           expect(e.s.unhide).toHaveBeenCalledWith('g1', 'room-1', KAY);
         });
 
         it('leaves it locked while command_access.disabled is on', async () => {
-          const e = guardEnv({ privacy: { users: [KAY] } });
+          const e = guardEnv({ privacy: { deny: { users: [KAY] } } });
           e.commandAccessDisabled.mockResolvedValue(true);
           await press(e);
           expect(e.s.unhide).toHaveBeenCalledWith('g1', 'room-1', KAY);
         });
 
         it('fails open when the check throws', async () => {
-          const e = guardEnv({ privacy: { users: [KAY] } });
+          const e = guardEnv({ privacy: { deny: { users: [KAY] } } });
           e.commandAccessDisabled.mockRejectedValue(new Error('flag read failed'));
           await press(e);
           expect(e.s.unhide).toHaveBeenCalledWith('g1', 'room-1', KAY);
@@ -5897,7 +6185,7 @@ describe('registerInteractionHandler (the restriction guard)', () => {
     });
 
     /**
-     * `/restrict add` clears the saved nickname of a USER it names but cannot list
+     * `/restrict deny` clears the saved nickname of a USER it names but cannot list
      * a ROLE's members, so a member under a role rule holds saved text that only
      * they can remove. The guard must leave them that way out.
      */
@@ -5957,7 +6245,7 @@ describe('registerInteractionHandler (the restriction guard)', () => {
     });
 
     it('logs nothing when the member is let through, or while enforcement is off', async () => {
-      const allowed = guardEnv({ limit: { users: [OTHER] } });
+      const allowed = guardEnv({ limit: { deny: { users: [OTHER] } } });
       await fire(allowed, { kind: 'command', commandName: 'limit', voiceChannelId: 'room-1' });
       expect(allowed.info).not.toHaveBeenCalled();
       dispose?.();
@@ -5975,8 +6263,9 @@ describe('registerInteractionHandler (the restriction guard)', () => {
       ['a row with no settings at all', undefined],
       ['a command_access that is not a map', 'garbage'],
       ['an entry that is not a map', { limit: 'nope' }],
-      ['an entry whose lists are not lists', { limit: { users: 'u', roles: 5 } }],
-      ['ids that are not snowflakes', { limit: { users: ['kay'], roles: ['admins'] } }],
+      ['an entry whose lists are not lists', { limit: { deny: { users: 'u', roles: 5 } } }],
+      ['an allow list that is not a list', { limit: { allow: 'nope' } }],
+      ['ids that are not snowflakes', { limit: { deny: { users: ['kay'], roles: ['admins'] } } }],
     ])('%s', async (_what, rules) => {
       const e = guardEnv(rules as never);
       const f = await fire(e, { kind: 'command', commandName: 'limit', voiceChannelId: 'room-1' });
@@ -6032,8 +6321,8 @@ describe('registerInteractionHandler (the restriction guard)', () => {
     /** A server with no rules, and a member no rule names, never pays for the read. */
     it.each([
       ['a server with no rules', undefined],
-      ['a member no rule names', { limit: { users: [OTHER] } }],
-      ['a feature nobody is denied', { rename: { users: [KAY] } }],
+      ['a member no rule names', { limit: { deny: { users: [OTHER] } } }],
+      ['a feature nobody is denied', { rename: { deny: { users: [KAY] } } }],
     ])('is never read for %s', async (_what, rules) => {
       const e = guardEnv(rules as never);
       await fire(e, { kind: 'command', commandName: 'limit', voiceChannelId: 'room-1' });
@@ -6076,8 +6365,8 @@ describe('registerInteractionHandler (the restriction guard)', () => {
       },
     );
 
-    it('leaves Public, Unhide, Claim and Kick open to a member denied everything', async () => {
-      for (const action of ['unlock', 'unhide', 'claim', 'kick'] as const) {
+    it('leaves Public, Unhide and Info open to a member denied everything', async () => {
+      for (const action of ['unlock', 'unhide', 'info'] as const) {
         const e = guardEnv(DENY_KAY);
         const f = await fire(e, { kind: 'button', customId: controlPanelId(action, ROOM) });
         expect(notRefused(f), action).toBe(true);
@@ -6092,13 +6381,13 @@ describe('registerInteractionHandler (the restriction guard)', () => {
     });
 
     it('lets a member who is not denied Hide press it', async () => {
-      const e = guardEnv({ hide: { users: [OTHER] } });
+      const e = guardEnv({ hide: { deny: { users: [OTHER] } } });
       await fire(e, { kind: 'button', customId: controlPanelId('hide', ROOM) });
       expect(e.s.hide).toHaveBeenCalledWith('g1', ROOM, KAY);
     });
 
     it('opens the modals and the picker for a member who is not denied', async () => {
-      const e = guardEnv({ limit: { users: [OTHER] } });
+      const e = guardEnv({ limit: { deny: { users: [OTHER] } } });
       const limit = await fire(e, { kind: 'button', customId: controlPanelId('limit', ROOM) });
       expect(limit.interaction.showModal).toHaveBeenCalled();
       const rename = await fire(e, { kind: 'button', customId: controlPanelId('rename', ROOM) });
@@ -6158,7 +6447,7 @@ describe('registerInteractionHandler (the restriction guard)', () => {
       expect(e.s.setLimit).toHaveBeenCalledWith('g1', ROOM, KAY, 0);
     });
 
-    it('refuses a stale Transfer picker, and leaves the Kick picker alone', async () => {
+    it('refuses a stale Transfer picker and a stale Kick picker', async () => {
       const e = guardEnv(DENY_KAY);
       const transfer = await fire(e, {
         kind: 'stringSelect',
@@ -6173,17 +6462,148 @@ describe('registerInteractionHandler (the restriction guard)', () => {
         customId: controlPanelId('kickpick', ROOM),
         values: [OTHER],
       });
+      expectRefused(kick, 'Kick');
+      expect(e.s.startVote).not.toHaveBeenCalled();
+    });
+
+    it('lets a member a Kick rule does not cover pick from the Kick picker', async () => {
+      const e = guardEnv({ kick: { deny: { users: [OTHER] } } });
+      const kick = await fire(e, {
+        kind: 'stringSelect',
+        customId: controlPanelId('kickpick', ROOM),
+        values: [OTHER],
+      });
       expect(notRefused(kick)).toBe(true);
+      expect(e.s.startVote).toHaveBeenCalledWith('g1', ROOM, KAY, OTHER);
     });
 
     it('does not stop a member who is not denied from picking', async () => {
-      const e = guardEnv({ transfer: { users: [OTHER] } });
+      const e = guardEnv({ transfer: { deny: { users: [OTHER] } } });
       await fire(e, {
         kind: 'stringSelect',
         customId: controlPanelId('transferpick', ROOM),
         values: [OTHER],
       });
       expect(e.s.transfer).toHaveBeenCalledWith('g1', ROOM, KAY, OTHER);
+    });
+  });
+
+  // -- Kick and Claim ----------------------------------------------------------
+
+  /**
+   * Kick and Claim are occupant-level: anyone in the room presses them, so the panel
+   * never hides them on the owner's standing, and a rule is refused at the click for
+   * whoever it covers. Voting on a kick that is already running is never restricted.
+   */
+  describe('Kick and Claim', () => {
+    const ROOM = 'room-9';
+
+    it.each([
+      ['denied', DENY_KAY],
+      ['left out by an allow list', KEEP_FROM_KAY],
+    ])('refuses the Kick button for a member %s, before the picker opens', async (_what, rules) => {
+      const e = guardEnv(rules);
+      const f = await fire(e, { kind: 'button', customId: controlPanelId('kick', ROOM) });
+      expectRefused(f, 'Kick');
+      expect(e.s.getRoomPanelState).not.toHaveBeenCalled();
+      expect(e.s.startVote).not.toHaveBeenCalled();
+    });
+
+    it('opens the Kick picker for a member no rule covers', async () => {
+      const e = guardEnv({ kick: { deny: { users: [OTHER] } } });
+      const f = await fire(e, { kind: 'button', customId: controlPanelId('kick', ROOM) });
+      expect(notRefused(f)).toBe(true);
+      expect(JSON.stringify(f.reply.mock.calls[0]?.[0])).toContain('kickpick');
+    });
+
+    /** A vote is not starting a kick: it is somebody else's vote, and stays open to everyone. */
+    it('never refuses a vote on a kick that is already running', async () => {
+      for (const rules of [DENY_KAY, KEEP_FROM_KAY]) {
+        const e = guardEnv(rules);
+        const f = await fire(e, { kind: 'button', customId: 'avc:kick:room-1' });
+        expect(notRefused(f)).toBe(true);
+        expect(e.s.castVote).toHaveBeenCalledWith('room-1', KAY);
+        dispose?.();
+      }
+    });
+
+    /**
+     * `claim` decides the rule itself, from the room's row, because the original
+     * creator taking their own room back is never restricted. This stands in for it:
+     * it asks `refuseClaim` as the real one does for anyone but the creator.
+     */
+    const claimAsking = (s: ReturnType<typeof services>) =>
+      s.claim.mockImplementation(
+        async (
+          _guildId: string,
+          _channelId: string,
+          _userId: string,
+          opts?: { refuseClaim?: () => Promise<string | null> },
+        ) => {
+          const refusal = (await opts?.refuseClaim?.()) ?? null;
+          return refusal === null
+            ? { ok: true, message: 'You are now the owner of this channel.' }
+            : { ok: false, message: refusal };
+        },
+      );
+
+    const doors = {
+      '/reclaim': (e: Env, extra: Partial<FakeInteractionOpts> = {}) =>
+        fire(e, { kind: 'command', commandName: 'reclaim', voiceChannelId: ROOM, ...extra }),
+      'Claim button': (e: Env, extra: Partial<FakeInteractionOpts> = {}) =>
+        fire(e, { kind: 'button', customId: controlPanelId('claim', ROOM), ...extra }),
+    };
+
+    describe.each(Object.entries(doors))('through the %s', (_door, press) => {
+      it.each([
+        ['denied', DENY_KAY],
+        ['left out by an allow list', KEEP_FROM_KAY],
+      ])('refuses a member %s, ephemerally, in the usual words', async (_what, rules) => {
+        const e = guardEnv(rules);
+        claimAsking(e.s);
+        const f = await press(e);
+        expect(sent(f)).toContain(`⚠️ ${REFUSAL('Claim')}`);
+        expect(f.interaction.update).not.toHaveBeenCalled();
+        expect(f.interaction.deferUpdate).not.toHaveBeenCalled();
+        expect(f.interaction.deferReply).toHaveBeenCalledWith({ flags: MessageFlags.Ephemeral });
+      });
+
+      it('lets a member no rule covers, and a manager, take the room', async () => {
+        for (const [rules, extra] of [
+          [{ claim: { deny: { users: [OTHER] } } }, {}],
+          [DENY_KAY, { manageChannels: true }],
+          [{ claim: { allow: { users: [KAY] } } }, {}],
+        ] as const) {
+          const e = guardEnv(rules);
+          claimAsking(e.s);
+          const f = await press(e, extra);
+          expect(notRefused(f)).toBe(true);
+          expect(sent(f)).toContain('You are now the owner of this channel.');
+          dispose?.();
+        }
+      });
+
+      it('refuses nobody while command_access.disabled is on', async () => {
+        const e = guardEnv(DENY_KAY);
+        e.commandAccessDisabled.mockResolvedValue(true);
+        claimAsking(e.s);
+        const f = await press(e);
+        expect(notRefused(f)).toBe(true);
+      });
+
+      /** The router leaves the decision to `claim`: it never refuses before the row is read. */
+      it('hands the decision to claim rather than refusing first', async () => {
+        const e = guardEnv(DENY_KAY);
+        const f = await press(e);
+        expect(e.s.claim).toHaveBeenCalledWith(
+          'g1',
+          ROOM,
+          KAY,
+          expect.objectContaining({ refuseClaim: expect.any(Function) }),
+        );
+        // The stand-in never asked, so nothing was refused: the original creator's case.
+        expect(notRefused(f)).toBe(true);
+      });
     });
   });
 
@@ -6239,7 +6659,7 @@ describe('registerInteractionHandler (the restriction guard)', () => {
     );
 
     it('lets a member who is not denied save a name', async () => {
-      const e = guardEnv({ rename: { users: [OTHER] } });
+      const e = guardEnv({ rename: { deny: { users: [OTHER] } } });
       e.s.getEditorState.mockResolvedValue({
         found: true,
         scope: 'channel',
@@ -6286,6 +6706,8 @@ describe('registerInteractionHandler (the restriction guard)', () => {
         ['command', { commandName: 'nick', voiceChannelId: 'room-1' }],
         ['button', { customId: controlPanelId('lock', 'room-9') }],
         ['button', { customId: controlPanelId('hide', 'room-9') }],
+        ['command', { commandName: 'kick', voiceChannelId: 'room-1' }],
+        ['button', { customId: controlPanelId('kick', 'room-9') }],
         ['modal', { customId: controlPanelId('renameset', 'room-9'), textInputs: { input: 'x' } }],
       ] as const) {
         const e = guardEnv(DENY_KAY);

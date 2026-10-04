@@ -1464,7 +1464,8 @@ describe('control panel appearance round trip', () => {
 });
 
 /**
- * Who may not use which room command (`command_access`).
+ * Who may use which room command (`command_access`): an allow list and a deny list
+ * per feature.
  *
  * A key of its own for `control_panel_style`'s reason, and a permissive wire
  * schema so that a shape a newer build invents costs one entry and an issue
@@ -1486,19 +1487,21 @@ describe('command_access', () => {
   it('carries a map through, in the order it was written', () => {
     const plan = planOf(
       withAccess({
-        rename: { users: [USER_B, USER_A], roles: [ROLE_A] },
-        limit: { roles: [ROLE_B] },
+        rename: { deny: { users: [USER_B, USER_A], roles: [ROLE_A] } },
+        limit: { deny: { roles: [ROLE_B] } },
       }),
     );
     expect(plan.settingsPatch.command_access).toEqual({
-      rename: { users: [USER_B, USER_A], roles: [ROLE_A] },
-      limit: { roles: [ROLE_B] },
+      rename: { deny: { users: [USER_B, USER_A], roles: [ROLE_A] } },
+      limit: { deny: { roles: [ROLE_B] } },
     });
   });
 
   it('keeps a feature id this build has never heard of', () => {
-    const plan = planOf(withAccess({ somethingnew: { users: [USER_A] } }));
-    expect(plan.settingsPatch.command_access).toEqual({ somethingnew: { users: [USER_A] } });
+    const plan = planOf(withAccess({ somethingnew: { deny: { users: [USER_A] } } }));
+    expect(plan.settingsPatch.command_access).toEqual({
+      somethingnew: { deny: { users: [USER_A] } },
+    });
   });
 
   /**
@@ -1508,52 +1511,56 @@ describe('command_access', () => {
   it('normalises an empty list to absent and drops an entry with nothing in it', () => {
     const plan = planOf(
       withAccess({
-        rename: { users: [], roles: [ROLE_A] },
-        limit: { users: [], roles: [] },
+        rename: { deny: { users: [], roles: [ROLE_A] } },
+        limit: { deny: { users: [], roles: [] } },
         nick: {},
       }),
     );
-    expect(plan.settingsPatch.command_access).toEqual({ rename: { roles: [ROLE_A] } });
+    expect(plan.settingsPatch.command_access).toEqual({ rename: { deny: { roles: [ROLE_A] } } });
     expect(noteCodes(plan)).not.toContain('setting_invalid');
   });
 
   it('removes a repeated id, and does not call a repeat a mistake', () => {
-    const plan = planOf(withAccess({ rename: { users: [USER_A, USER_B, USER_A] } }));
-    expect(plan.settingsPatch.command_access).toEqual({ rename: { users: [USER_A, USER_B] } });
+    const plan = planOf(withAccess({ rename: { deny: { users: [USER_A, USER_B, USER_A] } } }));
+    expect(plan.settingsPatch.command_access).toEqual({
+      rename: { deny: { users: [USER_A, USER_B] } },
+    });
     expect(noteCodes(plan)).not.toContain('setting_invalid');
   });
 
   it('drops an id that is not a snowflake and says so', () => {
-    const plan = planOf(withAccess({ rename: { users: [USER_A, 'not-an-id', 42, '12'] } }));
-    expect(plan.settingsPatch.command_access).toEqual({ rename: { users: [USER_A] } });
+    const plan = planOf(
+      withAccess({ rename: { deny: { users: [USER_A, 'not-an-id', 42, '12'] } } }),
+    );
+    expect(plan.settingsPatch.command_access).toEqual({ rename: { deny: { users: [USER_A] } } });
     expect(noteCodes(plan)).toContain('setting_invalid');
   });
 
   /** The guild id as a role is `@everyone`, which would deny the whole server. */
   it('drops the guild id from the roles, and keeps it nowhere', () => {
-    const plan = planOf(withAccess({ rename: { roles: [GUILD, ROLE_A] } }));
-    expect(plan.settingsPatch.command_access).toEqual({ rename: { roles: [ROLE_A] } });
+    const plan = planOf(withAccess({ rename: { deny: { roles: [GUILD, ROLE_A] } } }));
+    expect(plan.settingsPatch.command_access).toEqual({ rename: { deny: { roles: [ROLE_A] } } });
     expect(noteCodes(plan)).toContain('setting_invalid');
 
-    const only = planOf(withAccess({ rename: { roles: [GUILD] } }));
+    const only = planOf(withAccess({ rename: { deny: { roles: [GUILD] } } }));
     expect(only.settingsPatch.command_access).toBeUndefined();
   });
 
   /** The guild id is a legal USER id as far as shape goes: it is only a role that it denies. */
   it('does not drop the guild id from the users, since there it is just an id', () => {
-    const plan = planOf(withAccess({ rename: { users: [GUILD] } }));
-    expect(plan.settingsPatch.command_access).toEqual({ rename: { users: [GUILD] } });
+    const plan = planOf(withAccess({ rename: { deny: { users: [GUILD] } } }));
+    expect(plan.settingsPatch.command_access).toEqual({ rename: { deny: { users: [GUILD] } } });
   });
 
   it('drops an entry that is not a map, or whose lists are not lists, and keeps the rest', () => {
     const plan = planOf(
       withAccess({
         rename: ['nope'],
-        limit: { users: 'nope' },
-        nick: { users: [USER_A] },
+        limit: { deny: { users: 'nope' } },
+        nick: { deny: { users: [USER_A] } },
       }),
     );
-    expect(plan.settingsPatch.command_access).toEqual({ nick: { users: [USER_A] } });
+    expect(plan.settingsPatch.command_access).toEqual({ nick: { deny: { users: [USER_A] } } });
     expect(noteCodes(plan).filter((c) => c === 'setting_invalid')).toHaveLength(2);
   });
 
@@ -1573,14 +1580,14 @@ describe('command_access', () => {
   it('never sees an entry named __proto__, which the wire schema drops while parsing', () => {
     const text = JSON.stringify(nativeFile()).replace(
       '"command_access":null',
-      `"command_access":{"__proto__":{"users":["${USER_A}"]},"rename":{"users":["${USER_B}"]}}`,
+      `"command_access":{"__proto__":{"deny":{"users":["${USER_A}"]}},"rename":{"deny":{"users":["${USER_B}"]}}}`,
     );
     expect(text).toContain('"__proto__"');
     const parsed = parseNativeFile(JSON.parse(text));
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     const written = planOf(parsed.file).settingsPatch.command_access as Record<string, unknown>;
-    expect(written).toEqual({ rename: { users: [USER_B] } });
+    expect(written).toEqual({ rename: { deny: { users: [USER_B] } } });
     expect(Object.keys(written)).toEqual(['rename']);
   });
 
@@ -1588,14 +1595,14 @@ describe('command_access', () => {
   it('keeps a feature id of 40 characters and drops one of 41, with a note', () => {
     const plan = planOf(
       withAccess({
-        ['a'.repeat(40)]: { users: [USER_A] },
-        ['b'.repeat(41)]: { users: [USER_B] },
-        nick: { users: [USER_B] },
+        ['a'.repeat(40)]: { deny: { users: [USER_A] } },
+        ['b'.repeat(41)]: { deny: { users: [USER_B] } },
+        nick: { deny: { users: [USER_B] } },
       }),
     );
     expect(plan.settingsPatch.command_access).toEqual({
-      ['a'.repeat(40)]: { users: [USER_A] },
-      nick: { users: [USER_B] },
+      ['a'.repeat(40)]: { deny: { users: [USER_A] } },
+      nick: { deny: { users: [USER_B] } },
     });
     expect(noteCodes(plan).filter((c) => c === 'setting_invalid')).toHaveLength(1);
   });
@@ -1605,9 +1612,11 @@ describe('command_access', () => {
    * admin's edit, and the importer does not: it is the boundary that bounds what
    * reaches the blob. Pinned so the difference is a decision, not a surprise.
    */
-  it('rebuilds an entry as users and roles, so a field a newer build added is not carried', () => {
-    const plan = planOf(withAccess({ rename: { users: [USER_A], until: 1700000000 } }));
-    expect(plan.settingsPatch.command_access).toEqual({ rename: { users: [USER_A] } });
+  it('rebuilds an entry as lists of users and roles, so a field a newer build added is not carried', () => {
+    const plan = planOf(
+      withAccess({ rename: { deny: { users: [USER_A], note: 'x' }, until: 1700000000 } }),
+    );
+    expect(plan.settingsPatch.command_access).toEqual({ rename: { deny: { users: [USER_A] } } });
   });
 
   describe('caps', () => {
@@ -1617,22 +1626,42 @@ describe('command_access', () => {
       expect(IMPORT_LIMITS.commandAccessTotal).toBe(150);
     });
 
-    it('accepts a feature at exactly the user and role limits', () => {
+    /** Both lists full is 150, which is also the whole-map cap, so it is exactly allowed. */
+    it('accepts a feature with both lists at exactly the user and role limits', () => {
       const entry = {
-        users: ids(1, IMPORT_LIMITS.commandAccessUsers),
-        roles: ids(2, IMPORT_LIMITS.commandAccessRoles),
+        allow: {
+          users: ids(1, IMPORT_LIMITS.commandAccessUsers),
+          roles: ids(2, IMPORT_LIMITS.commandAccessRoles),
+        },
+        deny: {
+          users: ids(3, IMPORT_LIMITS.commandAccessUsers),
+          roles: ids(4, IMPORT_LIMITS.commandAccessRoles),
+        },
       };
       const plan = planOf(withAccess({ rename: entry }));
       expect(plan.settingsPatch.command_access).toEqual({ rename: entry });
     });
 
+    it('drops the whole key when an allow list has more users than the limit', () => {
+      const plan = planOf(
+        withAccess({ rename: { allow: { users: ids(1, IMPORT_LIMITS.commandAccessUsers + 1) } } }),
+      );
+      expect(plan.settingsPatch.command_access).toBeUndefined();
+      expect(plan.notes).toContainEqual(
+        expect.objectContaining({
+          code: 'setting_over_limit',
+          limit: IMPORT_LIMITS.commandAccessUsers,
+        }),
+      );
+    });
+
     it('drops the whole key when one feature has more users than the limit', () => {
       const plan = planOf(
         withAccess({
-          nick: { users: [USER_A] },
-          rename: { users: ids(1, IMPORT_LIMITS.commandAccessUsers + 1) },
+          nick: { deny: { users: [USER_A] } },
+          rename: { deny: { users: ids(1, IMPORT_LIMITS.commandAccessUsers + 1) } },
         }),
-        currentConfig({ settings: { command_access: { limit: { users: [USER_B] } } } }),
+        currentConfig({ settings: { command_access: { limit: { deny: { users: [USER_B] } } } } }),
       );
       expect(plan.settingsPatch.command_access).toBeUndefined();
       expect(plan.notes).toContainEqual(
@@ -1647,7 +1676,7 @@ describe('command_access', () => {
 
     it('drops the whole key when one feature has more roles than the limit', () => {
       const plan = planOf(
-        withAccess({ rename: { roles: ids(2, IMPORT_LIMITS.commandAccessRoles + 1) } }),
+        withAccess({ rename: { deny: { roles: ids(2, IMPORT_LIMITS.commandAccessRoles + 1) } } }),
       );
       expect(plan.settingsPatch.command_access).toBeUndefined();
       expect(plan.notes).toContainEqual(
@@ -1664,7 +1693,13 @@ describe('command_access', () => {
         users: ids(prefix, IMPORT_LIMITS.commandAccessUsers),
         roles: ids(prefix + 10, IMPORT_LIMITS.commandAccessRoles),
       });
-      const plan = planOf(withAccess({ privacy: full(1), limit: full(2), rename: full(3) }));
+      const plan = planOf(
+        withAccess({
+          privacy: { deny: full(1) },
+          limit: { allow: full(2) },
+          rename: { deny: full(3) },
+        }),
+      );
       expect(plan.settingsPatch.command_access).toBeUndefined();
       expect(plan.notes).toContainEqual(
         expect.objectContaining({
@@ -1699,13 +1734,16 @@ describe('command_access', () => {
 
     it('counts an id once however often the file repeats it', () => {
       const repeated = Array.from({ length: 80 }, () => USER_A);
-      const plan = planOf(withAccess({ rename: { users: repeated } }));
-      expect(plan.settingsPatch.command_access).toEqual({ rename: { users: [USER_A] } });
+      const plan = planOf(withAccess({ rename: { deny: { users: repeated } } }));
+      expect(plan.settingsPatch.command_access).toEqual({ rename: { deny: { users: [USER_A] } } });
     });
   });
 
   describe('round trip', () => {
-    const stored = { rename: { users: [USER_A], roles: [ROLE_A] }, nick: { users: [USER_B] } };
+    const stored = {
+      rename: { deny: { users: [USER_A], roles: [ROLE_A] } },
+      nick: { deny: { users: [USER_B] } },
+    };
 
     it('changes nothing when the file matches what is stored', () => {
       const plan = planOf(
@@ -1733,17 +1771,21 @@ describe('command_access', () => {
     });
 
     it('reads a file whose entry has a shape this build does not know, and drops that entry', () => {
-      const parsed = parseNativeFile(withAccess({ rename: { users: { [USER_A]: 1700000000 } } }));
+      const newer = { rename: { deny: { users: { [USER_A]: 1700000000 } } } };
+      const parsed = parseNativeFile(withAccess(newer));
       expect(parsed.ok).toBe(true);
-      const plan = planOf(withAccess({ rename: { users: { [USER_A]: 1700000000 } } }));
+      const plan = planOf(withAccess(newer));
       expect(plan.settingsPatch.command_access).toBeUndefined();
       expect(noteCodes(plan)).toContain('setting_invalid');
     });
 
     it('lists the features whose entries changed, by feature name', () => {
       const plan = planOf(
-        withAccess({ rename: { users: [USER_A, USER_B] }, limit: { roles: [ROLE_A] } }),
-        currentConfig({ settings: { command_access: { rename: { users: [USER_A] } } } }),
+        withAccess({
+          rename: { deny: { users: [USER_A, USER_B] } },
+          limit: { deny: { roles: [ROLE_A] } },
+        }),
+        currentConfig({ settings: { command_access: { rename: { deny: { users: [USER_A] } } } } }),
       );
       const change = plan.settingChanges.find((c) => c.key === 'command_access');
       expect(change?.entriesChanged).toEqual(['rename']);
@@ -1751,12 +1793,76 @@ describe('command_access', () => {
     });
   });
 
+  it('carries an allow list through beside a deny list, and both lists of one feature', () => {
+    const plan = planOf(
+      withAccess({
+        rename: { allow: { roles: [ROLE_A] }, deny: { users: [USER_A] } },
+        kick: { allow: { users: [USER_B] } },
+      }),
+    );
+    expect(plan.settingsPatch.command_access).toEqual({
+      rename: { allow: { roles: [ROLE_A] }, deny: { users: [USER_A] } },
+      kick: { allow: { users: [USER_B] } },
+    });
+    expect(noteCodes(plan)).not.toContain('setting_invalid');
+  });
+
+  /**
+   * On an allow list `@everyone` lets everyone in, which the bot reads as no allow list.
+   * Dropping only the id would close the feature to everyone else, the opposite of what
+   * the file says, so the whole allow list goes, with a note, and the deny list stays.
+   */
+  it('drops an allow list that names the everyone role, with a note, and keeps the deny list', () => {
+    const plan = planOf(
+      withAccess({
+        rename: { allow: { users: [USER_B], roles: [GUILD, ROLE_A] }, deny: { users: [USER_A] } },
+        limit: { allow: { roles: [GUILD] } },
+      }),
+    );
+    expect(plan.settingsPatch.command_access).toEqual({ rename: { deny: { users: [USER_A] } } });
+    expect(noteCodes(plan).filter((c) => c === 'setting_invalid')).toHaveLength(2);
+  });
+
+  /** A list it cannot read costs that list and not its neighbour, which is what the bot would read. */
+  it('drops a list that is not the shape, with a note, and keeps the other list of the entry', () => {
+    const plan = planOf(
+      withAccess({ rename: { allow: 'nope', deny: { users: [USER_A] } }, limit: { allow: ['x'] } }),
+    );
+    expect(plan.settingsPatch.command_access).toEqual({ rename: { deny: { users: [USER_A] } } });
+    expect(noteCodes(plan).filter((c) => c === 'setting_invalid')).toHaveLength(2);
+  });
+
+  /** Null is nothing stored, to the writer and the reader, so it is no mistake either. */
+  it('skips a list that is null without a note', () => {
+    const plan = planOf(withAccess({ rename: { allow: null, deny: { users: [USER_A] } } }));
+    expect(plan.settingsPatch.command_access).toEqual({ rename: { deny: { users: [USER_A] } } });
+    expect(noteCodes(plan)).not.toContain('setting_invalid');
+  });
+
+  /**
+   * The bot reads the roles of a list whose users are not a list, so the import keeps
+   * them: dropping the whole allow list would open a feature the bot keeps closed.
+   */
+  it('keeps the roles of a list whose users are not a list, with a note', () => {
+    const plan = planOf(withAccess({ rename: { allow: { users: 'nope', roles: [ROLE_A] } } }));
+    expect(plan.settingsPatch.command_access).toEqual({ rename: { allow: { roles: [ROLE_A] } } });
+    expect(noteCodes(plan)).toContain('setting_invalid');
+  });
+
+  /** An entry with neither list holds no rule the bot reads, so it is dropped like an empty one. */
+  it('drops an entry with no allow or deny list quietly', () => {
+    const plan = planOf(
+      withAccess({ rename: { users: [USER_A] }, nick: { deny: { users: [USER_B] } } }),
+    );
+    expect(plan.settingsPatch.command_access).toEqual({ nick: { deny: { users: [USER_B] } } });
+  });
+
   /** Notes name a key and a count, never a value, and an id is a value. */
   it('never puts a denied id in a note', () => {
     const plan = planOf(
       withAccess({
-        rename: { users: [USER_A, 'junk'], roles: [GUILD] },
-        limit: { users: ids(1, IMPORT_LIMITS.commandAccessUsers + 1) },
+        rename: { deny: { users: [USER_A, 'junk'], roles: [GUILD] } },
+        limit: { deny: { users: ids(1, IMPORT_LIMITS.commandAccessUsers + 1) } },
       }),
     );
     const serialized = JSON.stringify(plan.notes);

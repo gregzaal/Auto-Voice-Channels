@@ -83,9 +83,11 @@ export const IMPORT_LIMITS = {
   /**
    * Room command restrictions: `MAX_RESTRICTED_USERS`, `MAX_RESTRICTED_ROLES` and
    * `MAX_RESTRICTIONS` in `bot/src/features/voice/commandAccess.ts`, which core
-   * cannot import. `commandAccess.unit.test.ts` binds the two sets of numbers.
+   * cannot import. `commandAccess.unit.test.ts` binds the two sets of numbers. The
+   * first two are per list (allow or deny) of one feature, the third is every list
+   * of every feature together.
    *
-   * Bounded because the denied ids ride in the settings blob that every instance
+   * Bounded because the listed ids ride in the settings blob that every instance
    * keeps resident and that `route` reads in full on every interaction.
    */
   commandAccessUsers: 50,
@@ -256,11 +258,13 @@ export type ImportNoteCode =
  * has".
  *
  * Only `restrictions`: the old `restrict` command's per-command map of the roles
- * that MAY use a command. It was not carried over, and `/restrict` is the
- * opposite model (it names who may NOT use a room command and everyone else
- * keeps it), so the note says both. `requiredrole` is deliberately not here: the
- * old bot never read it, it is only an empty default in `default_settings.json`
- * and sits in nearly every legacy file, so it keeps the generic note.
+ * that MAY use a command. It is not carried over, and the note says so and points
+ * at `/restrict allow`, which keeps a room command to the roles it names the same
+ * way. Translating the old map into allow lists is a possible follow-up and was
+ * not done when the allow lists were built. `requiredrole` is deliberately not
+ * here: the old bot never read it, it is only an empty default in
+ * `default_settings.json` and sits in nearly every legacy file, so it keeps the
+ * generic note.
  *
  * Listed here, and not read from `DROPPED_FIELDS` in `migrate/legacy.ts`, because
  * this module imports nothing that could reach the database (an allow-list test
@@ -1148,7 +1152,9 @@ function validateSetting(
     }
 
     /**
-     * Who may not use which room command: a feature id to `{ users, roles }`.
+     * Who may use which room command: a feature id to `{ allow?, deny? }`, each
+     * list a `{ users, roles }`. An allow list keeps the feature to whoever it
+     * names, a deny list names who may never use it, and deny wins.
      *
      * The feature id is not checked, for `control_panel`'s reason: an id this
      * build has never heard of is inert, because the reader looks each feature up
@@ -1156,12 +1162,22 @@ function validateSetting(
      * build wrote. Everything else is, because these ids sit in the blob forever
      * and are read on every interaction.
      *
-     * A role that no longer exists here is harmless and cannot be detected
-     * (`GuildFacts` carries no roles): a deny that matches nothing fails open.
-     * The guild id as a role is the exception, since it IS `@everyone` and would
-     * deny the whole server, so it is dropped the way `text_channel_role` refuses
-     * it. An entry with nothing left in it is dropped without a note, because
-     * that is what a normalised empty list looks like rather than a mistake.
+     * A role that no longer exists here cannot be detected (`GuildFacts` carries no
+     * roles). On a deny list it matches nothing, which fails open, and on an allow
+     * list it lets nobody in, which the bot's `/restrict list` flags. The guild id as
+     * a role is `@everyone`, refused on both lists the way `text_channel_role`
+     * refuses it, and how differs because what the bot reads differs. On a deny list
+     * it would deny the whole server, so the id is dropped and the rest kept. On an
+     * allow list it lets everyone in, which the bot reads as no allow list at all,
+     * so that whole list is dropped: keeping the rest of it would close the feature
+     * to everyone else, which is the opposite of what the file says. A list or an
+     * entry with nothing left in it is dropped without a note, because that is what
+     * a normalised empty list looks like rather than a mistake, and so is a list
+     * that is null. A list that is not a map is dropped with a note, and an id list
+     * that is not a list costs that id list alone with a note, so what is kept is
+     * what the bot would read from the same value. The same id on both lists of a
+     * feature is kept on both (deny wins when the bot reads it), where `/restrict`
+     * itself would have moved it.
      *
      * A count overrun drops the whole key, as `aliases` does: a silent partial
      * list of who is restricted is harder to explain than an untouched one. So
@@ -1169,11 +1185,11 @@ function validateSetting(
      * file of thousands of junk entries from becoming thousands of notes: every
      * stored entry holds at least one id, so a real map cannot have more.
      *
-     * Each entry is rebuilt as `{ users, roles }` and nothing else, so a field a
-     * newer build adds to an entry is lost on import. That is deliberate and the
-     * writer's lossless copy is not the model here: the importer is the boundary
-     * that bounds what reaches the blob, and a field it cannot read it cannot
-     * bound. The pre-import snapshot is the way back.
+     * Each entry is rebuilt as `{ allow, deny }` of `{ users, roles }` and nothing
+     * else, so a field a newer build adds to an entry or a list is lost on import.
+     * That is deliberate and the writer's lossless copy is not the model here: the
+     * importer is the boundary that bounds what reaches the blob, and a field it
+     * cannot read it cannot bound. The pre-import snapshot is the way back.
      */
     case 'command_access': {
       const record = asRecord(value);
@@ -1182,40 +1198,58 @@ function validateSetting(
       if (keys > limits.commandAccessTotal) {
         return drop('setting_over_limit', { limit: limits.commandAccessTotal, count: keys });
       }
-      const entries: [string, { users?: string[]; roles?: string[] }][] = [];
+      type Ids = { users?: string[]; roles?: string[] };
+      const entries: [string, { allow?: Ids; deny?: Ids }][] = [];
+      const invalid = (): void => {
+        notes.push({ code: 'setting_invalid', severity: 'dropped', subject: `${key}.entry` });
+      };
       let total = 0;
       for (const [feature, raw] of Object.entries(record)) {
         const shape = asRecord(raw);
-        const users = shape ? snowflakeList(shape.users, undefined) : null;
-        const roles = shape ? snowflakeList(shape.roles, facts.guildId) : null;
-        if (!shape || !users || !roles || feature.length > 40) {
-          notes.push({ code: 'setting_invalid', severity: 'dropped', subject: `${key}.entry` });
+        if (!shape || feature.length > 40) {
+          invalid();
           continue;
         }
-        if (users.dropped + roles.dropped > 0) {
-          notes.push({ code: 'setting_invalid', severity: 'dropped', subject: `${key}.entry` });
-        }
-        if (users.ids.length > limits.commandAccessUsers) {
-          return drop('setting_over_limit', {
-            limit: limits.commandAccessUsers,
-            count: users.ids.length,
-          });
-        }
-        if (roles.ids.length > limits.commandAccessRoles) {
-          return drop('setting_over_limit', {
-            limit: limits.commandAccessRoles,
-            count: roles.ids.length,
-          });
-        }
-        if (users.ids.length + roles.ids.length === 0) continue;
-        total += users.ids.length + roles.ids.length;
-        entries.push([
-          feature,
-          {
+        const rebuilt: { allow?: Ids; deny?: Ids } = {};
+        for (const kind of ['allow', 'deny'] as const) {
+          // Null is nothing stored, as the writer and the reader both take it.
+          if (shape[kind] === undefined || shape[kind] === null) continue;
+          const list = asRecord(shape[kind]);
+          if (!list) {
+            invalid();
+            continue;
+          }
+          if (kind === 'allow' && Array.isArray(list.roles) && list.roles.includes(facts.guildId)) {
+            invalid();
+            continue;
+          }
+          // An id list that is not a list costs that id list alone, as the bot reads it:
+          // the users of a list still count when its roles cannot be read, and the other
+          // way round.
+          const users = snowflakeList(list.users, undefined) ?? { ids: [], dropped: 1 };
+          const roles = snowflakeList(list.roles, facts.guildId) ?? { ids: [], dropped: 1 };
+          if (users.dropped + roles.dropped > 0) invalid();
+          if (users.ids.length > limits.commandAccessUsers) {
+            return drop('setting_over_limit', {
+              limit: limits.commandAccessUsers,
+              count: users.ids.length,
+            });
+          }
+          if (roles.ids.length > limits.commandAccessRoles) {
+            return drop('setting_over_limit', {
+              limit: limits.commandAccessRoles,
+              count: roles.ids.length,
+            });
+          }
+          if (users.ids.length + roles.ids.length === 0) continue;
+          total += users.ids.length + roles.ids.length;
+          rebuilt[kind] = {
             ...(users.ids.length > 0 ? { users: users.ids } : {}),
             ...(roles.ids.length > 0 ? { roles: roles.ids } : {}),
-          },
-        ]);
+          };
+        }
+        if (rebuilt.allow === undefined && rebuilt.deny === undefined) continue;
+        entries.push([feature, rebuilt]);
       }
       if (total > limits.commandAccessTotal) {
         return drop('setting_over_limit', { limit: limits.commandAccessTotal, count: total });

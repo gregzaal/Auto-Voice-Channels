@@ -116,7 +116,7 @@ export interface VoiceSettings {
    */
   gameNameMode: GameNameMode;
   /**
-   * Who may not use which room command, for the one read that is not a guard:
+   * Who may use which room command, for the one read that is not a guard:
    * whether a saved `/nick` still applies to a room's owner. See {@link displayName}.
    */
   commandAccess: CommandAccess;
@@ -254,11 +254,12 @@ export function readTimeZone(settings: Record<string, unknown>): string | undefi
  * a restriction on Nickname now covers them.
  *
  * **A restricted feature is inert for a denied member, saved data included.**
- * `/restrict add` removes the saved nickname of a USER it names, but it cannot
- * list the members of a ROLE, so without this check a role-based rule would stop
- * new `/nick` calls and leave every nickname already chosen showing in every
- * room name, which is the thing the rule was written to stop. The saved name is
- * kept rather than cleared, so lifting the rule (or the lever) brings it back.
+ * `/restrict deny` removes the saved nickname of a USER it names, but it cannot
+ * list the members of a ROLE, or everyone an allow list leaves out, so without
+ * this check such a rule would stop new `/nick` calls and leave every nickname
+ * already chosen showing in every room name, which is the thing the rule was
+ * written to stop. The saved name is kept rather than cleared, so lifting the
+ * rule (or the lever) brings it back.
  *
  * `roleIds` and `canManage` are the member's, as the voice snapshot carries
  * them, so a render and the `/nick` guard agree on roles. On Manage Channels
@@ -270,7 +271,10 @@ export function readTimeZone(settings: Record<string, unknown>): string | undefi
  * role a rule names. `roleIds` may include the guild id, which the rules never hold, so it
  * cannot match. Absent, for a member nobody could resolve (the original creator
  * of a room, who has left and is not cached), means nobody can say what they
- * hold, so only a rule naming the person applies, the direction that fails open.
+ * hold, so only a rule naming the person applies: a deny list by role cannot hide
+ * their nickname, and an allow list by role cannot let it show, so under an allow
+ * list they show their own display name unless it names them by id. That is the
+ * allow list's closed direction, and the cost is cosmetic.
  */
 export function displayName(
   settings: VoiceSettings,

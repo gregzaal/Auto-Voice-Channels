@@ -204,17 +204,18 @@ describe('toTopggCommands', () => {
       (c) => c.name === 'restrict',
     );
     expect(restrict?.options?.map((o) => [o.name, o.type])).toEqual([
-      ['add', 'sub_command'],
+      ['allow', 'sub_command'],
+      ['deny', 'sub_command'],
       ['remove', 'sub_command'],
       ['clear', 'sub_command'],
       ['list', 'sub_command'],
     ]);
-    const add = restrict?.options?.[0];
-    expect(add?.options?.map((o) => [o.name, o.type, o.required])).toEqual([
+    const allow = restrict?.options?.[0];
+    expect(allow?.options?.map((o) => [o.name, o.type, o.required])).toEqual([
       ['feature', 'string', true],
       ['who', 'mentionable', true],
     ]);
-    expect(add?.options?.[0]?.choices?.map((c) => c.value)).toEqual([
+    expect(allow?.options?.[0]?.choices?.map((c) => c.value)).toEqual([
       'privacy',
       'hide',
       'limit',
@@ -222,11 +223,13 @@ describe('toTopggCommands', () => {
       'transfer',
       'access',
       'nick',
+      'kick',
+      'claim',
     ]);
-    expect(restrict?.options?.[2]?.options?.map((o) => [o.name, o.type, o.required])).toEqual([
+    expect(restrict?.options?.[3]?.options?.map((o) => [o.name, o.type, o.required])).toEqual([
       ['feature', 'string', true],
     ]);
-    expect(restrict?.options?.[3]?.options).toBeUndefined();
+    expect(restrict?.options?.[4]?.options).toBeUndefined();
   });
 });
 

@@ -67,7 +67,7 @@ export function buildCommandDefinitions(
       PermissionFlagsBits.ManageGuild,
     ) as SlashCommandBuilder;
 
-  /** `/restrict add`, `remove` and `clear` take the same feature, and the first two the same who. */
+  /** `/restrict allow`, `deny`, `remove` and `clear` take the same feature, and all but `clear` the same who. */
   const restrictFeatureOption = (o: SlashCommandStringOption): SlashCommandStringOption =>
     o
       .setName('feature')
@@ -330,19 +330,30 @@ export function buildCommandDefinitions(
      * DEFAULT, and the in-code gate is also what keeps a role that Server Settings
      * > Integrations re-opened it to from rewriting who may use a room command.
      * The feature choices are `AVAILABLE_FEATURES`, so a feature whose command
-     * does not exist yet cannot be offered. `clear` is the way out of a list that
-     * has filled with people who left and roles that were deleted, which `remove`
-     * cannot name because Discord's picker cannot offer them.
+     * does not exist yet cannot be offered. `allow` keeps a room command to the
+     * people and roles it names, `deny` names those who may never use it, and
+     * `remove` takes somebody off whichever list holds them. `clear` is the way out
+     * of a list that has filled with people who left and roles that were deleted,
+     * which `remove` cannot name because Discord's picker cannot offer them.
      *
      * Registered only while `RESTRICT_ENFORCED`: see the filter below.
      */
     adminOnly(
       new SlashCommandBuilder()
         .setName('restrict')
-        .setDescription('Stop a person, or everyone with a role, from using some room commands.')
+        .setDescription('Choose who can use some room commands, by person or by role.')
         .addSubcommand((s) =>
           s
-            .setName('add')
+            .setName('allow')
+            .setDescription(
+              'Keep a room command to some people and roles, and anyone who can manage channels.',
+            )
+            .addStringOption(restrictFeatureOption)
+            .addMentionableOption(restrictWhoOption),
+        )
+        .addSubcommand((s) =>
+          s
+            .setName('deny')
             .setDescription('Stop a person or a role from using a room command.')
             .addStringOption(restrictFeatureOption)
             .addMentionableOption(restrictWhoOption),
@@ -350,7 +361,7 @@ export function buildCommandDefinitions(
         .addSubcommand((s) =>
           s
             .setName('remove')
-            .setDescription('Let a person or a role use a room command again.')
+            .setDescription('Take a person or a role off the allow or deny list of a room command.')
             .addStringOption(restrictFeatureOption)
             .addMentionableOption(restrictWhoOption),
         )
@@ -361,7 +372,7 @@ export function buildCommandDefinitions(
             .addStringOption(restrictFeatureOption),
         )
         .addSubcommand((s) =>
-          s.setName('list').setDescription('See who is restricted from which room commands.'),
+          s.setName('list').setDescription('See who can use which room commands.'),
         ) as unknown as SlashCommandBuilder,
     ),
     /**

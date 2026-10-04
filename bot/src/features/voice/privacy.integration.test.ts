@@ -3304,7 +3304,7 @@ describe('PrivacyService (integration)', () => {
    * names, so the unknown direction keeps it.
    */
   describe('a creator who is denied Saved lists', () => {
-    const DENIED = { access: { users: ['alice'], roles: [] } };
+    const DENIED = { access: { deny: { users: ['alice'], roles: [] } } };
     let rules: CommandAccess;
 
     beforeEach(async () => {
@@ -3391,7 +3391,7 @@ describe('PrivacyService (integration)', () => {
     });
 
     it('is not restricted for anybody the rule does not name', async () => {
-      rules = { access: { users: ['bob'], roles: [] } };
+      rules = { access: { deny: { users: ['bob'], roles: [] } } };
 
       await privacy.makePrivate(GUILD, SEC, 'alice');
 

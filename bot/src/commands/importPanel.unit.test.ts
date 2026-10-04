@@ -233,8 +233,16 @@ describe('renderAnnouncement', () => {
    * admin who ran the command.
    */
   it('emits no restricted member or role id for a command_access change, only a count', () => {
-    const before = { rename: { users: [NICK_USER, RESTRICTED_USER], roles: [RESTRICTED_ROLE] } };
-    const after = { nick: { users: [OTHER_USER] } };
+    const before = {
+      rename: {
+        allow: { roles: [RESTRICTED_ROLE] },
+        deny: { users: [NICK_USER, RESTRICTED_USER] },
+      },
+    };
+    const after = {
+      nick: { deny: { users: [OTHER_USER] } },
+      kick: { allow: { users: [NICK_USER] } },
+    };
     for (const change of [
       setting({
         key: 'command_access',
@@ -254,7 +262,7 @@ describe('renderAnnouncement', () => {
       setting({
         key: 'command_access',
         before,
-        after: { rename: { users: [OTHER_USER] } },
+        after: { rename: { deny: { users: [OTHER_USER] } } },
         entriesChanged: ['rename'],
       }),
     ]) {
@@ -266,7 +274,7 @@ describe('renderAnnouncement', () => {
           expect(text).not.toContain(id);
         }
         expect(text).toContain('Who can use room commands');
-        expect(text).toMatch(/\d restrictions?|none/);
+        expect(text).toMatch(/\d (allow|deny) rules?|none/);
         assertCopyRules(text);
       }
     }
@@ -278,8 +286,13 @@ describe('renderAnnouncement', () => {
         settingChanges: [
           setting({
             key: 'command_access',
-            before: { rename: { users: [NICK_USER, RESTRICTED_USER], roles: [RESTRICTED_ROLE] } },
-            after: { rename: { users: [OTHER_USER] }, nick: { users: [NICK_USER] } },
+            before: {
+              rename: { deny: { users: [NICK_USER, RESTRICTED_USER], roles: [RESTRICTED_ROLE] } },
+            },
+            after: {
+              rename: { deny: { users: [OTHER_USER] } },
+              nick: { deny: { users: [NICK_USER] } },
+            },
             entriesAdded: ['nick'],
             entriesChanged: ['rename'],
           }),
@@ -287,7 +300,31 @@ describe('renderAnnouncement', () => {
       }),
       ctx,
     );
-    expect(text).toContain('Who can use room commands: 2 restrictions (was 3 restrictions)');
+    expect(text).toContain('Who can use room commands: 2 deny rules (was 3 deny rules)');
+  });
+
+  /** Both lists are counted, each on its own, and neither names anybody. */
+  it('counts the allow lists and the deny lists apart', () => {
+    const text = renderAnnouncement(
+      plan({
+        settingChanges: [
+          setting({
+            key: 'command_access',
+            before: undefined,
+            after: {
+              rename: { allow: { roles: [RESTRICTED_ROLE] }, deny: { users: [NICK_USER] } },
+              kick: { allow: { users: [OTHER_USER, RESTRICTED_USER] } },
+            },
+            entriesAdded: ['rename', 'kick'],
+          }),
+        ],
+      }),
+      ctx,
+    );
+    expect(text).toContain('Who can use room commands: 3 allow rules and 1 deny rule (was none)');
+    for (const id of [NICK_USER, RESTRICTED_USER, RESTRICTED_ROLE, OTHER_USER]) {
+      expect(text).not.toContain(id);
+    }
   });
 
   it('says how many restrictions an import removes, and not whose', () => {
@@ -297,17 +334,17 @@ describe('renderAnnouncement', () => {
           setting({
             key: 'command_access',
             before: {
-              rename: { users: [NICK_USER, RESTRICTED_USER] },
-              nick: { roles: [RESTRICTED_ROLE] },
+              rename: { deny: { users: [NICK_USER, RESTRICTED_USER] } },
+              nick: { deny: { roles: [RESTRICTED_ROLE] } },
             },
-            after: { nick: { roles: [RESTRICTED_ROLE] } },
+            after: { nick: { deny: { roles: [RESTRICTED_ROLE] } } },
             entriesRemoved: ['rename'],
           }),
         ],
       }),
       ctx,
     );
-    expect(text).toContain('2 restrictions on room commands');
+    expect(text).toContain('2 deny rules on room commands');
     expect(text).not.toContain(RESTRICTED_USER);
   });
 
@@ -318,8 +355,8 @@ describe('renderAnnouncement', () => {
    */
   it('lists a file that clears every restriction under Removed, from the real diff', () => {
     const stored = {
-      rename: { users: [NICK_USER, RESTRICTED_USER] },
-      nick: { roles: [RESTRICTED_ROLE] },
+      rename: { deny: { users: [NICK_USER, RESTRICTED_USER] } },
+      nick: { allow: { roles: [RESTRICTED_ROLE] } },
     };
     const settings = Object.fromEntries(
       EXPORT_SETTINGS_KEYS.map((key) => [key, null]),
@@ -358,9 +395,11 @@ describe('renderAnnouncement', () => {
     expect(change?.cleared).toBe(true);
 
     for (const text of [renderPreview(result.plan, ctx), renderAnnouncement(result.plan, ctx)]) {
-      expect(text).toContain('Who can use room commands: cleared (3 restrictions removed)');
+      expect(text).toContain(
+        'Who can use room commands: cleared (1 allow rule and 2 deny rules removed)',
+      );
       expect(text).toContain('Removed');
-      expect(text).toContain('3 restrictions on room commands');
+      expect(text).toContain('1 allow rule and 2 deny rules on room commands');
       for (const id of [NICK_USER, RESTRICTED_USER, RESTRICTED_ROLE]) {
         expect(text).not.toContain(id);
       }
@@ -430,16 +469,19 @@ describe('a legacy import that drops the old role rule', () => {
     });
 
   /**
-   * The old rule was an allow list (only these roles may use a command) and
-   * `/restrict` is the opposite, so the sentence must not call it a like-for-like
-   * replacement or an admin who relied on it is left believing nothing changed.
+   * The old rule was an allow list (only these roles may use a command), and so is
+   * `/restrict allow`, so the sentence points there. It still says the rule was not
+   * carried over, or an admin who relied on it is left believing nothing changed.
    */
-  it('points at /restrict, says it works the other way round, and says the rule was not carried over', () => {
+  it('points at /restrict allow, says it works the same way, and says the rule was not carried over', () => {
     const text = renderPreview(legacyPlan(), { ...ctx, source: 'legacy' });
     expect(text).toContain(
       'restrictions: was an old rule that let only certain roles use a command, and it was not carried over',
     );
-    expect(text).toContain('/restrict works the other way round');
+    expect(text).toContain(
+      '/restrict allow works the same way: it keeps a room command to the people and roles you name',
+    );
+    expect(text).not.toContain('the other way round');
     expect(text).not.toContain('is the replacement');
   });
 
