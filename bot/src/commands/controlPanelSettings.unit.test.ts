@@ -368,8 +368,10 @@ describe('setControlPanelEntry', () => {
 
   /**
    * Golden rule 3: preserve unknown JSON fields on writes. Filtering to
-   * booleans would break the migration `feature-parity.md` §3.5 names next,
-   * which widens a value in this same key to `false | 'everyone' | [role ids]`.
+   * booleans would have an older instance delete an entry it cannot read. The
+   * role column once planned for this key was built as `command_access`
+   * (`feature-parity.md` §3.3 and §3.5), so the value here is only a stand-in
+   * for a shape this build does not know.
    */
   it('keeps a value it cannot read rather than deleting it', async () => {
     const { service, writes } = makeService({

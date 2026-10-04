@@ -81,9 +81,10 @@ export const RUNTIME_FLAGS = {
    * While it is on, `/hide` and the panel's Hide button refuse, `/access trust`,
    * `block` and `admit` refuse, the knock card's Always allow refuses, a saved
    * list is not applied to a room by `/access`, a card's Block, the creator's room
-   * being made, or the sweep that keeps rooms in step with the lists (the whole
-   * pass is off: no overwrite is repaired, no queued opening is carried through and
-   * no Join channel is settled), and a card's Block still turns the requester away
+   * being made, or the sweep that keeps rooms in step with the lists (the pass
+   * adds no entry and no role and repairs no overwrite, and the one thing it still
+   * does is finish an opening Discord queued, which is an undo, and settle the Join
+   * channel that opening needs), and a card's Block still turns the requester away
    * but saves nothing. A refusal says the feature is switched off for now, and a
    * list keeps whatever it already holds.
    *

@@ -994,13 +994,14 @@ export class GuildSettingsService {
        * Copied WHOLE, values and all, and only the one entry being changed is
        * touched. Golden rule 3: preserve unknown JSON fields on writes.
        *
-       * Filtering to booleans looked tidier and broke the very migration §3.5
-       * of `feature-parity.md` names next. That column widens a value from a
-       * boolean to `false | 'everyone' | [role ids]` in this same key, and a
-       * filter would mean an OLD instance, during the rollout, silently
-       * deleting every role-valued entry the moment an admin toggled any single
-       * button. A value this build cannot read is ignored by `readControlPanel`,
-       * which is inert; a value this build DELETES is gone.
+       * Filtering to booleans looked tidier and would mean an OLD instance,
+       * during a rollout, silently deleting every entry it cannot read the moment
+       * an admin toggled any single button. The role column that was once planned
+       * for this key was built as the separate `command_access` setting instead
+       * (`feature-parity.md` §3.3 and §3.5), so this build stores only booleans
+       * here and the rule is golden rule 3 alone. A value this build cannot read
+       * is ignored by `readControlPanel`, which is inert; a value this build
+       * DELETES is gone.
        *
        * `Object.fromEntries` rather than assigning into a literal, because a
        * stored `__proto__` key is reachable through `/import` and assigning it
