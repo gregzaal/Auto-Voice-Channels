@@ -22,7 +22,12 @@ import { isSnowflake, SETTINGS_KEYS } from './guildSettings.js';
  * **Members who can manage channels are never restricted.** Manage Channels or
  * Administrator already lets them rename any room, so a rule could not stop
  * them and would only mislead the admin who wrote it, and it means an admin can
- * never lock themselves out.
+ * never lock themselves out. **Where that is judged differs by door.** The guard reads
+ * the permissions Discord resolved for the channel the interaction came from, the room
+ * panel reads them for the room, and a snapshot of a member (a name in a room title,
+ * a remembered setting at creation) knows only what they hold server-wide. A moderator
+ * who has Manage Channels through one category or room overwrite is therefore exempt at
+ * the first two and held to a rule at the third.
  *
  * **Undo directions are never restricted.** Opening a room again, removing a
  * limit (`/unlimit`, or a limit of 0), removing a saved nickname and (later)

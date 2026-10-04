@@ -261,9 +261,13 @@ export function readTimeZone(settings: Record<string, unknown>): string | undefi
  * kept rather than cleared, so lifting the rule (or the lever) brings it back.
  *
  * `roleIds` and `canManage` are the member's, as the voice snapshot carries
- * them, so a render and the `/nick` guard agree: a member who can manage
- * channels is never restricted, so their nickname shows whatever role a rule
- * names. `roleIds` may include the guild id, which the rules never hold, so it
+ * them, so a render and the `/nick` guard agree on roles. On Manage Channels
+ * they can differ: the snapshot judges it server-wide and the guard reads the
+ * permissions Discord resolved for the channel the command was typed in, so a
+ * moderator who holds it only through a category or room overwrite is exempt
+ * typing `/nick` there and still has a rule applied to the nickname that shows
+ * in a room name. Whoever holds it server-wide shows their nickname whatever
+ * role a rule names. `roleIds` may include the guild id, which the rules never hold, so it
  * cannot match. Absent, for a member nobody could resolve (the original creator
  * of a room, who has left and is not cached), means nobody can say what they
  * hold, so only a rule naming the person applies, the direction that fails open.
