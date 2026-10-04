@@ -225,6 +225,13 @@ export class MemberRoomPrefsRepository {
    * The update takes the row lock and re-reads the row, so the delete after it sees the
    * settings as they are now, and nobody else sees a row with nothing in it. A row that
    * already had nothing here is left untouched, so a replay does not move `updated_at`.
+   *
+   * **A read comes first, and a clear that finds nothing opens no transaction.** Nearly every
+   * clear finds nothing: a name reset in a room that never had one remembered, a `/public` in a
+   * server that never turned this on. Each runs inside a guild's queued task, so each must cost
+   * one statement and not the four of a transaction (begin, update, delete, commit). The read is
+   * not a decision the writes rely on: a save that lands just after it is a save that came
+   * after this clear, and the transaction below still re-reads the row under its lock.
    */
   private async clearField(
     guildId: string,
@@ -238,6 +245,10 @@ export class MemberRoomPrefsRepository {
       eq(memberRoomPrefs.guildId, guildId),
     );
     const col = sql.raw(`"${column}"`);
+    const held = await this.db.execute(sql`
+      SELECT 1 FROM member_room_prefs WHERE ${mine} AND ${col} IS NOT NULL LIMIT 1
+    `);
+    if (held.rows.length === 0) return { status: 'cleared' };
     await this.db.transaction(async (tx) => {
       await tx.execute(sql`
         UPDATE member_room_prefs SET ${col} = NULL, updated_at = now()

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { AutoChannelRepository } from './autoChannels.js';
 import { MemberRoomPrefsRepository } from './memberRoomPrefs.js';
@@ -487,6 +487,36 @@ describe('MemberRoomPrefsRepository (integration)', () => {
         expect(await repo.get(PRIMARY, USER)).toEqual({ name: null, limit: 4, privacy: null });
         await repo.saveName(GUILD, PRIMARY, USER, 'den');
         await repo.saveLimit(GUILD, PRIMARY, USER, null);
+      }
+    });
+
+    /**
+     * Nearly every clear finds nothing (a name reset in a room that never had one remembered,
+     * a `/public` in a server that never turned this on), and each runs inside a guild's queued
+     * task, so it costs one statement and not a transaction's four.
+     */
+    it('opens no transaction when there is nothing to clear, and still does when there is', async () => {
+      await optIn();
+      await repo.saveLimit(GUILD, PRIMARY, USER, 3);
+      const transaction = vi.spyOn(env.handle.db, 'transaction');
+      try {
+        // A row that holds something else, a member with no row at all, and another server's.
+        expect(await repo.saveName(GUILD, PRIMARY, USER, null)).toEqual({ status: 'cleared' });
+        expect(await repo.savePrivacy(GUILD, PRIMARY, OTHER_USER, null)).toEqual({
+          status: 'cleared',
+        });
+        expect(await repo.saveLimit(OTHER_GUILD, PRIMARY, USER, null)).toEqual({
+          status: 'cleared',
+        });
+        expect(transaction).not.toHaveBeenCalled();
+        expect(await repo.get(PRIMARY, USER)).toEqual({ name: null, limit: 3, privacy: null });
+
+        // Something to remove is still removed atomically, and the emptied row goes.
+        expect(await repo.saveLimit(GUILD, PRIMARY, USER, null)).toEqual({ status: 'cleared' });
+        expect(transaction).toHaveBeenCalledTimes(1);
+        expect(await rows()).toEqual([]);
+      } finally {
+        transaction.mockRestore();
       }
     });
 
