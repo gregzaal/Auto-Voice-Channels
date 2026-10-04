@@ -85,12 +85,18 @@ export interface ScenarioOptions {
     seed?: number | undefined;
     numberOffset?: number | undefined;
   };
+  /**
+   * The server's blocked words, so `/channelinfo`'s other situations are masked the way the
+   * room itself is. Left unset by the assistant, whose checks read the template's own text,
+   * length included, and must not judge a proposal by what a list happens to mask.
+   */
+  blockedWords?: readonly string[] | undefined;
 }
 
 /** The scenarios every proposal is rendered against, in display order. */
 export function previewScenarios(opts: ScenarioOptions): PreviewScenario[] {
   const { general, aliases, creatorName, standalone, identity, lists, timezone } = opts;
-  const { gameNameMode } = opts;
+  const { gameNameMode, blockedWords } = opts;
   const index = identity?.index ?? (standalone ? -1 : 0);
   const base = {
     index,
@@ -104,6 +110,7 @@ export function previewScenarios(opts: ScenarioOptions): PreviewScenario[] {
     timezone: timezone ?? 'UTC',
     ...(gameNameMode ? { gameNameMode } : {}),
     ...(lists ? { lists } : {}),
+    ...(blockedWords && blockedWords.length > 0 ? { blockedWords } : {}),
     ...(identity?.numberOffset !== undefined ? { numberOffset: identity.numberOffset } : {}),
   };
 

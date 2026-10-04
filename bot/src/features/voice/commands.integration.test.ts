@@ -134,6 +134,62 @@ describe('VoiceCommands (integration)', () => {
     expect(actions.ofType('rename').at(-1)!.name).toBe('Admin Named');
   });
 
+  /**
+   * The server's blocked words, which the router hands in as `refuseText`. Asked inside the
+   * write, before it, and only for a submit that changes something: a reset only takes text
+   * away, and a value the room already has (or the panel box's cut of it) writes nothing new.
+   */
+  describe('a blocked word', () => {
+    const refusing = () =>
+      vi.fn((text: string) => Promise.resolve(text.includes('zzbad') ? 'refused' : null));
+
+    it('refuses a name or a status before anything is written', async () => {
+      voice.put(SEC, member('alice'));
+      const refuseText = refusing();
+      const name = await commands.setName(GUILD, SEC, 'alice', 'zzbad room', { refuseText });
+      expect(name).toEqual({ ok: false, message: 'refused' });
+      const status = await commands.setStatus(GUILD, SEC, 'alice', 'zzbad now', { refuseText });
+      expect(status).toEqual({ ok: false, message: 'refused' });
+      const state = (await secondaries.get(SEC))!.state;
+      expect(state.template).toBeUndefined();
+      expect(state.statusTemplate).toBeUndefined();
+      expect(actions.ofType('rename')).toHaveLength(0);
+    });
+
+    it('lets a name through that the check does not refuse', async () => {
+      voice.put(SEC, member('alice'));
+      const refuseText = refusing();
+      expect((await commands.setName(GUILD, SEC, 'alice', 'fine', { refuseText })).ok).toBe(true);
+      expect(refuseText).toHaveBeenCalledWith('fine');
+      expect((await secondaries.get(SEC))!.state.template).toBe('fine');
+    });
+
+    it('never asks for a reset, or for the value the room already has', async () => {
+      voice.put(SEC, member('alice'));
+      await commands.setName(GUILD, SEC, 'alice', 'zzbad room');
+      const refuseText = refusing();
+      expect((await commands.setName(GUILD, SEC, 'alice', 'zzbad room', { refuseText })).ok).toBe(
+        true,
+      );
+      expect((await commands.setName(GUILD, SEC, 'alice', 'reset', { refuseText })).ok).toBe(true);
+      expect(refuseText).not.toHaveBeenCalled();
+    });
+
+    it('never asks for the panel box saved unchanged on a longer name', async () => {
+      voice.put(SEC, member('alice'));
+      const long = `zzbad ${'x'.repeat(120)}`;
+      await commands.setName(GUILD, SEC, 'alice', long);
+      const refuseText = refusing();
+      const res = await commands.setName(GUILD, SEC, 'alice', long.slice(0, 100), {
+        fromPanel: true,
+        refuseText,
+      });
+      expect(res.ok).toBe(true);
+      expect(refuseText).not.toHaveBeenCalled();
+      expect((await secondaries.get(SEC))!.state.template).toBe(long);
+    });
+  });
+
   it('sets and resets the per-channel status override', async () => {
     voice.put(SEC, member('alice'));
     const set = await commands.setStatus(GUILD, SEC, 'alice', 'AFK 💤');

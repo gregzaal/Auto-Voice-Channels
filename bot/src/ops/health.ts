@@ -133,6 +133,15 @@ export interface DiagnosticsReport {
    * idling instance, which holds no shards and so serves no rooms.
    */
   memberPrefs?: { disabled: boolean };
+  /**
+   * Blocked words (`/blockedwords`). Only the lever, for the reason `commandAccess` gives:
+   * the lists live in each server's settings.
+   *
+   * `disabled` true means this fleet refuses no typed name for a blocked word and masks
+   * nothing it renders, while every list is kept. Per fleet, like the flag. Absent on an
+   * idling instance, which holds no shards and so serves no rooms.
+   */
+  wordFilter?: { disabled: boolean };
 }
 
 export interface HealthServerOptions {

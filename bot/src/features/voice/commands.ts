@@ -24,6 +24,13 @@ export interface CommandResult {
 const ok = (message: string): CommandResult => ({ ok: true, message });
 const fail = (message: string): CommandResult => ({ ok: false, message });
 
+/**
+ * The sentence to refuse a typed room name or status with, or null to let it be saved. The
+ * router's check of the server's blocked words, handed in so that it runs where the write
+ * decides whether anything changes.
+ */
+export type RefuseText = (text: string) => Promise<string | null>;
+
 /** Discord's hard cap on a voice channel's user limit. */
 export const MAX_USER_LIMIT = 99;
 
@@ -124,7 +131,7 @@ export class VoiceCommands {
     channelId: string | undefined,
     userId: string,
     name: string,
-    opts: { admin?: boolean; fromPanel?: boolean } = {},
+    opts: { admin?: boolean; fromPanel?: boolean; refuseText?: RefuseText } = {},
   ): Promise<CommandResult> {
     return this.setChannelField(guildId, channelId, userId, 'name', name, opts);
   }
@@ -138,7 +145,7 @@ export class VoiceCommands {
     channelId: string | undefined,
     userId: string,
     status: string,
-    opts: { admin?: boolean } = {},
+    opts: { admin?: boolean; refuseText?: RefuseText } = {},
   ): Promise<CommandResult> {
     return this.setChannelField(guildId, channelId, userId, 'status', status, opts);
   }
@@ -150,7 +157,7 @@ export class VoiceCommands {
     userId: string,
     field: 'name' | 'status',
     value: string,
-    opts: { admin?: boolean; fromPanel?: boolean },
+    opts: { admin?: boolean; fromPanel?: boolean; refuseText?: RefuseText },
   ): Promise<CommandResult> {
     const found = await this.resolveSecondary(guildId, channelId);
     if ('error' in found) return found.error;
@@ -182,6 +189,18 @@ export class VoiceCommands {
       return ok(
         "Left this channel's name as it was, because the box only shows the first 100 characters of a longer name.",
       );
+    }
+    /**
+     * The server's blocked words, asked here and not by the caller, because only here is
+     * it known whether this submit changes anything. A reset only takes text away, and a
+     * value that is the one the room already has writes nothing new, so neither is refused:
+     * a member who opened the box and pressed Save on a name a word was added to since is
+     * not told off for something they did not type. Before the write, so a refusal leaves
+     * the room as it was.
+     */
+    if (!isReset && opts.refuseText && stored !== row.state[stateKey]) {
+      const refusal = await opts.refuseText(stored);
+      if (refusal !== null) return fail(refusal);
     }
     if (isReset) {
       delete next[stateKey];

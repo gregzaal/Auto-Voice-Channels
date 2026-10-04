@@ -57,6 +57,7 @@ import {
   type AccessTarget,
   type ChannelDebug,
   type CommandResult,
+  type RefuseText,
   type EditorField,
   type EditorScope,
   type EditorState,
@@ -177,10 +178,28 @@ import {
   CONTROL_PANEL_ENABLED_KEY,
   parsePanelColor,
   groupKeyFor,
+  readBlockedWords,
   ROOT_GROUP_KEY,
   type ControlPanelAppearanceKey,
   type ControlPanelEntry,
 } from '../features/voice/guildSettings.js';
+import { findBlocked, findBlockedInTemplate } from '../features/voice/nameTemplate.js';
+import { parseBlockedWordsInput } from '../features/voice/blockedWords.js';
+import {
+  BLOCKED_WORDS_NOTHING_USABLE,
+  BLOCKED_WORDS_PAUSED,
+  blockedWordLogLine,
+  blockedWordRefusal,
+  blockedWordsAuditLine,
+  blockedWordsSavedMessage,
+  rejectedWordsLines,
+  type BlockedWordDoor,
+} from '../features/voice/blockedWordsCopy.js';
+import {
+  BLOCKED_WORDS_MODAL_ID,
+  buildBlockedWordsModal,
+  parseBlockedWordsModal,
+} from './blockedWordsModal.js';
 import {
   buildLimitModal,
   buildMemberPicker,
@@ -194,6 +213,7 @@ import {
   FEATURE_LABELS,
   featureForCommand,
   isAvailableFeature,
+  isNickReset,
   limitFeatureFor,
   mayUse,
   nickFeatureFor,
@@ -316,6 +336,15 @@ export interface InteractionDeps {
    * absent means not disabled.
    */
   commandAccessDisabled?: () => Promise<boolean>;
+  /**
+   * Whether the blocked words filter is switched off (`word_filter.disabled`), which fails
+   * open: nothing typed is refused for a blocked word while it is on.
+   *
+   * Over the creation gate's cached snapshot, for the reason {@link commandAccessDisabled}
+   * gives, and asked only once a typed text has matched, so a server with no list, and every
+   * text with no match, never reads it. Never throws, and absent means not disabled.
+   */
+  wordFilterDisabled?: () => Promise<boolean>;
   selfHosted: boolean;
   /** Discord application id, for building the `/invite` link. */
   clientId: string;
@@ -553,6 +582,13 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
          * in this state and refused below, so nothing new can go up.
          */
         'botprofile',
+        /**
+         * `/blockedwords` opens, so a gated admin can see the list and take entries off
+         * it. Its submit is open too, and decides inside the write: a save that only
+         * takes entries away is written and one that adds any is refused with the
+         * reactivation notice, which is `/restrict`'s split again.
+         */
+        'blockedwords',
       ].includes(interaction.commandName);
     }
     if (interaction.isButton()) {
@@ -636,7 +672,9 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         interaction.customId === LOGGING_MODAL_ID ||
         interaction.customId === TIMEZONE_MODAL_ID ||
         interaction.customId === TEXT_CHANNELS_MODAL_ID ||
-        interaction.customId.startsWith(LISTS_PREFIX)
+        interaction.customId.startsWith(LISTS_PREFIX) ||
+        // Decides for itself: a save that adds an entry is refused inside the write.
+        interaction.customId === BLOCKED_WORDS_MODAL_ID
       );
     }
     return false;
@@ -780,8 +818,15 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       case 'kick':
         return handleKickCommand(interaction);
       case 'nick': {
+        const name = interaction.options.getString('name', true);
+        // A blocked word is refused before anything is written. Removing the nickname never
+        // is, since it only takes text away. Deferred above, so the refusal is the edit.
+        const refusal = isNickReset(name)
+          ? null
+          : await wordRefusalFor(interaction, settings, name, 'nick');
+        if (refusal !== null) return replyResult(interaction, { ok: false, message: refusal });
         const res = await run(guildId, 'cmd:nick', () =>
-          deps.settings.setNick(guildId, userId, interaction.options.getString('name', true)),
+          deps.settings.setNick(guildId, userId, name),
         );
         if (!res.ok) return replyResult(interaction, res);
         // Re-render the user's channels so `@@owner@@` picks up the new name.
@@ -809,6 +854,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
         return handleDefaultLimit(interaction);
       case 'restrict':
         return handleRestrict(interaction);
+      case 'blockedwords':
+        return openBlockedWords(interaction, settings);
       case 'group':
         return openGroupPanel(interaction);
       case 'inheritpermissions':
@@ -1567,6 +1614,142 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     }
   }
 
+  // -- /blockedwords -----------------------------------------------------------
+
+  /**
+   * `/blockedwords`: the box holding the server's blocked words, one per line.
+   *
+   * **Re-gated in code, for `/restrict`'s reason**: the command's default permission is a
+   * default, and a server admin can re-open it to any role in Server Settings >
+   * Integrations. Gated BEFORE the modal, because `showModal` has to be the first response.
+   *
+   * The box is prefilled from the settings the router read for this interaction, which is
+   * an uncached read, and not from the settings cache: the submit replaces the whole list,
+   * so a prefill one save behind would quietly undo that save. The lever is the creation
+   * gate's cached snapshot, so nothing here waits in the guild's queue before the modal.
+   */
+  async function openBlockedWords(
+    interaction: ChatInputCommandInteraction,
+    settings: StoredSettings,
+  ): Promise<void> {
+    if (!(await requireManageChannels(interaction))) return;
+    const words = readBlockedWords(settings ?? {});
+    const paused = words.length > 0 && (await deps.wordFilterDisabled?.()) === true;
+    await interaction.showModal(buildBlockedWordsModal(words, { paused }));
+  }
+
+  /**
+   * The `/blockedwords` submit: the list as typed, split, checked and saved whole.
+   *
+   * Gated again, since a modal outlives the permission of whoever opened it, and then
+   * deferred, because the write waits its turn in the guild's queue and a modal submit has
+   * three seconds. Entries that cannot be used are reported and the rest are saved. A box
+   * that held text and none of it could be used saves nothing, because emptying the list
+   * over a paste that went wrong is not what anybody typed. An empty box empties the list.
+   *
+   * **In a lapsed server it decides inside the write.** A save that only takes entries away
+   * is written, and one that adds any entry the list does not hold writes nothing and is
+   * answered with the reactivation notice: the hard gate stops writes that add and leaves
+   * the ones that only take away.
+   *
+   * The `/logging` line names the admin and how many words there are now, never the words:
+   * they may be slurs, and the log channel is read by whoever the admin chose.
+   */
+  async function handleBlockedWordsSubmit(interaction: ModalSubmitInteraction): Promise<void> {
+    if (!(await requireManageChannels(interaction))) return;
+    const guildId = interaction.guildId!;
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const answer = (parts: readonly string[]): Promise<unknown> =>
+      interaction.editReply({ content: fitReply(parts), allowedMentions: { parse: [] } });
+
+    const { words, rejected } = parseBlockedWordsInput(parseBlockedWordsModal(interaction.fields));
+    if (words.length === 0 && rejected.length > 0) {
+      await answer([`⚠️ ${BLOCKED_WORDS_NOTHING_USABLE}`, ...rejectedWordsLines(rejected)]);
+      return;
+    }
+    const gate = await gateCheck(guildId);
+    const res = await run(guildId, 'cmd:blockedwords', () =>
+      deps.settings.setBlockedWords(guildId, words, { refuseAdditions: !gate.entitled }),
+    );
+    if (res.refusedAddition) {
+      await answer([gate.reply]);
+      return;
+    }
+    const rejectedLines = rejectedWordsLines(rejected);
+    if (!res.ok) {
+      await answer([formatResult(res), ...rejectedLines]);
+      return;
+    }
+    if (res.changed)
+      deps.serverLog?.(guildId, 1, blockedWordsAuditLine(interaction.user.id, res.count));
+    // While the lever is on the sentence above it would be untrue, so the reply says so.
+    const paused = res.count > 0 && (await deps.wordFilterDisabled?.()) === true;
+    await answer([
+      `✅ ${blockedWordsSavedMessage(res.count)}`,
+      ...(paused ? [BLOCKED_WORDS_PAUSED] : []),
+      ...rejectedLines,
+    ]);
+  }
+
+  /**
+   * The sentence to refuse a typed room name, status or nickname with, or null when it may
+   * be saved. One check, at every door a member types text a room shows through: `/nick`,
+   * the room panel's Name box, and the `/name` editor's name and status.
+   *
+   * **Nobody is exempt, admins included.** The list is the server's, and a rendered name is
+   * masked whoever typed it, so an exempt name would be accepted and then shown as `***`.
+   *
+   * **A name or a status is a template, so only its literal text is judged**
+   * (`findBlockedInTemplate`): blocking `game` must not refuse `@@game_name@@`, and what a
+   * token renders is masked anyway. A nickname is plain text and is judged whole.
+   *
+   * Ordered so a server with no list, and every text with no match, costs a read of the
+   * settings the router already holds and nothing else. The lever is asked only once a text
+   * has matched. **Fails OPEN** on anything that throws, like the `/restrict` guard: a
+   * filter that refuses names nobody listed is the failure an admin cannot diagnose.
+   *
+   * A refusal posts a `/logging` line naming the member and the door and never the text,
+   * and logs ids only.
+   */
+  async function wordRefusalFor(
+    interaction: Interaction,
+    settings: StoredSettings,
+    text: string,
+    door: BlockedWordDoor,
+  ): Promise<string | null> {
+    const guildId = interaction.guildId;
+    try {
+      if (guildId === null) return null;
+      const words = readBlockedWords(settings ?? {});
+      if (words.length === 0) return null;
+      const found =
+        door === 'nick' ? findBlocked(text, words) !== null : findBlockedInTemplate(text, words);
+      if (!found) return null;
+      if (await deps.wordFilterDisabled?.()) return null;
+      deps.logger.info({ guildId, userId: interaction.user.id, door }, 'refused a blocked word');
+      deps.serverLog?.(guildId, 1, blockedWordLogLine(interaction.user.id, door));
+      return blockedWordRefusal(door);
+    } catch (err) {
+      deps.logger.warn({ err, guildId, door }, 'could not check blocked words, allowing it');
+      return null;
+    }
+  }
+
+  /**
+   * {@link wordRefusalFor} for a room's name or status, handed to `setName` and `setStatus`
+   * so it runs inside the write, where it is known whether the submit changes anything: a
+   * reset, and a value the room already has, are never refused. Absent for a server with no
+   * list, so nothing is asked there.
+   */
+  function roomTextRefusal(
+    interaction: Interaction,
+    settings: StoredSettings,
+    door: 'name' | 'status',
+  ): { refuseText?: RefuseText } {
+    if (readBlockedWords(settings ?? {}).length === 0) return {};
+    return { refuseText: (text) => wordRefusalFor(interaction, settings, text, door) };
+  }
+
   // -- /access ----------------------------------------------------------------
 
   /**
@@ -2096,10 +2279,17 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     let result: CommandResult;
     if (scope === 'channel') {
       const userId = interaction.user.id;
+      /**
+       * A blocked word in a room's own name or status is refused inside the write, before
+       * anything is written, and comes back as a failed result like a restriction does. The
+       * two admin scopes are not checked: a creator channel's template and an adopted
+       * channel's are an admin's own configuration, and the render masks what they produce.
+       */
+      const words = roomTextRefusal(interaction, settings, field);
       result = await run(guildId, `editor:channel:${field}`, () =>
         field === 'name'
-          ? deps.voiceCommands.setName(guildId, channelId, userId, value, { admin })
-          : deps.voiceCommands.setStatus(guildId, channelId, userId, value, { admin }),
+          ? deps.voiceCommands.setName(guildId, channelId, userId, value, { admin, ...words })
+          : deps.voiceCommands.setStatus(guildId, channelId, userId, value, { admin, ...words }),
       );
     } else if (scope === 'adopted') {
       // Adopted standalone channel: edit + re-render happen inside the feature.
@@ -3974,12 +4164,16 @@ Already subscribed? Add the new server ` +
     }
     if (parsed.action === 'renameset') {
       if (!(await allowed(interaction, settings, PANEL_ACTION_FEATURE.renameset))) return;
+      // A blocked word is refused inside the write, which knows when the box was saved
+      // unchanged, and the refusal is the edit over the deferral like any other answer.
+      const words = roomTextRefusal(interaction, settings, 'name');
       return replyPanelResult(
         interaction,
         () =>
           deps.voiceCommands.setName(guildId, parsed.roomId, userId, raw === '' ? 'reset' : raw, {
             admin: hasManageChannels(interaction),
             fromPanel: true,
+            ...words,
           }),
         'panel:rename',
       );
@@ -4692,6 +4886,9 @@ Already subscribed? Add the new server ` +
       if (channelId) return handleInheritSubmit(interaction, channelId);
     }
     if (interaction.customId === LOGGING_MODAL_ID) return handleLoggingSubmit(interaction);
+    if (interaction.customId === BLOCKED_WORDS_MODAL_ID) {
+      return handleBlockedWordsSubmit(interaction);
+    }
     if (interaction.customId.startsWith(EDITOR_PREFIX))
       return handleEditorModal(interaction, settings);
     if (interaction.customId.startsWith(ASSISTANT_PREFIX)) return handleAssistantModal(interaction);
@@ -4967,6 +5164,21 @@ async function resolveOrPick(
 /** Standard `✅/⚠️ message` formatting for a CommandResult reply. */
 function formatResult(result: CommandResult): string {
   return `${result.ok ? '✅' : '⚠️'} ${result.message}`;
+}
+
+/**
+ * Paragraphs joined into one reply that Discord will take. The first is always kept (cut if
+ * it has to be), and the rest are kept while they fit, so a reply that quotes what an admin
+ * typed can never pass the 2000-character limit and throw after the work it reports on.
+ */
+function fitReply(parts: readonly string[]): string {
+  const BUDGET = 1900;
+  let out = (parts[0] ?? '').slice(0, BUDGET);
+  for (const part of parts.slice(1)) {
+    if (out.length + 2 + part.length > BUDGET) break;
+    out += `\n\n${part}`;
+  }
+  return out;
 }
 
 /**

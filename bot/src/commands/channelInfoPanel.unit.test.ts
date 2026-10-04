@@ -544,6 +544,24 @@ describe('buildTokenPanel', () => {
     expect(open).toContain('`{{PRIVATE}}` ❌ no');
   });
 
+  /**
+   * The context carries the server's blocked words and the engine masks the finished text,
+   * so a probe that read its branch back as a letter would report every condition as no in a
+   * server that blocks that letter. The branches are asterisks, which no list can mask.
+   */
+  it('reads conditions right, and masks values, in a server that blocks single letters', () => {
+    const room = info({
+      render: {
+        ...info().render!,
+        ctx: ctx({ isPrivate: true, blockedWords: ['y', 'n', '*drg*'] }),
+      },
+    });
+    const shown = fieldValues(buildTokenPanel(input({ info: room }))).join('\n');
+    expect(shown).toContain('`{{PRIVATE}}` ✅ yes');
+    expect(shown).toContain('`{{HIDDEN}}` ❌ no');
+    expect(shown).toContain('`@@game_name@@` `***`');
+  });
+
   it('says a creator channel preview is not a live channel', () => {
     const creator = info({
       kind: 'creator',
@@ -672,6 +690,75 @@ describe('buildScenarioPanel', () => {
     const pick = live.includes('Red') ? 'Red' : 'Blue';
     expect(rendered).toContain(pick);
     expect(rendered).not.toContain(pick === 'Red' ? 'Blue' : 'Red');
+  });
+
+  /** Masked as the room is, or a word the summary shows as `***` would read here in full. */
+  it('masks the server blocked words in every situation, as the room itself does', () => {
+    const blocked = info({
+      render: {
+        ...info().render!,
+        nameTemplate: '@@owner@@ room',
+        ctx: ctx({ blockedWords: ['robin'] }),
+      },
+    });
+    const rendered = fieldValues(buildScenarioPanel(input({ info: blocked }))).find((v) =>
+      v.includes('nothing playing'),
+    )!;
+    expect(rendered).toContain('*** room');
+    expect(rendered).not.toContain('Robin');
+  });
+
+  /** Any member can open the panel, and a template can hold a listed word an admin typed. */
+  it('quotes the template with the blocked words masked, on both views that show it', () => {
+    const blocked = info({
+      render: {
+        ...info().render!,
+        nameTemplate: 'zzbadzz ##',
+        statusTemplate: 'zzbadzz now',
+        ctx: ctx({ blockedWords: ['*bad*'] }),
+      },
+    });
+    const views = [
+      buildScenarioPanel(input({ info: blocked })),
+      buildTokenPanel(input({ info: blocked })),
+    ];
+    for (const view of views) {
+      expect(text(view)).not.toContain('zzbadzz');
+      expect(text(view)).toContain('zz***zz');
+    }
+  });
+
+  /** Blocking `game` must not turn the token the template is written with into `@@***_name@@`. */
+  it('leaves the template syntax it quotes readable', () => {
+    const blocked = info({
+      render: {
+        ...info().render!,
+        nameTemplate: '@@game_name@@ ##',
+        ctx: ctx({ blockedWords: ['game*'] }),
+      },
+    });
+    expect(text(buildTokenPanel(input({ info: blocked })))).toContain('@@game_name@@ ##');
+  });
+
+  /**
+   * A list that held an entry reading as the mask once made masking feed on itself, and this
+   * view renders every situation unclamped as well, which ran a shard out of memory. It has to
+   * answer, quickly, whatever the list holds.
+   */
+  it('answers quickly with a hostile list on every situation', () => {
+    const hostile = info({
+      render: {
+        ...info().render!,
+        nameTemplate: 'bad room * ##',
+        ctx: ctx({ blockedWords: ['bad', '＊', '*＊*', '﹡'] }),
+      },
+    });
+    const started = performance.now();
+    const rendered = fieldValues(buildScenarioPanel(input({ info: hostile }))).find((v) =>
+      v.includes('nothing playing'),
+    )!;
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(rendered).toContain('*** room * #2');
   });
 
   it('drops the privacy scenario for an adopted channel, which has no privacy', () => {

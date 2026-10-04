@@ -806,6 +806,8 @@ async function main(): Promise<void> {
     serverLog: (guildId, level, message) => serverLogger.log(guildId, level, message),
     // The `/restrict` lever, through the creation gate's cached snapshot.
     commandAccessDisabled: () => creationGate.commandAccessDisabled(),
+    // The blocked words lever, the same way: the typed doors and `/blockedwords` ask it.
+    wordFilterDisabled: () => creationGate.wordFilterDisabled(),
     selfHosted: config.selfHosted,
     clientId: config.clientId,
     // Its own kind: interaction failures are the one of these that can storm.
@@ -1517,6 +1519,15 @@ async function main(): Promise<void> {
          */
         memberPrefs: {
           disabled: runtimeFlags[RUNTIME_FLAGS.MEMBER_PREFS_DISABLED] === true,
+        },
+        /**
+         * Whether blocked words are being refused and masked. A list that stopped working
+         * is only ever seen as a word that should have been masked, so the lever is reported
+         * per fleet, because the failure mode of a freeze switch is being left on after the
+         * thing it was thrown for has been fixed.
+         */
+        wordFilter: {
+          disabled: runtimeFlags[RUNTIME_FLAGS.WORD_FILTER_DISABLED] === true,
         },
       };
     },

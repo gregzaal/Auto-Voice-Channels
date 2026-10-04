@@ -150,6 +150,27 @@ export const RUNTIME_FLAGS = {
    * creator channel into, and a database blip must not quietly withdraw it.
    */
   MEMBER_PREFS_DISABLED: 'member_prefs.disabled',
+  /**
+   * Stops the blocked words filter (`/blockedwords`) on **this fleet**, and it fails open:
+   * while it is on, nothing typed into `/name`, the room panel's Name box or `/nick` is
+   * refused for holding a blocked word, and nothing the bot renders is masked, so a room
+   * name, a voice status and a new "Join" channel show their words as they are.
+   *
+   * It **freezes rather than strips**: no list changes, so lifting it makes every list
+   * bite again. A room's name catches up the next time it is rendered, in either
+   * direction, and a "Join" channel keeps the name it was given until it is made again.
+   *
+   * It does **not** stop `/blockedwords` itself: an admin can still open the list and save
+   * it, and the reply says the filter is switched off for now. Nor does it change what an
+   * export or an import carries.
+   *
+   * Reach for it when the matcher refuses or masks what nobody listed, or costs too much
+   * on a render. Read through the creation gate's cached 2 second snapshot, and only for a
+   * server with a non-empty list. A failed flag read is treated as NOT disabled, matching
+   * `command_access.disabled`: a database blip must not quietly withdraw a list an admin
+   * wrote.
+   */
+  WORD_FILTER_DISABLED: 'word_filter.disabled',
   /** Throttle: max secondary creations per guild per minute (number; 0 = unlimited). */
   CREATE_RATE_LIMIT: 'create.rate_limit_per_min',
   /**

@@ -8,6 +8,7 @@ import {
   type InteractionReplyOptions,
 } from 'discord.js';
 import {
+  maskBlockedInTemplate,
   renderChannelName,
   type ChannelInfo,
   type PrimaryConfig,
@@ -140,9 +141,27 @@ function probeToken(token: string, ctx: RenderContext): string {
   return renderChannelName(token, ctx, { allowEmpty: true });
 }
 
-/** Renders one conditional on its own and reads back which branch fired. */
+/**
+ * Renders one conditional on its own and reads back which branch fired.
+ *
+ * The two branches are asterisks because nothing else is certain to come back as written: the
+ * context carries the server's blocked words, the engine masks the finished text, and a server
+ * may block any letter. An entry needs a letter or a number to be usable, so no list can mask
+ * either branch.
+ */
 function probeVariable(name: string, ctx: RenderContext): boolean {
-  return renderChannelName(`{{${name} ?? y // n}}`, ctx, { allowEmpty: true }) === 'y';
+  return renderChannelName(`{{${name} ?? * // **}}`, ctx, { allowEmpty: true }) === '*';
+}
+
+/**
+ * A template as the panel quotes it, with the server's blocked words masked in its typed text
+ * the way the room's own name is, and its syntax left as it is, so blocking `game` never turns
+ * `@@game_name@@` into a token nobody can read. Any member can open this panel, and a template
+ * can hold a listed word: an admin's own, which the doors do not refuse, or a member's from
+ * before the word was added.
+ */
+function quoted(template: string, ctx: RenderContext): string {
+  return maskBlockedInTemplate(template, ctx.blockedWords ?? []);
 }
 
 /**
@@ -334,13 +353,13 @@ export function buildTokenPanel(input: ChannelInfoPanelInput): InteractionReplyO
   embed.fields.push({
     name: '📛 Name template',
     value:
-      `${nameTemplate === '' ? '_(none, the name is left alone)_' : `\`${truncate(nameTemplate, 240)}\``}\n` +
+      `${nameTemplate === '' ? '_(none, the name is left alone)_' : `\`${truncate(quoted(nameTemplate, ctx), 240)}\``}\n` +
       `_${SOURCE_LABEL[nameSource]}_`,
   });
   if (statusTemplate !== '') {
     embed.fields.push({
       name: '💬 Status template',
-      value: `\`${truncate(statusTemplate, 240)}\`\n_${SOURCE_LABEL[statusSource]}_`,
+      value: `\`${truncate(quoted(statusTemplate, ctx), 240)}\`\n_${SOURCE_LABEL[statusSource]}_`,
     });
   }
 
@@ -442,6 +461,8 @@ export function buildScenarioPanel(input: ChannelInfoPanelInput): InteractionRep
       seed: ctx.seed ?? 0,
       ...(ctx.numberOffset !== undefined ? { numberOffset: ctx.numberOffset } : {}),
     },
+    // Masked as the room is, or a word the summary shows as `***` would read here in full.
+    blockedWords: ctx.blockedWords,
   });
 
   const lines = scenarios.map((s) => {
@@ -456,7 +477,10 @@ export function buildScenarioPanel(input: ChannelInfoPanelInput): InteractionRep
       `What <#${info.channelId}>'s template gives in states you cannot see right now. ` +
         'A template is only correct in the situations it will actually meet.',
     )
-    .addFields({ name: 'This template', value: `\`${truncate(nameTemplate, 240)}\`` })
+    .addFields({
+      name: 'This template',
+      value: `\`${truncate(quoted(nameTemplate, ctx), 240)}\``,
+    })
     .toJSON();
   embed.fields!.push({ name: 'Renders as', value: lines.join('\n').slice(0, 1024) });
 

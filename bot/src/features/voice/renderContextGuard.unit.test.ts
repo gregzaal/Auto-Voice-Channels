@@ -115,6 +115,44 @@ describe('every render goes through buildRenderContext', () => {
 });
 
 /**
+ * Every render masks the server's blocked words, so every context carries them.
+ *
+ * The engine masks whatever the context lists, which makes the assembler the one place a
+ * live render picks the list up. The synthetic previews do not go through it, so each of
+ * them has to carry the list itself, or the `/template` editor and `/channelinfo` preview a
+ * creator channel's first room with a word the room itself will show as `***`.
+ */
+describe('every render carries the blocked words', () => {
+  it('hands them on through the assembler', () => {
+    const from = SOURCE.indexOf('buildRenderContext(input: RenderContextInput)');
+    expect(from).toBeGreaterThan(-1);
+    const body = SOURCE.slice(from, SOURCE.indexOf('\n  }', from));
+    expect(body).toContain('blockedWords: settings.blockedWords');
+  });
+
+  it('puts them on every synthetic preview context', () => {
+    const previews = [...SOURCE.matchAll(/const previewCtx(?:: RenderContext)? = \{/g)];
+    expect(previews.length).toBeGreaterThanOrEqual(2);
+    for (const match of previews) {
+      const open = match.index + match[0].length - 1;
+      const literal = SOURCE.slice(open, SOURCE.indexOf('\n      };', open));
+      expect(literal, `a preview context leaves out the blocked words:\n${literal}`).toContain(
+        'blockedWords: settings.blockedWords',
+      );
+    }
+  });
+
+  /** The lever withdraws them where every render reads its settings, so it reaches all of them. */
+  it('withdraws them while the lever is on, in the one settings read every render shares', () => {
+    const from = SOURCE.indexOf('private async voiceSettings(');
+    expect(from).toBeGreaterThan(-1);
+    const body = SOURCE.slice(from, SOURCE.indexOf('\n  }', from));
+    expect(body).toContain('wordFilterDisabled');
+    expect(body).toContain('blockedWords: []');
+  });
+});
+
+/**
  * Every live render of a ROOM hands the assembler the room's privacy.
  *
  * **`{{PRIVATE}}` and `{{HIDDEN}}` are the two variables the assembler cannot work out for

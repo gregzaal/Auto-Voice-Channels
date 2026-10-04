@@ -376,6 +376,16 @@ export function buildCommandDefinitions(
         ) as unknown as SlashCommandBuilder,
     ),
     /**
+     * Opens a box holding the server's blocked words, one per line, so it takes no
+     * options. Enforced again in code (`requireManageChannels`), since the default is a
+     * DEFAULT, and the list decides what every member may type into a room name.
+     */
+    adminOnly(
+      new SlashCommandBuilder()
+        .setName('blockedwords')
+        .setDescription('Choose words to keep out of room names, voice statuses and /nick names.'),
+    ),
+    /**
      * Manage Server rather than Manage Channels: this changes how the bot looks
      * to everyone in the server, which is `/import`'s reach, not `/template`'s.
      * Enforced again in code (`requireManageGuild`), since this is a default.

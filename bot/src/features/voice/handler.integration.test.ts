@@ -1642,6 +1642,173 @@ describe('VoiceFeature (integration)', () => {
     });
   });
 
+  /**
+   * A server's blocked words, masked in everything the bot names: the room as it is made
+   * and on every render after, its voice status, an adopted channel, the previews, and the
+   * "⇩ Join" channel, which is named after its owner and not by the engine. Each of these
+   * reads the guild's settings for itself, so each is shown to mask.
+   */
+  describe('blocked words', () => {
+    const OWNER = 'zzbadzz';
+
+    beforeEach(async () => {
+      await guilds.updateSettings(GUILD, { blocked_words: ['*bad*'] });
+    });
+
+    // Guild settings outlive a test, and a list left behind would mask every later name.
+    afterEach(async () => {
+      await guilds.updateSettings(GUILD, { blocked_words: [] });
+    });
+
+    async function ownedRoom(template: Record<string, unknown> = { name: '@@owner@@' }) {
+      await autoChannels.upsert(GUILD, PRIMARY, template);
+      await secondaries.create({
+        channelId: 'c1',
+        guildId: GUILD,
+        primaryChannelId: PRIMARY,
+        ownerId: OWNER,
+        state: { name: 'stale', index: 0 },
+      });
+      voice.put('c1', member(OWNER, ['A Bad Game']));
+    }
+
+    it('names a new room with the match masked', async () => {
+      // A prior test blocks the guild, and a blocked guild creates nothing.
+      await guilds.transitionAuth({ guildId: GUILD, toStatus: 'trial' });
+      await autoChannels.upsert(GUILD, PRIMARY, { name: "@@owner@@'s room" });
+      const owner = member(OWNER);
+      voice.put(PRIMARY, owner);
+      await feature.handleVoiceStateUpdate({
+        guildId: GUILD,
+        member: owner,
+        afterChannelId: PRIMARY,
+      });
+      expect(actions.ofType('create')[0]!.name).toBe("zz***zz's room");
+    });
+
+    it('masks a re-render, and renames nothing when the masked name is unchanged', async () => {
+      await ownedRoom();
+      await feature.rerenderSecondary(GUILD, 'c1');
+      await feature.rerenderSecondary(GUILD, 'c1');
+      expect(actions.ofType('rename').map((a) => a.name)).toEqual(['zz***zz']);
+    });
+
+    it('masks the voice status, a game title included', async () => {
+      await ownedRoom({ name: 'room', status: 'Playing @@game_name@@' });
+      await feature.rerenderSecondary(GUILD, 'c1');
+      expect(actions.ofType('status').map((a) => a.status)).toEqual(['Playing A *** Game']);
+    });
+
+    it('masks an adopted channel', async () => {
+      await managed.create({
+        channelId: 'm1',
+        guildId: GUILD,
+        ownerId: OWNER,
+        template: { name: '@@owner@@ lounge' },
+      });
+      voice.put('m1', member(OWNER));
+      const f = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        managed,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+      });
+      await f.rerenderManaged(GUILD, 'm1');
+      expect(actions.ofType('rename').map((a) => a.name)).toEqual(['zz***zz lounge']);
+    });
+
+    it('masks the editor previews, live and for a creator channel', async () => {
+      await ownedRoom();
+      const room = await feature.getEditorState('channel', GUILD, 'c1');
+      expect(room.name.preview).toBe('zz***zz');
+      await autoChannels.upsert(GUILD, PRIMARY, { name: 'a bad name' });
+      const creator = await feature.getEditorState('primary', GUILD, PRIMARY);
+      expect(creator.name.preview).toBe('a *** name');
+    });
+
+    it('hands /channelinfo a context that masks', async () => {
+      await ownedRoom();
+      const info = await feature.channelInfo(GUILD, 'c1');
+      expect(renderChannelName('@@owner@@', info.render!.ctx)).toBe('zz***zz');
+    });
+
+    it('masks the owner a "⇩ Join" channel is named after, on every path', async () => {
+      const changes: string[] = [];
+      const named: string[] = [];
+      const f = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+        onOwnerChanged: (_g, _c, _id, name) => {
+          changes.push(name);
+          return Promise.resolve();
+        },
+        makePrivateOnCreate: (_g, _c, _owner, name) => {
+          named.push(name);
+          return Promise.resolve();
+        },
+      });
+      await f.repointJoinCompanion(GUILD, 'c1', member(OWNER));
+      expect(changes).toEqual(['zz***zz']);
+      expect(await f.nameFor(GUILD, member(OWNER))).toBe('zz***zz');
+
+      await guilds.transitionAuth({ guildId: GUILD, toStatus: 'trial' });
+      await autoChannels.upsert(GUILD, PRIMARY, { name: 'room', defaultPrivate: true });
+      const owner = member(OWNER);
+      voice.put(PRIMARY, owner);
+      await f.handleVoiceStateUpdate({ guildId: GUILD, member: owner, afterChannelId: PRIMARY });
+      expect(named).toEqual(['zz***zz']);
+    });
+
+    describe('and word_filter.disabled', () => {
+      let asked = 0;
+      const withLever = (disabled: boolean): VoiceFeature =>
+        new VoiceFeature({
+          autoChannels,
+          secondaries,
+          guilds,
+          actions,
+          voice,
+          selfHosted: true,
+          logger: fakeLogger(),
+          gate: {
+            allowCreate: () => Promise.resolve({ allowed: true }),
+            wordFilterDisabled: () => {
+              asked += 1;
+              return Promise.resolve(disabled);
+            },
+          },
+        });
+
+      beforeEach(() => {
+        asked = 0;
+      });
+
+      it('masks nothing while it is on, and masks again once it is lifted', async () => {
+        await ownedRoom();
+        await withLever(true).rerenderSecondary(GUILD, 'c1');
+        await withLever(false).rerenderSecondary(GUILD, 'c1');
+        expect(actions.ofType('rename').map((a) => a.name)).toEqual([OWNER, 'zz***zz']);
+      });
+
+      it('is never asked about for a server with no list', async () => {
+        await guilds.updateSettings(GUILD, { blocked_words: [] });
+        await ownedRoom();
+        await withLever(true).rerenderSecondary(GUILD, 'c1');
+        expect(asked).toBe(0);
+        expect(actions.ofType('rename').map((a) => a.name)).toEqual([OWNER]);
+      });
+    });
+  });
+
   it('rerenderSiblings re-renders all channels of a primary, counting rate limits', async () => {
     actions.simulateRenameRateLimit = true;
     for (const id of ['s1', 's2']) {

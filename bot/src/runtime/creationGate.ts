@@ -48,6 +48,7 @@ export class RuntimeCreationGate implements CreationGate {
         commandAccessDisabled: boolean;
         roomAccessDisabled: boolean;
         memberPrefsDisabled: boolean;
+        wordFilterDisabled: boolean;
       }
     | undefined;
 
@@ -190,6 +191,25 @@ export class RuntimeCreationGate implements CreationGate {
     }
   }
 
+  /**
+   * The blocked words lever alone (`word_filter.disabled`), for the doors that refuse a typed
+   * name, the renders that mask one and `/blockedwords`. None of them is a room create, and a
+   * render runs for every room on every sweep.
+   *
+   * Fails OPEN like the five above, and for their reason: a list is something an admin wrote,
+   * and a database blip must not quietly withdraw it, so a failed read counts as NOT disabled
+   * and the list keeps applying. Shares the cached snapshot, so asking costs no extra query.
+   * This is NOT `deps.flags.getBool`, which is an uncached SELECT per call.
+   */
+  async wordFilterDisabled(): Promise<boolean> {
+    try {
+      return (await this.readFlags()).wordFilterDisabled;
+    } catch (err) {
+      this.opts.logger.warn({ err }, 'word filter flag read failed; treating as enabled');
+      return false;
+    }
+  }
+
   private async readFlags(): Promise<{
     paused: boolean;
     limit: number;
@@ -199,6 +219,7 @@ export class RuntimeCreationGate implements CreationGate {
     commandAccessDisabled: boolean;
     roomAccessDisabled: boolean;
     memberPrefsDisabled: boolean;
+    wordFilterDisabled: boolean;
   }> {
     const now = Date.now();
     if (this.flagCache && now - this.flagCache.at < this.flagCacheMs) {
@@ -211,6 +232,7 @@ export class RuntimeCreationGate implements CreationGate {
         commandAccessDisabled,
         roomAccessDisabled,
         memberPrefsDisabled,
+        wordFilterDisabled,
       } = this.flagCache;
       return {
         paused,
@@ -221,6 +243,7 @@ export class RuntimeCreationGate implements CreationGate {
         commandAccessDisabled,
         roomAccessDisabled,
         memberPrefsDisabled,
+        wordFilterDisabled,
       };
     }
     const all = await this.opts.flags.getAll();
@@ -233,6 +256,7 @@ export class RuntimeCreationGate implements CreationGate {
     const commandAccessDisabled = all[RUNTIME_FLAGS.COMMAND_ACCESS_DISABLED] === true;
     const roomAccessDisabled = all[RUNTIME_FLAGS.ROOM_ACCESS_DISABLED] === true;
     const memberPrefsDisabled = all[RUNTIME_FLAGS.MEMBER_PREFS_DISABLED] === true;
+    const wordFilterDisabled = all[RUNTIME_FLAGS.WORD_FILTER_DISABLED] === true;
     this.flagCache = {
       at: now,
       paused,
@@ -243,6 +267,7 @@ export class RuntimeCreationGate implements CreationGate {
       commandAccessDisabled,
       roomAccessDisabled,
       memberPrefsDisabled,
+      wordFilterDisabled,
     };
     return {
       paused,
@@ -253,6 +278,7 @@ export class RuntimeCreationGate implements CreationGate {
       commandAccessDisabled,
       roomAccessDisabled,
       memberPrefsDisabled,
+      wordFilterDisabled,
     };
   }
 }

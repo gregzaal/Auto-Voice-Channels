@@ -16,6 +16,7 @@ describe('buildCommandDefinitions', () => {
         'alias',
         'alwayshidden',
         'alwaysprivate',
+        'blockedwords',
         'botprofile',
         'channelinfo',
         'controlpanel',
@@ -49,7 +50,7 @@ describe('buildCommandDefinitions', () => {
     );
     // The number the release notes and the docs state. A command added or dropped has to
     // change it here, where somebody is looking, and not only in the list above.
-    expect(defs).toHaveLength(33);
+    expect(defs).toHaveLength(34);
   });
 
   /**
@@ -84,6 +85,7 @@ describe('buildCommandDefinitions', () => {
       'inheritpermissions',
       'logging',
       'restrict',
+      'blockedwords',
     ]) {
       expect(byName.get(name)!.default_member_permissions).toBe(manage);
     }
@@ -154,6 +156,7 @@ describe('buildCommandDefinitions', () => {
       'botprofile',
       'group',
       'logging',
+      'blockedwords',
     ]) {
       expect(byName.get(name)!.options ?? [], `${name} should have no options`).toHaveLength(0);
     }
@@ -341,6 +344,29 @@ describe('buildCommandDefinitions', () => {
       expect(def.description).not.toMatch(/[—–‘’“”;]/);
       expect(def.description.toLowerCase()).not.toMatch(/primary|secondary/);
       expect(def.description).toContain('hidden');
+    });
+  });
+
+  /**
+   * Opens a box holding the list, so it takes no options, and it decides what every member may
+   * type into a room name, so it is an admin command like `/restrict`.
+   */
+  describe('/blockedwords', () => {
+    const def = byName.get('blockedwords')! as unknown as {
+      description: string;
+      default_member_permissions?: string | null;
+      dm_permission?: boolean;
+    };
+
+    it('is admin only like /restrict, and guild only', () => {
+      expect(def.default_member_permissions).toBe(PermissionFlagsBits.ManageChannels.toString());
+      expect(def.dm_permission).toBe(false);
+    });
+
+    it('says what it does in one short sentence a customer can read', () => {
+      expect(def.description.length).toBeLessThanOrEqual(100);
+      expect(def.description).not.toMatch(/[—–‘’“”;]/);
+      expect(def.description.toLowerCase()).not.toMatch(/primary|secondary/);
     });
   });
 

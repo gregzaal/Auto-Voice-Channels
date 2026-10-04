@@ -461,4 +461,69 @@ describe('RuntimeCreationGate', () => {
       expect(warn).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe('the blocked words lever', () => {
+    it('is off unless the flag is exactly true', async () => {
+      const unset = new RuntimeCreationGate({ flags: fakeFlags(), logger: fakeLogger() });
+      expect(await unset.wordFilterDisabled()).toBe(false);
+      const truthy = new RuntimeCreationGate({
+        flags: fakeFlags({ [RUNTIME_FLAGS.WORD_FILTER_DISABLED]: 'yes' }),
+        logger: fakeLogger(),
+      });
+      expect(await truthy.wordFilterDisabled()).toBe(false);
+      const on = new RuntimeCreationGate({
+        flags: fakeFlags({ [RUNTIME_FLAGS.WORD_FILTER_DISABLED]: true }),
+        logger: fakeLogger(),
+      });
+      expect(await on.wordFilterDisabled()).toBe(true);
+    });
+
+    /** Its own flag: throwing it must not switch any other feature off, or the reverse. */
+    it('is independent of the other levers, and never rides a creation decision', async () => {
+      const gate = new RuntimeCreationGate({
+        flags: fakeFlags({ [RUNTIME_FLAGS.WORD_FILTER_DISABLED]: true }),
+        logger: fakeLogger(),
+      });
+      expect(await gate.wordFilterDisabled()).toBe(true);
+      expect(await gate.commandAccessDisabled()).toBe(false);
+      expect(await gate.memberPrefsDisabled()).toBe(false);
+      expect(await gate.allowCreate('g1')).toEqual({ allowed: true });
+      for (const other of [
+        RUNTIME_FLAGS.COMMAND_ACCESS_DISABLED,
+        RUNTIME_FLAGS.ROOM_ACCESS_DISABLED,
+        RUNTIME_FLAGS.MEMBER_PREFS_DISABLED,
+        RUNTIME_FLAGS.CONTROL_PANEL_DISABLED,
+      ]) {
+        const unrelated = new RuntimeCreationGate({
+          flags: fakeFlags({ [other]: true }),
+          logger: fakeLogger(),
+        });
+        expect(await unrelated.wordFilterDisabled()).toBe(false);
+      }
+    });
+
+    /** A render asks for every room on every sweep, and `getAll` is a SELECT. */
+    it('reads through the cached snapshot the other levers share', async () => {
+      const getAll = vi.fn().mockResolvedValue({ [RUNTIME_FLAGS.WORD_FILTER_DISABLED]: true });
+      const gate = new RuntimeCreationGate({
+        flags: { getAll } as unknown as RuntimeFlagsRepository,
+        logger: fakeLogger(),
+      });
+      await gate.commandAccessDisabled();
+      for (let i = 0; i < 5; i += 1) expect(await gate.wordFilterDisabled()).toBe(true);
+      expect(getAll).toHaveBeenCalledTimes(1);
+    });
+
+    /** A blip must not quietly withdraw a list an admin wrote. */
+    it('treats a failed flag read as not disabled', async () => {
+      const flags = { getAll: () => Promise.reject(new Error('db down')) };
+      const warn = vi.fn();
+      const gate = new RuntimeCreationGate({
+        flags: flags as unknown as RuntimeFlagsRepository,
+        logger: { ...fakeLogger(), warn } as unknown as Logger,
+      });
+      expect(await gate.wordFilterDisabled()).toBe(false);
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+  });
 });

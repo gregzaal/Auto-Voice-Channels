@@ -21,6 +21,7 @@ import { controlPanelId } from '../features/voice/controlPanel.js';
 import { controlAppearanceId, controlSettingsId, controlToggleId } from './controlPanelSettings.js';
 import { botProfileResetId, botProfileSetId } from './botProfilePanel.js';
 import { alwaysId, joinId } from '../features/voice/joinPanel.js';
+import { BLOCKED_WORDS_MODAL_ID } from './blockedWordsModal.js';
 
 /** A Discord "Missing Permissions" (50013) rejection, as thrown by a failed create. */
 function missingPermissions(): DiscordAPIError {
@@ -7285,5 +7286,450 @@ describe('registerInteractionHandler (remembered room settings)', () => {
     expect(text).not.toMatch(/[‘’“”]/);
     expect(text).not.toMatch(/;/);
     expect(text.toLowerCase()).not.toMatch(/primary|secondary/);
+  });
+});
+
+/**
+ * A server's blocked words: the doors that refuse a typed name, status or nickname, and
+ * `/blockedwords`, which edits the list.
+ *
+ * Driven through the real router with the list on the guild row, because that row is where
+ * the doors read it from. What is pinned is what a unit test of the matcher cannot see: which
+ * doors check, that each answers the way its interaction allows (a deferred command edits, a
+ * modal submit replies), that nothing is written when a text is refused, that nobody is
+ * exempt, that a removal is never refused, and that neither a refusal nor a log line repeats
+ * the word.
+ */
+describe('registerInteractionHandler (blocked words)', () => {
+  let dispose: (() => void) | undefined;
+  afterEach(() => dispose?.());
+
+  const KAY = '111111111111111111';
+  const ROOM = 'room-9';
+  const WORD = 'zzbadzz';
+  const NAME_REFUSAL = "That has a word this server doesn't allow in room names.";
+  const STATUS_REFUSAL = "That has a word this server doesn't allow in a room's status.";
+
+  function wordsEnv(
+    words: unknown,
+    opts: { paused?: boolean; authStatus?: string; saved?: Record<string, unknown> } = {},
+  ) {
+    const ok = () => vi.fn().mockResolvedValue({ ok: true, message: 'done' });
+    const s = {
+      setName: ok(),
+      setStatus: ok(),
+      setNick: ok(),
+      setTemplate: ok(),
+      getBlockedWords: vi
+        .fn()
+        .mockResolvedValue(Array.isArray(words) ? (words as string[]) : ([] as string[])),
+      setBlockedWords: vi
+        .fn()
+        .mockResolvedValue(opts.saved ?? { ok: true, message: '', changed: true, count: 2 }),
+      getEditorState: vi.fn().mockResolvedValue({
+        found: true,
+        scope: 'channel',
+        ownerId: KAY,
+        name: { effectiveTemplate: 'T', preview: 'T' },
+        status: { effectiveTemplate: 'S', preview: 'S' },
+      }),
+      rerenderByOwner: vi.fn().mockResolvedValue({ considered: 0, renamed: 0, rateLimited: 0 }),
+      rerenderSiblings: vi.fn().mockResolvedValue({ considered: 0, renamed: 0, rateLimited: 0 }),
+    };
+    const serverLog = vi.fn();
+    const wordFilterDisabled = vi.fn().mockResolvedValue(opts.paused ?? false);
+    const env = setup({
+      selfHosted: false,
+      guilds: {
+        get: vi.fn().mockResolvedValue({
+          authStatus: opts.authStatus ?? 'active',
+          ...(words === undefined ? {} : { settings: { blocked_words: words } }),
+        }),
+        isEntitled: vi.fn().mockResolvedValue(true),
+      } as never,
+      voiceCommands: { setName: s.setName, setStatus: s.setStatus } as never,
+      settings: {
+        setNick: s.setNick,
+        setTemplate: s.setTemplate,
+        getBlockedWords: s.getBlockedWords,
+        setBlockedWords: s.setBlockedWords,
+        getConfig: vi
+          .fn()
+          .mockResolvedValue({ enabled: true, primaries: [], aliases: {}, lists: {} }),
+        recordContact: vi.fn().mockResolvedValue(undefined),
+      } as never,
+      feature: {
+        getEditorState: s.getEditorState,
+        rerenderByOwner: s.rerenderByOwner,
+        rerenderSiblings: s.rerenderSiblings,
+      } as never,
+      serverLog,
+      wordFilterDisabled,
+    });
+    dispose = env.dispose;
+    /** Emits one interaction as Kay (by default) and waits for the router to settle. */
+    const fire = async (opts: FakeInteractionOpts) => {
+      const fake = fakeInteraction({ userId: KAY, ...opts });
+      env.client.emit('interactionCreate', fake.interaction);
+      await flush();
+      return fake;
+    };
+    return { s, serverLog, wordFilterDisabled, fire };
+  }
+
+  /** Everything the caller was sent, whichever way it was delivered. */
+  const sent = (f: ReturnType<typeof fakeInteraction>): string =>
+    [...f.reply.mock.calls, ...f.followUp.mock.calls, ...f.editReply.mock.calls]
+      .map((call) => JSON.stringify(call[0]))
+      .join('\n');
+
+  describe('the doors', () => {
+    it('refuses /nick with a blocked word, as the edit over its deferral, and writes nothing', async () => {
+      const e = wordsEnv([WORD]);
+      const f = await e.fire({ kind: 'command', commandName: 'nick', optionString: `so ${WORD}` });
+      expect(f.interaction.deferReply).toHaveBeenCalled();
+      expect(f.reply).not.toHaveBeenCalled();
+      expect(sent(f)).toContain(NAME_REFUSAL);
+      expect(e.s.setNick).not.toHaveBeenCalled();
+    });
+
+    it('never refuses /nick reset, which only takes a nickname away', async () => {
+      const e = wordsEnv(['reset']);
+      await e.fire({ kind: 'command', commandName: 'nick', optionString: 'reset' });
+      expect(e.s.setNick).toHaveBeenCalledWith('g1', KAY, 'reset');
+    });
+
+    /**
+     * A room's name and status are refused inside `setName` and `setStatus`, which alone know
+     * whether a submit changes anything (`commands.integration.test.ts` pins that half). This
+     * stands in for them: it asks the check the router hands over, as the real ones do for a
+     * value that is not a reset and not what the room already has.
+     */
+    const asking = (fn: ReturnType<typeof vi.fn>) =>
+      fn.mockImplementation(
+        async (
+          _guildId: string,
+          _channelId: string,
+          _userId: string,
+          text: string,
+          opts?: { refuseText?: (text: string) => Promise<string | null> },
+        ) => {
+          const refusal = (await opts?.refuseText?.(text)) ?? null;
+          return refusal === null ? { ok: true, message: 'done' } : { ok: false, message: refusal };
+        },
+      );
+
+    it('refuses the room panel Name box, as the edit over its deferral, from inside the write', async () => {
+      const e = wordsEnv([WORD]);
+      asking(e.s.setName);
+      const f = await e.fire({
+        kind: 'modal',
+        customId: controlPanelId('renameset', ROOM),
+        textInputs: { input: `${WORD} room` },
+      });
+      expect(e.s.setName).toHaveBeenCalledWith('g1', ROOM, KAY, `${WORD} room`, {
+        admin: false,
+        fromPanel: true,
+        refuseText: expect.any(Function),
+      });
+      expect(sent(f)).toContain(NAME_REFUSAL);
+      expect(f.interaction.deferReply).toHaveBeenCalledWith({ flags: MessageFlags.Ephemeral });
+      expect(f.interaction.update).not.toHaveBeenCalled();
+    });
+
+    it('hands no check over for a server with no list', async () => {
+      const e = wordsEnv(undefined);
+      await e.fire({
+        kind: 'modal',
+        customId: controlPanelId('renameset', ROOM),
+        textInputs: { input: '' },
+      });
+      expect(e.s.setName).toHaveBeenCalledWith('g1', ROOM, KAY, 'reset', {
+        admin: false,
+        fromPanel: true,
+      });
+    });
+
+    it.each([
+      ['name', NAME_REFUSAL],
+      ['status', STATUS_REFUSAL],
+    ] as const)('refuses a room %s typed into the /name editor', async (field, refusal) => {
+      const e = wordsEnv([WORD]);
+      asking(e.s.setName);
+      asking(e.s.setStatus);
+      const f = await e.fire({
+        kind: 'modal',
+        customId: editorId('save', 'channel', field, ROOM),
+        fromMessage: true,
+        textInputs: { template: `Playing ${WORD.toUpperCase()}` },
+      });
+      expect(sent(f)).toContain(refusal);
+      expect(f.followUp).toHaveBeenCalledWith(expect.objectContaining({ ephemeral: true }));
+    });
+
+    /** Blocking `game` must never refuse the token `@@game_name@@`, whose output is masked anyway. */
+    it('judges only the text a member typed, never a token in the template', async () => {
+      const e = wordsEnv(['game', 'live']);
+      asking(e.s.setName);
+      const f = await e.fire({
+        kind: 'modal',
+        customId: editorId('save', 'channel', 'name', ROOM),
+        fromMessage: true,
+        textInputs: { template: '{{LIVE ?? 🔴 // @@game_name@@}} room' },
+      });
+      expect(sent(f)).not.toContain(NAME_REFUSAL);
+      expect(e.serverLog).not.toHaveBeenCalled();
+    });
+
+    it('hands the check to the editor Reset too, which the write never refuses', async () => {
+      const e = wordsEnv(['reset']);
+      await e.fire({ kind: 'button', customId: editorId('reset', 'channel', 'name', ROOM) });
+      expect(e.s.setName).toHaveBeenCalledWith('g1', ROOM, KAY, 'reset', {
+        admin: false,
+        refuseText: expect.any(Function),
+      });
+    });
+
+    /** The list is the server's, and a rendered name is masked whoever typed it. */
+    it('exempts nobody, an admin included', async () => {
+      const e = wordsEnv([WORD]);
+      const f = await e.fire({
+        kind: 'command',
+        commandName: 'nick',
+        optionString: WORD,
+        manageChannels: true,
+        administrator: true,
+      });
+      expect(sent(f)).toContain(NAME_REFUSAL);
+      expect(e.s.setNick).not.toHaveBeenCalled();
+    });
+
+    /** A creator channel's template is the admin's own configuration, and the render masks it. */
+    it('does not check a creator channel template', async () => {
+      const e = wordsEnv([WORD]);
+      await e.fire({
+        kind: 'modal',
+        customId: editorId('save', 'primary', 'name', 'p1'),
+        fromMessage: true,
+        manageChannels: true,
+        textInputs: { template: WORD },
+      });
+      expect(e.s.setTemplate).toHaveBeenCalledWith('g1', 'p1', WORD);
+    });
+
+    it('posts a /logging line naming the member and never the text', async () => {
+      const e = wordsEnv([WORD]);
+      const f = await e.fire({ kind: 'command', commandName: 'nick', optionString: WORD });
+      expect(e.serverLog).toHaveBeenCalledWith(
+        'g1',
+        1,
+        `🚫 <@${KAY}> tried to use a blocked word in their nickname.`,
+      );
+      expect(JSON.stringify(e.serverLog.mock.calls)).not.toContain(WORD);
+      expect(sent(f)).not.toContain(WORD);
+    });
+
+    it('lets everything through while word_filter.disabled is on', async () => {
+      const e = wordsEnv([WORD], { paused: true });
+      await e.fire({ kind: 'command', commandName: 'nick', optionString: WORD });
+      expect(e.s.setNick).toHaveBeenCalledWith('g1', KAY, WORD);
+      expect(e.serverLog).not.toHaveBeenCalled();
+    });
+
+    /** The lever is asked only once a text has matched, so a server with no list pays nothing. */
+    it('never asks the lever for a server with no list, or a text with no match', async () => {
+      const none = wordsEnv(undefined);
+      await none.fire({ kind: 'command', commandName: 'nick', optionString: WORD });
+      expect(none.s.setNick).toHaveBeenCalled();
+      expect(none.wordFilterDisabled).not.toHaveBeenCalled();
+      dispose?.();
+      const clean = wordsEnv([WORD]);
+      await clean.fire({ kind: 'command', commandName: 'nick', optionString: 'fine' });
+      expect(clean.s.setNick).toHaveBeenCalled();
+      expect(clean.wordFilterDisabled).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('/blockedwords', () => {
+    it('refuses a member without Manage Channels before the modal opens', async () => {
+      const e = wordsEnv(['bad']);
+      const f = await e.fire({ kind: 'command', commandName: 'blockedwords' });
+      expect(f.interaction.showModal).not.toHaveBeenCalled();
+      expect(sent(f)).toContain('Manage Channels');
+    });
+
+    it('opens the box prefilled with the list, one entry per line', async () => {
+      const e = wordsEnv(['bad', 'worse*']);
+      const f = await e.fire({
+        kind: 'command',
+        commandName: 'blockedwords',
+        manageChannels: true,
+      });
+      const modal = JSON.stringify(f.interaction.showModal.mock.calls[0]?.[0]);
+      expect(modal).toContain(BLOCKED_WORDS_MODAL_ID);
+      expect(modal).toContain('bad\\nworse*');
+      expect(f.reply).not.toHaveBeenCalled();
+      // From the guild row the router read for this click, not the settings cache: the
+      // submit replaces the whole list, so a prefill one save behind would undo that save.
+      expect(e.s.getBlockedWords).not.toHaveBeenCalled();
+    });
+
+    /** A paste that went wrong must not empty the list. */
+    it('saves nothing when the box held text and none of it could be used', async () => {
+      const e = wordsEnv(['bad']);
+      const f = await e.fire({
+        kind: 'modal',
+        customId: BLOCKED_WORDS_MODAL_ID,
+        manageChannels: true,
+        textInputs: { words: 'b*d\n*' },
+      });
+      expect(e.s.setBlockedWords).not.toHaveBeenCalled();
+      expect(sent(f)).toContain('Nothing in that could be saved, so the list is as it was.');
+      expect(e.serverLog).not.toHaveBeenCalled();
+    });
+
+    /** A list pasted with spaces arrives as one huge entry, and the reply must still send. */
+    it('keeps the reply inside what Discord takes, however long the rejected entries', async () => {
+      const e = wordsEnv([]);
+      const huge = Array.from({ length: 12 }, (_, i) => `${i} ${'word '.repeat(300)}`).join('\n');
+      const f = await e.fire({
+        kind: 'modal',
+        customId: BLOCKED_WORDS_MODAL_ID,
+        manageChannels: true,
+        textInputs: { words: `bad\n${huge}` },
+      });
+      const content = (f.editReply.mock.calls.at(-1)?.[0] as { content: string }).content;
+      expect(content.length).toBeLessThanOrEqual(2000);
+      expect(content).toContain('This server blocks');
+    });
+
+    it('says in the box when word filtering is switched off for now', async () => {
+      const e = wordsEnv(['bad'], { paused: true });
+      const f = await e.fire({
+        kind: 'command',
+        commandName: 'blockedwords',
+        manageChannels: true,
+      });
+      expect(JSON.stringify(f.interaction.showModal.mock.calls[0]?.[0])).toContain(
+        'switched off for now',
+      );
+    });
+
+    it('saves what was typed, split and checked, and says how many words are blocked', async () => {
+      const e = wordsEnv(['bad']);
+      const f = await e.fire({
+        kind: 'modal',
+        customId: BLOCKED_WORDS_MODAL_ID,
+        manageChannels: true,
+        textInputs: { words: 'bad, worse*\n\nb*d\nBAD' },
+      });
+      expect(f.interaction.deferReply).toHaveBeenCalledWith({ flags: MessageFlags.Ephemeral });
+      expect(e.s.setBlockedWords).toHaveBeenCalledWith('g1', ['bad', 'worse*'], {
+        refuseAdditions: false,
+      });
+      const text = sent(f);
+      expect(text).toContain('This server blocks **2 words**');
+      expect(text).toContain('`b*d`');
+      expect(f.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({ allowedMentions: { parse: [] } }),
+      );
+    });
+
+    it('logs who changed the list and how many words it has, never the words', async () => {
+      const e = wordsEnv([]);
+      await e.fire({
+        kind: 'modal',
+        customId: BLOCKED_WORDS_MODAL_ID,
+        manageChannels: true,
+        textInputs: { words: `${WORD}\nworse` },
+      });
+      expect(e.serverLog).toHaveBeenCalledWith(
+        'g1',
+        1,
+        `🚫 <@${KAY}> changed the blocked words list. It has 2 words now.`,
+      );
+      expect(JSON.stringify(e.serverLog.mock.calls)).not.toContain(WORD);
+    });
+
+    it('logs nothing when the list did not change', async () => {
+      const e = wordsEnv(['bad'], {
+        saved: { ok: true, message: '', changed: false, count: 1 },
+      });
+      await e.fire({
+        kind: 'modal',
+        customId: BLOCKED_WORDS_MODAL_ID,
+        manageChannels: true,
+        textInputs: { words: 'bad' },
+      });
+      expect(e.serverLog).not.toHaveBeenCalled();
+    });
+
+    it('says the filter is switched off for now when the lever is on', async () => {
+      const e = wordsEnv(['bad'], { paused: true });
+      const f = await e.fire({
+        kind: 'modal',
+        customId: BLOCKED_WORDS_MODAL_ID,
+        manageChannels: true,
+        textInputs: { words: 'bad\nworse' },
+      });
+      expect(sent(f)).toContain('Word filtering is switched off for now');
+    });
+
+    it('refuses a submit from a member who lost Manage Channels, and writes nothing', async () => {
+      const e = wordsEnv(['bad']);
+      const f = await e.fire({
+        kind: 'modal',
+        customId: BLOCKED_WORDS_MODAL_ID,
+        textInputs: { words: '' },
+      });
+      expect(sent(f)).toContain('Manage Channels');
+      expect(e.s.setBlockedWords).not.toHaveBeenCalled();
+    });
+
+    /** The hard gate leaves the writes that only take away, and refuses the ones that add. */
+    describe('in a lapsed server', () => {
+      it('opens the box', async () => {
+        const e = wordsEnv(['bad'], { authStatus: 'expired' });
+        const f = await e.fire({
+          kind: 'command',
+          commandName: 'blockedwords',
+          manageChannels: true,
+        });
+        expect(f.interaction.showModal).toHaveBeenCalled();
+      });
+
+      it('asks the write to refuse additions, and answers one with the reactivation notice', async () => {
+        const e = wordsEnv(['bad'], {
+          authStatus: 'expired',
+          saved: { ok: false, message: '', changed: false, count: 1, refusedAddition: true },
+        });
+        const f = await e.fire({
+          kind: 'modal',
+          customId: BLOCKED_WORDS_MODAL_ID,
+          manageChannels: true,
+          textInputs: { words: 'bad\nworse' },
+        });
+        expect(e.s.setBlockedWords).toHaveBeenCalledWith('g1', ['bad', 'worse'], {
+          refuseAdditions: true,
+        });
+        expect(sent(f)).toContain('auto-voice.io');
+        expect(e.serverLog).not.toHaveBeenCalled();
+      });
+
+      it('saves a submit that only takes entries away', async () => {
+        const e = wordsEnv(['bad', 'worse'], {
+          authStatus: 'expired',
+          saved: { ok: true, message: '', changed: true, count: 1 },
+        });
+        const f = await e.fire({
+          kind: 'modal',
+          customId: BLOCKED_WORDS_MODAL_ID,
+          manageChannels: true,
+          textInputs: { words: 'bad' },
+        });
+        expect(sent(f)).toContain('This server blocks **1 word**');
+        expect(sent(f)).not.toContain('auto-voice.io');
+      });
+    });
   });
 });

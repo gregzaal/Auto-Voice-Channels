@@ -26,6 +26,7 @@ import {
 import {
   displayName,
   groupKeyFor,
+  joinDisplayName,
   parseVoiceSettings,
   readGroups,
   type VoiceSettings,
@@ -208,6 +209,15 @@ export interface CreationGate {
    * restores what the member saved. Absent means not disabled.
    */
   memberPrefsDisabled?(): Promise<boolean>;
+  /**
+   * The blocked words lever alone (`word_filter.disabled`), for the renders that mask a
+   * server's blocked words: while it is on, nothing is masked.
+   *
+   * Its own method for the reason the ones above are. Asked only for a server with a
+   * non-empty list, through the gate's cached snapshot (no query), and failing open, so a
+   * blip keeps masking. Absent means not disabled.
+   */
+  wordFilterDisabled?(): Promise<boolean>;
 }
 
 export interface VoiceFeatureDeps {
@@ -1153,7 +1163,7 @@ export class VoiceFeature {
           guildId,
           newChannelId,
           member.id,
-          displayName(settings, member),
+          joinDisplayName(settings, member),
           startMode,
         );
       } catch (err) {
@@ -1490,7 +1500,7 @@ export class VoiceFeature {
         guildId,
         roomId,
         member.id,
-        displayName(settings, member),
+        joinDisplayName(settings, member),
         opts.mode,
         { quiet: opts.quiet },
       );
@@ -1673,7 +1683,10 @@ export class VoiceFeature {
 
     await this.deps.secondaries.setOwner(channelId, newOwner.id);
     const guild = await this.deps.guilds.ensure(guildId);
-    const newOwnerName = displayName(await this.voiceSettings(guild.settings, guildId), newOwner);
+    const newOwnerName = joinDisplayName(
+      await this.voiceSettings(guild.settings, guildId),
+      newOwner,
+    );
 
     this.deps.logger.info(
       { guildId, secondaryId: channelId, from: leaverId, to: newOwner.id },
@@ -1707,7 +1720,7 @@ export class VoiceFeature {
     if (!this.deps.onOwnerChanged) return;
     try {
       const guild = await this.deps.guilds.ensure(guildId);
-      const name = displayName(await this.voiceSettings(guild.settings, guildId), newOwner);
+      const name = joinDisplayName(await this.voiceSettings(guild.settings, guildId), newOwner);
       await this.deps.onOwnerChanged(guildId, channelId, newOwner.id, name, { handover: true });
     } catch (err) {
       this.deps.logger.warn(
@@ -1719,13 +1732,13 @@ export class VoiceFeature {
 
   /**
    * A member's name as rooms show it: their `/nick` applied, unless a restriction on
-   * Nickname now covers them. For a "⇩ Join {owner}" channel made by something other
-   * than this class, which should name its owner the way every other site does and
-   * not by the raw display name.
+   * Nickname now covers them, and the server's blocked words masked. For a "⇩ Join
+   * {owner}" channel made by something other than this class, which should name its owner
+   * the way every other site does and not by the raw display name.
    */
   async nameFor(guildId: string, member: VoiceMember): Promise<string> {
     const guild = await this.deps.guilds.ensure(guildId);
-    return displayName(await this.voiceSettings(guild.settings, guildId), member);
+    return joinDisplayName(await this.voiceSettings(guild.settings, guildId), member);
   }
 
   /** Appends a member to a secondary's arrival roster (no-op if already tracked). */
@@ -2205,10 +2218,24 @@ export class VoiceFeature {
     raw: Record<string, unknown>,
     guildId: string,
   ): Promise<VoiceSettings> {
-    const settings = parseVoiceSettings(raw, guildId);
-    if (Object.keys(settings.commandAccess).length === 0) return settings;
-    if (!(await this.deps.gate?.commandAccessDisabled?.())) return settings;
-    return { ...settings, commandAccess: {} };
+    let settings = parseVoiceSettings(raw, guildId);
+    if (
+      Object.keys(settings.commandAccess).length > 0 &&
+      (await this.deps.gate?.commandAccessDisabled?.())
+    ) {
+      settings = { ...settings, commandAccess: {} };
+    }
+    /**
+     * The blocked words, withdrawn while `word_filter.disabled` is on, which fails open: no
+     * render masks anything, and a "⇩ Join" channel made meanwhile carries the name as it is.
+     * Here for the reason the rules above are: every render and every Join name reads its
+     * settings through this. Asked only when the server has a list, through the gate's cached
+     * snapshot, so a server with none pays nothing.
+     */
+    if (settings.blockedWords.length > 0 && (await this.deps.gate?.wordFilterDisabled?.())) {
+      settings = { ...settings, blockedWords: [] };
+    }
+    return settings;
   }
 
   buildRenderContext(input: RenderContextInput): RenderContext {
@@ -2273,6 +2300,9 @@ export class VoiceFeature {
        */
       now: this.now(),
       lists: settings.lists,
+      // The engine masks them in every render, so this is the one line that makes every
+      // room name, status and preview built here mask the same way.
+      ...(settings.blockedWords.length > 0 ? { blockedWords: settings.blockedWords } : {}),
       ...(settings.timezone !== undefined ? { timezone: settings.timezone } : {}),
       ...(input.seed !== undefined ? { seed: input.seed } : {}),
       ...(owner ? { creatorName: displayName(settings, owner), creator: owner } : {}),
@@ -2947,6 +2977,8 @@ export class VoiceFeature {
         // new rooms start, and a probe that said "no" under it would contradict it.
         isPrivate: startMode !== 'public',
         isHidden: startMode === 'hidden',
+        // Masked as the room will be, so the preview does not show what the room cannot.
+        ...(settings.blockedWords.length > 0 ? { blockedWords: settings.blockedWords } : {}),
       };
       return {
         ...base,
@@ -3186,6 +3218,8 @@ export class VoiceFeature {
         numberOffset: own.template.startAt === undefined ? 0 : own.template.startAt - 1,
         isPrivate: startMode !== 'public',
         isHidden: startMode === 'hidden',
+        // Masked as the room will be, so the preview does not show what the room cannot.
+        ...(settings.blockedWords.length > 0 ? { blockedWords: settings.blockedWords } : {}),
       };
       const ownName = own.template.name ?? settings.channelNameTemplate;
       const ownStatus = own.template.status ?? settings.channelStatusTemplate;
