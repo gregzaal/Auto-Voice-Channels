@@ -228,7 +228,7 @@ Make your own with <#${CREATOR}>`,
   });
 
   /**
-   * `/setup`'s rule (rewrite.md decision 11) at its limit: peer actions of
+   * `/setup`'s rule at its limit: peer actions of
    * which none is the thing to press, so no Success, Primary or Danger.
    */
   it('uses only Secondary buttons', () => {
@@ -320,7 +320,7 @@ describe('control panel modals and pickers', () => {
 });
 
 /**
- * AGENTS.md's copy rules, over everything this module renders. Sentence case
+ * The project's copy rules, over everything this module renders. Sentence case
  * and the creator-channel/room vocabulary are review-only, but the punctuation
  * rules are mechanical and nothing else checks the strings a member reads here.
  */

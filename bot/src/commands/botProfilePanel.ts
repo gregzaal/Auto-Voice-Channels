@@ -33,7 +33,7 @@ import {
  *
  * One row per field, each a set and a reset (owner, 2026-09-23), so the whole
  * surface is visible at once and no field's reset hides behind another's modal.
- * Every button is Secondary under `/setup`'s rules (`rewrite.md` decision 11):
+ * Every button is Secondary under `/setup`'s rules:
  * none of the eight is more the thing to press than the others.
  */
 

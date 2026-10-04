@@ -520,8 +520,8 @@ export type ControlPanelControl = (typeof CONTROL_PANEL_CONTROLS)[number];
  * would have the mirror of this problem, so do that one by writing explicit
  * values first.
  *
- * Change the `/docs/commands` row and `feature-parity.md` §3.4 in the same
- * commit as any future flip - both state which way round this is.
+ * Change the `/docs/commands` row in the same commit as any future flip, since
+ * it states which way round this is.
  */
 export const CONTROL_PANEL_DEFAULT_ENABLED = true;
 

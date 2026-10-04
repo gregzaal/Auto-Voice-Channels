@@ -695,7 +695,7 @@ export class BillingReconciler {
        * number that was never true at any instant — on the upgrade side, where
        * being wrong charges somebody. So an unreadable member stops the pool
        * and says so, and somebody decides; the alternative is the bot quietly
-       * inventing a bill. `plans/fleets.md` §4 owns this split.
+       * inventing a bill.
        */
       if (POOL_UPGRADE_REASONS.has(decision.transition.reason)) {
         let freshSum = 0;

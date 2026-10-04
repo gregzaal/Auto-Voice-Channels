@@ -70,8 +70,8 @@ import { PANEL_FOOTER, PANEL_LINKS_FIELD } from '../panelBranding.js';
  * being in it, and their click would land on whatever room they happen to be in.
  *
  * **Every button is Secondary.** These are peer actions and none of them is the
- * thing to press, which is `/setup`'s one-Success rule (`rewrite.md` decision
- * 11) arriving at "no Success button at all" rather than a departure from it.
+ * thing to press, which is `/setup`'s one-Success rule
+ * arriving at "no Success button at all" rather than a departure from it.
  * Nothing here is ever disabled either: a control a server has switched off, or
  * that does not apply to the room right now, is absent rather than greyed out.
  */

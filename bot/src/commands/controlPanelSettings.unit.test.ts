@@ -246,7 +246,7 @@ describe('buildAppearanceModal', () => {
   });
 
   /**
-   * `/setup`'s rule (rewrite.md decision 11): at most one Success button and
+   * `/setup`'s rule: at most one Success button and
    * never a Primary, a Danger or a disabled one. The green one exists only
    * where turning the panel back on is this state's answer.
    */
@@ -370,8 +370,8 @@ describe('setControlPanelEntry', () => {
   /**
    * Golden rule 3: preserve unknown JSON fields on writes. Filtering to
    * booleans would have an older instance delete an entry it cannot read. The
-   * role column once planned for this key was built as `command_access`
-   * (`feature-parity.md` §3.3 and §3.5), so the value here is only a stand-in
+   * role column once planned for this key was built as `command_access`,
+   * so the value here is only a stand-in
    * for a shape this build does not know.
    */
   it('keeps a value it cannot read rather than deleting it', async () => {

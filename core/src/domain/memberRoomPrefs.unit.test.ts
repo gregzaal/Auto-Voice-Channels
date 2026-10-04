@@ -8,7 +8,7 @@ import {
 } from './memberRoomPrefs.js';
 
 /**
- * The numbers `docs/operations.md` and the schema comments state in words. A change to one is
+ * The numbers the schema comments and the operator documentation state in words. A change to one is
  * a change to what an operator was told and to what the Privacy page will describe, so it has
  * to be made on purpose and here as well as there.
  */

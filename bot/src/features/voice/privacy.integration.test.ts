@@ -3802,7 +3802,7 @@ describe('PrivacyService (integration)', () => {
   // -- copy rules -----------------------------------------------------------------------------
 
   /**
-   * AGENTS.md's copy rules over every reply this file made a command give, rendered,
+   * The project's copy rules over every reply this file made a command give, rendered,
    * because a source scan only catches a curly quote. Last, so it sees them all.
    */
   describe('copy rules', () => {

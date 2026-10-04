@@ -1065,8 +1065,8 @@ export class GuildSettingsService {
        * Filtering to booleans looked tidier and would mean an OLD instance,
        * during a rollout, silently deleting every entry it cannot read the moment
        * an admin toggled any single button. The role column that was once planned
-       * for this key was built as the separate `command_access` setting instead
-       * (`feature-parity.md` §3.3 and §3.5), so this build stores only booleans
+       * for this key was built as the separate `command_access` setting instead,
+       * so this build stores only booleans
        * here and the rule is golden rule 3 alone. A value this build cannot read
        * is ignored by `readControlPanel`, which is inert; a value this build
        * DELETES is gone.

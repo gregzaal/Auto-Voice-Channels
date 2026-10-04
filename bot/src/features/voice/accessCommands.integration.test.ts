@@ -710,7 +710,7 @@ describe('AccessCommands (integration)', () => {
 
   // -- copy rules ---------------------------------------------------------------------------------
 
-  /** The replies this file made, rendered, held to AGENTS.md's punctuation and vocabulary rules. */
+  /** The replies this file made, rendered, held to the project's punctuation and vocabulary rules. */
   describe('copy rules', () => {
     it('has replies to check', async () => {
       await lock();

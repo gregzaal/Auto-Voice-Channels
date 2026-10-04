@@ -34,7 +34,7 @@ export function restrictMention(target: RestrictTarget): string {
  *
  * It used to open by saying restrictions apply only on builds that include them.
  * True during a rolling deploy or a rollback, but nothing an admin can act on, so
- * the owner cut it (2026-10-04). The operations guide's rolling-deploy notes keep it.
+ * it was cut (2026-10-04).
  */
 export const RESTRICT_NOTE =
   "Discord's own Integrations settings still apply to slash commands on top of this, and the room panel buttons ignore those settings.";

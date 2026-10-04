@@ -42,7 +42,7 @@ import { settingsFaceOf } from '../features/voice/controlPanel.js';
  * away. `✅` and `❌` in the field name carry the state, which a Discord embed
  * has no checkbox for.
  *
- * Follows `/setup`'s rendering rules (`rewrite.md` decision 11): at most one
+ * Follows `/setup`'s rendering rules: at most one
  * Success button, never a Primary, a Danger or a disabled one. The Success
  * button is whatever this state's answer is, which here means it exists only
  * when the whole panel is switched off and turning it back on is the thing to
@@ -176,7 +176,7 @@ export function buildAppearanceModal(
  * The older copy narrated its own state ("rooms are not getting a control
  * panel", "panels already posted are updated too") in a panel whose state is
  * visible in the title and in eight ticks and crosses below it, which is the
- * self-referential copy AGENTS.md rules out.
+ * self-referential copy the project's copy rules rule out.
  */
 const WHAT_IT_IS =
   'The control panel is a message posted in every room this server makes, so members can see, and ' +
