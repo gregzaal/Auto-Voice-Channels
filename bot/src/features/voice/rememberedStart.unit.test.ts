@@ -116,6 +116,22 @@ describe('restoreRemembered', () => {
       });
     });
 
+    /**
+     * 0 is `/unlimit`, which no rule stops, so a rule on Size withholds a limit and never the
+     * member's own "no limit". Their room would otherwise start with the default limit and be
+     * undone by a command they are always allowed.
+     */
+    it('still restores a remembered limit of 0 for a member denied Size', () => {
+      const access: CommandAccess = { limit: { users: [ALICE], roles: [] } };
+      expect(restore(prefs({ limit: 0 }), { access })).toEqual({ limit: 0 });
+      expect(restore(prefs({ limit: 5 }), { access })).toEqual({});
+    });
+
+    it('restores a remembered limit of 0 under a Size rule even when the member cannot be resolved', () => {
+      const access: CommandAccess = { limit: { users: [ALICE], roles: [] } };
+      expect(restore(prefs({ limit: 0 }), { access, standing: undefined })).toEqual({ limit: 0 });
+    });
+
     it('is not affected by a rule on a feature the field does not belong to', () => {
       const access: CommandAccess = {
         transfer: { users: [ALICE], roles: [] },

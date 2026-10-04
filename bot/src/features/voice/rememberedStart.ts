@@ -1,5 +1,6 @@
 import type { MemberRoomPrefs, StartMode } from '@avc/core';
 import {
+  limitFeatureFor,
   mayUse,
   type CommandAccess,
   type CommandCaller,
@@ -48,7 +49,10 @@ export function standingOf(member: VoiceMember): CommandCaller | undefined {
  * **A restricted feature is inert for a denied member, saved data included** (see
  * `/restrict`): each field must pass {@link mayUse} for its own feature, so a member who was
  * denied Name after they saved one does not get it back. Name is Name, Size is Size, `private`
- * is Private and Public, and `hidden` is Hide.
+ * is Private and Public, and `hidden` is Hide. A remembered limit of 0 is `/unlimit`, an undo
+ * direction no rule stops (`limitFeatureFor`), so it applies to a member denied Size: they
+ * could remove the limit a second after the room was made, and a limit they could not choose
+ * would only be a limit they had to remove.
  *
  * **Where a rule names the feature and the member's standing cannot be resolved, the field is
  * skipped.** The guards fail OPEN on a standing they cannot read, because a person is there to
@@ -73,14 +77,15 @@ export function restoreRemembered(
 ): RememberedStart {
   if (!prefs) return {};
   const { access, standing } = input;
-  const permitted = (feature: CommandFeature): boolean => {
-    if (access[feature] === undefined) return true;
+  const permitted = (feature: CommandFeature | null): boolean => {
+    // An undo direction no rule can stop, which is what a remembered 0 is: `/unlimit`.
+    if (feature === null || access[feature] === undefined) return true;
     return standing !== undefined && mayUse(feature, standing, access);
   };
 
   const start: RememberedStart = {};
   if (prefs.name !== null && permitted('rename')) start.name = prefs.name;
-  if (prefs.limit !== null && permitted('limit')) start.limit = prefs.limit;
+  if (prefs.limit !== null && permitted(limitFeatureFor(prefs.limit))) start.limit = prefs.limit;
   if (prefs.privacy !== null) {
     const mode: Exclude<StartMode, 'public'> = prefs.privacy === 'hidden' ? 'hidden' : 'locked';
     const feature: CommandFeature = prefs.privacy === 'hidden' ? 'hide' : 'privacy';
