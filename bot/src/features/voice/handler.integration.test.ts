@@ -22,6 +22,7 @@ import {
 } from './accessPlan.js';
 import { RecordingVoiceActions } from './actions.js';
 import { CompanionTextService } from './companionText.js';
+import { ChannelObfuscatedError } from './discordAdapter.js';
 import { ControlPanelPoster } from './controlPanelPoster.js';
 import { VoiceFeature, type VoiceFeatureDeps } from './handler.js';
 import { renderChannelName } from './nameTemplate.js';
@@ -1048,6 +1049,124 @@ describe('VoiceFeature (integration)', () => {
     const row = await secondaries.get(secondaryId);
     expect(row!.state.name).toContain('Doom');
     expect(row!.state.private).toBe(true);
+  });
+
+  /**
+   * A room the bot can no longer edit costs that room, and not the guild's sweep. Discord shows
+   * a channel the bot cannot View as an obfuscated shell, which stays in the cache, so its rename
+   * throws; the renumber loops have no catch of their own, so it used to end the sweep at that
+   * room every five minutes, with the rooms after it never renumbered.
+   */
+  describe('a room the bot can no longer rename, in the sweep', () => {
+    let problems: PermissionProblemTracker;
+    let told: string[];
+    let rename: RecordingVoiceActions['renameChannel'];
+
+    beforeEach(async () => {
+      problems = new PermissionProblemTracker();
+      told = [];
+      feature = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+        permissionProblems: problems,
+        // The guild's log channel at the level problems go to, and not the renames at level 2.
+        serverLog: (_guild, level, message) => {
+          if (level === 1) told.push(message);
+        },
+      });
+      // Three rooms in creation order, each with a stale name so the sweep wants to rename it.
+      for (const id of ['r1', 'r2', 'r3']) {
+        await secondaries.create({
+          channelId: id,
+          guildId: GUILD,
+          primaryChannelId: PRIMARY,
+          ownerId: 'alice',
+          state: { name: 'STALE', index: 9 },
+        });
+        voice.put(id, member('alice', ['Halo']));
+      }
+      rename = actions.renameChannel.bind(actions);
+    });
+
+    /** Every rename of the first room fails with this, whatever the others do. */
+    const failFirstRoom = (make: () => Error) => {
+      actions.renameChannel = (guildId, channelId, name) =>
+        channelId === 'r1' ? Promise.reject(make()) : rename(guildId, channelId, name);
+    };
+    const triedFirstRoom = () =>
+      actions.ofType('rename').filter((a) => a.channelId === 'r1').length;
+
+    it('renumbers the rooms after it, records it once and leaves it alone on the next sweep', async () => {
+      let attempts = 0;
+      failFirstRoom(() => {
+        attempts += 1;
+        return new ChannelObfuscatedError('r1');
+      });
+
+      await feature.reconcileGuild(GUILD);
+
+      expect(attempts).toBe(1);
+      expect((await secondaries.get('r2'))!.state.index).toBe(1);
+      expect((await secondaries.get('r3'))!.state.index).toBe(2);
+      expect(actions.ofType('rename').map((a) => a.channelId)).toEqual(['r2', 'r3']);
+      expect(problems.recent(GUILD)).toEqual([
+        expect.objectContaining({ channelId: 'r1', operation: 'delete' }),
+      ]);
+      expect(told).toHaveLength(1);
+
+      await feature.reconcileGuild(GUILD);
+
+      expect(attempts).toBe(1);
+      expect(problems.recent(GUILD)).toHaveLength(1);
+      expect(told).toHaveLength(1);
+    });
+
+    it('does the same for a Missing Access refusal, recorded as a rename it could not make', async () => {
+      actions.failRenameForChannel = 'r1';
+
+      await feature.reconcileGuild(GUILD);
+
+      expect((await secondaries.get('r3'))!.state.index).toBe(2);
+      expect(problems.recent(GUILD)).toEqual([
+        expect.objectContaining({ channelId: 'r1', operation: 'rename' }),
+      ]);
+    });
+
+    it('asks again once the wait is over, and the incident ends when it works', async () => {
+      failFirstRoom(() => new ChannelObfuscatedError('r1'));
+      await feature.reconcileGuild(GUILD);
+      expect(problems.recent(GUILD)).toHaveLength(1);
+
+      actions.renameChannel = rename;
+      const now = Date.now();
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 7 * 60 * 60 * 1000);
+      try {
+        await feature.reconcileGuild(GUILD);
+      } finally {
+        clock.mockRestore();
+      }
+
+      expect(triedFirstRoom()).toBe(1);
+      expect((await secondaries.get('r1'))!.state.index).toBe(0);
+      expect(problems.recent(GUILD)).toEqual([]);
+    });
+
+    it('still lets an error that is not a permission failure end the sweep', async () => {
+      failFirstRoom(() => new Error('boom'));
+      await expect(feature.reconcileGuild(GUILD)).rejects.toThrow('boom');
+    });
+
+    it('does not act, or remember anything, under a dry run', async () => {
+      failFirstRoom(() => new ChannelObfuscatedError('r1'));
+      await feature.reconcileGuild(GUILD, { dryRun: true });
+      expect(actions.ofType('rename')).toEqual([]);
+      expect(problems.recent(GUILD)).toEqual([]);
+    });
   });
 
   it('rerenderSecondary is a no-op when the name is unchanged', async () => {

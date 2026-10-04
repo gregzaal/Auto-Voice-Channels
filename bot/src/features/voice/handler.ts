@@ -29,9 +29,10 @@ import {
   readGroups,
   type VoiceSettings,
 } from './guildSettings.js';
-import { isPermissionError, withoutRequestBody } from './discordAdapter.js';
+import { ChannelObfuscatedError, isPermissionError, withoutRequestBody } from './discordAdapter.js';
 import { CreationRefusedError, type PrivateCreation } from './privacy.js';
 import {
+  LOST_ACCESS_RETRY_MS,
   permissionProblemMessage,
   type PermissionOperation,
   type PermissionProblemTracker,
@@ -725,6 +726,12 @@ export interface GuildDrift {
  */
 export class VoiceFeature {
   constructor(private readonly deps: VoiceFeatureDeps) {}
+
+  /**
+   * Rooms the sweep has stopped renaming for a while, by channel id, because the bot can no
+   * longer edit them. In memory, so a restart asks once more.
+   */
+  private readonly unrenamable = new Map<string, { guildId: string; at: number }>();
 
   async handleVoiceStateUpdate(event: VoiceStateEvent): Promise<string[]> {
     if (event.beforeChannelId === event.afterChannelId) return []; // mute/unmute
@@ -2349,6 +2356,72 @@ export class VoiceFeature {
     };
   }
 
+  /**
+   * {@link rerenderSecondary} for the sweep's renumbering, where a room the bot can no longer
+   * edit costs that room and not the guild.
+   *
+   * The loops that call this have no other per-room catch, so a rename that threw ended the
+   * guild's sweep at that room: the rooms after it were never renumbered and members whose
+   * join event was missed never got a room, every five minutes. A room Discord shows only as
+   * an obfuscated shell (the bot lost View of it, mandatory from 2026-11-16) stays in the
+   * cache, so it reaches here and its rename throws `ChannelObfuscatedError`, which is a
+   * permission error. That is recorded once, and the room is left alone for
+   * {@link LOST_ACCESS_RETRY_MS}: asking again each sweep would repeat the incident, and the
+   * retry after it is how a restored permission is noticed. Anything that is not a permission
+   * error still throws, as it always did.
+   */
+  private async rerenderInSweep(
+    guildId: string,
+    channelId: string,
+    opts: RerenderOptions,
+  ): Promise<RerenderResult> {
+    const gaveUp = this.unrenamable.get(channelId);
+    if (gaveUp !== undefined && !opts.dryRun) {
+      if (Date.now() - gaveUp.at < LOST_ACCESS_RETRY_MS) return {};
+      this.unrenamable.delete(channelId);
+    }
+    try {
+      const result = await this.rerenderSecondary(guildId, channelId, opts);
+      // Asked again after the long wait and answered: the incident is over.
+      if (gaveUp !== undefined && !opts.dryRun) {
+        this.deps.permissionProblems?.clear(guildId, channelId, ['delete', 'rename']);
+      }
+      return result;
+    } catch (err) {
+      if (!isPermissionError(err)) throw err;
+      this.giveUpRenaming(guildId, channelId, err);
+      return {};
+    }
+  }
+
+  /** Remembers a room the sweep could not rename, and tells the guild once. Ids only in the log. */
+  private giveUpRenaming(guildId: string, channelId: string, err: unknown): void {
+    this.unrenamable.set(channelId, { guildId, at: Date.now() });
+    // A channel the bot can no longer see is lost access, recorded as the access pass does,
+    // so a room both of them find is one incident.
+    const operation = err instanceof ChannelObfuscatedError ? 'delete' : 'rename';
+    const told = this.deps.permissionProblems
+      ?.recent(guildId)
+      .some((p) => p.channelId === channelId && p.operation === operation);
+    if (told !== true) {
+      this.deps.permissionProblems?.record(guildId, { channelId, operation, at: Date.now() });
+      this.deps.serverLog?.(guildId, 1, permissionProblemMessage(channelId));
+    }
+    this.deps.logger.warn(
+      { err: withoutRequestBody(err), guildId, channelId },
+      'could not rename a room, leaving it alone for a while',
+    );
+  }
+
+  /** Forgets the rooms of a guild that no longer exist, so the map holds only rooms still being left alone. */
+  private forgetGoneRooms(guildId: string, survivors: readonly SecondaryChannelRow[]): void {
+    if (this.unrenamable.size === 0) return;
+    const live = new Set(survivors.map((s) => s.channelId));
+    for (const [channelId, gaveUp] of this.unrenamable) {
+      if (gaveUp.guildId === guildId && !live.has(channelId)) this.unrenamable.delete(channelId);
+    }
+  }
+
   /** Re-renders every secondary owned by a member (after `/nick`). */
   async rerenderByOwner(
     guildId: string,
@@ -3282,6 +3355,7 @@ export class VoiceFeature {
     // number is never duplicated within its scope. A **grouped** category numbers
     // across ALL its primaries as one block; ungrouped primaries number
     // independently (the legacy per-primary `check_rename`).
+    this.forgetGoneRooms(guildId, survivors);
     const groups = readGroups((await this.deps.guilds.ensure(guildId)).settings);
     const byCreated = (a: SecondaryChannelRow, b: SecondaryChannelRow): number =>
       a.createdAt.getTime() - b.createdAt.getTime() || a.channelId.localeCompare(b.channelId);
@@ -3299,7 +3373,7 @@ export class VoiceFeature {
     for (const rows of ungroupedByPrimary.values()) {
       rows.sort(byCreated);
       for (let i = 0; i < rows.length; i++) {
-        const { name } = await this.rerenderSecondary(guildId, rows[i]!.channelId, {
+        const { name } = await this.rerenderInSweep(guildId, rows[i]!.channelId, {
           dryRun,
           index: i,
         });
@@ -3309,7 +3383,7 @@ export class VoiceFeature {
     for (const [categoryKey, rows] of groupedByCategory) {
       rows.sort(byCreated);
       for (let i = 0; i < rows.length; i++) {
-        const { name } = await this.rerenderSecondary(guildId, rows[i]!.channelId, {
+        const { name } = await this.rerenderInSweep(guildId, rows[i]!.channelId, {
           dryRun,
           index: i,
         });

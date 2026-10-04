@@ -1721,9 +1721,11 @@ describe('the sweep keeps saved lists and hidden rooms in line (integration)', (
       // Made visible by hand, and the name is stale, so the sweep will try to rename it.
       actions.seedOverwrites('r1', [ow('alice', VC), roleOw(GUILD, V, 0n)]);
       await secondaries.updateState('r1', { ...(await row('r1')).state, name: 'stale name' });
-      actions.failRenameForChannel = 'r1';
+      // Not a permission failure, which the sweep now contains per room: any other error still
+      // ends it, and this pass has to have run by then.
+      actions.renameChannel = () => Promise.reject(new Error('boom'));
 
-      await expect(sweep()).rejects.toThrow();
+      await expect(sweep()).rejects.toThrow('boom');
 
       expect(bits(everyone('r1'))).toEqual({ allow: 0n, deny: VC });
       expect(bits(held('r1', BOT))).toEqual({ allow: BOT_ACCESS, deny: 0n });

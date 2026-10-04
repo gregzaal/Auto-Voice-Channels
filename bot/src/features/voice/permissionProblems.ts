@@ -40,6 +40,15 @@ export interface PermissionProblem {
 
 const MAX_PER_GUILD = 10;
 
+/**
+ * How long a sweep leaves a room alone after it found the bot can no longer edit it (Discord
+ * showed only the obfuscated shell of the channel, or answered Missing Access). The incident is
+ * recorded once, and asking again every sweep would only repeat it, so the sweep asks again
+ * rarely, which is also how it notices the access has been given back. Shared by the access
+ * pass and the rename pass, so a room both find is one incident with one memory.
+ */
+export const LOST_ACCESS_RETRY_MS = 6 * 60 * 60 * 1000;
+
 /** One guild's live incidents, as {@link PermissionProblemTracker.activeGuilds} reports them. */
 export interface PermissionProblemSummary {
   guildId: string;

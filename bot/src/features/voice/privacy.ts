@@ -41,7 +41,11 @@ import {
 } from './accessRecord.js';
 import { savedListsInert, type CommandAccess, type CommandCaller } from './commandAccess.js';
 import { ChannelObfuscatedError, isPermissionError, withoutRequestBody } from './discordAdapter.js';
-import { permissionProblemMessage, type PermissionProblemTracker } from './permissionProblems.js';
+import {
+  LOST_ACCESS_RETRY_MS,
+  permissionProblemMessage,
+  type PermissionProblemTracker,
+} from './permissionProblems.js';
 import {
   BLOCK_NOT_SAVED_PAUSED,
   ROOM_ACCESS_REPLIES as say,
@@ -393,14 +397,6 @@ function recordsAccess(record: RoomAccess | null): boolean {
     (record.kicked?.length ?? 0) > 0
   );
 }
-
-/**
- * How long the sweep leaves a room alone after Discord showed it only the obfuscated shell
- * of the channel (the bot can no longer see it). The incident is recorded once, and asking
- * again every sweep would only repeat it, so the sweep asks again rarely, which is also how
- * it notices the access has been given back.
- */
-const LOST_ACCESS_RETRY_MS = 6 * 60 * 60 * 1000;
 
 /**
  * How long a member Discord has said it has nobody by that id for is taken as still gone,
