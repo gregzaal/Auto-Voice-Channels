@@ -479,6 +479,12 @@ export interface RerenderResult {
   rateLimited?: boolean;
 }
 
+/**
+ * How long a guild-wide name refresh may hold the guild's queue, well inside the queue's own
+ * ten-minute task timeout. See {@link VoiceFeature.refreshGuildNames}.
+ */
+const REFRESH_NAMES_BUDGET_MS = 4 * 60_000;
+
 /** Aggregate result of re-rendering several secondaries (e.g. after `/nick`). */
 export interface RerenderSummary {
   considered: number;
@@ -3161,18 +3167,32 @@ export class VoiceFeature {
    * only when its name would change: it is named by this class rather than the engine, and
    * a rename that changes nothing still spends one of the two a channel gets per 10 minutes.
    * It is skipped when its owner is not in the room, since their name cannot be read.
+   *
+   * **Bounded in time, because it holds the guild's serial queue.** A rename Discord rate
+   * limits can cost seconds, so a guild with a great many rooms could run into the queue's
+   * task timeout, which counts toward the guild's breaker and abandons a loop that keeps
+   * running. Past `budgetMs` it stops and reports the rest as `deferred`: the five-minute
+   * sweep re-renders every room anyway, so they catch up there.
    */
   async refreshGuildNames(
     guildId: string,
-  ): Promise<RerenderSummary & { joinsRenamed: number; failed: number }> {
+    opts: { budgetMs?: number } = {},
+  ): Promise<RerenderSummary & { joinsRenamed: number; failed: number; deferred: number }> {
     const rows = await this.deps.secondaries.listByGuild(guildId);
     const guild = await this.deps.guilds.ensure(guildId);
     const settings = await this.voiceSettings(guild.settings, guildId);
+    const budgetMs = opts.budgetMs ?? REFRESH_NAMES_BUDGET_MS;
+    const startedAt = Date.now();
     let renamed = 0;
     let rateLimited = 0;
     let joinsRenamed = 0;
     let failed = 0;
-    for (const row of rows) {
+    let deferred = 0;
+    for (const [index, row] of rows.entries()) {
+      if (Date.now() - startedAt >= budgetMs) {
+        deferred = rows.length - index;
+        break;
+      }
       try {
         const r = await this.rerenderInSweep(guildId, row.channelId, {});
         if (r.name !== undefined) renamed += 1;
@@ -3196,7 +3216,7 @@ export class VoiceFeature {
         );
       }
     }
-    return { considered: rows.length, renamed, rateLimited, joinsRenamed, failed };
+    return { considered: rows.length, renamed, rateLimited, joinsRenamed, failed, deferred };
   }
 
   /**

@@ -1824,6 +1824,21 @@ describe('VoiceFeature (integration)', () => {
         expect(actions.ofType('rename').map((a) => a.channelId)).toContain('c2');
         expect(summary.considered).toBe(2);
       });
+
+      it('stops at its time budget and leaves the rest to the sweep', async () => {
+        await ownedRoom();
+        await secondRoom('stale');
+        const summary = await withJoins({}).refreshGuildNames(GUILD, { budgetMs: 0 });
+        expect(actions.ofType('rename')).toEqual([]);
+        expect(summary).toMatchObject({ considered: 2, renamed: 0, failed: 0, deferred: 2 });
+      });
+
+      it('defers nothing inside its budget', async () => {
+        await ownedRoom();
+        await secondRoom('stale');
+        const summary = await withJoins({}).refreshGuildNames(GUILD);
+        expect(summary.deferred).toBe(0);
+      });
     });
 
     describe('and word_filter.disabled', () => {

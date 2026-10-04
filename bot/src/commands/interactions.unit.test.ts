@@ -7341,6 +7341,7 @@ describe('registerInteractionHandler (blocked words)', () => {
         rateLimited: 0,
         joinsRenamed: 0,
         failed: 0,
+        deferred: 0,
       }),
     };
     const serverLog = vi.fn();
