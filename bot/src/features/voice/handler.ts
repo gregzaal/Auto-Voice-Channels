@@ -3143,6 +3143,56 @@ export class VoiceFeature {
   }
 
   /**
+   * Brings every room's name, status and "⇩ Join" channel in a guild into line with its
+   * settings now, rather than at the next sweep. After `/blockedwords`, so a saved list
+   * masks the rooms that already show a word, and a word taken off the list shows again,
+   * the moment the admin saves (the owner's call, 2026-10-04).
+   *
+   * Sequential, for {@link refreshGuildPanels}' reason. Each room goes through the sweep's
+   * own re-render, so a room the bot cannot rename costs that room and not the rest, and a
+   * rename Discord rate limits is queued and still lands. A "⇩ Join" channel is renamed
+   * only when its name would change: it is named by this class rather than the engine, and
+   * a rename that changes nothing still spends one of the two a channel gets per 10 minutes.
+   * It is skipped when its owner is not in the room, since their name cannot be read.
+   */
+  async refreshGuildNames(
+    guildId: string,
+  ): Promise<RerenderSummary & { joinsRenamed: number; failed: number }> {
+    const rows = await this.deps.secondaries.listByGuild(guildId);
+    const guild = await this.deps.guilds.ensure(guildId);
+    const settings = await this.voiceSettings(guild.settings, guildId);
+    let renamed = 0;
+    let rateLimited = 0;
+    let joinsRenamed = 0;
+    let failed = 0;
+    for (const row of rows) {
+      try {
+        const r = await this.rerenderInSweep(guildId, row.channelId, {});
+        if (r.name !== undefined) renamed += 1;
+        if (r.rateLimited) rateLimited += 1;
+
+        const joinId = await this.deps.joinCompanionFor?.(row.channelId);
+        if (joinId === undefined || row.ownerId === null) continue;
+        const owner = this.deps.voice
+          .membersInChannel(row.channelId)
+          .find((m) => m.id === row.ownerId);
+        if (!owner) continue;
+        const joinName = `⇩ Join ${joinDisplayName(settings, owner)}`;
+        if (this.deps.voice.channelNameOf?.(joinId) === joinName) continue;
+        await this.deps.actions.renameChannel(guildId, joinId, joinName);
+        joinsRenamed += 1;
+      } catch (err) {
+        failed += 1;
+        this.deps.logger.warn(
+          { err: withoutRequestBody(err), guildId, channelId: row.channelId },
+          'could not refresh a room name',
+        );
+      }
+    }
+    return { considered: rows.length, renamed, rateLimited, joinsRenamed, failed };
+  }
+
+  /**
    * The room behind a control panel button, or null when there is not one.
    *
    * One row read plus two cache lookups, deliberately light: this runs on the

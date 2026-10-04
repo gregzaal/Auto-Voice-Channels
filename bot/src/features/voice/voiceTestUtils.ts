@@ -24,6 +24,8 @@ export class FakeVoiceView implements GuildVoiceView {
   private readonly voiceProperties = new Map<string, VoiceChannelProperties>();
   /** channelId → live user limit. Unset → "cannot say", read as unlimited. */
   private readonly userLimits = new Map<string, number>();
+  /** channelId → current name. Unset → "cannot say". */
+  private readonly channelNames = new Map<string, string>();
   /** ownerId → their standing under `/restrict`. Unset → "cannot say". */
   private readonly ownerAccess = new Map<string, CommandCaller>();
   /** memberId → what they are (bot, Administrator, server owner). Unset → "cannot say". */
@@ -82,6 +84,16 @@ export class FakeVoiceView implements GuildVoiceView {
   /** Sets a channel's live user limit, for `@@limit@@`/`@@slots@@`/`{{FULL}}`. */
   setUserLimit(channelId: string, limit: number): void {
     this.userLimits.set(channelId, limit);
+  }
+
+  /** Opt-in like {@link userLimitOf}: a channel no test named is "cannot say". */
+  channelNameOf(channelId: string): string | undefined {
+    return this.channelNames.get(channelId);
+  }
+
+  /** Sets a channel's current name, as the cache would hold it. */
+  setChannelName(channelId: string, name: string): void {
+    this.channelNames.set(channelId, name);
   }
 
   /**

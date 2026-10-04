@@ -41,17 +41,19 @@ const words = (n: number): string => `${n} ${n === 1 ? 'word' : 'words'}`;
  * is filtered. Where it applies is said in full, because an admin who blocks a word and then
  * sees it in a game title would otherwise call it a bug.
  *
- * A "⇩ Join" channel is named when it is made (and when its room changes hands), and nothing
- * renames it after, so the promise is about new ones. A room's name is rendered again on
- * every sweep, which is what makes the last sentence true of rooms that already exist.
+ * A save re-renders every room in the server and renames its "⇩ Join" channel where the
+ * name would change (`VoiceFeature.refreshGuildNames`), which is what makes the last sentence
+ * true of rooms that already exist. Discord allows a channel two renames per 10 minutes, so
+ * the sentence says a recently renamed room can lag.
  */
 export function blockedWordsSavedMessage(count: number): string {
   if (count === 0) return 'The blocked words list is empty, so nothing is filtered.';
   return (
     `This server blocks **${words(count)}**. Nobody can type one into \`/name\`, the Name ` +
     "button on a room's panel or `/nick`, admins included. Anywhere else one turns up, like a " +
-    'game title or a display name, it shows as `***` in room names, voice statuses and new ' +
-    '**⇩ Join** channels. A room that already shows one changes the next time its name updates.'
+    'game title or a display name, it shows as `***` in room names, voice statuses and ' +
+    '**⇩ Join** channels. Rooms that already show one are being updated now. Discord allows ' +
+    'each channel two renames every 10 minutes, so a room renamed recently can take a few minutes.'
   );
 }
 

@@ -7335,6 +7335,13 @@ describe('registerInteractionHandler (blocked words)', () => {
       }),
       rerenderByOwner: vi.fn().mockResolvedValue({ considered: 0, renamed: 0, rateLimited: 0 }),
       rerenderSiblings: vi.fn().mockResolvedValue({ considered: 0, renamed: 0, rateLimited: 0 }),
+      refreshGuildNames: vi.fn().mockResolvedValue({
+        considered: 0,
+        renamed: 0,
+        rateLimited: 0,
+        joinsRenamed: 0,
+        failed: 0,
+      }),
     };
     const serverLog = vi.fn();
     const wordFilterDisabled = vi.fn().mockResolvedValue(opts.paused ?? false);
@@ -7362,6 +7369,7 @@ describe('registerInteractionHandler (blocked words)', () => {
         getEditorState: s.getEditorState,
         rerenderByOwner: s.rerenderByOwner,
         rerenderSiblings: s.rerenderSiblings,
+        refreshGuildNames: s.refreshGuildNames,
       } as never,
       serverLog,
       wordFilterDisabled,
@@ -7633,6 +7641,42 @@ describe('registerInteractionHandler (blocked words)', () => {
       expect(f.editReply).toHaveBeenCalledWith(
         expect.objectContaining({ allowedMentions: { parse: [] } }),
       );
+    });
+
+    /** The owner's call (2026-10-04): a save updates the rooms now, not at the next sweep. */
+    it('re-renders every room in the server once a save changed the list', async () => {
+      const e = wordsEnv(['bad']);
+      const f = await e.fire({
+        kind: 'modal',
+        customId: BLOCKED_WORDS_MODAL_ID,
+        manageChannels: true,
+        textInputs: { words: 'bad\nworse' },
+      });
+      expect(e.s.refreshGuildNames).toHaveBeenCalledTimes(1);
+      expect(e.s.refreshGuildNames).toHaveBeenCalledWith('g1');
+      expect(sent(f)).toContain('Rooms that already show one are being updated now.');
+    });
+
+    it('re-renders nothing when a save left the list as it was, or saved nothing', async () => {
+      const same = wordsEnv(['bad'], {
+        saved: { ok: true, message: '', changed: false, count: 1 },
+      });
+      await same.fire({
+        kind: 'modal',
+        customId: BLOCKED_WORDS_MODAL_ID,
+        manageChannels: true,
+        textInputs: { words: 'bad' },
+      });
+      expect(same.s.refreshGuildNames).not.toHaveBeenCalled();
+
+      const unusable = wordsEnv(['bad']);
+      await unusable.fire({
+        kind: 'modal',
+        customId: BLOCKED_WORDS_MODAL_ID,
+        manageChannels: true,
+        textInputs: { words: 'b*d' },
+      });
+      expect(unusable.s.refreshGuildNames).not.toHaveBeenCalled();
     });
 
     it('logs who changed the list and how many words it has, never the words', async () => {

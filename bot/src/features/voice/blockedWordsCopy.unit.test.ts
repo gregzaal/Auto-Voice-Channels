@@ -95,7 +95,14 @@ describe('what saving the list says', () => {
     expect(text).toContain('`/name`');
     expect(text).toContain('`/nick`');
     expect(text).toContain('admins included');
-    expect(text).toContain('room names, voice statuses and new **⇩ Join** channels');
+    expect(text).toContain('room names, voice statuses and **⇩ Join** channels');
+  });
+
+  /** A save re-renders the server's rooms at once (the owner's call, 2026-10-04). */
+  it('says rooms that already show a word are updated now, and that Discord can make that lag', () => {
+    const text = blockedWordsSavedMessage(3);
+    expect(text).toContain('Rooms that already show one are being updated now.');
+    expect(text).toContain('two renames every 10 minutes');
   });
 
   it('says nothing is filtered for an empty list', () => {

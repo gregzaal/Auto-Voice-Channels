@@ -117,6 +117,13 @@ export interface GuildVoiceView {
    */
   userLimitOf?(channelId: string): number | undefined;
   /**
+   * The channel's current name from the cache, or `undefined` when it is not known.
+   * For a rename the caller only wants to make when the name would change: a rename
+   * spends one of the two Discord allows a channel per 10 minutes even when it
+   * changes nothing.
+   */
+  channelNameOf?(channelId: string): string | undefined;
+  /**
    * Who a room's owner is for `/restrict`: their id, their role ids without
    * `@everyone`, and whether they can manage channels. `undefined` when it cannot
    * be said (the room or the member is not in the cache).

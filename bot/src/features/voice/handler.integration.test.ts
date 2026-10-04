@@ -1768,6 +1768,64 @@ describe('VoiceFeature (integration)', () => {
       expect(named).toEqual(['zz***zz']);
     });
 
+    /** The owner's call (2026-10-04): a `/blockedwords` save updates rooms now, not at the next sweep. */
+    describe('refreshGuildNames', () => {
+      const withJoins = (joins: Record<string, string>): VoiceFeature =>
+        new VoiceFeature({
+          autoChannels,
+          secondaries,
+          guilds,
+          actions,
+          voice,
+          selfHosted: true,
+          logger: fakeLogger(),
+          joinCompanionFor: (id) => Promise.resolve(joins[id]),
+        });
+
+      async function secondRoom(name: string) {
+        await secondaries.create({
+          channelId: 'c2',
+          guildId: GUILD,
+          primaryChannelId: PRIMARY,
+          ownerId: OWNER,
+          state: { name, index: 1 },
+        });
+        voice.put('c2', member(OWNER));
+      }
+
+      it('masks every room now, and renames a "⇩ Join" channel only when its name would change', async () => {
+        await ownedRoom();
+        await secondRoom('zz***zz');
+        voice.setChannelName('j1', `⇩ Join ${OWNER}`);
+        voice.setChannelName('j2', '⇩ Join zz***zz');
+        const summary = await withJoins({ c1: 'j1', c2: 'j2' }).refreshGuildNames(GUILD);
+        expect(
+          actions
+            .ofType('rename')
+            .map((a) => `${a.channelId}=${a.name}`)
+            .sort(),
+        ).toEqual(['c1=zz***zz', 'j1=⇩ Join zz***zz']);
+        expect(summary).toMatchObject({ considered: 2, renamed: 1, joinsRenamed: 1, failed: 0 });
+      });
+
+      it('shows a word again once it is off the list', async () => {
+        await ownedRoom();
+        await feature.rerenderSecondary(GUILD, 'c1');
+        await guilds.updateSettings(GUILD, { blocked_words: [] });
+        await withJoins({}).refreshGuildNames(GUILD);
+        expect(actions.ofType('rename').map((a) => a.name)).toEqual(['zz***zz', OWNER]);
+      });
+
+      it('lets a room it cannot rename cost that room and not the rest', async () => {
+        await ownedRoom();
+        await secondRoom('stale');
+        actions.failRenameForChannel = 'c1';
+        const summary = await withJoins({}).refreshGuildNames(GUILD);
+        expect(actions.ofType('rename').map((a) => a.channelId)).toContain('c2');
+        expect(summary.considered).toBe(2);
+      });
+    });
+
     describe('and word_filter.disabled', () => {
       let asked = 0;
       const withLever = (disabled: boolean): VoiceFeature =>

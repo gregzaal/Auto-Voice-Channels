@@ -1941,6 +1941,12 @@ export class DiscordVoiceView implements GuildVoiceView {
     return (channel as VoiceBasedChannel).userLimit;
   }
 
+  channelNameOf(channelId: string): string | undefined {
+    const channel = this.client.channels.cache.get(channelId);
+    if (!channel || !('name' in channel) || typeof channel.name !== 'string') return undefined;
+    return channel.name;
+  }
+
   /**
    * A room owner's roles and whether they can manage channels, from the cache.
    *

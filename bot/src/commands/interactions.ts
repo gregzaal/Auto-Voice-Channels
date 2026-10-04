@@ -434,6 +434,8 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   // `/controlpanel` change, so several toggles in a row cost one sweep and not
   // one each. See `refreshPanelsSoon`.
   const panelRefreshes = new Map<string, 'running' | 'again'>();
+  // The same for room names after a `/blockedwords` save. See `refreshNamesSoon`.
+  const nameRefreshes = new Map<string, 'running' | 'again'>();
 
   const onInteraction = (interaction: Interaction): void => {
     void route(interaction).catch((err: unknown) => {
@@ -1654,6 +1656,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
    *
    * The `/logging` line names the admin and how many words there are now, never the words:
    * they may be slurs, and the log channel is read by whoever the admin chose.
+   *
+   * A save that changed the list re-renders every room in the background
+   * (`refreshNamesSoon`), so names that already show a listed word are masked, and a word
+   * taken off the list shows again, without waiting for the next sweep.
    */
   async function handleBlockedWordsSubmit(interaction: ModalSubmitInteraction): Promise<void> {
     if (!(await requireManageChannels(interaction))) return;
@@ -1680,8 +1686,10 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       await answer([formatResult(res), ...rejectedLines]);
       return;
     }
-    if (res.changed)
+    if (res.changed) {
       deps.serverLog?.(guildId, 1, blockedWordsAuditLine(interaction.user.id, res.count));
+      refreshNamesSoon(guildId);
+    }
     // While the lever is on the sentence above it would be untrue, so the reply says so.
     const paused = res.count > 0 && (await deps.wordFilterDisabled?.()) === true;
     await answer([
@@ -4588,6 +4596,32 @@ Already subscribed? Add the new server ` +
         const again = panelRefreshes.get(guildId) === 'again';
         panelRefreshes.delete(guildId);
         if (again) refreshPanelsSoon(guildId);
+      });
+  }
+
+  /**
+   * Re-renders every room in a guild in the background, after `/blockedwords` changes the
+   * list, so rooms that already show a listed word are masked now and not at the next sweep.
+   * Coalesced like {@link refreshPanelsSoon}: two saves in a row cost one sweep and a second
+   * pass, and the pass re-reads the settings, so it always finishes on the latest list.
+   */
+  function refreshNamesSoon(guildId: string): void {
+    if (nameRefreshes.has(guildId)) {
+      nameRefreshes.set(guildId, 'again');
+      return;
+    }
+    nameRefreshes.set(guildId, 'running');
+    void run(guildId, 'blockedwords:refresh', () => deps.feature.refreshGuildNames(guildId))
+      .then((r) => {
+        deps.logger.info({ guildId, ...r }, 'refreshed room names after a blocked words change');
+      })
+      .catch((err: unknown) => {
+        deps.logger.warn({ err, guildId }, 'could not refresh room names');
+      })
+      .finally(() => {
+        const again = nameRefreshes.get(guildId) === 'again';
+        nameRefreshes.delete(guildId);
+        if (again) refreshNamesSoon(guildId);
       });
   }
 
