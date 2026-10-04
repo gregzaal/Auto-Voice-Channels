@@ -13,6 +13,7 @@
  * renderer, which had already drifted from the engine in two places with both
  * test suites green.
  */
+export * from './blockedWords.js';
 export * from './nameTemplate.js';
 export * from './stringTransforms.js';
 export * from './types.js';

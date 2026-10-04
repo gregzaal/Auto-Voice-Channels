@@ -1,3 +1,4 @@
+import { maskBlocked, maskBlockedWithin } from './blockedWords.js';
 import { applyMode } from './stringTransforms.js';
 import type { VoiceMember } from './types.js';
 
@@ -1302,7 +1303,7 @@ function streamGameName(ctx: RenderContext, roomGame: string): string {
  * legacy guard. The individual modes live in {@link applyMode}; an unrecognised
  * mode leaves its text unchanged rather than emitting the literal wrapper.
  */
-export function applyStringTransforms(template: string): string {
+export function applyStringTransforms(template: string, mask?: (text: string) => string): string {
   let name = template;
   for (let guard = 0; guard < 50; guard++) {
     const pairs = name.split('""').length - 1;
@@ -1313,7 +1314,11 @@ export function applyStringTransforms(template: string): string {
     const inner = name.slice(first + 2, second);
     const colon = inner.indexOf(':');
     if (colon === -1) break;
+    // `mask` is the server's blocked words, applied BEFORE the modes: small caps and
+    // upside-down write characters a fold cannot read back as letters (`ᴅ`, `ɐ`, and `usd`
+    // reverses the text too), so the words have to go while they are still words.
     let text = inner.slice(colon + 1).trim();
+    if (mask) text = mask(text);
     for (const mode of inner.slice(0, colon).split('+')) {
       text = applyMode(mode.trim().toLowerCase(), text);
     }
@@ -1407,6 +1412,18 @@ export interface RenderContext {
    * on the render path is not an option.
    */
   originalCreatorName?: string;
+  /**
+   * The server's blocked words (`/blockedwords`). Every match in the rendered text is
+   * replaced with `***`, whatever put it there: a game title, a display name, a stream
+   * title, a name typed before the word was added, or the template itself.
+   *
+   * Applied here, to the finished text (and to a `""mode:text""` transform's text before
+   * its modes run, since small caps and upside-down write characters that no longer read
+   * as letters), and not by each caller, so every render path masks the same way and the
+   * renamer's no-op check compares masked text with masked text. Absent or empty changes
+   * nothing, which is every render the marketing site does.
+   */
+  blockedWords?: readonly string[];
 }
 
 /**
@@ -1635,14 +1652,24 @@ export function renderChannelName(
 
   // 10. Legacy ""mode:text"" string transforms — applied LAST, to the fully
   //     substituted text (case, small-caps, math fonts, uwu, …; see applyMode).
-  if (name.includes('""')) name = applyStringTransforms(name);
+  if (name.includes('""')) {
+    const words = ctx.blockedWords;
+    name = applyStringTransforms(
+      name,
+      words && words.length > 0 ? (text) => maskBlocked(text, words) : undefined,
+    );
+  }
 
   // Clamp to the platform limit (100 for names, ~500 for statuses). An empty
   // channel name isn't valid (fall back to "-"), but an empty status is — it
   // clears the status — so `allowEmpty` keeps it empty.
   const max = opts.maxLength ?? MAX_CHANNEL_NAME_LENGTH;
   const trimmed = name.trim();
-  const clamped = trimmed.length > max ? trimmed.slice(0, max) : trimmed;
+  let clamped = trimmed.length > max ? trimmed.slice(0, max) : trimmed;
+  // 11. Blocked words, masked in the finished text and clamped again until neither
+  //     changes anything (see `maskBlockedWithin` for why once is not enough). A
+  //     masked name is never empty, so the fallback below is untouched.
+  if (ctx.blockedWords) clamped = maskBlockedWithin(clamped, ctx.blockedWords, max);
   return clamped === '' && !opts.allowEmpty ? '-' : clamped;
 }
 
