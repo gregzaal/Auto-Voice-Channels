@@ -865,6 +865,34 @@ describe('PrivacyService (integration)', () => {
       expect(await joinRow()).toBeDefined();
     });
 
+    /** A failed channel create carries the name it was given, and a Join channel is named for its owner. */
+    it('logs a Join channel that could not be put back without the name it was given', async () => {
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      actions.failOverwrites = true;
+      actions.createJoinChannel = () =>
+        Promise.reject(
+          new DiscordAPIError(
+            { code: 50013, message: 'Missing Permissions' } as never,
+            50013,
+            403,
+            'POST',
+            'https://discord.test',
+            { body: { name: '⇩ Join alice' } } as never,
+          ),
+        );
+      const warn = vi.fn();
+      privacy = build({ logger: { ...fakeLogger(), warn } as never });
+
+      expect((await privacy.hide(GUILD, SEC, 'alice')).ok).toBe(false);
+
+      const logged = warn.mock.calls.filter(
+        ([, message]) => message === 'could not put the join channel back after a failed hide',
+      );
+      expect(logged).toHaveLength(1);
+      const { err } = logged[0]![0] as { err: { requestBody: unknown } };
+      expect(JSON.stringify(err.requestBody)).not.toContain('alice');
+    });
+
     it('leaves a room as it was, Join channel and all, when an exit fails', async () => {
       await privacy.makePrivate(GUILD, SEC, 'alice');
       actions.failOverwrites = true;
@@ -3341,6 +3369,17 @@ describe('PrivacyService (integration)', () => {
       expect(problems.recent(GUILD)).toEqual([
         expect.objectContaining({ channelId: SEC, operation: 'access' }),
       ]);
+      expect(serverLogs).toHaveLength(1);
+    });
+
+    it('tells the guild once for a room, however often its owner presses the button', async () => {
+      noManageRoles();
+      for (let press = 0; press < 5; press += 1) {
+        const res = await privacy.hide(GUILD, SEC, 'alice');
+        expect(res).toEqual({ ok: false, message: ROOM_ACCESS_REPLIES.needsManageRoles });
+      }
+      await privacy.admit(GUILD, SEC, 'alice', 'carol');
+      expect(problems.recent(GUILD)).toHaveLength(1);
       expect(serverLogs).toHaveLength(1);
     });
 

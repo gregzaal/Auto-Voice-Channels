@@ -1493,16 +1493,28 @@ export class PrivacyService {
    * Whether the cache says the bot cannot edit this room's overwrites, which is a
    * preflight and not the authority: "cannot say" goes ahead, and Discord answers.
    * Records the access problem the failed write would have, so an admin still hears
-   * about a bot that is missing the permission.
+   * about a bot that is missing the permission, once per room for as long as the sweep's
+   * rule says: an owner who presses the button in a loop must not post a line to the
+   * guild's log channel on every press, and each press costs the bot no Discord call.
    */
   private lacksManageRoles(guildId: string, channelId: string): boolean {
     if (this.deps.voice.botPermissionsIn?.(channelId)?.manageRoles !== false) return false;
-    this.deps.permissionProblems?.record(guildId, {
-      channelId,
-      operation: 'access',
-      at: Date.now(),
-    });
-    this.deps.serverLog?.(guildId, 1, permissionProblemMessage(channelId, 'access'));
+    const key = `${channelId}:access`;
+    const told =
+      (this.deps.permissionProblems
+        ?.recent(guildId)
+        .some((p) => p.channelId === channelId && p.operation === 'access') ??
+        false) ||
+      this.toldRecently(key);
+    if (!told) {
+      this.deps.permissionProblems?.record(guildId, {
+        channelId,
+        operation: 'access',
+        at: Date.now(),
+      });
+      this.sweepTold.set(key, Date.now());
+      this.deps.serverLog?.(guildId, 1, permissionProblemMessage(channelId, 'access'));
+    }
     return true;
   }
 
@@ -1754,8 +1766,9 @@ export class PrivacyService {
         try {
           await this.ensureJoinChannel(guildId, channelId, input.ownerId, await input.joinName());
         } catch (restoreErr) {
+          // Without the request body: the channel's name is the owner's.
           this.deps.logger.warn(
-            { err: restoreErr, guildId, channelId },
+            { err: withoutRequestBody(restoreErr), guildId, channelId },
             'could not put the join channel back after a failed hide',
           );
         }
