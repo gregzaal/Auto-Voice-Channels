@@ -3,10 +3,11 @@ import {
   GuildRepository,
   JoinChannelRepository,
   MemberAccessListRepository,
+  MemberRoomPrefsRepository,
   SecondaryChannelRepository,
   db,
 } from '@avc/core';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PgTestEnv } from '../../test/pgContainer.js';
 import { startPostgres } from '../../test/pgContainer.js';
 import { fakeLogger } from '../../runtime/testUtils.js';
@@ -668,6 +669,257 @@ describe('VoiceCommands (integration)', () => {
       // One command, one rename, and not a hidden name followed by a private one.
       expect(await renamesFrom(() => privacy.hide(GUILD, SEC, 'alice'))).toEqual(['HP']);
       expect(await renamesFrom(() => privacy.makePublic(GUILD, SEC, 'alice'))).toEqual(['VO']);
+    });
+  });
+
+  /**
+   * What an owner's `/limit` and `/name` leave behind for their next room from this creator
+   * channel. The save is the owner's own by equality, runs after the command has worked, is
+   * stopped by `member_prefs.disabled` for a value and never for a clear, and can never fail
+   * the command it follows.
+   */
+  describe('remembering what the owner chose', () => {
+    let prefs: MemberRoomPrefsRepository;
+    let remembering: VoiceCommands;
+    let paused: boolean;
+
+    /** The commands as `index.ts` wires them, over a prefs repository a test may swap. */
+    const build = (
+      memberPrefs: Pick<MemberRoomPrefsRepository, 'saveName' | 'saveLimit'> | null = prefs,
+      logger = fakeLogger(),
+    ): VoiceCommands => {
+      const feature = new VoiceFeature({
+        autoChannels,
+        secondaries,
+        guilds,
+        actions,
+        voice,
+        selfHosted: true,
+        logger: fakeLogger(),
+      });
+      return new VoiceCommands({
+        secondaries,
+        actions,
+        voice,
+        feature,
+        logger,
+        ...(memberPrefs ? { memberPrefs } : {}),
+        memberPrefsDisabled: () => Promise.resolve(paused),
+      });
+    };
+
+    beforeEach(async () => {
+      await env.handle.db.delete(db.schema.memberRoomPrefs);
+      prefs = new MemberRoomPrefsRepository(env.handle.db);
+      paused = false;
+      remembering = build();
+      await autoChannels.setRememberPrefs(GUILD, PRIMARY, true);
+    });
+
+    const saved = () => prefs.get(PRIMARY, 'alice');
+
+    describe('the limit', () => {
+      it('saves a limit the owner sets, for the creator channel the room came from', async () => {
+        expect((await remembering.setLimit(GUILD, SEC, 'alice', 5)).ok).toBe(true);
+        expect(await saved()).toEqual({ name: null, limit: 5, privacy: null });
+      });
+
+      /** 0 is the member's explicit "no limit", which is not the same as never having chosen one. */
+      it('saves /unlimit as 0, an explicit no limit', async () => {
+        await remembering.setLimit(GUILD, SEC, 'alice', 5);
+        expect((await remembering.unlimit(GUILD, SEC, 'alice')).ok).toBe(true);
+        expect(await saved()).toEqual({ name: null, limit: 0, privacy: null });
+      });
+
+      it('saves nothing for a limit that was refused, or that Discord did not accept', async () => {
+        expect((await remembering.setLimit(GUILD, SEC, 'alice', 500)).ok).toBe(false);
+        expect(await saved()).toBeUndefined();
+
+        actions.setUserLimit = () => Promise.reject(new Error('Missing Permissions'));
+        await expect(remembering.setLimit(GUILD, SEC, 'alice', 5)).rejects.toThrow();
+        expect(await saved()).toBeUndefined();
+      });
+    });
+
+    describe('the name', () => {
+      it('saves the template as the room stores it, and not the voice status', async () => {
+        expect((await remembering.setName(GUILD, SEC, 'alice', '  My\nLounge  ')).ok).toBe(true);
+        expect((await secondaries.get(SEC))!.state.template).toBe('My Lounge');
+        expect(await saved()).toEqual({ name: 'My Lounge', limit: null, privacy: null });
+
+        await remembering.setStatus(GUILD, SEC, 'alice', 'AFK');
+        await remembering.setStatus(GUILD, SEC, 'alice', 'reset');
+        expect(await saved()).toEqual({ name: 'My Lounge', limit: null, privacy: null });
+      });
+
+      it('takes the saved name back out on a reset, and leaves the rest', async () => {
+        await remembering.setLimit(GUILD, SEC, 'alice', 5);
+        await remembering.setName(GUILD, SEC, 'alice', 'My Lounge');
+
+        expect((await remembering.setName(GUILD, SEC, 'alice', 'reset')).ok).toBe(true);
+
+        expect(await saved()).toEqual({ name: null, limit: 5, privacy: null });
+      });
+
+      it('reads a blank name as a reset too, and deletes the row when it was the last setting', async () => {
+        await remembering.setName(GUILD, SEC, 'alice', 'My Lounge');
+
+        expect((await remembering.setName(GUILD, SEC, 'alice', '   ')).ok).toBe(true);
+
+        expect(await saved()).toBeUndefined();
+        expect(await prefs.countByPrimary(GUILD, PRIMARY)).toBe(0);
+      });
+
+      /**
+       * The panel's Name box shows the first 100 characters of a template and stops there, while
+       * `/name` takes ten times that. Pressing Save on a long template without touching it
+       * submits the cut version, and remembering that would replace the template with its start.
+       */
+      describe('submitted unchanged from the panel box', () => {
+        const LONG = `${'a'.repeat(60)} ${'b'.repeat(60)} ${'c'.repeat(60)}`;
+        const CUT = LONG.slice(0, 100).trim();
+
+        it('does not overwrite a longer remembered template with its cut', async () => {
+          await remembering.setName(GUILD, SEC, 'alice', LONG);
+          expect((await saved())!.name).toBe(LONG);
+
+          expect((await remembering.setName(GUILD, SEC, 'alice', CUT)).ok).toBe(true);
+
+          expect((await saved())!.name).toBe(LONG);
+          // The room's own template is cut by that submit, as it always was.
+          expect((await secondaries.get(SEC))!.state.template).toBe(CUT);
+        });
+
+        it('does remember a name that was really changed, or written whole again', async () => {
+          await remembering.setName(GUILD, SEC, 'alice', LONG);
+          await remembering.setName(GUILD, SEC, 'alice', `${CUT}!`);
+          expect((await saved())!.name).toBe(`${CUT}!`);
+
+          await remembering.setName(GUILD, SEC, 'alice', LONG);
+          expect((await saved())!.name).toBe(LONG);
+        });
+
+        it('remembers a short name that happens to be a start of nothing', async () => {
+          await remembering.setName(GUILD, SEC, 'alice', 'My Lounge');
+          await remembering.setName(GUILD, SEC, 'alice', 'My');
+          expect((await saved())!.name).toBe('My');
+        });
+      });
+    });
+
+    /**
+     * The save is for the room's owner by equality. `opts.admin` is true for every moderator,
+     * including one renaming their OWN room, and an ownerless room passes every owner check.
+     */
+    describe('whose settings they are', () => {
+      it('saves for a moderator renaming their own room', async () => {
+        const res = await remembering.setName(GUILD, SEC, 'alice', 'Mine', { admin: true });
+        expect(res.ok).toBe(true);
+        expect((await saved())!.name).toBe('Mine');
+      });
+
+      it('saves nothing, for anybody, when a moderator renames somebody else’s room', async () => {
+        const res = await remembering.setName(GUILD, SEC, 'mallory', 'Hijacked', { admin: true });
+
+        expect(res.ok).toBe(true);
+        expect((await secondaries.get(SEC))!.state.template).toBe('Hijacked');
+        expect(await prefs.countByPrimary(GUILD, PRIMARY)).toBe(0);
+        // And a moderator’s reset does not take the owner’s own name back out.
+        await remembering.setName(GUILD, SEC, 'alice', 'Mine');
+        await remembering.setName(GUILD, SEC, 'mallory', 'reset', { admin: true });
+        expect((await saved())!.name).toBe('Mine');
+      });
+
+      it('saves nothing for a room that has no owner, whoever changes it', async () => {
+        await env.handle.pool.query(
+          'UPDATE secondary_channels SET owner_id = NULL WHERE channel_id = $1',
+          [SEC],
+        );
+
+        expect((await remembering.setLimit(GUILD, SEC, 'mallory', 5)).ok).toBe(true);
+        expect((await remembering.setName(GUILD, SEC, 'mallory', 'Mine')).ok).toBe(true);
+        expect((await remembering.setName(GUILD, SEC, 'mallory', 'Mine', { admin: true })).ok).toBe(
+          true,
+        );
+
+        expect(await prefs.countByPrimary(GUILD, PRIMARY)).toBe(0);
+      });
+    });
+
+    describe('for a creator channel that does not remember', () => {
+      it('stores nothing, and the commands work as they always did', async () => {
+        await autoChannels.setRememberPrefs(GUILD, PRIMARY, false);
+
+        expect((await remembering.setLimit(GUILD, SEC, 'alice', 5)).ok).toBe(true);
+        expect((await remembering.setName(GUILD, SEC, 'alice', 'Mine')).ok).toBe(true);
+
+        expect(await prefs.countByPrimary(GUILD, PRIMARY)).toBe(0);
+        expect(actions.ofType('limit').at(-1)).toMatchObject({ channelId: SEC, limit: 5 });
+      });
+
+      /** The statement checks the opt-in itself, so the command reads no creator channel of its own. */
+      it('costs the command no read of the creator channel that it did not already make', async () => {
+        const reads = vi.spyOn(autoChannels, 'get');
+        await build(null).setName(GUILD, SEC, 'alice', 'Without');
+        const without = reads.mock.calls.length;
+        reads.mockClear();
+
+        await remembering.setName(GUILD, SEC, 'alice', 'With');
+
+        expect(without).toBeGreaterThan(0);
+        expect(reads.mock.calls.length).toBe(without);
+      });
+    });
+
+    describe('when saving goes wrong', () => {
+      /** The command has already worked, so a failed save costs next time’s convenience and nothing else. */
+      it('never fails the command, and logs ids and never what was typed', async () => {
+        const warn = vi.fn();
+        const failing = build(
+          {
+            saveName: () => Promise.reject(new Error('db down')),
+            saveLimit: () => Promise.reject(new Error('db down')),
+          },
+          { ...fakeLogger(), warn } as never,
+        );
+
+        const limit = await failing.setLimit(GUILD, SEC, 'alice', 5);
+        const name = await failing.setName(GUILD, SEC, 'alice', 'a secret den name');
+
+        expect(limit.ok).toBe(true);
+        expect(name.ok).toBe(true);
+        expect(actions.ofType('limit').at(-1)).toMatchObject({ channelId: SEC, limit: 5 });
+        expect((await secondaries.get(SEC))!.state.template).toBe('a secret den name');
+        expect(warn).toHaveBeenCalledTimes(2);
+        expect(JSON.stringify(warn.mock.calls)).not.toContain('secret');
+      });
+    });
+
+    /**
+     * The lever stops what is stored and never what is taken back out, so a member can still
+     * reset a name while it is on, and what they reset does not come back when it is lifted.
+     */
+    describe('while member_prefs.disabled is on', () => {
+      it('stores nothing, and still takes a name back out', async () => {
+        await remembering.setName(GUILD, SEC, 'alice', 'Mine');
+        paused = true;
+
+        await remembering.setLimit(GUILD, SEC, 'alice', 5);
+        await remembering.unlimit(GUILD, SEC, 'alice');
+        await remembering.setName(GUILD, SEC, 'alice', 'Changed');
+        expect(await saved()).toEqual({ name: 'Mine', limit: null, privacy: null });
+
+        await remembering.setName(GUILD, SEC, 'alice', 'reset');
+        expect(await saved()).toBeUndefined();
+      });
+
+      it('saves again once it is lifted', async () => {
+        paused = true;
+        await remembering.setLimit(GUILD, SEC, 'alice', 5);
+        paused = false;
+        await remembering.setLimit(GUILD, SEC, 'alice', 6);
+        expect((await saved())!.limit).toBe(6);
+      });
     });
   });
 });

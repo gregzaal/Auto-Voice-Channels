@@ -76,10 +76,36 @@ describe('the remembered settings repository reaches the admin readouts', () => 
     );
   });
 
-  it('and nothing else is handed it yet, so a new consumer has to be added here too', () => {
+  it('and nothing else is handed it, so a new consumer has to be added here too', () => {
     expect(SOURCE.split('memberRoomPrefsRepo').length - 1).toBe(
-      // the declaration, the sweep, and the two readers
-      4,
+      // the declaration, the sweep, the two readers, and the two services that save
+      6,
     );
+  });
+});
+
+const LEVER = 'memberPrefsDisabled: () => creationGate.memberPrefsDisabled()';
+
+/**
+ * Saving and restoring each take their dependency as optional, and absent reads as "off": a
+ * consumer that was never handed the repository saves nothing, and one that was never handed the
+ * lever keeps saving through the incident `member_prefs.disabled` was thrown for. Every test
+ * builds its own wiring, so none of them could notice.
+ */
+describe('remembered room settings are saved by the services that change a room', () => {
+  it('the commands that set a limit and a name, with the lever that stops what they store', () => {
+    const commands = statementFrom('const voiceCommands = new VoiceCommands({');
+    expect(commands).toContain('memberPrefs: memberRoomPrefsRepo,');
+    expect(commands).toContain(LEVER);
+  });
+
+  it('the privacy service, which saves a lock or a hide and takes a privacy back out', () => {
+    const service = statementFrom('const privacy = new PrivacyService({');
+    expect(service).toContain('memberPrefs: memberRoomPrefsRepo,');
+    expect(service).toContain(LEVER);
+  });
+
+  it('and the lever is handed to exactly those two, so a third saver has to be added here too', () => {
+    expect(SOURCE.split(LEVER).length - 1).toBe(2);
   });
 });

@@ -1,6 +1,9 @@
 import {
+  AutoChannelRepository,
+  GuildRepository,
   JoinChannelRepository,
   MemberAccessListRepository,
+  MemberRoomPrefsRepository,
   SecondaryChannelRepository,
   db,
 } from '@avc/core';
@@ -3370,6 +3373,246 @@ describe('PrivacyService (integration)', () => {
       expect(await privacy.hide(GUILD, SEC, 'alice')).toEqual({
         ok: false,
         message: ROOM_ACCESS_REPLIES.alreadyHidden,
+      });
+    });
+  });
+
+  // -- remembered settings ---------------------------------------------------------------------
+
+  /**
+   * What an owner's `/private`, `/hide`, `/unhide` and `/public` leave behind for their next
+   * room from this creator channel. Saved only once the change has taken effect, for the owner
+   * by equality, stopped by `member_prefs.disabled` for a value and never for a clear, and never
+   * able to fail the command it follows.
+   */
+  describe('remembering what the owner chose', () => {
+    const PRIMARY = 'p';
+    let prefs: MemberRoomPrefsRepository;
+    let autoChannels: AutoChannelRepository;
+    let paused: boolean;
+    let remembering: PrivacyService;
+
+    const saved = () => prefs.get(PRIMARY, 'alice');
+
+    beforeAll(async () => {
+      autoChannels = new AutoChannelRepository(env.handle.db);
+      prefs = new MemberRoomPrefsRepository(env.handle.db);
+      await new GuildRepository(env.handle.db).ensure(GUILD);
+    });
+
+    beforeEach(async () => {
+      await env.handle.db.delete(db.schema.memberRoomPrefs);
+      await env.handle.db.delete(db.schema.autoChannels);
+      paused = false;
+      await autoChannels.upsert(GUILD, PRIMARY, { name: '## [@@game_name@@]' });
+      await autoChannels.setRememberPrefs(GUILD, PRIMARY, true);
+      remembering = build({
+        memberPrefs: prefs,
+        memberPrefsDisabled: () => Promise.resolve(paused),
+      });
+    });
+
+    describe('what each change remembers', () => {
+      it('saves private for /private', async () => {
+        expect((await remembering.makePrivate(GUILD, SEC, 'alice')).ok).toBe(true);
+        expect(await saved()).toEqual({ name: null, limit: null, privacy: 'private' });
+      });
+
+      it('saves hidden for /hide', async () => {
+        expect((await remembering.hide(GUILD, SEC, 'alice')).ok).toBe(true);
+        expect(await saved()).toEqual({ name: null, limit: null, privacy: 'hidden' });
+      });
+
+      /** A room shown again is still locked, so a hide then a show must not leave a hidden room behind. */
+      it('saves private for /unhide, which replaces a remembered hidden', async () => {
+        await remembering.hide(GUILD, SEC, 'alice');
+        expect((await saved())!.privacy).toBe('hidden');
+
+        expect((await remembering.unhide(GUILD, SEC, 'alice')).ok).toBe(true);
+
+        expect((await saved())!.privacy).toBe('private');
+      });
+
+      it('takes the privacy back out for /public, from a locked room and from a hidden one', async () => {
+        await remembering.makePrivate(GUILD, SEC, 'alice');
+        expect((await remembering.makePublic(GUILD, SEC, 'alice')).ok).toBe(true);
+        expect(await saved()).toBeUndefined();
+
+        await remembering.hide(GUILD, SEC, 'alice');
+        expect((await remembering.makePublic(GUILD, SEC, 'alice')).ok).toBe(true);
+        expect(await saved()).toBeUndefined();
+      });
+
+      it('leaves a remembered name and size alone when it takes the privacy out', async () => {
+        await prefs.saveName(GUILD, PRIMARY, 'alice', 'Den');
+        await prefs.saveLimit(GUILD, PRIMARY, 'alice', 4);
+        await remembering.makePrivate(GUILD, SEC, 'alice');
+        await remembering.makePublic(GUILD, SEC, 'alice');
+        expect(await saved()).toEqual({ name: 'Den', limit: 4, privacy: null });
+      });
+
+      it('is for the creator channel the room came from, and for no other', async () => {
+        await autoChannels.upsert(GUILD, 'another-primary', { name: 'x' });
+        await autoChannels.setRememberPrefs(GUILD, 'another-primary', true);
+
+        await remembering.makePrivate(GUILD, SEC, 'alice');
+
+        expect(await prefs.get('another-primary', 'alice')).toBeUndefined();
+        expect((await saved())!.privacy).toBe('private');
+      });
+    });
+
+    /** Anything that left the room as it was, or only queued the change, is not a choice that took effect. */
+    describe('what it does not remember', () => {
+      it('saves nothing when somebody else asks, or the room has no owner', async () => {
+        expect((await remembering.makePrivate(GUILD, SEC, 'bob')).ok).toBe(false);
+        expect((await remembering.hide(GUILD, SEC, 'bob')).ok).toBe(false);
+        expect(await prefs.countByPrimary(GUILD, PRIMARY)).toBe(0);
+
+        await env.handle.pool.query(
+          'UPDATE secondary_channels SET owner_id = NULL WHERE channel_id = $1',
+          [SEC],
+        );
+        expect((await remembering.makePrivate(GUILD, SEC, 'bob')).ok).toBe(false);
+        expect((await remembering.hide(GUILD, SEC, 'alice')).ok).toBe(false);
+        expect(await prefs.countByPrimary(GUILD, PRIMARY)).toBe(0);
+      });
+
+      it('saves nothing when the room was already as asked, or the change is the wrong way round', async () => {
+        await remembering.hide(GUILD, SEC, 'alice');
+        // Already hidden, and /private on a hidden room is refused: neither is a new choice.
+        expect((await remembering.makePrivate(GUILD, SEC, 'alice')).ok).toBe(false);
+        expect((await remembering.hide(GUILD, SEC, 'alice')).ok).toBe(false);
+        expect((await saved())!.privacy).toBe('hidden');
+      });
+
+      it('saves nothing when a role the bot cannot edit defeats the hide', async () => {
+        actions.seedOverwrites(SEC, [roleOw(GATE, V)]);
+        voice.setBotRoleAccess({ uneditableRoleIds: [GATE] });
+
+        expect((await remembering.hide(GUILD, SEC, 'alice')).ok).toBe(false);
+
+        expect(await saved()).toBeUndefined();
+      });
+
+      it('saves nothing when the write failed', async () => {
+        actions.failOverwrites = true;
+
+        expect((await remembering.makePrivate(GUILD, SEC, 'alice')).ok).toBe(false);
+        expect((await remembering.hide(GUILD, SEC, 'alice')).ok).toBe(false);
+
+        expect(await saved()).toBeUndefined();
+      });
+
+      it('saves nothing when Discord only queued the change behind its rate limit', async () => {
+        actions.simulateOverwriteRateLimit = true;
+
+        expect((await remembering.makePrivate(GUILD, SEC, 'alice')).ok).toBe(false);
+        expect(await saved()).toBeUndefined();
+        expect((await remembering.hide(GUILD, SEC, 'alice')).ok).toBe(false);
+        expect(await saved()).toBeUndefined();
+      });
+
+      it('does not clear a remembered privacy for a /public that was only queued', async () => {
+        await remembering.makePrivate(GUILD, SEC, 'alice');
+        actions.simulateOverwriteRateLimit = true;
+
+        expect((await remembering.makePublic(GUILD, SEC, 'alice')).ok).toBe(false);
+
+        expect((await saved())!.privacy).toBe('private');
+      });
+
+      it('stores nothing for a creator channel that does not remember', async () => {
+        await autoChannels.setRememberPrefs(GUILD, PRIMARY, false);
+
+        expect((await remembering.makePrivate(GUILD, SEC, 'alice')).ok).toBe(true);
+        expect((await remembering.hide(GUILD, SEC, 'alice')).ok).toBe(true);
+
+        expect(await prefs.countByPrimary(GUILD, PRIMARY)).toBe(0);
+      });
+    });
+
+    describe('when saving goes wrong', () => {
+      it('never fails the command: the room is changed and the reply is the usual one', async () => {
+        const failing = build({
+          memberPrefs: { savePrivacy: () => Promise.reject(new Error('db down')) },
+        });
+
+        const locked = await failing.makePrivate(GUILD, SEC, 'alice');
+        expect(locked.ok).toBe(true);
+        expect(locked.message).toBe(ROOM_ACCESS_REPLIES.locked);
+        expect((await row()).state.private).toBe(true);
+
+        const hidden = await failing.hide(GUILD, SEC, 'alice');
+        expect(hidden.ok).toBe(true);
+        expect((await access())?.hidden).toBe(true);
+        expect((await failing.makePublic(GUILD, SEC, 'alice')).ok).toBe(true);
+        expect((await row()).state.private).toBeUndefined();
+      });
+
+      it('logs ids and what failed, and never the owner’s name', async () => {
+        const warn = vi.fn();
+        const failing = build({
+          memberPrefs: { savePrivacy: () => Promise.reject(new Error('db down')) },
+          logger: { ...fakeLogger(), warn } as never,
+        });
+        nicks.set('alice', 'Alice the Secret');
+
+        await failing.makePrivate(GUILD, SEC, 'alice');
+
+        const saveFailures = warn.mock.calls.filter(
+          ([, message]) => message === 'could not remember a room setting',
+        );
+        expect(saveFailures).toHaveLength(1);
+        expect(saveFailures[0]![0]).toMatchObject({
+          guildId: GUILD,
+          channelId: SEC,
+          userId: 'alice',
+          field: 'privacy',
+        });
+        expect(JSON.stringify(saveFailures)).not.toContain('Secret');
+      });
+
+      it('does not need a repository at all, and a construction without one is unchanged', async () => {
+        expect((await privacy.makePrivate(GUILD, SEC, 'alice')).ok).toBe(true);
+        expect(await prefs.countByPrimary(GUILD, PRIMARY)).toBe(0);
+      });
+    });
+
+    /** The lever stops a privacy being stored, and never one being taken back out. */
+    describe('while member_prefs.disabled is on', () => {
+      it('stores nothing for a lock, a hide or a show', async () => {
+        paused = true;
+
+        await remembering.makePrivate(GUILD, SEC, 'alice');
+        await remembering.hide(GUILD, SEC, 'alice');
+        await remembering.unhide(GUILD, SEC, 'alice');
+
+        expect(await saved()).toBeUndefined();
+      });
+
+      it('still takes a remembered privacy out for /public', async () => {
+        await remembering.makePrivate(GUILD, SEC, 'alice');
+        paused = true;
+
+        expect((await remembering.makePublic(GUILD, SEC, 'alice')).ok).toBe(true);
+
+        expect(await saved()).toBeUndefined();
+      });
+
+      it('saves again once it is lifted', async () => {
+        paused = true;
+        await remembering.makePrivate(GUILD, SEC, 'alice');
+        paused = false;
+        await remembering.makePublic(GUILD, SEC, 'alice');
+        await remembering.hide(GUILD, SEC, 'alice');
+        expect((await saved())!.privacy).toBe('hidden');
+      });
+
+      it('does not get in the way of a lock, which it never stopped', async () => {
+        paused = true;
+        expect((await remembering.makePrivate(GUILD, SEC, 'alice')).ok).toBe(true);
+        expect((await row()).state.private).toBe(true);
       });
     });
   });

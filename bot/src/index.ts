@@ -499,6 +499,10 @@ async function main(): Promise<void> {
     serverLog: (gid, level, message) => serverLogger.log(gid, level, message),
     // The `room_access.disabled` lever, through the creation gate's cached snapshot.
     roomAccessDisabled: () => creationGate.roomAccessDisabled(),
+    // What an owner's `/private`, `/hide`, `/unhide` and `/public` are remembered in, and the
+    // lever that stops them being stored (never `/public`, which takes it back out).
+    memberPrefs: memberRoomPrefsRepo,
+    memberPrefsDisabled: () => creationGate.memberPrefsDisabled(),
     // The one `/restrict` rule that reaches saved lists: a member denied Saved lists has
     // lists that apply to nothing. Withdrawn while `command_access.disabled` is on, and the
     // lever is only asked when a rule names the feature, so a server with none pays nothing.
@@ -695,6 +699,10 @@ async function main(): Promise<void> {
     voice,
     feature: voiceFeature,
     logger,
+    // What `/limit` and `/name` are remembered in, and the lever that stops them being stored
+    // (never a name reset, which takes it back out).
+    memberPrefs: memberRoomPrefsRepo,
+    memberPrefsDisabled: () => creationGate.memberPrefsDisabled(),
   });
   const settingsService = new GuildSettingsService({
     guilds: settingsCache,

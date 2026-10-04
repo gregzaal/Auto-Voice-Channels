@@ -1,6 +1,17 @@
-import type { Logger, SecondaryChannelRepository, SecondaryChannelRow } from '@avc/core';
+import type {
+  Logger,
+  MemberRoomPrefsRepository,
+  SecondaryChannelRepository,
+  SecondaryChannelRow,
+} from '@avc/core';
 import type { VoiceActions } from './actions.js';
 import type { VoiceFeature } from './handler.js';
+import {
+  isTruncatedPrefill,
+  rememberSetting,
+  type RememberedSaveDeps,
+  type RememberedSetting,
+} from './rememberedSave.js';
 import type { GuildVoiceView } from './types.js';
 
 /** Result of a per-channel command: a flag plus a user-facing message. */
@@ -32,6 +43,14 @@ export interface VoiceCommandsDeps {
   voice: GuildVoiceView;
   feature: VoiceFeature;
   logger: Logger;
+  /**
+   * What a member's `/limit` and `/name` are remembered in, for the creator channels that
+   * remember. Optional so a construction that predates it keeps working: absent means nothing
+   * is saved. See {@link rememberSetting} for who is saved for and when.
+   */
+  memberPrefs?: Pick<MemberRoomPrefsRepository, 'saveName' | 'saveLimit'> | undefined;
+  /** The `member_prefs.disabled` lever, through the creation gate's cached snapshot. */
+  memberPrefsDisabled?: RememberedSaveDeps['memberPrefsDisabled'];
 }
 
 /**
@@ -60,6 +79,9 @@ export class VoiceCommands {
       return fail(`The limit must be a whole number between 0 and ${MAX_USER_LIMIT}.`);
     }
     await this.deps.actions.setUserLimit(guildId, secondary.row.channelId, limit);
+    // After the limit is set, so a failed `/limit` remembers nothing. 0 is saved too: it is the
+    // member's explicit "no limit", which is not the same as never having chosen one.
+    await this.remember(secondary.row, userId, { field: 'limit', value: limit });
     // `@@limit@@`, `@@slots@@` and `{{FULL}}` read the LIVE limit, so the name
     // has to be recomputed. Deliberately NOT awaited: the reply below has to
     // land inside Discord's 3-second interaction window, and a rate-limited
@@ -143,14 +165,21 @@ export class VoiceCommands {
     const clearedStatus = field === 'status' && !isReset && trimmed === '';
 
     const next = { ...row.state };
+    const stored = field === 'name' ? trimmed.replace(/[\r\n]+/g, ' ') : trimmed;
     if (isReset) {
       delete next[stateKey];
     } else {
       // Newlines aren't valid in channel names; flatten to spaces (legacy parity).
-      next[stateKey] = field === 'name' ? trimmed.replace(/[\r\n]+/g, ' ') : trimmed;
+      next[stateKey] = stored;
     }
     await this.deps.secondaries.updateState(id, next);
     const r = await this.deps.feature.rerenderSecondary(guildId, id);
+    // A NAME the member set, or took back, and never the voice status: a status is about what
+    // is happening in this room now. Not the panel's prefill of a longer template, which is
+    // the same template cut short and not a new choice.
+    if (field === 'name' && (isReset || !isTruncatedPrefill(stored, row.state.template))) {
+      await this.remember(row, userId, { field: 'name', value: isReset ? null : stored });
+    }
     const note = rateLimitNote(r.rateLimited ? 1 : 0);
     return ok(
       isReset
@@ -228,6 +257,24 @@ export class VoiceCommands {
   }
 
   // -- helpers --------------------------------------------------------------
+
+  /** Remembers a setting for the room's owner, for their next room. Never throws. */
+  private remember(
+    row: SecondaryChannelRow,
+    userId: string,
+    setting: RememberedSetting,
+  ): Promise<void> {
+    return rememberSetting(
+      {
+        memberPrefs: this.deps.memberPrefs,
+        memberPrefsDisabled: this.deps.memberPrefsDisabled,
+        logger: this.deps.logger,
+      },
+      row,
+      userId,
+      setting,
+    );
+  }
 
   private async resolveSecondary(
     guildId: string,

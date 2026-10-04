@@ -4,6 +4,8 @@ import type {
   Logger,
   MemberAccessLists,
   MemberAccessListRepository,
+  MemberPrefPrivacy,
+  MemberRoomPrefsRepository,
   RoomAccess,
   RoomAccessRead,
   SecondaryChannelRepository,
@@ -59,6 +61,7 @@ import {
   unhiddenWithoutJoin,
   withSkipped,
 } from './roomAccessCopy.js';
+import { rememberSetting, type RememberedSaveDeps } from './rememberedSave.js';
 import { roomMode } from './roomMode.js';
 
 const ok = (message: string): CommandResult => ({ ok: true, message });
@@ -134,6 +137,18 @@ export interface PrivacyServiceDeps {
    * throws: a failed read counts as no rules, which keeps every saved list applying.
    */
   commandAccess?: (guildId: string) => Promise<CommandAccess>;
+  /**
+   * What an owner's `/private`, `/hide`, `/unhide` and `/public` are remembered in, for the
+   * creator channels that remember. Optional so a construction that predates it keeps working:
+   * absent means nothing is saved. See {@link rememberSetting} for who is saved for and when.
+   */
+  memberPrefs?: Pick<MemberRoomPrefsRepository, 'savePrivacy'> | undefined;
+  /**
+   * The `member_prefs.disabled` lever, through the creation gate's cached snapshot. It stops a
+   * privacy being saved, and never one being taken back out (`/public`). Absent means not
+   * disabled, and a read that throws counts as not disabled.
+   */
+  memberPrefsDisabled?: RememberedSaveDeps['memberPrefsDisabled'];
 }
 
 /** A room as a command finds it, or the reply that says it cannot be acted on. */
@@ -463,6 +478,7 @@ export class PrivacyService {
         ownerId: row.ownerId,
         joinName: () => this.ownerJoinName(guildId, row),
       });
+      await this.rememberPrivacy(row, userId, outcome, 'private');
       return this.report(guildId, row.channelId, 'private', outcome);
     });
   }
@@ -592,6 +608,10 @@ export class PrivacyService {
         ownerId: row.ownerId,
         joinName: () => this.ownerJoinName(guildId, row),
       });
+      // Public is never remembered: it is what every room is until somebody changes it, and
+      // remembering it would pin a member to an open room after the creator channel chose a
+      // private one. So going public takes whatever they remembered back out.
+      await this.rememberPrivacy(row, userId, outcome, null);
       return this.report(guildId, row.channelId, 'public', outcome);
     });
   }
@@ -621,6 +641,7 @@ export class PrivacyService {
         ownerId: row.ownerId,
         joinName: () => this.ownerJoinName(guildId, row),
       });
+      await this.rememberPrivacy(row, userId, outcome, 'hidden');
       return this.report(guildId, row.channelId, 'hide', outcome);
     });
   }
@@ -646,6 +667,10 @@ export class PrivacyService {
         ownerId: row.ownerId,
         joinName: () => this.ownerJoinName(guildId, row),
       });
+      // A room that is shown again is still locked, so it is `private` that they now want. Left
+      // as `hidden`, a member who hid a room and then showed it would be given a hidden room
+      // next time.
+      await this.rememberPrivacy(row, userId, outcome, 'private');
       return this.report(guildId, row.channelId, 'unhide', outcome);
     });
   }
@@ -1502,6 +1527,32 @@ export class PrivacyService {
     // Only an unreadable record is `unknown`, and that was refused above.
     if (mode === 'unknown') return refused(say.unreadable);
     return { kind: 'open', row, access: read.access, mode };
+  }
+
+  /**
+   * Remembers the privacy an owner chose for their next room (`null` takes it back out), once
+   * the change has taken effect: applied, or already in place on a replay. Never when it was
+   * refused, failed or only queued behind a rate limit, because then the room is not what they
+   * asked for and the command says so. Never throws. The save is the owner's own, by equality
+   * (see {@link rememberSetting}), and `open` has already refused anyone else.
+   */
+  private async rememberPrivacy(
+    row: SecondaryChannelRow,
+    userId: string,
+    outcome: AccessOutcome,
+    privacy: MemberPrefPrivacy | null,
+  ): Promise<void> {
+    if (outcome.status !== 'applied' && outcome.status !== 'unchanged') return;
+    await rememberSetting(
+      {
+        memberPrefs: this.deps.memberPrefs,
+        memberPrefsDisabled: this.deps.memberPrefsDisabled,
+        logger: this.deps.logger,
+      },
+      row,
+      userId,
+      { field: 'privacy', value: privacy },
+    );
   }
 
   /** What a finished change says to the owner who asked for it. */
