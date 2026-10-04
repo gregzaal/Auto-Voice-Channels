@@ -8,7 +8,7 @@ import { SITE_URL } from '../billing/messages.js';
  * **Who reads these.** An admin, on the editor panel they opened for a creator channel. The
  * words are about what a member's room starts with, so they say "room" and "creator
  * channel", and the one thing they have to say plainly is what is stored about people: a
- * member's id and the names they chose, which the Privacy page covers.
+ * member's id and the name, size and privacy they chose, which the Privacy page covers.
  *
  * **What is promised.** Name, size and privacy, and nothing else. A name is only remembered
  * when the member set one themselves, so a room that was merely named by the creator
@@ -51,7 +51,7 @@ export function rememberedFieldValue(
   if (on && paused) {
     return (
       '**On, but switched off for now.** Nothing new is saved and every new room starts from this ' +
-      "creator channel's defaults until it is switched back on. What members already saved is " +
+      "creator channel's defaults for now. What members already saved is " +
       `kept.${savedSentence(on, saved)}`
     );
   }
@@ -65,15 +65,24 @@ export function rememberedFieldValue(
  * What turning it on says, which is where an admin learns what it does and what it keeps.
  *
  * The sentence about storage is not optional: this is the one place an admin chooses to have
- * member ids and typed names kept, and it has to be said where the choice is made.
+ * member ids and the names, sizes and privacy they choose kept, and it has to be said where the
+ * choice is made.
  */
 export const REMEMBER_ON_NOTE =
   '💾 Remembered settings are on for this creator channel. A member who comes back gets a room ' +
   'that starts with the name, size and privacy they chose last time, instead of this creator ' +
   "channel's defaults. A name is only remembered when the member set one themselves. To do " +
-  "this I store each member's id and the names they choose, which the " +
+  "this I store each member's id and the name, size and privacy they choose, which the " +
   `[Privacy page](${PRIVACY_URL}) covers. ` +
   'Nothing is remembered until a member next changes their room.';
+
+/**
+ * What is added to {@link REMEMBER_ON_NOTE} while remembering is switched off for now, because
+ * the note above says members get their saved settings back and the field beside it says
+ * "on, but switched off for now". Said in the words the field uses.
+ */
+export const REMEMBER_PAUSED_NOTE =
+  'Remembering is switched off for now, so nothing is saved or restored yet.';
 
 /** What turning it off says, including that what members saved is kept. */
 export const REMEMBER_OFF_NOTE =

@@ -481,6 +481,7 @@ describe('the creator channel settings', () => {
         { rememberPrefs: true, savedSettings: 0 },
         { rememberPrefs: true, savedSettings: 1 },
         { rememberPrefs: true, savedSettings: 40 },
+        { rememberPrefs: true, rememberPaused: true },
       ]
         .map((extra) => remembered(extra))
         .join('\n');

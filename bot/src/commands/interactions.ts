@@ -211,6 +211,7 @@ import {
   renderRestrictionList,
   restrictedRefusal,
 } from '../features/voice/commandAccessCopy.js';
+import { REMEMBER_PAUSED_NOTE } from '../features/voice/memberPrefsCopy.js';
 import {
   buildAppearanceModal,
   buildControlSettingsPanel,
@@ -2005,10 +2006,15 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       });
       return;
     }
+    // Turning it on says members now get their own settings back, and the field beside the note
+    // says "switched off for now" while `member_prefs.disabled` is on. Said once, here, from
+    // the state that was just read, so the service needs no lever of its own.
+    const note =
+      action === 'remember_on' && state.rememberPaused === true
+        ? `${result.message} ${REMEMBER_PAUSED_NOTE}`
+        : result.message;
     await interaction.editReply(
-      toUpdate(
-        renderEditorPanel('primary', channelId, state, { updated: true, note: result.message }),
-      ),
+      toUpdate(renderEditorPanel('primary', channelId, state, { updated: true, note })),
     );
   }
 

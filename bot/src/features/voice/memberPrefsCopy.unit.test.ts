@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   REMEMBER_OFF_NOTE,
   REMEMBER_ON_NOTE,
+  REMEMBER_PAUSED_NOTE,
   clearedNote,
   rememberedFieldValue,
   rememberedInfoLine,
@@ -15,7 +16,7 @@ const COUNTS = [undefined, 0, 1, 2, 250] as const;
  * not on source text, where only a curly quote shows.
  */
 function everySentence(): string[] {
-  const out: string[] = [REMEMBER_ON_NOTE, REMEMBER_OFF_NOTE];
+  const out: string[] = [REMEMBER_ON_NOTE, REMEMBER_OFF_NOTE, REMEMBER_PAUSED_NOTE];
   for (const saved of COUNTS) {
     for (const on of [true, false]) {
       for (const paused of [true, false]) {
@@ -53,8 +54,9 @@ describe('copy rules', () => {
 
 describe('what turning it on says', () => {
   /**
-   * The one place an admin chooses to have member ids and typed names kept, so each thing it
-   * has to say is pinned: what members get, the one rule about names, and what is stored.
+   * The one place an admin chooses to have member ids and the settings they choose kept, so
+   * each thing it has to say is pinned: what members get, the one rule about names, and what
+   * is stored, which is all three of the things members get.
    */
   it('says what members get, that a name is only remembered when set, and what is stored', () => {
     expect(REMEMBER_ON_NOTE).toContain('name, size and privacy');
@@ -62,8 +64,18 @@ describe('what turning it on says', () => {
     expect(REMEMBER_ON_NOTE).toContain(
       'A name is only remembered when the member set one themselves',
     );
-    expect(REMEMBER_ON_NOTE).toContain("each member's id and the names they choose");
+    expect(REMEMBER_ON_NOTE).toContain(
+      "each member's id and the name, size and privacy they choose",
+    );
     expect(REMEMBER_ON_NOTE).toContain('[Privacy page](https://auto-voice.io/privacy)');
+  });
+
+  /** The note above says members get their settings back, which is not true while the lever is on. */
+  it('says, when it is added, that remembering is switched off for now', () => {
+    expect(REMEMBER_PAUSED_NOTE).toBe(
+      'Remembering is switched off for now, so nothing is saved or restored yet.',
+    );
+    expect(`${REMEMBER_ON_NOTE} ${REMEMBER_PAUSED_NOTE}`.length).toBeLessThanOrEqual(1024);
   });
 
   it('says that nothing is remembered until a member next changes their room', () => {
@@ -129,6 +141,15 @@ describe('rememberedFieldValue', () => {
       expect(text).toContain("every new room starts from this creator channel's defaults");
       expect(text).toContain('What members already saved is kept');
       expect(text).toContain('3 members have saved settings.');
+    });
+
+    /**
+     * The lever is an operator's, and the editor's own "Remembered settings: on" button is
+     * unchanged and does nothing about it, so the field must not read as something the admin
+     * can switch back on.
+     */
+    it('does not tell the admin to switch anything back on', () => {
+      expect(rememberedFieldValue(true, undefined, true)).not.toMatch(/switched back on/);
     });
 
     /** "Off" already says every new room starts from the defaults, so there is nothing to add. */

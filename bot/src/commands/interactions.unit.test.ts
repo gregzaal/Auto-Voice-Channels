@@ -6558,6 +6558,43 @@ describe('registerInteractionHandler (remembered room settings)', () => {
     expect(JSON.stringify(payload)).toContain(idFor('remember_off'));
   });
 
+  /**
+   * The note for turning it on says members get their settings back, and the field beside it
+   * says "switched off for now" while member_prefs.disabled is on. An admin must not read both.
+   */
+  describe('while remembering is switched off for now', () => {
+    const paused = () =>
+      envWith({
+        state: primaryState({ rememberPrefs: true, rememberPaused: true, savedSettings: 2 }),
+      });
+
+    it('adds that to the note for turning it on', async () => {
+      const { env } = paused();
+      const fake = await press(env, idFor('remember_on'));
+      const payload = JSON.stringify(fake.editReply.mock.calls[0]?.[0]);
+      expect(payload).toContain('Remembering is on.');
+      expect(payload).toContain('Remembering is switched off for now, so nothing is saved');
+      expect(payload).toContain('On, but switched off for now.');
+    });
+
+    it('adds nothing to the note for turning it off or for clearing', async () => {
+      const { env } = paused();
+      for (const action of ['remember_off', 'forget'] as const) {
+        const fake = await press(env, idFor(action));
+        const payload = JSON.stringify(fake.editReply.mock.calls[0]?.[0]);
+        expect(payload).not.toContain('Remembering is switched off for now');
+      }
+    });
+
+    it('adds nothing to the note for turning it on when the lever is not on', async () => {
+      const { env } = envWith({ state: primaryState({ rememberPrefs: true, savedSettings: 2 }) });
+      const fake = await press(env, idFor('remember_on'));
+      expect(JSON.stringify(fake.editReply.mock.calls[0]?.[0])).not.toContain(
+        'Remembering is switched off for now',
+      );
+    });
+  });
+
   it('keeps the editor at three rows after every press', async () => {
     const { env } = envWith();
     for (const action of IDS) {

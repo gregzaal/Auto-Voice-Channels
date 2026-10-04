@@ -736,7 +736,7 @@ describe('GuildSettingsService (integration)', () => {
       expect(on.message).toContain('name, size and privacy');
       expect(on.message).toContain("instead of this creator channel's defaults");
       expect(on.message).toContain('only remembered when the member set one themselves');
-      expect(on.message).toContain("each member's id and the names they choose");
+      expect(on.message).toContain("each member's id and the name, size and privacy they choose");
       expect(on.message).toContain('/privacy');
 
       const off = await service.setRememberPrefs(GUILD, PRIMARY, false);
