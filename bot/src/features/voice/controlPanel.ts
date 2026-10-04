@@ -359,6 +359,13 @@ export function hiddenControls(
   return hidden;
 }
 
+/**
+ * Buttons per row. Three, not Discord's ceiling of five: Discord draws inline embed
+ * fields three to a row, so three buttons put each row under the fields that describe it.
+ * Eight controls make three rows, well inside Discord's five.
+ */
+const PANEL_ROW_SIZE = 3;
+
 /** The panel message: an embed and its button rows, or null when there is none to show. */
 export interface ControlPanelMessage {
   embeds: APIEmbed[];
@@ -432,14 +439,15 @@ export function buildControlPanel(
     .setFooter(PANEL_FOOTER)
     .toJSON();
 
-  // Five per row is Discord's ceiling. Chunking rather than a fixed layout so a
-  // server that switches some off gets full rows rather than gaps.
+  // Three per row, so each row of buttons sits under the row of three inline
+  // fields that describes it. Chunking rather than a fixed layout so a server
+  // that switches some off gets full rows rather than gaps.
   const rows: ActionRowBuilder<ButtonBuilder>[] = [];
-  for (let i = 0; i < faces.length; i += 5) {
+  for (let i = 0; i < faces.length; i += PANEL_ROW_SIZE) {
     rows.push(
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         faces
-          .slice(i, i + 5)
+          .slice(i, i + PANEL_ROW_SIZE)
           .map(({ action, face }) =>
             new ButtonBuilder()
               .setCustomId(controlPanelId(action, roomId))

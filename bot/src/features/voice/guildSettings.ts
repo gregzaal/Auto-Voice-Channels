@@ -411,22 +411,25 @@ export function readGroups(settings: Record<string, unknown>): Record<string, Gr
  *
  * Order is fixed here rather than configurable, which is the whole reason this
  * is a list and not a set: an admin can take a button away, and cannot move one.
- * Appending is safe; reordering changes every server's panel at once, and
- * renaming an id silently re-enables a control somebody switched off, because
- * the stored map is keyed by these strings.
+ * Reordering changes every server's panel at once, which is safe for stored
+ * config (the map is keyed by id, not position), and renaming an id silently
+ * re-enables a control somebody switched off, because the stored map is keyed
+ * by these strings.
  *
- * Hide is last because it was appended. It shows after Info, and a server on the
- * default buttons (five, with Claim and Transfer off) gets a second row holding it.
+ * The panel lays buttons out three to a row, matching the three inline embed
+ * fields Discord draws per row, so the default six read as Name, Size, Info over
+ * Private, Hide, Kick (the owner's layout, 2026-10-04). Claim and Transfer are
+ * off by default and fill a third row when switched on.
  */
 export const CONTROL_PANEL_CONTROLS = [
-  'privacy',
-  'limit',
   'rename',
+  'limit',
+  'info',
+  'privacy',
+  'hide',
+  'kick',
   'claim',
   'transfer',
-  'kick',
-  'info',
-  'hide',
 ] as const;
 
 export type ControlPanelControl = (typeof CONTROL_PANEL_CONTROLS)[number];

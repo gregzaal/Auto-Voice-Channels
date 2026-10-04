@@ -140,12 +140,12 @@ describe('buildControlPanel', () => {
     const open = buildControlPanel(ROOM, defaults(), view({ isPrivate: false }));
     expect(buttonIds(open)).toContain(controlPanelId('lock', ROOM));
     expect(buttonIds(open)).not.toContain(controlPanelId('unlock', ROOM));
-    expect(fieldsOf(open)[0]!.name).toBe('🔒 Private');
+    expect(fieldsOf(open)[3]!.name).toBe('🔒 Private');
 
     const locked = buildControlPanel(ROOM, defaults(), view({ isPrivate: true }));
     expect(buttonIds(locked)).toContain(controlPanelId('unlock', ROOM));
     expect(buttonIds(locked)).not.toContain(controlPanelId('lock', ROOM));
-    expect(fieldsOf(locked)[0]!.name).toBe('🔓 Public');
+    expect(fieldsOf(locked)[3]!.name).toBe('🔓 Public');
   });
 
   it('names the owner and the creator channel, as mentions', () => {
@@ -535,7 +535,7 @@ describe('buildControlPanel and /restrict', () => {
   it('hides Private, Hide, Size, Name and Transfer from a room whose owner is denied them', () => {
     const panel = buildControlPanel(ROOM, allOn(), view({ ownerAccess: standing() }), DENY_ALL);
     // Claim, Kick and Info are occupant-level and are never hidden.
-    expect(actionsOf(panel)).toEqual(['claim', 'kick', 'info']);
+    expect(actionsOf(panel)).toEqual(['info', 'kick', 'claim']);
     expect(fieldsOf(panel).map((f) => f.name)).not.toContain('🔒 Private');
     expect(fieldsOf(panel).map((f) => f.name)).not.toContain('🙈 Hide');
   });
@@ -549,13 +549,13 @@ describe('buildControlPanel and /restrict', () => {
       access,
     );
     expect(actionsOf(panel)).toEqual([
-      'lock',
       'limit',
+      'info',
+      'lock',
+      'hide',
+      'kick',
       'claim',
       'transfer',
-      'kick',
-      'info',
-      'hide',
     ]);
   });
 
@@ -567,7 +567,7 @@ describe('buildControlPanel and /restrict', () => {
       DENY_ALL,
     );
     // Hide is withdrawn here too: a locked room that is not hidden is offered it.
-    expect(actionsOf(panel)).toEqual(['unlock', 'claim', 'kick', 'info']);
+    expect(actionsOf(panel)).toEqual(['info', 'unlock', 'kick', 'claim']);
   });
 
   it('shows Private on a public room for an owner who is not denied', () => {
@@ -588,14 +588,14 @@ describe('buildControlPanel and /restrict', () => {
       DENY_ALL,
     );
     expect(actionsOf(panel)).toEqual([
-      'lock',
-      'limit',
       'rename',
+      'limit',
+      'info',
+      'lock',
+      'hide',
+      'kick',
       'claim',
       'transfer',
-      'kick',
-      'info',
-      'hide',
     ]);
   });
 
@@ -608,18 +608,18 @@ describe('buildControlPanel and /restrict', () => {
    */
   it('hides restricted controls from an ownerless room but not for an unresolved owner', () => {
     const ownerless = buildControlPanel(ROOM, allOn(), view({ ownerId: null }), DENY_ALL);
-    expect(actionsOf(ownerless)).toEqual(['claim', 'kick', 'info']);
+    expect(actionsOf(ownerless)).toEqual(['info', 'kick', 'claim']);
 
     const unknown = buildControlPanel(ROOM, allOn(), view({ ownerAccess: 'unknown' }), DENY_ALL);
     expect(actionsOf(unknown)).toEqual([
-      'lock',
-      'limit',
       'rename',
+      'limit',
+      'info',
+      'lock',
+      'hide',
+      'kick',
       'claim',
       'transfer',
-      'kick',
-      'info',
-      'hide',
     ]);
     // And absent, which is what a caller that predates restrictions passes.
     expect(actionsOf(buildControlPanel(ROOM, allOn(), view(), DENY_ALL))).toEqual(
@@ -631,13 +631,13 @@ describe('buildControlPanel and /restrict', () => {
     const access: CommandAccess = { limit: { users: [], roles: [DENIED_ROLE] } };
     const panel = buildControlPanel(ROOM, allOn(), view({ ownerId: null }), access);
     expect(actionsOf(panel)).toEqual([
-      'lock',
       'rename',
+      'info',
+      'lock',
+      'hide',
+      'kick',
       'claim',
       'transfer',
-      'kick',
-      'info',
-      'hide',
     ]);
   });
 
@@ -648,7 +648,7 @@ describe('buildControlPanel and /restrict', () => {
       view({ ownerId: null, isPrivate: true }),
       DENY_ALL,
     );
-    expect(actionsOf(panel)).toEqual(['unlock', 'claim', 'kick', 'info']);
+    expect(actionsOf(panel)).toEqual(['info', 'unlock', 'kick', 'claim']);
   });
 
   it('computes the hidden set from the action each control would carry', () => {
@@ -712,26 +712,45 @@ describe('the hide control', () => {
   ): string | undefined =>
     fieldsOf(panel).find((f) => f.name.endsWith(action === 'hide' ? 'Hide' : 'Unhide'))?.name;
 
-  it('is the last control, so appending it moved no existing button', () => {
-    expect(CONTROL_PANEL_CONTROLS.at(-1)).toBe('hide');
-    expect([...CONTROL_PANEL_CONTROLS].slice(0, 7)).toEqual([
-      'privacy',
-      'limit',
+  /** The owner's layout (2026-10-04): Name, Size, Info, then Private, Hide, Kick. */
+  it('sits in the second row between Private and Kick', () => {
+    expect([...CONTROL_PANEL_CONTROLS]).toEqual([
       'rename',
+      'limit',
+      'info',
+      'privacy',
+      'hide',
+      'kick',
       'claim',
       'transfer',
-      'kick',
-      'info',
     ]);
   });
 
   /** The owner's decision (2026-10-03): beta testers expect some friction. */
-  it('is on by default, which puts it in a second row beside the default five', () => {
+  it('is on by default, which makes the default panel two rows of three', () => {
     expect(CONTROL_PANEL_DEFAULTS.hide).toBe(true);
     const panel = buildControlPanel(ROOM, defaults(), view())!;
     const rows = panel.components.map((r) => (r.toJSON().components as unknown[]).length);
-    expect(rows).toEqual([5, 1]);
-    expect(actionsOf(panel)).toEqual(['lock', 'limit', 'rename', 'kick', 'info', 'hide']);
+    expect(rows).toEqual([3, 3]);
+    expect(actionsOf(panel)).toEqual(['rename', 'limit', 'info', 'lock', 'hide', 'kick']);
+    // The fields follow the buttons, so each row of three inline fields describes the row
+    // of buttons under the embed in the same order.
+    expect(fieldsOf(panel).map((f) => f.name)).toEqual([
+      '✏️ Name',
+      '👥 Size',
+      'ℹ️ Info',
+      '🔒 Private',
+      '🙈 Hide',
+      '🥾 Kick',
+      expect.any(String),
+    ]);
+  });
+
+  it('puts Claim and Transfer in a third row when a server switches them on', () => {
+    const panel = buildControlPanel(ROOM, allOn(), view())!;
+    const rows = panel.components.map((r) => (r.toJSON().components as unknown[]).length);
+    expect(rows).toEqual([3, 3, 2]);
+    expect(actionsOf(panel).slice(6)).toEqual(['claim', 'transfer']);
   });
 
   it('offers Hide on a public room and on a locked one, and Unhide only on a hidden one', () => {
@@ -767,7 +786,7 @@ describe('the hide control', () => {
     );
     expect(buttonIds(unknown)).not.toContain(controlPanelId('hide', ROOM));
     expect(buttonIds(unknown)).not.toContain(controlPanelId('unhide', ROOM));
-    expect(actionsOf(unknown)).toEqual(['unlock', 'limit', 'rename', 'kick', 'info']);
+    expect(actionsOf(unknown)).toEqual(['rename', 'limit', 'info', 'unlock', 'kick']);
     expect(fieldsOf(unknown).map((f) => f.name)).not.toContain('🙈 Hide');
   });
 
