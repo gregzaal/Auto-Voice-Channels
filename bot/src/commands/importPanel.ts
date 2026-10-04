@@ -504,6 +504,16 @@ function removalSection(plan: ImportPlan, isPublic: boolean): string[] {
   const cap = isPublic ? PUBLIC_LIST_CAP : LIST_CAP;
 
   for (const change of plan.settingChanges) {
+    /**
+     * A file that carries `command_access: null` clears every restriction, and the diff reports
+     * a cleared change with no entries (they are only listed for a map of strings, and these
+     * values are objects), so it is counted from `before` here rather than from the entries.
+     */
+    if (change.key === 'command_access' && change.cleared) {
+      const cleared = commandAccessCount(change.before);
+      if (cleared > 0) out.push(`${restrictions(cleared)} on room commands`);
+      continue;
+    }
     if (change.entriesRemoved.length === 0) continue;
     const label = SETTING_LABELS[change.key] ?? change.key;
     if (change.key === 'custom_nicks') {

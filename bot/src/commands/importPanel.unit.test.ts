@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import type { ChannelChange, ImportNote, ImportPlan, SettingChange } from '@avc/core';
+import {
+  AVC_EXPORT_VERSION,
+  diffGuildConfig,
+  EXPORT_SETTINGS_KEYS,
+  fromNativeFile,
+  type ChannelChange,
+  type GuildConfigFile,
+  type ImportNote,
+  type ImportPlan,
+  type SettingChange,
+} from '@avc/core';
 import {
   confirmLabel,
   destructiveCount,
@@ -13,6 +23,7 @@ import {
 } from './importPanel.js';
 
 const ACTOR = '123456789012345678';
+const GUILD = '100000000000000001';
 const NICK_USER = '222222222222222222';
 const RESTRICTED_USER = '333333333333333333';
 const RESTRICTED_ROLE = '444444444444444444';
@@ -298,6 +309,62 @@ describe('renderAnnouncement', () => {
     );
     expect(text).toContain('2 restrictions on room commands');
     expect(text).not.toContain(RESTRICTED_USER);
+  });
+
+  /**
+   * A file whose `command_access` is null clears every restriction, and the diff reports that
+   * as a cleared change with no entries. Built through the real diff, because a hand-built
+   * change decides its own `entriesRemoved` and never takes this path.
+   */
+  it('lists a file that clears every restriction under Removed, from the real diff', () => {
+    const stored = {
+      rename: { users: [NICK_USER, RESTRICTED_USER] },
+      nick: { roles: [RESTRICTED_ROLE] },
+    };
+    const settings = Object.fromEntries(
+      EXPORT_SETTINGS_KEYS.map((key) => [key, null]),
+    ) as GuildConfigFile['settings'];
+    const file: GuildConfigFile = {
+      avc_export_version: AVC_EXPORT_VERSION,
+      exported_at: '2026-10-04T12:00:00.000Z',
+      guild_id: GUILD,
+      guild_name: 'Example server',
+      source_application_id: null,
+      source_fleet_channel_scope: null,
+      settings,
+      creator_channels: [],
+      adopted_channels: [],
+    };
+    const result = diffGuildConfig(
+      fromNativeFile(file),
+      { settings: { command_access: stored }, creatorChannels: [], adoptedChannels: [] },
+      {
+        guildId: GUILD,
+        channels: new Map([
+          [
+            '999999999999999999',
+            { name: 'Lobby', kind: 'voice', botCanManage: true, botCanRename: true },
+          ],
+        ]),
+        members: new Map(),
+        foreignFleetChannels: new Map(),
+        applicationId: null,
+        otherFleetsPresent: [],
+        actorId: ACTOR,
+      },
+    );
+    if (!result.ok) throw new Error('expected a plan');
+    const change = result.plan.settingChanges.find((c) => c.key === 'command_access');
+    expect(change?.cleared).toBe(true);
+
+    for (const text of [renderPreview(result.plan, ctx), renderAnnouncement(result.plan, ctx)]) {
+      expect(text).toContain('Who can use room commands: cleared (3 restrictions removed)');
+      expect(text).toContain('Removed');
+      expect(text).toContain('3 restrictions on room commands');
+      for (const id of [NICK_USER, RESTRICTED_USER, RESTRICTED_ROLE]) {
+        expect(text).not.toContain(id);
+      }
+    }
   });
 
   /**
