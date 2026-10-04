@@ -769,14 +769,42 @@ export class DiscordVoiceActions implements VoiceActions {
     return Promise.resolve(collides);
   }
 
+  /** Channels already reported as ones new rooms cannot copy from, so a creator channel logs it once. */
+  private readonly warnedUncopyable = new Set<string>();
+
+  /**
+   * The overwrites a new room copies from `channel`, or nothing when Discord is showing only
+   * the obfuscated shell of it (the bot cannot View it, mandatory from 2026-11-16).
+   *
+   * The shell's overwrites are a single `@everyone` View deny, and copying that gives every
+   * room the creator channel makes the same deny: born invisible to everyone, with no error
+   * anywhere. Before obfuscation a channel the bot could not see was absent from the cache, the
+   * fetch failed and the callers fell back, and this puts them back on that path.
+   */
+  private copyableFrom(channel: {
+    id: string;
+    flags?: { bitfield: number } | null;
+    permissionOverwrites: { cache: Parameters<typeof mapOverwrites>[0] };
+  }): ResolvedOverwrite[] | undefined {
+    if (isObfuscated(channel)) {
+      if (!this.warnedUncopyable.has(channel.id)) {
+        this.warnedUncopyable.add(channel.id);
+        this.logger?.warn(
+          { channelId: channel.id },
+          'new rooms cannot copy permissions from a channel the bot can no longer view',
+        );
+      }
+      return undefined;
+    }
+    return mapOverwrites(channel.permissionOverwrites.cache);
+  }
+
   /** A category's overwrites by id (for the implicit-sync lock-out guard). */
   private async resolveCategoryOverwrites(
     categoryId: string,
   ): Promise<ResolvedOverwrite[] | undefined> {
     const category = await this.client.channels.fetch(categoryId).catch(() => null);
-    return category && 'permissionOverwrites' in category
-      ? mapOverwrites(category.permissionOverwrites.cache)
-      : undefined;
+    return category && 'permissionOverwrites' in category ? this.copyableFrom(category) : undefined;
   }
 
   private async resolveInheritedOverwrites(
@@ -785,11 +813,11 @@ export class DiscordVoiceActions implements VoiceActions {
   ): Promise<ReturnType<typeof mapOverwrites> | undefined> {
     try {
       if (mode === 'primary') {
-        return near?.isVoiceBased() ? mapOverwrites(near.permissionOverwrites.cache) : undefined;
+        return near?.isVoiceBased() ? this.copyableFrom(near) : undefined;
       }
       if (mode === 'category') {
         const parent = near?.isVoiceBased() ? near.parent : null;
-        return parent ? mapOverwrites(parent.permissionOverwrites.cache) : undefined;
+        return parent ? this.copyableFrom(parent) : undefined;
       }
       /**
        * Otherwise `mode` is a channel id to copy from.
@@ -817,9 +845,11 @@ export class DiscordVoiceActions implements VoiceActions {
           ? source.guildId === near.guildId
           : false;
       if (source && sameGuild && 'permissionOverwrites' in source) {
-        return mapOverwrites(source.permissionOverwrites.cache);
+        // A shell is treated like an id that no longer resolves: the primary's own.
+        const copied = this.copyableFrom(source);
+        if (copied) return copied;
       }
-      return near?.isVoiceBased() ? mapOverwrites(near.permissionOverwrites.cache) : undefined;
+      return near?.isVoiceBased() ? this.copyableFrom(near) : undefined;
     } catch {
       return undefined;
     }

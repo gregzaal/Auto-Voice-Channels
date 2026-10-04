@@ -170,6 +170,8 @@ describe('DiscordVoiceActions.createVoiceChannel', () => {
     categoryOverwrites: Row[],
     primaryOverwrites: Row[] = [],
     botPerms = FULL_BOT_PERMS,
+    /** Channels Discord shows as the obfuscated shell, because the bot cannot View them. */
+    obfuscated: { primary?: boolean; category?: boolean } = {},
   ) {
     const created = { id: 'new', setPosition: vi.fn() };
     const guild = {
@@ -184,11 +186,15 @@ describe('DiscordVoiceActions.createVoiceChannel', () => {
       rawPosition: 0,
       position: 0,
       permissionOverwrites: overwriteCache(primaryOverwrites),
+      ...(obfuscated.primary ? { flags: { bitfield: CHANNEL_OBFUSCATED } } : {}),
       // bottomOfBlock reads the category off the channel's own guild, so this
       // has to be present even for cases that pass no rooms.
       guild,
     };
-    const category = { permissionOverwrites: overwriteCache(categoryOverwrites) };
+    const category = {
+      permissionOverwrites: overwriteCache(categoryOverwrites),
+      ...(obfuscated.category ? { flags: { bitfield: CHANNEL_OBFUSCATED } } : {}),
+    };
     const client = {
       user: { id: BOT },
       guilds: { fetch: vi.fn().mockResolvedValue(guild) },
@@ -302,6 +308,22 @@ describe('DiscordVoiceActions.createVoiceChannel', () => {
       expect(ow!.find((o) => o.id === 'g1')).toBeUndefined();
     });
 
+    /**
+     * A channel id the bot cannot View arrives as a shell, and `/inheritpermissions` takes any
+     * id. It is an id that no longer resolves for this purpose, so the primary's own are copied.
+     */
+    it('falls back to the primary when the channel is an obfuscated shell', async () => {
+      const { client, guild } = clientWithSource({
+        guildId: 'g1',
+        flags: { bitfield: CHANNEL_OBFUSCATED },
+        permissionOverwrites: overwriteCache(SOURCE),
+      });
+      const ow = await create(client, guild);
+      expect(ow!.find((o) => o.id === 'roleX')).toBeUndefined();
+      expect(ow!.find((o) => o.id === 'g1')!.deny & VIEW).toBe(VIEW);
+      expect(ow!.find((o) => o.id === BOT)!.allow & VIEW).toBe(VIEW);
+    });
+
     it('falls back to the primary when the channel is gone', async () => {
       const { client, guild } = clientWithSource(null);
       const ow = await create(client, guild);
@@ -396,6 +418,60 @@ describe('DiscordVoiceActions.createVoiceChannel', () => {
     const ow = createArg(guild).permissionOverwrites!;
     expect(ow.find((o) => o.id === BOT)!.allow & VIEW).toBe(VIEW); // bot can see/manage
     expect(ow.find((o) => o.id === 'g1')!.deny & VIEW).toBe(VIEW); // others still hidden
+  });
+
+  /**
+   * Discord's obfuscation (mandatory 2026-11-16) hands the bot a channel it cannot View as a shell
+   * whose overwrites are one `@everyone` View deny. Copied, that deny is on every room the creator
+   * channel makes: born invisible to everyone, with no error anywhere.
+   */
+  describe('copying permissions from a channel Discord shows only as an obfuscated shell', () => {
+    const SHELL: Row[] = [{ id: 'g1', type: 0, allow: 0n, deny: VIEW }];
+
+    it('does not copy a creator channel that is a shell, and leaves the room to sync', async () => {
+      const { client, guild } = makeClient([], SHELL, FULL_BOT_PERMS, { primary: true });
+      const logger = { warn: vi.fn() };
+      const actions = new DiscordVoiceActions(client, logger as never);
+      for (let room = 0; room < 2; room += 1) {
+        guild.channels.create.mockClear();
+        await actions.createVoiceChannel({
+          guildId: 'g1',
+          name: 'x',
+          nearChannelId: 'prim',
+          inheritFrom: 'primary',
+        });
+        expect(createArg(guild).permissionOverwrites).toBeUndefined();
+      }
+      // Said once for the channel, not once per room.
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenCalledWith(
+        { channelId: 'prim' },
+        expect.stringContaining('cannot copy permissions'),
+      );
+    });
+
+    it('does not snapshot a category that is a shell either', async () => {
+      const { client, guild } = makeClient(SHELL, [], FULL_BOT_PERMS, { category: true });
+      await new DiscordVoiceActions(client).createVoiceChannel({
+        guildId: 'g1',
+        name: 'x',
+        nearChannelId: 'prim',
+      });
+      expect(createArg(guild).permissionOverwrites).toBeUndefined();
+    });
+
+    it('still copies a creator channel and a category that are not', async () => {
+      const { client, guild } = makeClient(SHELL, SHELL);
+      await new DiscordVoiceActions(client).createVoiceChannel({
+        guildId: 'g1',
+        name: 'x',
+        nearChannelId: 'prim',
+        inheritFrom: 'primary',
+      });
+      expect(createArg(guild).permissionOverwrites!.find((o) => o.id === 'g1')!.deny & VIEW).toBe(
+        VIEW,
+      );
+    });
   });
 
   it('leaves a public category alone (Discord sync, no explicit overwrites)', async () => {
