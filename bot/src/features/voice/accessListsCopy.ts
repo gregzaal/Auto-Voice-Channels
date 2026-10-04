@@ -34,7 +34,8 @@ export const ACCESS_REFUSALS = {
   /** `/access trust` or `block` with nobody picked, which only a hand-built request sends. */
   unusable: "That isn't someone I can put on a list.",
   self: "That's you. You always have access to your own rooms, so there is nothing to save.",
-  bot: (memberId: string): string => `<@${memberId}> is a bot, so I can't put it on a list.`,
+  bot: (memberId: string): string =>
+    `<@${memberId}> is a bot, so I can't put it on a list. To let it into one room, use \`/access admit\`.`,
   notInServer: (memberId: string): string =>
     `<@${memberId}> isn't in this server, so I can't put them on a list.`,
   /** An Administrator or the server's owner, whom no block can stop. */

@@ -715,6 +715,26 @@ describe('PrivacyService (integration)', () => {
       }
     });
 
+    /**
+     * A music bot is in the room because somebody put it there. Left out of the grants it kept
+     * only its role's base View, which `@everyone`'s deny beats, so a hide took the room out of
+     * the bot's list, and a role overwrite that allowed View was flipped to a deny as well.
+     */
+    it('keeps a bot that is in the room, whichever way the room is closed', async () => {
+      voice.put(SEC, { ...member('musicbot'), bot: true });
+      actions.seedOverwrites(SEC, [roleOw('role-music', V | C)]);
+
+      expect((await privacy.makePrivate(GUILD, SEC, 'alice')).ok).toBe(true);
+      expect(bits(held('musicbot'))).toEqual({ allow: C, deny: 0n });
+
+      expect((await privacy.hide(GUILD, SEC, 'alice')).ok).toBe(true);
+      expect(bits(held('musicbot'))).toEqual({ allow: VC, deny: 0n });
+      // Its own role's overwrite was flipped like any other, and the bot still sees the room.
+      expect(bits(held('role-music', OVERWRITE_ROLE))).toEqual({ allow: C, deny: V });
+      // The AVC bot has its own allow and is never granted as an occupant.
+      expect(bits(held(BOT))).toEqual({ allow: BOT_ACCESS, deny: 0n });
+    });
+
     /** The whole point of a baseline: out and back is the room the creator channel made. */
     it('hide, unhide and public give a role-gated room back exactly as it came', async () => {
       moderatorRole = MODS;

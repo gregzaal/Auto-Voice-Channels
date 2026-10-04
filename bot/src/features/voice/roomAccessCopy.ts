@@ -150,7 +150,8 @@ export function hiddenMessage(opts: {
   return (
     '🙈 Your room is now hidden from the channel list. ' +
     `${who} Anyone given direct access to this room still sees it too. ` +
-    'Everyone else sees it only if you let them in, with `/access trust` or `/access admit`.' +
+    'Everyone else sees it only if you let them in, with `/access trust` or `/access admit`. ' +
+    'Bots already in the room keep their access, and a bot you bring in later needs `/access admit`.' +
     skippedRolesNote(opts.skippedRoleIds ?? [])
   );
 }

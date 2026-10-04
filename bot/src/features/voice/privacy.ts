@@ -2140,12 +2140,16 @@ export class PrivacyService {
    * Who is in the room: the roster (maintained by the join and leave events) and the
    * voice cache together, because the cache lags a join by long enough to plan
    * without somebody who is standing in the room.
+   *
+   * **Bots count.** A music bot is in the room because somebody put it there, and a hide
+   * that left it with only its role's base View would take the room out of its list
+   * and, once it leaves, keep it out: `@everyone`'s View deny beats a role's base
+   * permissions, and a role overwrite that allowed View is flipped to a deny. The plan
+   * leaves out AVC's own id, which has its own allow, and a bot that joins later needs
+   * `/access admit`.
    */
   private occupantIds(row: SecondaryChannelRow): string[] {
-    const present = this.deps.voice
-      .membersInChannel(row.channelId)
-      .filter((m) => !m.bot)
-      .map((m) => m.id);
+    const present = this.deps.voice.membersInChannel(row.channelId).map((m) => m.id);
     return [...new Set([...(row.state.roster ?? []), ...present])];
   }
 
