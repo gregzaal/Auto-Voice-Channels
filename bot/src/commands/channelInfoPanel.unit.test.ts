@@ -404,7 +404,7 @@ describe('the creator channel settings', () => {
 
   describe('remembered room settings', () => {
     const remembered = (
-      extra: { rememberPrefs?: boolean; savedSettings?: number } = {},
+      extra: { rememberPrefs?: boolean; savedSettings?: number; rememberPaused?: boolean } = {},
       isAdmin = true,
     ): string | undefined => {
       const reply = buildChannelInfoPanel(
@@ -458,6 +458,20 @@ describe('the creator channel settings', () => {
     /** It sits in the admin's section, so a member running the command never reads it. */
     it('is part of the admin section and absent from a member view', () => {
       expect(remembered({ rememberPrefs: true }, false)).toBeUndefined();
+    });
+
+    /** `member_prefs.disabled` is on: "on" would describe a feature that is doing nothing. */
+    it('says it is switched off for now while the lever is on, and drops the count', () => {
+      expect(remembered({ rememberPrefs: true, rememberPaused: true })).toBe(
+        'Returning members get their own saved name, size and privacy: on, but switched off for now',
+      );
+      expect(remembered({ rememberPrefs: true, rememberPaused: true, savedSettings: 9 })).toBe(
+        'Returning members get their own saved name, size and privacy: on, but switched off for now',
+      );
+      // Off stays off, and says nothing of the lever.
+      expect(remembered({ rememberPrefs: false, rememberPaused: true })).toBe(
+        'Returning members get their own saved name, size and privacy: off',
+      );
     });
 
     it('keeps to the copy rules and the vocabulary in every state', () => {

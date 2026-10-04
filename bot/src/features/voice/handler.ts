@@ -552,6 +552,12 @@ export interface PrimaryConfig {
    * and not shown as nobody.
    */
   savedSettings?: number | undefined;
+  /**
+   * True while `member_prefs.disabled` is on for a creator channel that remembers, so the
+   * readout can say it is switched off for now and not "on" about a feature that is doing
+   * nothing. Present only when true, and read with the count, so only for a viewer who sees it.
+   */
+  rememberPaused?: boolean | undefined;
 }
 
 /** Lifts a creator channel's stored template into the reportable subset. */
@@ -664,6 +670,11 @@ export interface EditorState {
    * editor's "Clear saved settings" acts on it. Absent when it could not be counted.
    */
   savedSettings?: number;
+  /**
+   * Creator channel editors only: true while `member_prefs.disabled` is on for a creator
+   * channel that remembers, so the field says it is switched off for now. Absent otherwise.
+   */
+  rememberPaused?: boolean;
 }
 
 /** What the room control panel's buttons need to know about a room. */
@@ -3123,11 +3134,14 @@ export class VoiceFeature {
   private async rememberedState(
     guildId: string,
     primary: AutoChannelRow,
-  ): Promise<Pick<EditorState, 'rememberPrefs' | 'savedSettings'>> {
+  ): Promise<Pick<EditorState, 'rememberPrefs' | 'savedSettings' | 'rememberPaused'>> {
     const savedSettings = await this.savedSettingsOf(guildId, primary.channelId);
+    const remembers = primary.template.rememberPrefs === true;
     return {
-      rememberPrefs: primary.template.rememberPrefs === true,
+      rememberPrefs: remembers,
       ...(savedSettings === undefined ? {} : { savedSettings }),
+      // Asked only of a creator channel that remembers, and a cached read at that.
+      ...(remembers && (await this.memberPrefsPaused()) ? { rememberPaused: true } : {}),
     };
   }
 
@@ -3156,8 +3170,9 @@ export class VoiceFeature {
 
   /**
    * A creator channel's own configuration for `/channelinfo`, with the count of members who
-   * have something saved when it remembers and the viewer will see it. Not paid for a creator
-   * channel that does not remember, nor for a viewer who is not an admin.
+   * have something saved, and whether remembering is switched off for now, when it remembers
+   * and the viewer will see it. Neither is paid for a creator channel that does not remember,
+   * nor for a viewer who is not an admin.
    */
   private async primaryConfigOf(
     guildId: string,
@@ -3167,7 +3182,11 @@ export class VoiceFeature {
     const config = primaryConfig(row);
     if (config.rememberPrefs !== true || !countSaved) return config;
     const savedSettings = await this.savedSettingsOf(guildId, row.channelId);
-    return savedSettings === undefined ? config : { ...config, savedSettings };
+    return {
+      ...config,
+      ...(savedSettings === undefined ? {} : { savedSettings }),
+      ...((await this.memberPrefsPaused()) ? { rememberPaused: true } : {}),
+    };
   }
 
   /**

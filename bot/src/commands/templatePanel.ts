@@ -191,7 +191,11 @@ export function renderEditorPanel(
         ? [
             {
               name: '💾 Remembered settings',
-              value: rememberedFieldValue(remembers, state.savedSettings),
+              value: rememberedFieldValue(
+                remembers,
+                state.savedSettings,
+                state.rememberPaused === true,
+              ),
             },
           ]
         : []),

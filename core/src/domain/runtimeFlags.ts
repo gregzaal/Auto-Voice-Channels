@@ -137,13 +137,16 @@ export const RUNTIME_FLAGS = {
    * creator channel or empty what is stored, which is the way out if the cause is the data
    * and not the feature. Nor does it stop the sweep that deletes saved settings of a creator
    * channel that no longer exists, or erasure on request, since neither saves or restores
-   * anything. It is not a creation lever: a room is made whatever it says.
+   * anything. It is not a creation lever: a room is made whatever it says. While it is on, the
+   * editor and `/channelinfo` say remembering is "on, but switched off for now", so an admin
+   * does not read a working feature into one that is doing nothing.
    *
    * Read through the creation gate's cached 2 second snapshot, and only on a path that would
-   * otherwise save or restore, so a creator channel that does not remember costs nothing. A
-   * failed flag read is treated as NOT disabled, matching `room_access.disabled`: remembering
-   * is something an admin opted a creator channel into, and a database blip must not quietly
-   * withdraw it.
+   * otherwise store a value or restore one. A restore asks only for a creator channel that
+   * remembers. A save asks before it stores, whatever the creator channel, because its opt-in
+   * is only known inside the save's own statement. A failed flag read is treated as NOT
+   * disabled, matching `room_access.disabled`: remembering is something an admin opted a
+   * creator channel into, and a database blip must not quietly withdraw it.
    */
   MEMBER_PREFS_DISABLED: 'member_prefs.disabled',
   /** Throttle: max secondary creations per guild per minute (number; 0 = unlimited). */

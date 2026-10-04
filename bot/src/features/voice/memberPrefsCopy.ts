@@ -35,8 +35,26 @@ function savedSentence(on: boolean, saved: number | undefined): string {
     : ` ${members(saved)} ${saved === 1 ? 'has' : 'have'} saved settings, which are kept and not used while this is off.`;
 }
 
-/** The editor's field about it: the current state, in a sentence an admin can act on. */
-export function rememberedFieldValue(on: boolean, saved: number | undefined): string {
+/**
+ * The editor's field about it: the current state, in a sentence an admin can act on.
+ *
+ * `paused` is whether remembering has been switched off for now (the `member_prefs.disabled`
+ * lever). It only changes what "on" says, because an admin who sees "on" while nothing is saved
+ * or restored would take it for a fault in their own setup, and "off" already says every new
+ * room starts from the defaults.
+ */
+export function rememberedFieldValue(
+  on: boolean,
+  saved: number | undefined,
+  paused = false,
+): string {
+  if (on && paused) {
+    return (
+      '**On, but switched off for now.** Nothing new is saved and every new room starts from this ' +
+      "creator channel's defaults until it is switched back on. What members already saved is " +
+      `kept.${savedSentence(on, saved)}`
+    );
+  }
   return on
     ? '**On.** A member who comes back gets a room that starts with their own saved name, size and ' +
         `privacy, instead of this creator channel's defaults.${savedSentence(on, saved)}`
@@ -74,11 +92,13 @@ export function clearedNote(removed: number): string {
 /**
  * The `/channelinfo` line for a creator channel, in the words the rest of that section uses.
  * The count rides only on the "on" line: it is read only then, and a count beside "off" would
- * describe rows nothing uses.
+ * describe rows nothing uses. `paused` is as for {@link rememberedFieldValue}, and also drops the
+ * count, since a count beside "switched off for now" would read as members being served.
  */
-export function rememberedInfoLine(on: boolean, saved: number | undefined): string {
+export function rememberedInfoLine(on: boolean, saved: number | undefined, paused = false): string {
   const head = 'Returning members get their own saved name, size and privacy';
   if (!on) return `${head}: off`;
+  if (paused) return `${head}: on, but switched off for now`;
   if (saved === undefined) return `${head}: on`;
   if (saved === 0) return `${head}: on, nobody has saved settings yet`;
   return `${head}: on, ${members(saved)} ${saved === 1 ? 'has' : 'have'} saved settings`;

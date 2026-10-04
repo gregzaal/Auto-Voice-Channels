@@ -1739,6 +1739,107 @@ describe('VoiceFeature (integration)', () => {
         expect(info.primary).not.toHaveProperty('savedSettings');
       });
     });
+
+    /**
+     * `member_prefs.disabled` has consumers now, and an admin who reads "on" while nothing is
+     * saved or restored would take it for a fault in their own setup. The lever is asked only of
+     * a creator channel that remembers, and for a viewer who will see the line.
+     */
+    describe('while member_prefs.disabled is on', () => {
+      const gateAnswering = (answer: () => Promise<boolean>) => ({
+        allowCreate: () => Promise.resolve({ allowed: true }),
+        memberPrefsDisabled: answer,
+      });
+      const withGate = (answer: () => Promise<boolean>) =>
+        new VoiceFeature({
+          autoChannels,
+          secondaries,
+          guilds,
+          actions,
+          voice,
+          selfHosted: true,
+          logger: fakeLogger(),
+          memberPrefs: prefs,
+          gate: gateAnswering(answer),
+        });
+
+      it('has the creator channel editor say so, and still counts what is kept', async () => {
+        await remember(true);
+        await prefs.saveName(GUILD, PRIMARY, 'alice', 'den');
+        const paused = withGate(() => Promise.resolve(true));
+
+        const state = await paused.getEditorState('primary', GUILD, PRIMARY);
+
+        expect(state).toMatchObject({
+          rememberPrefs: true,
+          savedSettings: 1,
+          rememberPaused: true,
+        });
+        // Through one of its rooms too, which is how /template is usually reached.
+        expect(await paused.getEditorState('primary', GUILD, 'rm-room')).toMatchObject({
+          rememberPaused: true,
+        });
+      });
+
+      it('has /channelinfo say so for the creator channel and for a room of it', async () => {
+        await remember(true);
+        const paused = withGate(() => Promise.resolve(true));
+
+        expect((await paused.channelInfo(GUILD, PRIMARY)).primary).toMatchObject({
+          rememberPrefs: true,
+          rememberPaused: true,
+        });
+        expect((await paused.channelInfo(GUILD, 'rm-room')).primary).toMatchObject({
+          rememberPaused: true,
+        });
+      });
+
+      it('says nothing of it when the lever is off, or cannot be read', async () => {
+        await remember(true);
+        for (const answer of [
+          () => Promise.resolve(false),
+          () => Promise.reject(new Error('flags down')),
+        ]) {
+          const f = withGate(answer);
+          expect(await f.getEditorState('primary', GUILD, PRIMARY)).not.toHaveProperty(
+            'rememberPaused',
+          );
+          expect((await f.channelInfo(GUILD, PRIMARY)).primary).not.toHaveProperty(
+            'rememberPaused',
+          );
+        }
+      });
+
+      it('is not asked of a creator channel that does not remember', async () => {
+        const asked = vi.fn(() => Promise.resolve(true));
+        const f = withGate(asked);
+
+        expect(await f.getEditorState('primary', GUILD, PRIMARY)).not.toHaveProperty(
+          'rememberPaused',
+        );
+        expect((await f.channelInfo(GUILD, PRIMARY)).primary).not.toHaveProperty('rememberPaused');
+        expect(asked).not.toHaveBeenCalled();
+      });
+
+      it('is not asked for a viewer who will not see the line', async () => {
+        await remember(true);
+        const asked = vi.fn(() => Promise.resolve(true));
+        const f = withGate(asked);
+
+        const info = await f.channelInfo(GUILD, PRIMARY, { savedCount: false });
+
+        expect(info.primary).not.toHaveProperty('rememberPaused');
+        expect(asked).not.toHaveBeenCalled();
+      });
+
+      it('is not asked by a room editor, which has no switch to show', async () => {
+        await remember(true);
+        const asked = vi.fn(() => Promise.resolve(true));
+        const state = await withGate(asked).getEditorState('channel', GUILD, 'rm-room');
+        expect(state).not.toHaveProperty('rememberPaused');
+        expect(asked).not.toHaveBeenCalled();
+      });
+    });
   });
 
   it('rerenderSecondary sets the voice status from the status template, and clears it when idle', async () => {

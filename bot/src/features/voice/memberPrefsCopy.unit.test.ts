@@ -18,7 +18,9 @@ function everySentence(): string[] {
   const out: string[] = [REMEMBER_ON_NOTE, REMEMBER_OFF_NOTE];
   for (const saved of COUNTS) {
     for (const on of [true, false]) {
-      out.push(rememberedFieldValue(on, saved), rememberedInfoLine(on, saved));
+      for (const paused of [true, false]) {
+        out.push(rememberedFieldValue(on, saved, paused), rememberedInfoLine(on, saved, paused));
+      }
     }
   }
   for (const removed of [0, 1, 2, 250]) out.push(clearedNote(removed));
@@ -109,6 +111,35 @@ describe('rememberedFieldValue', () => {
     expect(rememberedFieldValue(true, undefined)).not.toMatch(/Nobody|have saved|has saved/);
     expect(rememberedFieldValue(false, undefined)).not.toMatch(/Nobody|have saved|has saved/);
   });
+
+  /**
+   * The lever has consumers now, and an admin who sees plain "On" while nothing is saved or
+   * restored would take it for a fault in their own setup.
+   */
+  describe('while it is switched off for now', () => {
+    it('says so, first and in bold, instead of plain "On"', () => {
+      expect(rememberedFieldValue(true, undefined, true)).toMatch(
+        /^\*\*On, but switched off for now\.\*\*/,
+      );
+      expect(rememberedFieldValue(true, undefined, true)).not.toMatch(/^\*\*On\.\*\*/);
+    });
+
+    it('says what that means for new rooms and for what members already saved', () => {
+      const text = rememberedFieldValue(true, 3, true);
+      expect(text).toContain("every new room starts from this creator channel's defaults");
+      expect(text).toContain('What members already saved is kept');
+      expect(text).toContain('3 members have saved settings.');
+    });
+
+    /** "Off" already says every new room starts from the defaults, so there is nothing to add. */
+    it('changes nothing for a creator channel that is off', () => {
+      expect(rememberedFieldValue(false, 2, true)).toBe(rememberedFieldValue(false, 2, false));
+    });
+
+    it('is the same as before when the lever is not on', () => {
+      expect(rememberedFieldValue(true, 2, false)).toBe(rememberedFieldValue(true, 2));
+    });
+  });
 });
 
 describe('clearedNote', () => {
@@ -138,5 +169,11 @@ describe('rememberedInfoLine', () => {
     expect(rememberedInfoLine(true, 0)).toBe(`${HEAD}: on, nobody has saved settings yet`);
     // A count beside "off" would describe rows nothing uses.
     expect(rememberedInfoLine(false, 4)).toBe(`${HEAD}: off`);
+  });
+
+  it('says on but switched off for now while the lever is on, and drops the count', () => {
+    expect(rememberedInfoLine(true, undefined, true)).toBe(`${HEAD}: on, but switched off for now`);
+    expect(rememberedInfoLine(true, 4, true)).toBe(`${HEAD}: on, but switched off for now`);
+    expect(rememberedInfoLine(false, 4, true)).toBe(`${HEAD}: off`);
   });
 });

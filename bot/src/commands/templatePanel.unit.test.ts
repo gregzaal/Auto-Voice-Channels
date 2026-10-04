@@ -308,6 +308,61 @@ describe('templatePanel remembered settings', () => {
   });
 
   /**
+   * `member_prefs.disabled` is on: an admin who read "On" while nothing is saved or restored
+   * would take it for a fault in their own setup. The switch itself still reads and works as it
+   * does, because the lever does not stop an admin turning remembering off or clearing.
+   */
+  describe('while remembering is switched off for now', () => {
+    const paused = (extra: Partial<EditorState> = {}) =>
+      renderEditorPanel(
+        'primary',
+        CHANNEL,
+        primaryState({ rememberPrefs: true, rememberPaused: true, ...extra }),
+      );
+
+    it('says so in the field, in place of plain On, and keeps the count', () => {
+      const field = fieldsOf(paused({ savedSettings: 2 })).find((f) => f.name === FIELD)!;
+      expect(field.value).toMatch(/^\*\*On, but switched off for now\.\*\*/);
+      expect(field.value).not.toContain('**On.**');
+      expect(field.value).toContain('2 members have saved settings.');
+    });
+
+    it('leaves the switch and the clear button as they are', () => {
+      const rows = rowsOf(paused());
+      expect(rows[2]![0]).toMatchObject({
+        custom_id: editorId('remember_off', 'primary', 'name', CHANNEL),
+        label: 'Remembered settings: on',
+      });
+      expect(rows[2]![1]).toMatchObject({
+        custom_id: editorId('forget', 'primary', 'name', CHANNEL),
+      });
+    });
+
+    it('says nothing of it for a creator channel that is off, or when the lever is not on', () => {
+      const off = fieldsOf(
+        renderEditorPanel(
+          'primary',
+          CHANNEL,
+          primaryState({ rememberPrefs: false, rememberPaused: true }),
+        ),
+      ).find((f) => f.name === FIELD)!;
+      expect(off.value).toContain('**Off.**');
+      expect(off.value).not.toContain('switched off for now');
+      const normal = fieldsOf(
+        renderEditorPanel('primary', CHANNEL, primaryState({ rememberPrefs: true })),
+      ).find((f) => f.name === FIELD)!;
+      expect(normal.value).not.toContain('switched off for now');
+    });
+
+    it('keeps to the copy rules and fits a field, with the largest count', () => {
+      const value = fieldsOf(paused({ savedSettings: 12345 })).find((f) => f.name === FIELD)!.value;
+      expect(value).not.toMatch(/[—–‘’“”;]/);
+      expect(value.toLowerCase()).not.toMatch(/primary|secondary|\bai\b/);
+      expect(value.length).toBeLessThanOrEqual(1024);
+    });
+  });
+
+  /**
    * Discord allows five action rows of five buttons, an embed of 25 fields and a custom id of
    * 100 characters, and refuses the whole message past any of them.
    */
