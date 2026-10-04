@@ -215,12 +215,20 @@ export class VoiceCommands {
     // remember the status as well). Not a name that is only the cut of a longer template, which
     // is the same template cut short and not a new choice (the panel is answered above, so this
     // is the backstop for a submit that did not say where it came from). A status has no such
-    // cut: no box shows less of it than the editor's, which holds all a save accepts. A blank
-    // status is saved as one, since it is not a reset. Saved before the re-render, which can
-    // throw: the room already has the name, and a save that sat behind it would leave a member
-    // told the command failed about a room that was renamed and not remembered.
+    // cut: no box shows less of it than the editor's, which holds all a save accepts.
+    //
+    // **A blank status clears what was remembered, like a reset** (the owner's call,
+    // 2026-10-04). It still blanks THIS room's status, but the editor's status box opens empty
+    // for a room with no status of its own, so a member who pressed Submit without typing
+    // would otherwise carry "no status" into every later room and lose the creator channel's.
+    // Saved before the re-render, which can throw: the room already has the name, and a save
+    // that sat behind it would leave a member told the command failed about a room that was
+    // renamed and not remembered.
     if (field === 'status') {
-      await this.remember(row, userId, { field: 'status', value: isReset ? null : stored });
+      await this.remember(row, userId, {
+        field: 'status',
+        value: isReset || clearedStatus ? null : stored,
+      });
     } else if (isReset || !isTruncatedPrefill(stored, row.state.template)) {
       await this.remember(row, userId, { field: 'name', value: isReset ? null : stored });
     }

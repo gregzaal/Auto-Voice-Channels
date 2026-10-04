@@ -975,17 +975,24 @@ describe('VoiceCommands (integration)', () => {
       });
 
       /**
-       * A blank status leaves the room with none, which `/name` keeps apart from a reset to the
-       * creator channel's status, so it is the member's choice and is remembered as one.
+       * A blank status still leaves THIS room with none, but clears what was remembered, like a
+       * reset (the owner's call, 2026-10-04): the editor's status box opens empty for a room with
+       * no status of its own, so a Submit pressed without typing must not carry "no status" into
+       * every later room.
        */
-      it('saves a blank status as no status, and a reset then takes it back out', async () => {
+      it('clears the remembered status on a blank one, which still blanks this room', async () => {
+        await remembering.setStatus(GUILD, SEC, 'alice', 'Chilling');
+        expect((await saved())!.status).toBe('Chilling');
+
         const res = await remembering.setStatus(GUILD, SEC, 'alice', '   ');
         expect(res.message).toContain('it will stay blank');
         expect((await secondaries.get(SEC))!.state.statusTemplate).toBe('');
-        expect(await saved()).toEqual({ name: null, limit: null, privacy: null, status: '' });
-
-        await remembering.setStatus(GUILD, SEC, 'alice', 'reset');
         expect(await saved()).toBeUndefined();
+        expect(await prefs.countByPrimary(GUILD, PRIMARY)).toBe(0);
+      });
+
+      it('saves nothing for a blank status when nothing was remembered', async () => {
+        await remembering.setStatus(GUILD, SEC, 'alice', '');
         expect(await prefs.countByPrimary(GUILD, PRIMARY)).toBe(0);
       });
 
@@ -1067,10 +1074,10 @@ describe('VoiceCommands (integration)', () => {
         paused = true;
 
         await remembering.setStatus(GUILD, SEC, 'alice', 'Changed');
-        await remembering.setStatus(GUILD, SEC, 'alice', '');
         expect((await saved())!.status).toBe('AFK');
 
-        await remembering.setStatus(GUILD, SEC, 'alice', 'reset');
+        // A blank status takes the remembered one back out, and the lever never holds that back.
+        await remembering.setStatus(GUILD, SEC, 'alice', '');
         expect(await saved()).toBeUndefined();
       });
 
