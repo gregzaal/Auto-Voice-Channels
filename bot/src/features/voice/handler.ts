@@ -5,6 +5,7 @@ import type {
   Logger,
   ManagedChannelRepository,
   ManagedChannelRow,
+  MemberAccessLists,
   MemberRoomPrefs,
   MemberRoomPrefsRepository,
   PrimaryTemplate,
@@ -374,8 +375,19 @@ export interface VoiceFeatureDeps {
   applyAccessLists?: (
     guildId: string,
     roomChannelId: string,
-    creator: { id: string; standing?: CommandCaller | undefined },
+    creator: {
+      id: string;
+      standing?: CommandCaller | undefined;
+      /** The creator's lists, read while the room was being made. Absent: the service reads them. */
+      saved?: MemberAccessLists | undefined;
+    },
   ) => Promise<{ status: string; error?: unknown }>;
+  /**
+   * Reads a creator's saved lists (the privacy service's), so the create path can start the
+   * read beside the Discord create instead of after it. Optional, and never relied on:
+   * without it the service reads them itself, one serial query later.
+   */
+  readSavedLists?: (guildId: string, ownerId: string) => Promise<MemberAccessLists | undefined>;
   /**
    * The sweep's pass over a guild's saved lists and hidden rooms (the privacy service's
    * `convergeGuild`), given the guild's live rooms. Gated by `room_access.disabled` inside,
@@ -857,6 +869,10 @@ export class VoiceFeature {
     // is paused or not entitled must not cost a read. It runs beside the reads below and is
     // awaited before the first render, which is the first thing that needs it.
     const rememberedRead = this.startRememberedRead(guildId, primary, member);
+    // The creator's saved lists, for the same reason and read beside the same work: they are
+    // applied after the move, and a read that waited for it would stand between the owner and
+    // the companion channel and the panel, which every room pays for.
+    const savedListsRead = this.startSavedListsRead(guildId, member);
 
     this.deps.logger.debug(
       { guildId, memberId: member.id, playing: member.playing },
@@ -1228,7 +1244,13 @@ export class VoiceFeature {
      * unwind. By here the room is committed, and what this adds is a block that has to
      * be in place before anyone else can join it.
      */
-    await this.applySavedLists(guildId, newChannelId, member, settings.commandAccess);
+    await this.applySavedLists(
+      guildId,
+      newChannelId,
+      member,
+      settings.commandAccess,
+      await savedListsRead,
+    );
 
     /**
      * The companion text channel, for a creator channel that opted in.
@@ -1391,6 +1413,32 @@ export class VoiceFeature {
     });
   }
 
+  /**
+   * Starts reading the creator's saved lists, or resolves to nothing at once for a feature with
+   * nothing to read them with and while `room_access.disabled` is on (nothing is applied then).
+   * **Never rejects**, with its catch attached HERE for the reason {@link startRememberedRead}
+   * gives: it is awaited a long way down, after calls that can throw first. A read that fails
+   * is logged with ids and reads as nothing read, and the service reads them itself.
+   */
+  private startSavedListsRead(
+    guildId: string,
+    member: VoiceMember,
+  ): Promise<MemberAccessLists | undefined> {
+    const read = this.deps.readSavedLists;
+    if (!read) return Promise.resolve(undefined);
+    const start = async (): Promise<MemberAccessLists | undefined> =>
+      (await this.deps.gate?.roomAccessDisabled?.().catch(() => false))
+        ? undefined
+        : read(guildId, member.id);
+    return start().catch((err: unknown) => {
+      this.deps.logger.warn(
+        { err, guildId, memberId: member.id },
+        'could not read the creator saved lists early; the service reads them when it applies them',
+      );
+      return undefined;
+    });
+  }
+
   /** Whether `member_prefs.disabled` is on. Fails open, whatever the gate does. */
   private async memberPrefsPaused(): Promise<boolean> {
     try {
@@ -1476,6 +1524,7 @@ export class VoiceFeature {
     roomId: string,
     member: VoiceMember,
     commandAccess: CommandAccess,
+    saved: MemberAccessLists | undefined,
   ): Promise<void> {
     const apply = this.deps.applyAccessLists;
     if (!apply) return;
@@ -1485,7 +1534,7 @@ export class VoiceFeature {
       if (disabled) return;
       const standing = standingOf(member);
       if (savedListsInert(commandAccess, standing)) return;
-      const result = await apply(guildId, roomId, { id: member.id, standing });
+      const result = await apply(guildId, roomId, { id: member.id, standing, saved });
       if (result.status === 'failed') {
         this.deps.logger.warn(
           { err: result.error, guildId, roomId, creatorId: member.id },

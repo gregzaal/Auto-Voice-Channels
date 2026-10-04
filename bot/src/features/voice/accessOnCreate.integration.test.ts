@@ -138,7 +138,10 @@ describe('saved lists on a room as it is made (integration)', () => {
       makePrivateOnCreate: (g, c, ownerId, ownerName) =>
         privacy.makePrivateForCreation(g, c, ownerId, ownerName),
       ...(hook
-        ? { applyAccessLists: (g, c, who) => privacy.applyAccessLists(g, c, { creator: who }) }
+        ? {
+            applyAccessLists: (g, c, who) => privacy.applyAccessLists(g, c, { creator: who }),
+            readSavedLists: (g, owner) => privacy.readSavedLists(g, owner),
+          }
         : {}),
       roomAccess: privacy,
       ...over,
@@ -284,6 +287,58 @@ describe('saved lists on a room as it is made (integration)', () => {
   // -- what it costs ----------------------------------------------------------------------
 
   describe('a creator with nothing saved', () => {
+    /**
+     * The read is started beside the Discord create, so it does not stand between the owner and
+     * the companion channel and the panel, which every room made in every server pays for.
+     */
+    it('is read while the room is being made, and not after the move', async () => {
+      const order: string[] = [];
+      const get = vi.spyOn(lists, 'get').mockImplementation(async (...args) => {
+        order.push('read');
+        return MemberAccessListRepository.prototype.get.apply(lists, args);
+      });
+      const create = actions.createVoiceChannel.bind(actions);
+      actions.createVoiceChannel = (input) => {
+        order.push('create');
+        return create(input);
+      };
+      const move = actions.moveMember.bind(actions);
+      actions.moveMember = (...args) => {
+        order.push('move');
+        return move(...args);
+      };
+
+      await join(buildFeature());
+
+      expect(get).toHaveBeenCalledTimes(1);
+      expect(order.indexOf('read')).toBeLessThan(order.indexOf('create'));
+      expect(order.indexOf('read')).toBeLessThan(order.indexOf('move'));
+    });
+
+    it('is not read at all while room_access.disabled is on', async () => {
+      gate = {
+        allowCreate: () => Promise.resolve({ allowed: true }),
+        roomAccessDisabled: () => Promise.resolve(true),
+      };
+      const get = vi.spyOn(lists, 'get');
+
+      await join(buildFeature());
+
+      expect(get).not.toHaveBeenCalled();
+    });
+
+    it('is left to the service when the early read fails, and the room is made all the same', async () => {
+      await lists.add(GUILD, ALICE, MALLORY, 'blocked');
+      vi.spyOn(privacy, 'readSavedLists').mockRejectedValue(new Error('the database blinked'));
+      const get = vi.spyOn(lists, 'get');
+
+      const room = await join(buildFeature());
+
+      expect(room).toBeDefined();
+      expect(get).toHaveBeenCalledTimes(1); // the service's own read, which found the block
+      expect(bits(held(room!, MALLORY))).toEqual({ allow: 0n, deny: VC });
+    });
+
     it('costs one indexed read and no call to Discord about access', async () => {
       const read = vi.spyOn(actions, 'readOverwrites');
       const readAccess = vi.spyOn(secondaries, 'readAccess');

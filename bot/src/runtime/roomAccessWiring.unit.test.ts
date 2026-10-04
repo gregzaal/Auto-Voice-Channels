@@ -69,6 +69,11 @@ describe('the room_access.disabled lever is wired to every consumer', () => {
     const feature = statementFrom('const voiceFeature = new VoiceFeature({');
     expect(feature).toContain('applyAccessLists: (gid, cid, creator) =>');
     expect(feature).toContain('privacy.applyAccessLists(gid, cid, { creator })');
+    // Optional and silent when absent: without it the service reads the creator's lists one
+    // serial query later, after the move and ahead of the room's panel.
+    expect(feature).toContain(
+      'readSavedLists: (gid, ownerId) => privacy.readSavedLists(gid, ownerId)',
+    );
     expect(feature).toContain('roomAccess: privacy,');
   });
 

@@ -630,6 +630,7 @@ async function main(): Promise<void> {
     // The creator's saved lists on the room they just made, and the sweep's pass that keeps
     // every room in line with them. Both are the privacy service's, and neither throws.
     applyAccessLists: (gid, cid, creator) => privacy.applyAccessLists(gid, cid, { creator }),
+    readSavedLists: (gid, ownerId) => privacy.readSavedLists(gid, ownerId),
     roomAccess: privacy,
     serverLog: (gid, level, message) => serverLogger.log(gid, level, message),
     permissionProblems,

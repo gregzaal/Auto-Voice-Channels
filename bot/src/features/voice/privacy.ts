@@ -236,7 +236,9 @@ export interface AccessApplyOptions {
    * a cache that may not have them yet, and absent when the snapshot carried no roles.
    * Without a standing the cache says, and a creator it cannot show is not restricted.
    */
-  creator?: { id: string; standing?: CommandCaller | undefined } | undefined;
+  creator?:
+    | { id: string; standing?: CommandCaller | undefined; saved?: MemberAccessLists | undefined }
+    | undefined;
   /**
    * The creator's saved lists, when the caller has already read them. The sweep reads
    * every owner's in one query for the guild and hands each room its own, instead of one
@@ -780,6 +782,16 @@ export class PrivacyService {
   // -- saved lists ----------------------------------------------------------------
 
   /**
+   * A creator's saved lists, for the create path to read while the room is being made and hand
+   * to {@link applyAccessLists} as `creator.saved`. Nothing without the repository, which is
+   * what that method answers `no_lists` for. It throws as the repository does: the caller
+   * catches, because a read that failed is only a read to repeat later.
+   */
+  readSavedLists(guildId: string, ownerId: string): Promise<MemberAccessLists | undefined> {
+    return this.deps.memberAccessLists?.get(guildId, ownerId) ?? Promise.resolve(undefined);
+  }
+
+  /**
    * Makes a room's overwrites say what its creator's saved lists say, for the room's
    * CURRENT mode: blocked members are denied in every mode, trusted ones are let in
    * only while the room is locked or hidden, and whoever was admitted to this room
@@ -839,7 +851,9 @@ export class PrivacyService {
       // nothing. One indexed read, and it ends the run for nearly every room.
       let saved = opts.saved;
       if (opts.creator && !opts.revokeOnly && saved === undefined) {
-        saved = await repo.get(guildId, opts.creator.id);
+        // Read already by a creator who started it beside the Discord create, which spares the
+        // room's panel one serial query.
+        saved = opts.creator.saved ?? (await repo.get(guildId, opts.creator.id));
         if (saved.blocked.length === 0) {
           return { status: 'unchanged', movedOut: [], skippedRoleIds: [] };
         }

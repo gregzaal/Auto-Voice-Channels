@@ -1594,6 +1594,56 @@ describe('PrivacyService (integration)', () => {
       expect(await access()).toBeNull();
     });
 
+    /**
+     * The create path starts the read while the room is being made and hands the result over, so
+     * the service does not read them again after the move, ahead of the panel.
+     */
+    describe('for a room that has just been made', () => {
+      it('uses the lists its creator hands it, and does not read them again', async () => {
+        await lists.add(GUILD, 'alice', 'mallory', 'blocked');
+        const saved = await privacy.readSavedLists(GUILD, 'alice');
+        const get = vi.spyOn(lists, 'get');
+
+        const res = await privacy.applyAccessLists(GUILD, SEC, {
+          creator: { id: 'alice', saved },
+        });
+
+        expect(res.status).toBe('applied');
+        expect(get).not.toHaveBeenCalled();
+        expect(bits(held('mallory'))).toEqual({ allow: 0n, deny: VC });
+      });
+
+      it('ends the run for a creator who has blocked nobody, from the lists it was handed', async () => {
+        await lists.add(GUILD, 'alice', 'carol', 'trusted');
+        const saved = await privacy.readSavedLists(GUILD, 'alice');
+        const get = vi.spyOn(lists, 'get');
+        const read = vi.spyOn(actions, 'readOverwrites');
+
+        const res = await privacy.applyAccessLists(GUILD, SEC, {
+          creator: { id: 'alice', saved },
+        });
+
+        expect(res.status).toBe('unchanged');
+        expect(get).not.toHaveBeenCalled();
+        expect(read).not.toHaveBeenCalled();
+      });
+
+      it('still reads them itself when the creator hands it none', async () => {
+        await lists.add(GUILD, 'alice', 'mallory', 'blocked');
+        const get = vi.spyOn(lists, 'get');
+
+        const res = await privacy.applyAccessLists(GUILD, SEC, { creator: { id: 'alice' } });
+
+        expect(res.status).toBe('applied');
+        expect(get).toHaveBeenCalledTimes(1);
+      });
+
+      it('answers nothing for the early read when it has no repository', async () => {
+        const unwired = build({ memberAccessLists: undefined });
+        expect(await unwired.readSavedLists(GUILD, 'alice')).toBeUndefined();
+      });
+    });
+
     it('takes back what a list granted when the member comes off it', async () => {
       await privacy.makePrivate(GUILD, SEC, 'alice');
       await lists.add(GUILD, 'alice', 'carol', 'trusted');
