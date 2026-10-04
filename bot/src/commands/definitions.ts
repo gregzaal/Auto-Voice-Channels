@@ -117,12 +117,12 @@ export function buildCommandDefinitions(
     guildOnly(
       new SlashCommandBuilder()
         .setName('hide')
-        .setDescription('Hide your voice channel from the channel list.'),
+        .setDescription('Hide your room from the channel list.'),
     ),
     guildOnly(
       new SlashCommandBuilder()
         .setName('unhide')
-        .setDescription('Show your hidden voice channel in the channel list again.'),
+        .setDescription('Show your hidden room in the channel list again.'),
     ),
     /**
      * The second command here with subcommands, after `/restrict`, and open to every
