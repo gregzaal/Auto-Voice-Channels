@@ -228,6 +228,25 @@ const OVERDUE_LOCK_SLOT = 1;
 const OVERDUE_REPORT_EVERY_MS = 6 * 3_600_000;
 
 /**
+ * How long one guild's undeliverable notices stay quiet after the first alert.
+ *
+ * Thirty days: long enough that a permanently unreachable guild is a monthly
+ * reminder rather than a stream, short enough that it cannot be forgotten
+ * entirely while its grace window runs out. Per guild, not per notice: the
+ * operator's action — reach the server some other way — is the same whichever
+ * notice failed, so a second key failing in the same month is not news.
+ */
+const EXPIRED_NOTICE_REALERT_MS = 30 * 86_400_000;
+
+/**
+ * Written once per guild each time an expiry actually reaches the admin
+ * channel, and read by the next expiry to decide whether it is news. Separate
+ * from `billing.notification.expired`, which is the per-expiry record and is
+ * written far too often to measure a monthly window by.
+ */
+const EXPIRED_ALERTED_ACTION = 'billing.notification.expired_alerted';
+
+/**
  * The trial/billing reconcile job applies time-based transitions.
  * Three phases per tick:
  *
@@ -1477,6 +1496,8 @@ export class BillingReconciler {
      * One message with a count and examples says the same thing.
      */
     const gaveUp: { target: string; key: string; attempts: number }[] = [];
+    // One guild with two notices expiring in the same drain is one piece of news.
+    const toldThisTick = new Set<string>();
     try {
       const expired = await this.deps.notifications.expire(now);
       for (const row of expired) {
@@ -1502,11 +1523,46 @@ export class BillingReconciler {
          * still fires.
          */
         if (row.attempts === 0) continue;
-        gaveUp.push({
-          target: row.guildId ?? row.poolId ?? '',
-          key: row.key,
-          attempts: row.attempts,
-        });
+        const target = row.guildId ?? row.poolId ?? '';
+        /**
+         * Alerted the first time a guild gives up, not every time it does.
+         *
+         * A guild that cannot be reached at all never stamps its dedupe key, so
+         * the ladder re-derives the same notice on every pass and this queue
+         * expires it again every TTL, forever — nudges only start once the
+         * first notice lands, and nothing else ends the cycle. Alerting each
+         * expiry turned two unreachable servers into four or five messages a
+         * week about a fact nobody could act on twice, which is the shape of
+         * an alarm that gets muted. The news is "this guild cannot be
+         * reached", once, then restated monthly while it stays true.
+         *
+         * **What it reads is the ALERT marker, not the expiry row.** The first
+         * version of this read `billing.notification.expired`, which is written
+         * on every expiry — every three days, so the 30-day window never once
+         * ran out and a guild alerted exactly once and then never again, while
+         * the comment above promised a monthly restatement. An adversarial
+         * review caught it before it shipped. The marker is written only when
+         * a message actually goes out, below.
+         *
+         * An unattributed row (no guild, no pool) skips the dedupe entirely:
+         * every such row would share one empty target and silence the rest.
+         */
+        const alreadyNews =
+          target !== '' &&
+          (toldThisTick.has(target) ||
+            (await this.deps.opsAudit
+              .hasActionSince(
+                EXPIRED_ALERTED_ACTION,
+                target,
+                new Date(now.getTime() - EXPIRED_NOTICE_REALERT_MS),
+              )
+              // Fails OPEN: a database that cannot answer is not a reason to
+              // swallow news that a customer went untold.
+              .catch(() => false)));
+        if (!alreadyNews) {
+          gaveUp.push({ target, key: row.key, attempts: row.attempts });
+          toldThisTick.add(target);
+        }
         await this.deps.opsAudit
           .record({
             actor: 'billing-reconciler',
@@ -1540,6 +1596,25 @@ export class BillingReconciler {
         `Gave up delivering ${gaveUp.length} billing notice${gaveUp.length === 1 ? '' : 's'} after repeated attempts`,
         { count: gaveUp.length, examples: gaveUp.slice(0, 5), fleet: this.deps.fleet },
       );
+      /**
+       * Marked AFTER the report, so a process that dies in between errs
+       * toward saying it twice rather than never. `report` is fire-and-forget
+       * by contract, so "handed to the reporter" is as close to "a person was
+       * told" as this code can know.
+       */
+      for (const { target } of gaveUp) {
+        if (target === '') continue;
+        await this.deps.opsAudit
+          .record({
+            actor: 'billing-reconciler',
+            action: EXPIRED_ALERTED_ACTION,
+            target,
+            details: { observedBy: this.deps.fleet },
+          })
+          .catch((err: unknown) => {
+            this.deps.logger.warn({ err, target }, 'could not mark an expiry as alerted');
+          });
+      }
     }
 
     let claimed;

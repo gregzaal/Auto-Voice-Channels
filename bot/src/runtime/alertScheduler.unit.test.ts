@@ -708,11 +708,25 @@ describe('AlertScheduler', () => {
      * can still act on, and nagging about it forever is how a channel dies.
      */
     it('asks only for conditions still being confirmed, on a half-hourly cadence', async () => {
-      const { scheduler, alerts } = build([], { deliver: async () => true });
-      await scheduler.tick();
-      const asked = alerts.remindClaims.at(-1);
-      expect(asked?.everyMs).toBe(30 * 60_000);
-      expect(Date.now() - (asked?.freshSince as Date).getTime()).toBe(15 * 60_000);
+      /**
+       * The clock is frozen because the assertion is exact and the scheduler
+       * reads the real one. Left running, any millisecond between the
+       * scheduler's `Date.now()` and this test's made the difference 15
+       * minutes and a bit, which a busy full-suite run produced about two
+       * times in five. Only `Date` is faked: `tick()` is promise-driven and
+       * keeps its real timers.
+       */
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-09-30T12:00:00.000Z'));
+      try {
+        const { scheduler, alerts } = build([], { deliver: async () => true });
+        await scheduler.tick();
+        const asked = alerts.remindClaims.at(-1);
+        expect(asked?.everyMs).toBe(30 * 60_000);
+        expect(Date.now() - (asked?.freshSince as Date).getTime()).toBe(15 * 60_000);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('does not run at all without a deliver transport, which is self-host', async () => {
