@@ -1017,6 +1017,39 @@ describe('VoiceFeature (integration)', () => {
     expect(row!.state.name).toBe(renames[0]!.name);
   });
 
+  /**
+   * The rename a re-render waits on can sit rate limited for seconds, and a `/private` or
+   * `/public` can finalise inside that time. `private` lives in `state`, so a re-render that
+   * wrote its snapshot back whole would revert it: the room locked on Discord and public in the
+   * row, or the other way round.
+   */
+  it('keeps a lock that finalised while a re-render waited on its rename', async () => {
+    const alice = member('alice', ['Halo']);
+    voice.put(PRIMARY, alice);
+    await feature.handleVoiceStateUpdate({
+      guildId: GUILD,
+      member: alice,
+      afterChannelId: PRIMARY,
+    });
+    const secondaryId = actions.ofType('create')[0]!.channelId;
+    voice.put(secondaryId, alice);
+    voice.put(secondaryId, member('bob', ['Doom']));
+
+    const rename = actions.renameChannel.bind(actions);
+    actions.renameChannel = async (...args) => {
+      await secondaries.transitionAccess(secondaryId, {
+        statePatch: { private: true },
+        access: (stored) => stored,
+      });
+      return rename(...args);
+    };
+    await feature.rerenderSecondary(GUILD, secondaryId);
+
+    const row = await secondaries.get(secondaryId);
+    expect(row!.state.name).toContain('Doom');
+    expect(row!.state.private).toBe(true);
+  });
+
   it('rerenderSecondary is a no-op when the name is unchanged', async () => {
     const alice = member('alice', ['Halo']);
     voice.put(PRIMARY, alice);

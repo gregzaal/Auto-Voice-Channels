@@ -2327,13 +2327,13 @@ export class VoiceFeature {
         : {};
     // Persist both even if only one changed (and even if a rename was deferred —
     // the queued rename will still apply).
-    await this.deps.secondaries.updateState(channelId, {
-      ...secondary.state,
-      ...backfill,
-      name,
-      status,
-      index,
-    });
+    //
+    // A merge of these keys, not the snapshot read at the top written back whole: the
+    // rename above can sit rate limited for seconds, a `/private` or `/public` can
+    // finalise in that time (`private` lives in `state`), and a whole write would
+    // revert it. The detached re-renders after `/limit` and a lock are not queued
+    // behind the transition they follow, so nothing else orders the two.
+    await this.deps.secondaries.mergeState(channelId, { ...backfill, name, status, index });
 
     // Strictly after the write above: see the note on the other call site.
     await this.refreshRoomPanel(guildId, secondary, primary?.channelId);

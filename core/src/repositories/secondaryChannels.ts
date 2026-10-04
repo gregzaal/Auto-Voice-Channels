@@ -437,6 +437,28 @@ export class SecondaryChannelRepository {
   }
 
   /**
+   * Merges these keys into `state` server side, leaving every other key as it is
+   * (and `access` too).
+   *
+   * **For a writer that changes a few keys after a slow Discord call.** The render
+   * reads the row, waits on a rename that can sit rate limited for seconds, then
+   * writes. {@link updateState} would carry the snapshot from before the wait and
+   * revert whatever landed meanwhile: the `private` flag of a lock that finalised, the
+   * roster. `||` merges in the database, so only these keys are touched. Unlike
+   * {@link setControlPanelMessage} this does bump `updatedAt`: the rename paths read it,
+   * and this is called for a rename.
+   */
+  async mergeState(channelId: string, patch: Partial<SecondaryState>): Promise<void> {
+    await this.db
+      .update(secondaryChannels)
+      .set({
+        state: sql`coalesce(${secondaryChannels.state}, '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb`,
+        updatedAt: new Date(),
+      })
+      .where(this.scoped(eq(secondaryChannels.channelId, channelId)));
+  }
+
+  /**
    * Records where the room's control panel was posted, merging into `state`
    * rather than replacing it.
    *

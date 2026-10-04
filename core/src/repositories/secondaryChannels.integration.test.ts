@@ -787,6 +787,34 @@ describe('SecondaryChannelRepository access (integration)', () => {
       expect(after?.state.private).toBeUndefined();
     });
 
+    /**
+     * The writer for a few keys after a slow call. The same stale snapshot, merged instead of
+     * replaced, leaves the flag a lock finalised meanwhile and the roster a join appended.
+     */
+    it('keeps private and the roster when only the keys it names are merged', async () => {
+      await make(ROOM, { state: { seed: 7, name: 'Room', roster: ['u1'] } });
+      const stale = await repo.get(ROOM);
+
+      await repo.transitionAccess(ROOM, {
+        statePatch: { private: true },
+        access: () => ({ hidden: true }),
+      });
+      await repo.updateState(ROOM, { ...(await repo.get(ROOM))!.state, roster: ['u1', 'u2'] });
+      await repo.mergeState(ROOM, { name: 'Renamed', status: 'chilling', index: 3 });
+
+      const after = await repo.get(ROOM);
+      expect(stale!.state.private).toBeUndefined();
+      expect(after?.state).toMatchObject({
+        seed: 7,
+        name: 'Renamed',
+        status: 'chilling',
+        index: 3,
+        private: true,
+        roster: ['u1', 'u2'],
+      });
+      expect(after?.access?.hidden).toBe(true);
+    });
+
     it('keeps the access record when an old snapshot is written back after mutateAccess', async () => {
       await make(ROOM, { state: { seed: 7 } });
       const stale = await repo.get(ROOM);
