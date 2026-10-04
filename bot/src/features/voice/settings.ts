@@ -10,6 +10,7 @@ import type {
 } from '@avc/core';
 import type { VoiceActions } from './actions.js';
 import {
+  blockedWordProblem,
   canonicalTimeZone,
   DEFAULT_CHANNEL_NAME_TEMPLATE,
   isValidListName,
@@ -39,6 +40,7 @@ import {
   isStringMap,
   parseVoiceSettings,
   readContact,
+  readBlockedWords,
   readControlPanel,
   readGroups,
   readLogging,
@@ -80,6 +82,14 @@ import {
 } from './commandAccessCopy.js';
 import { startModeMessage } from './roomAccessCopy.js';
 import { clearedNote, REMEMBER_OFF_NOTE, REMEMBER_ON_NOTE } from './memberPrefsCopy.js';
+import {
+  addsBlockedWords,
+  blockedWordsText,
+  MAX_BLOCKED_WORD_LENGTH,
+  MAX_BLOCKED_WORDS,
+  MAX_BLOCKED_WORDS_TEXT,
+} from './blockedWords.js';
+import { BLOCKED_WORDS_TOO_LONG, tooManyBlockedWords } from './blockedWordsCopy.js';
 
 /** Logging verbosity levels (legacy parity): 1 lifecycle, 2 changes, 3 joins/leaves. */
 export type LogLevel = 1 | 2 | 3;
@@ -98,6 +108,20 @@ export interface RestrictionResult extends CommandResult {
   changed: boolean;
   nicknameCleared: boolean;
   from?: readonly AccessList[];
+}
+
+/**
+ * What saving the blocked words reports, beside a sentence the caller writes itself.
+ *
+ * `count` is how many entries the stored list holds after the write (or still holds, when
+ * nothing was written), and `changed` whether the stored list moved, which decides whether
+ * there is anything to log. `refusedAddition` is a lapsed server's save that would have
+ * added an entry, which wrote nothing and is answered with the reactivation notice.
+ */
+export interface BlockedWordsResult extends CommandResult {
+  changed: boolean;
+  count: number;
+  refusedAddition?: true;
 }
 
 const ok = (message: string): CommandResult => ({ ok: true, message });
@@ -1410,6 +1434,80 @@ export class GuildSettingsService {
         patch,
         remove,
         result: { ok: true, message, changed, nicknameCleared, from: takeOff },
+      };
+    });
+  }
+
+  /** The server's blocked words, as a copy. A plain `ensure`, for `getCommandAccess`'s reason. */
+  async getBlockedWords(guildId: string): Promise<string[]> {
+    const guild = await this.deps.guilds.ensure(guildId);
+    return readBlockedWords(guild.settings);
+  }
+
+  /**
+   * Replaces the server's blocked words with `words`. `/blockedwords`.
+   *
+   * The whole list in one write, because the box `/blockedwords` opens is the whole list:
+   * what the admin submits is the list they want. An empty list removes the key, so "nothing
+   * is blocked" is the absence of the key on an export round trip, and a list equal to the
+   * stored one writes nothing.
+   *
+   * **Under the row lock, for the reason `editCommandAccess` gives**, and for one more:
+   * `refuseAdditions` is the hard gate, which decides against the list as it stands when the
+   * write lands. In a lapsed server a save that only takes entries away is written and one
+   * that adds an entry the list does not hold writes nothing and says so (`refusedAddition`),
+   * which is the gate's rule everywhere: a write that only removes stays open.
+   *
+   * The caller has split and checked what was typed (`parseBlockedWordsInput`). The caps and
+   * the entry check are asked again here, because this is the one writer and a caller that
+   * skipped them would store a list that the box cannot hold or the matcher skips.
+   */
+  setBlockedWords(
+    guildId: string,
+    words: readonly string[],
+    opts: { refuseAdditions?: boolean } = {},
+  ): Promise<BlockedWordsResult> {
+    const unchanged = (count: number): BlockedWordsResult => ({
+      ok: true,
+      message: '',
+      changed: false,
+      count,
+    });
+    if (words.length > MAX_BLOCKED_WORDS) {
+      return Promise.resolve({
+        ok: false,
+        message: tooManyBlockedWords(words.length),
+        changed: false,
+        count: 0,
+      });
+    }
+    if (blockedWordsText(words).length > MAX_BLOCKED_WORDS_TEXT) {
+      return Promise.resolve({
+        ok: false,
+        message: BLOCKED_WORDS_TOO_LONG,
+        changed: false,
+        count: 0,
+      });
+    }
+    const usable = words.filter(
+      (word) => blockedWordProblem(word, MAX_BLOCKED_WORD_LENGTH) === null,
+    );
+    return this.deps.guilds.mergeSettings(guildId, (existing) => {
+      const current = readBlockedWords(existing?.settings ?? {});
+      if (opts.refuseAdditions && addsBlockedWords(current, usable)) {
+        return {
+          patch: {},
+          result: { ...unchanged(current.length), ok: false, refusedAddition: true },
+        };
+      }
+      const same =
+        current.length === usable.length && current.every((word, i) => word === usable[i]);
+      if (same) return { patch: {}, result: unchanged(usable.length) };
+      return {
+        ...(usable.length > 0
+          ? { patch: { [SETTINGS_KEYS.blockedWords]: [...usable] } }
+          : { patch: {}, remove: [SETTINGS_KEYS.blockedWords] }),
+        result: { ok: true, message: '', changed: true, count: usable.length },
       };
     });
   }

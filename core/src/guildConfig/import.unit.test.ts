@@ -1360,6 +1360,9 @@ describe('the differ writes no auth state, by construction', () => {
      *   `pg`, no node builtins. The differ borrows `canonicalTimeZone` from it
      *   rather than keeping a second copy, which is the lesson the shared
      * engine was extracted to learn.
+     * - `../template/blockedWords.js` is the engine's blocked words matcher, pure for
+     *   the same reason. The differ checks an imported list with its own rule, so an
+     *   imported entry is one the matcher can use.
      *
      * Widening this list is a real decision. The forbidden-call checks below
      * are the teeth and stay whatever it contains.
@@ -1369,7 +1372,11 @@ describe('the differ writes no auth state, by construction', () => {
     // test exists to avoid.
     expect(imports.length).toBeGreaterThan(0);
     for (const from of imports) {
-      expect(['./format.js', '../template/nameTemplate.js']).toContain(from);
+      expect([
+        './format.js',
+        '../template/nameTemplate.js',
+        '../template/blockedWords.js',
+      ]).toContain(from);
     }
     for (const forbidden of [
       'mergeIntoExisting',
@@ -1869,5 +1876,103 @@ describe('command_access', () => {
     expect(serialized).not.toContain(USER_A);
     expect(serialized).not.toContain('junk');
     expect(serialized).not.toMatch(/\d{17,}/);
+  });
+});
+
+/**
+ * The server's blocked words (`blocked_words`): a list of entries as an admin typed them.
+ * Each is checked with the matcher's own rule and the caps `/blockedwords` writes under, so
+ * an imported list is one the box can hold and the matcher can use.
+ */
+describe('blocked_words', () => {
+  const withWords = (blocked_words: unknown): GuildConfigFile =>
+    nativeFile({ settings: { ...nativeFile().settings, blocked_words } as never });
+
+  it('carries a list through, in the order it was written, trimmed', () => {
+    const plan = planOf(withWords([' bad ', 'worse*', '*worst*', 'bad word']));
+    expect(plan.settingsPatch.blocked_words).toEqual(['bad', 'worse*', '*worst*', 'bad word']);
+  });
+
+  it('drops an entry the matcher cannot use, with one note that quotes none of them', () => {
+    const plan = planOf(withWords(['bad', 'sl*ur', '*', 42, 'x'.repeat(61), 'a,b']));
+    expect(plan.settingsPatch.blocked_words).toEqual(['bad']);
+    expect(plan.notes).toEqual([
+      expect.objectContaining({
+        code: 'setting_invalid',
+        subject: 'blocked_words.entry',
+        count: 5,
+      }),
+    ]);
+    const serialized = JSON.stringify(plan.notes);
+    expect(serialized).not.toContain('sl*ur');
+    expect(serialized).not.toContain('a,b');
+  });
+
+  it('drops a repeat by case and accents quietly, keeping the first spelling', () => {
+    const plan = planOf(withWords(['Bad', 'bád', 'BAD']));
+    expect(plan.settingsPatch.blocked_words).toEqual(['Bad']);
+    expect(noteCodes(plan)).not.toContain('setting_invalid');
+  });
+
+  it('drops the whole key for more entries than a server may block', () => {
+    const many = Array.from({ length: IMPORT_LIMITS.blockedWords + 1 }, (_, i) => `w${i}`);
+    const plan = planOf(withWords(many), currentConfig({ settings: { blocked_words: ['bad'] } }));
+    expect(plan.settingsPatch.blocked_words).toBeUndefined();
+    expect(plan.notes).toContainEqual(
+      expect.objectContaining({
+        code: 'setting_over_limit',
+        subject: 'blocked_words',
+        limit: IMPORT_LIMITS.blockedWords,
+      }),
+    );
+  });
+
+  /** Counted the way it is kept, so unusable entries and repeats do not push a list over. */
+  it('counts only the usable entries against the cap', () => {
+    // Two characters each, so a full list stays inside the 4000-character box.
+    const full = Array.from({ length: IMPORT_LIMITS.blockedWords }, (_, i) =>
+      i.toString(36).padStart(2, '0'),
+    );
+    const plan = planOf(withWords([...full, '00', 'A0', 'b*d']));
+    expect(plan.settingsPatch.blocked_words).toHaveLength(IMPORT_LIMITS.blockedWords);
+  });
+
+  /** The `/blockedwords` box holds 4000 characters, one entry per line. */
+  it('drops the whole key for a list longer than the box that edits it', () => {
+    const long = Array.from({ length: 100 }, (_, i) => `${'x'.repeat(40)}${i}`);
+    const plan = planOf(withWords(long));
+    expect(plan.settingsPatch.blocked_words).toBeUndefined();
+    expect(plan.notes).toContainEqual(
+      expect.objectContaining({
+        code: 'setting_over_limit',
+        limit: IMPORT_LIMITS.blockedWordsTotalChars,
+      }),
+    );
+  });
+
+  it('drops a value that is not a list, and a list with nothing usable left', () => {
+    expect(planOf(withWords('bad')).settingsPatch.blocked_words).toBeUndefined();
+    expect(planOf(withWords(['*', 'b*d'])).settingsPatch.blocked_words).toBeUndefined();
+  });
+
+  it('clears the stored list for null, and leaves it alone when the file omits the key', () => {
+    const current = currentConfig({ settings: { blocked_words: ['bad'] } });
+    expect(planOf(withWords(null), current).settingsRemove).toContain('blocked_words');
+    const omitted = nativeFile();
+    expect(planOf(omitted, current).settingsRemove).not.toContain('blocked_words');
+    expect(planOf(omitted, current).settingsPatch.blocked_words).toBeUndefined();
+  });
+
+  it('writes nothing for the list already stored', () => {
+    const current = currentConfig({ settings: { blocked_words: ['bad', 'worse'] } });
+    expect(planOf(withWords(['bad', 'worse']), current).settingChanges).toEqual([]);
+  });
+
+  /** A file a newer build wrote must not be refused whole over one entry of a new shape. */
+  it('reads a file whose entries are not all strings', () => {
+    const parsed = parseNativeFile(
+      JSON.parse(JSON.stringify(withWords(['bad', { word: 'worse', mode: 'new' }]))),
+    );
+    expect(parsed.ok).toBe(true);
   });
 });

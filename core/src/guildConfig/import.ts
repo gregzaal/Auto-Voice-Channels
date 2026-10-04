@@ -1,5 +1,6 @@
 import { EXPORT_SETTINGS_KEYS, type ExportSettingsKey, type GuildConfigFile } from './format.js';
 import { canonicalTimeZone, isValidListName } from '../template/nameTemplate.js';
+import { keepBlockedWords } from '../template/blockedWords.js';
 
 /**
  * The pure differ behind `/import`: a file plus the guild's current state in, a
@@ -93,6 +94,16 @@ export const IMPORT_LIMITS = {
   commandAccessUsers: 50,
   commandAccessRoles: 25,
   commandAccessTotal: 150,
+  /**
+   * Blocked words: `MAX_BLOCKED_WORDS`, `MAX_BLOCKED_WORD_LENGTH` and
+   * `MAX_BLOCKED_WORDS_TEXT` in `bot/src/features/voice/blockedWords.ts`, bound by
+   * `blockedWords.unit.test.ts`. The entry count and length are Discord AutoMod's own caps
+   * on the keywords of one rule. The total is the box `/blockedwords` prefills, one entry
+   * per line, so a longer imported list could not be edited without losing its tail.
+   */
+  blockedWords: 1000,
+  blockedWordChars: 60,
+  blockedWordsTotalChars: 4000,
 } as const;
 
 export type ChannelKind = 'voice' | 'text' | 'category' | 'other';
@@ -1259,6 +1270,41 @@ function validateSetting(
       // record drops it first), but an assignment would invoke the prototype
       // setter and lose the entry if one ever did.
       return entries.length > 0 ? Object.fromEntries(entries) : drop('setting_invalid');
+    }
+
+    /**
+     * The server's blocked words: each entry checked with the matcher's own rule
+     * (`keepBlockedWords`, which `/export`'s check of what `/import` accepts uses too) and
+     * the same caps `/blockedwords` writes under, so an imported list is one the box can
+     * hold and the matcher can use.
+     *
+     * An entry that cannot be used costs that entry, with one note for all of them that
+     * quotes none: a note can reach `reportError`, and the words may be slurs. Duplicates
+     * (by case and accents, the way entries match) are dropped silently, since
+     * `/blockedwords` drops them the same way. More usable entries than a server may block,
+     * or a list longer than the box, drops the whole key, as `aliases` does: a silently
+     * shortened list of what is blocked is harder to explain than an untouched one. A list
+     * with nothing usable left is dropped with a note rather than written empty, since a
+     * stored empty list and no list are the same thing, and the format says that with null.
+     */
+    case 'blocked_words': {
+      if (!Array.isArray(value)) return drop('setting_invalid');
+      const { kept, unusable } = keepBlockedWords(value, limits.blockedWordChars);
+      if (kept.length > limits.blockedWords)
+        return drop('setting_over_limit', { limit: limits.blockedWords, count: kept.length });
+      // One note however many, so a file of junk entries cannot become a wall of notes.
+      if (unusable > 0) {
+        notes.push({
+          code: 'setting_invalid',
+          severity: 'dropped',
+          subject: `${key}.entry`,
+          count: unusable,
+        });
+      }
+      const total = kept.reduce((sum, entry) => sum + entry.length + 1, -1);
+      if (total > limits.blockedWordsTotalChars)
+        return drop('setting_over_limit', { limit: limits.blockedWordsTotalChars, count: total });
+      return kept.length > 0 ? kept : drop('setting_invalid');
     }
   }
 

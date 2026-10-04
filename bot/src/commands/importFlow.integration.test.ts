@@ -255,7 +255,8 @@ describe('import and export flow (integration)', () => {
         rename: { deny: { users: ['555555555555555551'] } },
       });
       expect(text(replies)).toContain(
-        'the names members chose for themselves with /nick, and who can or cannot use some room commands.',
+        'the names members chose for themselves with /nick, who can or cannot use some room commands, ' +
+          'and the words this server blocks.',
       );
       expect(text(replies)).toContain('Anyone who gets the file gets all of that');
     });
@@ -486,6 +487,54 @@ describe('import and export flow (integration)', () => {
       expect((await guilds.ensure(GUILD)).settings.command_access).toEqual({
         nick: { deny: { users: [USER_C] } },
       });
+    });
+
+    /**
+     * `blocked_words` holds words an admin chose to block, which may be slurs. The preview,
+     * the public announcement and the audit row print a count, and the attached snapshot is
+     * the one place the words stay, because it is the admin's undo.
+     */
+    it('puts no blocked word in the preview, the announcement or the audit row', async () => {
+      const [OLD_A, OLD_B, NEW_A] = ['zzoldazz', 'zzoldbzz', 'zznewazz'];
+      await configureGuild();
+      await guilds.updateSettings(GUILD, { blocked_words: [OLD_A, `${OLD_B}*`] });
+      const exported = fakeCommand(fakeGuild());
+      await handleExport(exported.interaction, deps);
+      const edited = JSON.parse(exported.replies.at(-1)!.files![0]!.attachment!.toString('utf8'));
+      // The export carries the stored list, which is what a round trip needs.
+      expect(edited.settings.blocked_words).toEqual([OLD_A, `${OLD_B}*`]);
+      edited.settings.blocked_words = [NEW_A];
+      serveFile(JSON.stringify(edited));
+
+      const previewed = fakeCommand(fakeGuild(), [
+        { name: 'avc-config.json', attachment: Buffer.from(JSON.stringify(edited), 'utf8') },
+      ]);
+      await handleImportCommand(previewed.interaction, deps);
+      const preview = previewed.replies.at(-1)!.content!;
+      expect(preview).toContain('Blocked words: 1 word (was 2 words)');
+
+      const guild = fakeGuild();
+      const confirmed = fakeButton(guild, importId('confirm', 'i-1'));
+      await handleImportButton(confirmed.interaction, deps);
+
+      const announcement = (guild.systemChannel.send.mock.calls[0]![0] as { content: string })
+        .content;
+      const rows = await new OpsAuditRepository(env.handle.db).recent(10);
+      const audit = JSON.stringify(rows.find((r) => r.action === 'guild.config_import')?.details);
+      for (const word of [OLD_A, OLD_B, NEW_A]) {
+        expect(preview).not.toContain(word);
+        expect(announcement).not.toContain(word);
+        expect(audit).not.toContain(word);
+      }
+      expect(announcement).toContain('Blocked words');
+      expect(announcement).toContain('2 blocked words');
+      expect(audit).toContain('"redactedEntryCount":2');
+
+      // The undo is real: the snapshot the admin is handed still holds the words.
+      const snapshot = confirmed.replies.find((r) => r.files?.[0]?.name?.includes('before-import'));
+      const before = JSON.parse(snapshot!.files![0]!.attachment!.toString('utf8'));
+      expect(before.settings.blocked_words).toEqual([OLD_A, `${OLD_B}*`]);
+      expect((await guilds.ensure(GUILD)).settings.blocked_words).toEqual([NEW_A]);
     });
 
     it('refuses while the kill switch is set, on either fleet', async () => {

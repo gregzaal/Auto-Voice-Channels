@@ -38,9 +38,11 @@ import {
   type ConfigSnapshotDeps,
 } from '../features/voice/configSnapshot.js';
 import type { GuildSettingsService } from '../features/voice/settings.js';
+import { keepBlockedWords } from '../features/voice/nameTemplate.js';
 import { CircuitOpenError } from '../runtime/circuitBreaker.js';
 import { missingBotPermissions, missingRenamePermissions } from './setupPanel.js';
 import {
+  blockedWordsCount,
   commandAccessCount,
   commandAccessCounts,
   destructiveCount,
@@ -195,7 +197,8 @@ export async function handleExport(
     '',
     `Creator channels: ${file.creator_channels.length}. Adopted channels: ${file.adopted_channels.length}.`,
     'The file lists channel ids, your templates and game aliases, the recorded server contact, ' +
-      'the names members chose for themselves with /nick, and who can or cannot use some room commands.',
+      'the names members chose for themselves with /nick, who can or cannot use some room commands, ' +
+      'and the words this server blocks.',
     'Anyone who gets the file gets all of that, so treat it the way you would treat a server backup.',
   ];
   if (otherFleets.length > 0) {
@@ -283,6 +286,18 @@ function importCeilingsExceeded(file: GuildConfigFile, text: string): string[] {
       widest('roles') > IMPORT_LIMITS.commandAccessRoles
     ) {
       over.push('too many restrictions on room commands');
+    }
+  }
+  // The same whole-key drop again: more entries than a server may block, or a list longer
+  // than the `/blockedwords` box. Counted the importer's own way (`keepBlockedWords`), so
+  // entries it would drop as unusable or repeated do not raise a warning it would not act
+  // on. `/blockedwords` writes under the same caps, so this is empty for every list it wrote.
+  const blocked = file.settings.blocked_words;
+  if (blocked) {
+    const { kept } = keepBlockedWords(blocked, IMPORT_LIMITS.blockedWordChars);
+    const total = kept.reduce((sum, word) => sum + word.length + 1, -1);
+    if (kept.length > IMPORT_LIMITS.blockedWords || total > IMPORT_LIMITS.blockedWordsTotalChars) {
+      over.push('too many blocked words');
     }
   }
   return over;
@@ -1033,6 +1048,10 @@ function auditDetails(
       // drops who.
       command_access: accessCounts
         ? { redactedAllowCount: accessCounts.allow, redactedDenyCount: accessCounts.deny }
+        : null,
+      // A count and never the words: they may be slurs, and `/admin/ops` renders this row.
+      blocked_words: snapshot.settings.blocked_words
+        ? { redactedEntryCount: blockedWordsCount(snapshot.settings.blocked_words) }
         : null,
     },
   };

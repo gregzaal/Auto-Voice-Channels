@@ -407,6 +407,58 @@ describe('renderAnnouncement', () => {
   });
 
   /**
+   * The words a server blocks may be slurs, and the announcement is public, so every surface
+   * that prints a `blocked_words` change prints a count. The plan file is the runner's own,
+   * and counts too: a word nobody needs to read is one nobody is shown.
+   */
+  describe('blocked_words', () => {
+    const SLUR = 'zzslurzz';
+    const OTHER = 'qqworseqq';
+    const surfaces = (change: SettingChange): string[] => [
+      renderAnnouncement(plan({ settingChanges: [change] }), ctx),
+      renderPreview(plan({ settingChanges: [change] }), ctx),
+      renderPlanFile(plan({ settingChanges: [change] }), ctx),
+    ];
+
+    it('emits no blocked word for any shape of change, only a count', () => {
+      for (const change of [
+        setting({ key: 'blocked_words', before: undefined, after: [SLUR, `${OTHER}*`] }),
+        setting({ key: 'blocked_words', before: [SLUR], after: [OTHER] }),
+        setting({ key: 'blocked_words', before: [SLUR, OTHER], after: undefined, cleared: true }),
+      ]) {
+        for (const text of surfaces(change)) {
+          expect(text).not.toContain(SLUR);
+          expect(text).not.toContain(OTHER);
+          expect(text).toContain('Blocked words');
+          assertCopyRules(text);
+        }
+      }
+    });
+
+    it('says how many words there are, and were', () => {
+      const [announced] = surfaces(
+        setting({ key: 'blocked_words', before: [SLUR], after: [SLUR, OTHER, 'x'] }),
+      );
+      expect(announced).toContain('Blocked words: 3 words (was 1 word)');
+      const [added] = surfaces(setting({ key: 'blocked_words', before: undefined, after: [SLUR] }));
+      expect(added).toContain('Blocked words: 1 word (was none)');
+    });
+
+    it('lists the words an import stops blocking under Removed, as a count', () => {
+      const [replaced] = surfaces(
+        setting({ key: 'blocked_words', before: [SLUR, OTHER, 'keep'], after: ['KEEP', 'new'] }),
+      );
+      expect(replaced).toContain('Removed');
+      expect(replaced).toContain('2 blocked words');
+      const [cleared] = surfaces(
+        setting({ key: 'blocked_words', before: [SLUR], after: undefined, cleared: true }),
+      );
+      expect(cleared).toContain('Blocked words: cleared (1 word removed)');
+      expect(cleared).toContain('1 blocked word');
+    });
+  });
+
+  /**
    * Channels as `<#id>`, never as a name string: a mention renders as
    * unresolvable to a viewer without access, while a name discloses a
    * staff-only channel to everyone who can read the system channel.

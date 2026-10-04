@@ -71,6 +71,7 @@ export const EXPORT_SETTINGS_KEYS = [
   'control_panel',
   'control_panel_style',
   'command_access',
+  'blocked_words',
 ] as const;
 
 export type ExportSettingsKey = (typeof EXPORT_SETTINGS_KEYS)[number];
@@ -164,6 +165,19 @@ export const exportedSettingsSchema = z.object({
    * reports a count for this key and never an id.
    */
   command_access: z.record(z.string(), z.unknown()).nullable(),
+  /**
+   * The server's blocked words (`/blockedwords`): a list of entries as an admin typed them,
+   * `*` wildcards and all. Absent means nothing is blocked.
+   *
+   * A list of `unknown` rather than of strings for `command_access`'s reason: a file a
+   * newer build wrote must not be refused whole over one entry of a shape this build does
+   * not know, so the importer's `validateSetting` checks each entry and drops what it
+   * cannot use.
+   *
+   * The words may be slurs, and the public import announcement prints settings. Every
+   * import surface that prints one reports a count for this key and never a word.
+   */
+  blocked_words: z.array(z.unknown()).nullable(),
 });
 
 export type ExportedSettings = z.infer<typeof exportedSettingsSchema>;

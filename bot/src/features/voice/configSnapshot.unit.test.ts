@@ -81,6 +81,9 @@ function configured(): CurrentConfig {
       // Who may use which room command. It is member data, so the round trip
       // for this key is the one that proves nothing is lost or invented.
       command_access: { rename: { deny: { users: [CONTACT], roles: ['234567890123456790'] } } },
+      // A list rather than a map, wildcards and a phrase included, which is the shape the
+      // round trip has to carry exactly.
+      blocked_words: ['bad', 'worse*', '*worst*', 'bad word'],
     },
     creatorChannels: [
       {

@@ -1220,4 +1220,33 @@ describe('GuildSettingsService (integration)', () => {
       expect((await guilds.ensure(SERVER)).settings).not.toHaveProperty('command_access');
     });
   });
+
+  /** The whole list in one write under the row lock, against the real row. */
+  describe('blocked words', () => {
+    it('stores the list, reads it back as a copy, and removes the key when emptied', async () => {
+      await settings.setBlockedWords(GUILD, ['bad', 'worse*']);
+      expect(await settings.getBlockedWords(GUILD)).toEqual(['bad', 'worse*']);
+      await settings.setBlockedWords(GUILD, []);
+      expect((await guilds.ensure(GUILD)).settings).not.toHaveProperty('blocked_words');
+    });
+
+    it('leaves the other settings in the blob alone', async () => {
+      await settings.setGeneral(GUILD, 'Hangout');
+      await settings.setBlockedWords(GUILD, ['bad']);
+      const stored = (await guilds.ensure(GUILD)).settings;
+      expect(stored.general).toBe('Hangout');
+      expect(stored.blocked_words).toEqual(['bad']);
+    });
+
+    it('refuses an addition in a lapsed server against the list as it stands at the write', async () => {
+      await settings.setBlockedWords(GUILD, ['bad']);
+      const added = await settings.setBlockedWords(GUILD, ['bad', 'worse'], {
+        refuseAdditions: true,
+      });
+      expect(added.refusedAddition).toBe(true);
+      expect(await settings.getBlockedWords(GUILD)).toEqual(['bad']);
+      const removed = await settings.setBlockedWords(GUILD, [], { refuseAdditions: true });
+      expect(removed).toMatchObject({ ok: true, changed: true, count: 0 });
+    });
+  });
 });

@@ -2,8 +2,10 @@ import {
   DEFAULT_CHANNEL_NAME_TEMPLATE,
   DEFAULT_STATUS_TEMPLATE,
   isValidTimeZone,
+  maskBlockedWithin,
 } from './nameTemplate.js';
 import type { GameNameMode } from './nameTemplate.js';
+import { MAX_BLOCKED_WORDS } from './blockedWords.js';
 // A cycle with `commandAccess.ts`, which reads `SETTINGS_KEYS` and `isSnowflake`
 // from here. Safe while both only use the other's exports inside a function
 // body, as they do: nothing at module top level may touch an import from the
@@ -36,6 +38,7 @@ export const SETTINGS_KEYS = {
   controlPanel: 'control_panel',
   controlPanelStyle: 'control_panel_style',
   commandAccess: 'command_access',
+  blockedWords: 'blocked_words',
 } as const;
 
 /**
@@ -120,6 +123,12 @@ export interface VoiceSettings {
    * whether a saved `/nick` still applies to a room's owner. See {@link displayName}.
    */
   commandAccess: CommandAccess;
+  /**
+   * The server's blocked words (`/blockedwords`), as stored. Every render masks them, and
+   * the "⇩ Join" channel name does through {@link joinDisplayName}. Empty for almost every
+   * server, which is what makes the lever and the matcher free for them.
+   */
+  blockedWords: string[];
 }
 
 /** True only when `value` is a plain object whose values are ALL strings. */
@@ -193,7 +202,48 @@ export function parseVoiceSettings(
     lists: stringArrayMap(settings[SETTINGS_KEYS.lists]),
     gameNameMode: readGameNameMode(settings),
     commandAccess: readCommandAccess(settings, guildId),
+    blockedWords: readBlockedWords(settings),
   };
+}
+
+/**
+ * The server's blocked words, as a fresh array.
+ *
+ * Strings only, blank ones dropped, at most {@link MAX_BLOCKED_WORDS}. Whether each entry is
+ * well formed is the matcher's to judge, which skips one it cannot use, so a hand-edited
+ * value costs the entries that are wrong and not the list. Fresh on every call because
+ * `SettingsCache` serves the same row object to every caller on the instance.
+ */
+export function readBlockedWords(settings: Record<string, unknown>): string[] {
+  const raw = settings[SETTINGS_KEYS.blockedWords];
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((word): word is string => typeof word === 'string' && word.trim() !== '')
+    .slice(0, MAX_BLOCKED_WORDS);
+}
+
+/**
+ * The longest owner name a "⇩ Join" channel carries once its blocked words are masked,
+ * leaving room for the "⇩ Join " before it in a 100-character channel name. Masking can make
+ * a name longer (a two-letter word becomes `***`), and a name Discord refuses would cost the
+ * room its Join channel.
+ */
+export const JOIN_OWNER_NAME_MAX = 90;
+
+/**
+ * A member's name as a "⇩ Join" channel shows it: {@link displayName}, with the server's
+ * blocked words masked. The Join channel is named once, when it is made or its owner changes,
+ * and not by the engine, so it has to be masked here.
+ */
+export function joinDisplayName(
+  settings: VoiceSettings,
+  member: Parameters<typeof displayName>[1],
+): string {
+  return maskBlockedWithin(
+    displayName(settings, member),
+    settings.blockedWords,
+    JOIN_OWNER_NAME_MAX,
+  );
 }
 
 /**

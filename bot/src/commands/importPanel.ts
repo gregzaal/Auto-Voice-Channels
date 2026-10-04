@@ -6,6 +6,7 @@ import type {
   ImportPlan,
   SettingChange,
 } from '@avc/core';
+import { blockedWordKey } from '../features/voice/nameTemplate.js';
 
 /**
  * Rendering and session state for `/import`.
@@ -252,6 +253,7 @@ const SETTING_LABELS: Record<string, string> = {
   control_panel: 'Room control panel buttons',
   control_panel_style: 'Room control panel title, description and colour',
   command_access: 'Who can use room commands',
+  blocked_words: 'Blocked words',
 };
 
 const NOTE_LABELS: Record<ImportNoteCode, string> = {
@@ -468,8 +470,44 @@ function restrictions(counts: { allow: number; deny: number }): string {
   return parts.length > 0 ? parts.join(' and ') : 'none';
 }
 
+/**
+ * How many entries a stored `blocked_words` value holds, and nothing else about it. A raw
+ * settings value, so anything that is not a list holds none.
+ */
+export function blockedWordsCount(value: unknown): number {
+  return Array.isArray(value) ? value.length : 0;
+}
+
+/**
+ * How many of the entries `before` holds that `after` does not, compared the way entries
+ * match (case and accents folded), for the removal line. A count, never the words.
+ */
+export function blockedWordsRemoved(before: unknown, after: unknown): number {
+  if (!Array.isArray(before)) return 0;
+  const kept = new Set(
+    (Array.isArray(after) ? after : []).filter((w) => typeof w === 'string').map(blockedWordKey),
+  );
+  return before.filter((w) => typeof w !== 'string' || !kept.has(blockedWordKey(w))).length;
+}
+
+/** "1 word", "3 words", "none". */
+function wordCount(n: number): string {
+  return n === 0 ? 'none' : `${n} ${n === 1 ? 'word' : 'words'}`;
+}
+
 function settingLine(change: SettingChange): string {
   const label = SETTING_LABELS[change.key] ?? change.key;
+  /**
+   * A COUNT on every surface, like `command_access`: the entries are words an admin chose
+   * to block, which may be slurs, and this line reaches the public announcement and the
+   * plan file. The generic path below would say "3 entries", which is a count too, and is
+   * replaced so that the contract is stated here rather than left to the shape of a value.
+   */
+  if (change.key === 'blocked_words') {
+    const was = blockedWordsCount(change.before);
+    if (change.cleared) return `${label}: cleared (${wordCount(was)} removed)`;
+    return `${label}: ${wordCount(blockedWordsCount(change.after))} (was ${wordCount(was)})`;
+  }
   /**
    * A COUNT on every surface, like `custom_nicks`: the entries are the ids of
    * members an admin has restricted, and this line reaches the public
@@ -531,6 +569,13 @@ function removalSection(plan: ImportPlan, isPublic: boolean): string[] {
     if (change.key === 'command_access' && change.cleared) {
       const cleared = commandAccessCounts(change.before);
       if (cleared.allow + cleared.deny > 0) out.push(`${restrictions(cleared)} on room commands`);
+      continue;
+    }
+    // A list, so the diff lists no entries for it: counted from the two values, as words
+    // that stop being blocked, and never the words themselves.
+    if (change.key === 'blocked_words') {
+      const removed = blockedWordsRemoved(change.before, change.cleared ? [] : change.after);
+      if (removed > 0) out.push(`${removed} blocked ${removed === 1 ? 'word' : 'words'}`);
       continue;
     }
     if (change.entriesRemoved.length === 0) continue;
