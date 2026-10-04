@@ -135,6 +135,14 @@ describe('phrases', () => {
     expect(mask('abad words', 'bad word')).toBe('abad words');
     expect(mask('abad words', '*bad word*')).toBe('a***s');
   });
+
+  it('matches an entry that holds a character outside the Basic Multilingual Plane', () => {
+    // Each of these is a surrogate pair in UTF-16, which the matcher reads a unit at a time.
+    expect(mask('x bad 🍆 y', 'bad 🍆')).toBe('x *** y');
+    expect(mask('a nsfw🍆 b', 'nsfw🍆')).toBe('a *** b');
+    expect(mask('a 𠮷野家 b', '𠮷野家')).toBe('a *** b');
+    expect(mask('a 𠮷野家s b', '𠮷野家')).toBe('a 𠮷野家s b');
+  });
 });
 
 describe('folding', () => {

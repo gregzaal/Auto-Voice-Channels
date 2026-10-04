@@ -321,7 +321,11 @@ function buildMatcher(list: readonly string[]): { matcher: BlockedWordMatcher; n
     if (!word || seen.has(`${word.kind}:${word.core}`)) continue;
     seen.add(`${word.kind}:${word.core}`);
     let node = root;
-    for (const unit of word.core) {
+    // One step per UTF-16 unit, because the walk below reads the folded text a unit at a time:
+    // iterating code points would give a character outside the Basic Multilingual Plane (an
+    // emoji, a rare CJK character) one step here and two there, and it would never match.
+    for (let i = 0; i < word.core.length; i++) {
+      const unit = word.core[i]!;
       let child = node.next.get(unit);
       if (!child) {
         child = { next: new Map() };
