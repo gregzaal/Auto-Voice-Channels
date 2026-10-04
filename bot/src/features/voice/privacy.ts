@@ -1537,10 +1537,15 @@ export class PrivacyService {
 
   /**
    * Remembers the privacy an owner chose for their next room (`null` takes it back out), once
-   * the change has taken effect: applied, or already in place on a replay. Never when it was
-   * refused, failed or only queued behind a rate limit, because then the room is not what they
-   * asked for and the command says so. Never throws. The save is the owner's own, by equality
-   * (see {@link rememberSetting}), and `open` has already refused anyone else.
+   * the change has taken effect, which is `applied`. A command that finds the room already in
+   * the mode asked for is refused by `open` before it gets here, so `unchanged` (a plan with
+   * nothing to write, which needs the same mode before and after) is not an outcome of these
+   * four commands. Never when it was refused, failed or only queued behind a rate limit,
+   * because then the room is not what they asked for and the command says so. A lock whose
+   * Join channel could not be made is `applied` with the error beside it: the room is locked,
+   * which is what they chose, and the sweep makes the channel. Never throws. The save is the
+   * owner's own, by equality (see {@link rememberSetting}), and `open` has already refused
+   * anyone else.
    */
   private async rememberPrivacy(
     row: SecondaryChannelRow,
@@ -1548,7 +1553,7 @@ export class PrivacyService {
     outcome: AccessOutcome,
     privacy: MemberPrefPrivacy | null,
   ): Promise<void> {
-    if (outcome.status !== 'applied' && outcome.status !== 'unchanged') return;
+    if (outcome.status !== 'applied') return;
     await rememberSetting(
       {
         memberPrefs: this.deps.memberPrefs,

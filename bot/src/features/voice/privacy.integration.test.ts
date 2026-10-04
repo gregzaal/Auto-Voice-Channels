@@ -3451,6 +3451,32 @@ describe('PrivacyService (integration)', () => {
         expect(await saved()).toEqual({ name: 'Den', limit: 4, privacy: null });
       });
 
+      /**
+       * The lock is what the member chose, and only the way for others to knock is missing,
+       * which the sweep makes. The command tells them it could not, and the room is still locked.
+       */
+      it('saves private for a lock whose Join channel could not be made, which still locked the room', async () => {
+        actions.createJoinChannel = () => Promise.reject(apiError(50013));
+
+        const res = await remembering.makePrivate(GUILD, SEC, 'alice');
+
+        expect(res.ok).toBe(false);
+        expect(res.message).toContain("I couldn't create its **⇩ Join** channel");
+        expect((await row()).state.private).toBe(true);
+        expect(await saved()).toEqual({ name: null, limit: null, privacy: 'private' });
+      });
+
+      it('saves private for a /unhide whose Join channel could not be made, the same way', async () => {
+        await remembering.hide(GUILD, SEC, 'alice');
+        actions.createJoinChannel = () => Promise.reject(apiError(50013));
+
+        const res = await remembering.unhide(GUILD, SEC, 'alice');
+
+        expect(res.ok).toBe(false);
+        expect(res.message).toContain("I couldn't create its **⇩ Join** channel");
+        expect((await saved())!.privacy).toBe('private');
+      });
+
       it('is for the creator channel the room came from, and for no other', async () => {
         await autoChannels.upsert(GUILD, 'another-primary', { name: 'x' });
         await autoChannels.setRememberPrefs(GUILD, 'another-primary', true);
@@ -3511,6 +3537,15 @@ describe('PrivacyService (integration)', () => {
         expect(await saved()).toBeUndefined();
         expect((await remembering.hide(GUILD, SEC, 'alice')).ok).toBe(false);
         expect(await saved()).toBeUndefined();
+      });
+
+      it('does not replace a remembered hidden for an /unhide that was only queued', async () => {
+        await remembering.hide(GUILD, SEC, 'alice');
+        actions.simulateOverwriteRateLimit = true;
+
+        expect((await remembering.unhide(GUILD, SEC, 'alice')).ok).toBe(false);
+
+        expect((await saved())!.privacy).toBe('hidden');
       });
 
       it('does not clear a remembered privacy for a /public that was only queued', async () => {

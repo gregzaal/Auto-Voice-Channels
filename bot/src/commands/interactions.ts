@@ -487,7 +487,11 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       /**
        * `/unhide` is open and `/hide` is not: the hard gate stops writes and destroys
        * nothing, and showing a room again is an undo that only removes. A gated owner
-       * whose room is hidden can bring it back, and cannot hide another.
+       * whose room is hidden can bring it back, and cannot hide another. The one thing it
+       * writes is the owner's remembered privacy (`private`, which replaces a remembered
+       * `hidden`), and only where the creator channel remembers. That is kept on purpose: a
+       * restore is never read while the guild is gated, and the row is what makes the next
+       * room after reactivation start the way they last left this one.
        */
       if (interaction.commandName === 'unhide') return true;
       /**
