@@ -418,6 +418,16 @@ const ABSENT_MEMBER_RECHECK_MS = 60 * 60 * 1000;
 const SWEEP_TOLD_FOR_MS = 6 * 60 * 60 * 1000;
 
 /**
+ * How long the sweep leaves a room alone after Discord refused a write on it (a permission
+ * error the cache did not predict). A room it cannot write costs a read, a transaction, one or
+ * two refused calls and a read to confirm the channel exists, every sweep, and every refused
+ * call counts toward Discord's budget of invalid requests, which a bot that spends it is cut off
+ * from. Shorter than {@link LOST_ACCESS_RETRY_MS} because the admin was just told and may fix
+ * it within the hour, and a hidden room that is open until the next try is a privacy fault.
+ */
+const WRITE_REFUSED_RETRY_MS = 30 * 60 * 1000;
+
+/**
  * The full private-channel + "⇩ Join {owner}" mechanism, ported from the
  * legacy `private`/`public` commands and join-request handling, and the modes
  * built on it: a room is public, locked, or hidden from the channel list.
@@ -445,10 +455,13 @@ export class PrivacyService {
   constructor(private readonly deps: PrivacyServiceDeps) {}
 
   /**
-   * Rooms the sweep found it could no longer see, and when. In memory and per process, like
-   * the problem tracker it sits beside: a restart asks once more, which is one more request.
+   * Rooms the sweep found it could no longer write to, when, and how long to leave them alone:
+   * {@link LOST_ACCESS_RETRY_MS} for one it could no longer see, and
+   * {@link WRITE_REFUSED_RETRY_MS} for one Discord refused a write on. In memory and per
+   * process, like the problem tracker it sits beside: a restart asks once more, which is one
+   * more request.
    */
-  private readonly lostAccess = new Map<string, number>();
+  private readonly lostAccess = new Map<string, { at: number; retryMs: number }>();
 
   /** Members Discord has no one for, by guild and member, and when it said so. See {@link ABSENT_MEMBER_RECHECK_MS}. */
   private readonly absentMembers = new Map<string, number>();
@@ -1065,10 +1078,18 @@ export class PrivacyService {
       }
 
       for (const { room, saved } of work) {
-        const lostAt = this.lostAccess.get(room.channelId);
-        if (lostAt !== undefined) {
-          if (Date.now() - lostAt < LOST_ACCESS_RETRY_MS) continue;
+        const lost = this.lostAccess.get(room.channelId);
+        if (lost !== undefined) {
+          if (Date.now() - lost.at < lost.retryMs) continue;
           this.lostAccess.delete(room.channelId);
+        }
+        // The cache says the bot cannot edit the room's overwrites, so the write is bound to be
+        // refused, at the price of a read and one or two refused calls per room per sweep. Free
+        // to ask, so it is asked every sweep and the room is repaired the sweep after the
+        // permission comes back. Said to the guild once, by the rule a command uses.
+        if (this.lacksManageRoles(guildId, room.channelId)) {
+          result.failed += 1;
+          continue;
         }
         result.considered += 1;
         try {
@@ -1078,16 +1099,15 @@ export class PrivacyService {
             ...(paused ? { revokeOnly: true } : {}),
           });
           if (applied.status === 'skipped' && applied.reason === 'disabled') break;
-          // Asked again after the long wait and answered, so the room's lost-access
-          // incident is over. Nothing else clears it: the room's own write may well be
-          // `unchanged`.
+          // Asked again after the wait and answered, so the room's incident is over. Nothing
+          // else clears it: the room's own write may well be `unchanged`.
           if (
-            lostAt !== undefined &&
+            lost !== undefined &&
             (applied.status === 'applied' ||
               applied.status === 'unchanged' ||
               applied.status === 'deferred')
           ) {
-            this.clearIncident(guildId, room.channelId, ['delete']);
+            this.clearIncident(guildId, room.channelId, ['delete', 'access']);
           }
           this.tally(result, room.channelId, applied);
         } catch (err) {
@@ -1124,7 +1144,9 @@ export class PrivacyService {
       case 'failed':
         result.failed += 1;
         if (applied.error instanceof ChannelObfuscatedError) {
-          this.lostAccess.set(channelId, Date.now());
+          this.lostAccess.set(channelId, { at: Date.now(), retryMs: LOST_ACCESS_RETRY_MS });
+        } else if (isPermissionError(applied.error)) {
+          this.lostAccess.set(channelId, { at: Date.now(), retryMs: WRITE_REFUSED_RETRY_MS });
         }
         break;
       case 'skipped':

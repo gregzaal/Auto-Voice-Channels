@@ -1239,6 +1239,39 @@ describe('the sweep keeps saved lists and hidden rooms in line (integration)', (
       ]);
     });
 
+    /**
+     * The cache knows the bot's permissions, so a room it says the bot cannot edit is not read or
+     * written at all: the write is bound to be refused, at the price of a read, a transaction and
+     * one or two refused calls per room per sweep. Free to ask, so asked every sweep, and the room
+     * is repaired the sweep after the permission comes back.
+     */
+    it('is neither read nor written while the cache says the bot lacks Manage Roles, and is told once', async () => {
+      await room('rA', 'alice');
+      await lists.add(GUILD, 'alice', 'mallory', 'blocked');
+      voice.setBotPermissions('rA', { manageRoles: false });
+      const read = vi.spyOn(actions, 'readOverwrites');
+      const recorded = vi.fn();
+      problems.onRecord = recorded;
+
+      await sweep();
+      await sweep();
+      await sweep();
+
+      expect(read).not.toHaveBeenCalled();
+      expect(actions.ofType('overwrites')).toEqual([]);
+      expect(recorded).toHaveBeenCalledTimes(1);
+      expect(serverLogs).toHaveLength(1);
+      expect(problems.recent(GUILD)).toEqual([
+        expect.objectContaining({ channelId: 'rA', operation: 'access' }),
+      ]);
+
+      voice.setBotPermissions('rA', { manageRoles: true });
+      await sweep();
+
+      expect(bits(held('rA', 'mallory'))).toEqual({ allow: 0n, deny: VC });
+      expect(problems.recent(GUILD)).toEqual([]);
+    });
+
     it('is told to the guild once, and not again by every sweep', async () => {
       await room('rA', 'alice');
       await lists.add(GUILD, 'alice', 'mallory', 'blocked');
@@ -1250,21 +1283,24 @@ describe('the sweep keeps saved lists and hidden rooms in line (integration)', (
       await sweep();
       await sweep();
 
-      // Tried every time, which is what lets it recover when the permission comes back,
-      // but one incident and one line in the log channel.
-      expect(read).toHaveBeenCalledTimes(3);
+      // Asked once and then left alone for a while: every try is a read and refused calls that
+      // count toward Discord's budget of invalid requests. One incident, one line in the log.
+      expect(read).toHaveBeenCalledTimes(1);
       expect(recorded).toHaveBeenCalledTimes(1);
       expect(serverLogs).toHaveLength(1);
     });
 
     it('recovers when the permission comes back, and the incident clears with it', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
       await room('rA', 'alice');
       await lists.add(GUILD, 'alice', 'mallory', 'blocked');
       const read = failFor('rA', apiError(50013));
       await sweep();
       expect(problems.recent(GUILD)).toHaveLength(1);
 
+      // After the half hour it is left alone for, which is how it notices the permission is back.
       read.mockRestore();
+      vi.setSystemTime(Date.now() + 31 * 60 * 1000);
       await sweep();
       expect(bits(held('rA', 'mallory'))).toEqual({ allow: 0n, deny: VC });
       expect(problems.recent(GUILD)).toEqual([]);
@@ -1409,7 +1445,7 @@ describe('the sweep keeps saved lists and hidden rooms in line (integration)', (
       await sweep();
       await sweep();
 
-      expect(calls).toBeGreaterThanOrEqual(6); // tried every time
+      expect(calls).toBe(2); // the intent and the failed finalise, once, and then left alone
       expect(recorded).toHaveBeenCalledTimes(1);
       expect(serverLogs).toHaveLength(1);
     });
@@ -1467,8 +1503,9 @@ describe('the sweep keeps saved lists and hidden rooms in line (integration)', (
       await sweep();
       expect(recorded).toHaveBeenCalledTimes(22);
 
-      // And over, for every room, once the permission is back.
+      // And over, for every room, once the permission is back and the wait is over.
       actions.failOverwrites = false;
+      vi.setSystemTime(Date.now() + 31 * 60 * 1000);
       await sweep();
       for (let i = 1; i <= 11; i++) {
         expect(bits(held(`r${i}`, 'mallory'))).toEqual({ allow: 0n, deny: VC });

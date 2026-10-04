@@ -2234,6 +2234,22 @@ describe('DiscordVoiceActions room overwrites', () => {
     });
 
     /**
+     * The gateway keeps the cache current, so a cached shell is what Discord last said the bot can
+     * see. Asking REST first spends a request, and may answer 403 where the shell would have been
+     * recognised, which no caller treats as a room it has lost.
+     */
+    it('recognises a cached shell without a request, and without waiting for REST to say 403', async () => {
+      const room = makeRoom([everyone(0n, VIEW)], { flags: CHANNEL_OBFUSCATED });
+      room.fetch.mockRejectedValue(apiError(50001));
+
+      await expect(room.actions.readOverwrites(GUILD, ROOM)).rejects.toBeInstanceOf(
+        ChannelObfuscatedError,
+      );
+
+      expect(room.fetch).not.toHaveBeenCalled();
+    });
+
+    /**
      * discord.js yields no channel for one whose guild it does not hold, after Discord
      * has just confirmed the channel exists. That is not "gone": the caller that
      * drops a room's record on null would drop a live room's.

@@ -1049,6 +1049,11 @@ export class DiscordVoiceActions implements VoiceActions {
    * that drops a room's record on "gone" would drop a live room's.
    */
   async readOverwrites(guildId: string, channelId: string): Promise<ResolvedOverwrite[] | null> {
+    // The gateway keeps the cache current, and a cached shell is what Discord last said the
+    // bot can see of this channel. Asking REST first would spend a request, and may answer 403
+    // where the shell would have been recognised, which no caller treats as lost access.
+    const cached = this.client.channels.cache?.get(channelId);
+    if (cached && isObfuscated(cached)) throw new ChannelObfuscatedError(channelId);
     let channel;
     try {
       channel = await this.client.channels.fetch(channelId, { force: true });
