@@ -5,6 +5,7 @@ import type {
   Logger,
   ManagedChannelRepository,
   ManagedChannelRow,
+  MemberRoomPrefs,
   MemberRoomPrefsRepository,
   PrimaryTemplate,
   SecondaryChannelRepository,
@@ -28,8 +29,8 @@ import {
   readGroups,
   type VoiceSettings,
 } from './guildSettings.js';
-import { isPermissionError } from './discordAdapter.js';
-import { CreationRefusedError } from './privacy.js';
+import { isPermissionError, withoutRequestBody } from './discordAdapter.js';
+import { CreationRefusedError, type PrivateCreation } from './privacy.js';
 import {
   permissionProblemMessage,
   type PermissionOperation,
@@ -39,6 +40,7 @@ import type { CommandResult } from './commands.js';
 import type { PanelOwnerAccess, RoomPanelView } from './controlPanel.js';
 import type { PanelRoomRow } from './controlPanelPoster.js';
 import { roomMode, type RoomMode } from './roomMode.js';
+import { restoreRemembered, standingOf } from './rememberedStart.js';
 import { savedListsInert, type CommandAccess, type CommandCaller } from './commandAccess.js';
 
 /** A fresh 31-bit random seed for a channel's `[[random]]` picks. */
@@ -193,6 +195,17 @@ export interface CreationGate {
    * apply. Absent means not disabled.
    */
   roomAccessDisabled?(): Promise<boolean>;
+  /**
+   * The remembered room settings lever alone (`member_prefs.disabled`), for the two things
+   * this feature does with it: not restoring what a member saved into the room they are making,
+   * and saying "switched off for now" where an admin reads about the setting.
+   *
+   * Its own method, and not a field of the decision, for the reason the one above is: it is not
+   * a creation lever and a room is made whatever it says. Asked only for a creator channel that
+   * remembers, through the gate's cached snapshot (no query), and failing open, so a blip
+   * restores what the member saved. Absent means not disabled.
+   */
+  memberPrefsDisabled?(): Promise<boolean>;
 }
 
 export interface VoiceFeatureDeps {
@@ -212,12 +225,16 @@ export interface VoiceFeatureDeps {
   /** Optional runtime gate for live creation (pause / throttle). */
   gate?: CreationGate;
   /**
-   * What members have remembered about their own rooms, for the two admin readouts that count
-   * it: the creator channel editor and `/channelinfo`. Optional like every other repository
+   * What members have remembered about their own rooms: counted for the two admin readouts
+   * (the creator channel editor and `/channelinfo`), and read, for the member who is making
+   * a room, to start it the way they left their last one. Optional like every other repository
    * here, so the feature is testable without it, and absent means "not counted" rather than
-   * "nobody".
+   * "nobody", and a room made from the creator channel's own defaults.
+   *
+   * `get` is optional on its own: a construction that only counts restores nothing.
    */
-  memberPrefs?: Pick<MemberRoomPrefsRepository, 'countByPrimary'>;
+  memberPrefs?: Pick<MemberRoomPrefsRepository, 'countByPrimary'> &
+    Partial<Pick<MemberRoomPrefsRepository, 'get'>>;
   /**
    * Called after a secondary's record is removed (deletion or reconcile), so
    * dependent resources (e.g. a private channel's "⇩ Join" companion) can be
@@ -325,6 +342,26 @@ export interface VoiceFeatureDeps {
     ownerName: string,
     mode: 'locked' | 'hidden',
   ) => Promise<void>;
+  /**
+   * {@link makePrivateOnCreate} for a mode the MEMBER remembered, which answers instead of
+   * throwing (the privacy service's `tryMakePrivateForCreation`). Optional, and without it a
+   * remembered privacy is not restored at all: the only other way to make a room private on
+   * creation is the one whose failure deletes the room, which is right for an admin's own
+   * default and never for what a member happened to choose last time.
+   *
+   * A failure is logged and the room is made as the creator channel's own default would have
+   * it, which for a public default is a plain public room. It is never deleted for this, and
+   * never thrown. `quiet` keeps a permission failure off the guild's problem list, for a call
+   * that is about to be followed by the admin's own default, whose rollback reports it.
+   */
+  tryMakePrivateOnCreate?: (
+    guildId: string,
+    channelId: string,
+    ownerId: string,
+    ownerName: string,
+    mode: 'locked' | 'hidden',
+    opts?: { quiet?: boolean },
+  ) => Promise<PrivateCreation>;
   /**
    * Applies the creator's saved trusted and blocked lists to a just-made room (the privacy
    * service's `applyAccessLists`), after the owner's move and any default-private step.
@@ -797,6 +834,12 @@ export class VoiceFeature {
       }
     }
 
+    // What this member left behind for this creator channel, started HERE and not at the top:
+    // everything above can still decide there is no room to make, and a join to a server that
+    // is paused or not entitled must not cost a read. It runs beside the reads below and is
+    // awaited before the first render, which is the first thing that needs it.
+    const rememberedRead = this.startRememberedRead(guildId, primary, member);
+
     this.deps.logger.debug(
       { guildId, memberId: member.id, playing: member.playing },
       'creating secondary: creator presence',
@@ -866,14 +909,36 @@ export class VoiceFeature {
         );
       }
     }
-    const template = primary?.template.name ?? settings.channelNameTemplate;
+    /**
+     * What the member's own remembered settings change about this room, which is nothing for a
+     * creator channel that does not remember, a member who has saved nothing, a read that
+     * failed, or a field their standing does not allow. Every applied field goes into the
+     * create below and into the first render and the first panel, never into an edit after
+     * them, so a remembered name costs no rename of the two a room gets per ten minutes.
+     */
+    const defaultMode: StartMode = primary ? startModeOf(primary.template) : 'public';
+    const remembered = restoreRemembered(await rememberedRead, {
+      access: settings.commandAccess,
+      standing: standingOf(member),
+      defaultMode,
+    });
+    const template = remembered.name ?? primary?.template.name ?? settings.channelNameTemplate;
+    // The creator channel's default limit, unless the member chose one. Their 0 is a choice too.
+    const userLimit = remembered.limit ?? primary?.template.limit ?? 0;
     /**
      * How this room starts: open, locked or hidden. ONE value read ONE time, because the
      * render, the slot reservation, the privacy step and the panel all have to agree on
      * it, and four separate reads of the stored booleans are how they drift. It is the
-     * creator channel's default; a member's remembered preference will feed the same local.
+     * creator channel's default, or the member's remembered privacy when that is STRICTER
+     * (`restoreRemembered` has already dropped one that is not).
+     *
+     * A remembered mode needs the hook that does not throw. Without it the only way to make a
+     * room private is the one whose failure deletes the room, which is the admin's own default
+     * and never a member's earlier choice.
      */
-    let startMode: StartMode = primary ? startModeOf(primary.template) : 'public';
+    let startMode: StartMode = defaultMode;
+    let rememberedMode = this.deps.tryMakePrivateOnCreate ? remembered.privacy : undefined;
+    if (rememberedMode !== undefined) startMode = rememberedMode;
     /**
      * `room_access.disabled` stops new hides, and a creator channel that starts its rooms
      * hidden is the one creation that hides. Without this the lever could not reach it, and
@@ -883,18 +948,30 @@ export class VoiceFeature {
      * lever changes about a creation: it never makes a room open. Decided HERE, before the
      * render, so `{{HIDDEN}}` and the panel agree with the room that is actually made.
      *
-     * Asked only of a hidden creator channel, through the gate's cached snapshot (no query),
-     * and failing open: a blip hides the room as the admin asked.
+     * Asked only of a room that would be hidden, through the gate's cached snapshot (no
+     * query), and failing open: a blip hides the room as asked. A hide the MEMBER remembered
+     * is not turned into a lock: it is skipped, and the room is what the creator channel
+     * would have made without it, since a member who wanted their room hidden has not asked
+     * for it to be locked.
      */
     if (
       startMode === 'hidden' &&
       (await this.deps.gate?.roomAccessDisabled?.().catch(() => false))
     ) {
-      startMode = 'locked';
-      this.deps.logger.info(
-        { guildId, primaryId: channelId },
-        'room_access.disabled is on: making a locked room where the creator channel asks for hidden',
-      );
+      if (rememberedMode === 'hidden') {
+        startMode = defaultMode;
+        rememberedMode = undefined;
+        this.deps.logger.info(
+          { guildId, primaryId: channelId },
+          'room_access.disabled is on: not restoring the hidden room a member remembered',
+        );
+      } else {
+        startMode = 'locked';
+        this.deps.logger.info(
+          { guildId, primaryId: channelId },
+          'room_access.disabled is on: making a locked room where the creator channel asks for hidden',
+        );
+      }
     }
     // Generate the per-channel random seed once, here, so `[[random]]` picks are
     // fixed for this channel's lifetime and never trigger a later rename.
@@ -921,9 +998,10 @@ export class VoiceFeature {
       }),
       // `buildRenderContext` reads the LIVE channel's limit, and the live
       // channel here is the CREATOR channel, which is not the room being made.
-      // The room is created with the primary's configured default, so that is
-      // the honest value for this one render.
-      userLimit: primary?.template.limit ?? 0,
+      // The room is created with the limit decided above (the member's remembered one,
+      // else the primary's configured default), so that is the honest value for this
+      // one render.
+      userLimit,
     });
 
     // Copy the primary's own bitrate/region/video-quality/nsfw, matching the
@@ -939,7 +1017,7 @@ export class VoiceFeature {
       newChannelId = await this.deps.actions.createVoiceChannel({
         guildId,
         name,
-        userLimit: primary?.template.limit ?? 0,
+        userLimit,
         ...(primaryProps
           ? {
               bitrate: primaryProps.bitrate,
@@ -998,9 +1076,33 @@ export class VoiceFeature {
         seed,
         roster: [member.id],
         originalCreatorName: member.displayName,
+        // The member's own template, exactly as `/name` would have stored it, so every later
+        // render of this room reads it from the same place and agrees with `name` above.
+        ...(remembered.name !== undefined ? { template: remembered.name } : {}),
       },
     });
     this.deps.countRoom?.('created', guildId);
+
+    // What the member remembered about privacy, made first and by the hook that does not
+    // throw. A failure leaves the room as the creator channel's own default would make it,
+    // which the step below then makes in the strict way, and is never a reason to delete
+    // the room: this is a preference, and the only room worth deleting for want of a lock
+    // is the one an admin asked for. Not when only the Join channel could not be made, which
+    // leaves the room in the mode that was asked for, and the sweep makes the channel. The
+    // name above was rendered for the mode that was asked for, so a template that reads
+    // `{{PRIVATE}}` or `{{HIDDEN}}` is corrected by the re-render that follows the owner's
+    // arrival, at the cost of one rename.
+    let privacyDone = false;
+    if (rememberedMode !== undefined) {
+      const held = await this.restorePrivacy(guildId, channelId, newChannelId, member, settings, {
+        mode: rememberedMode,
+        // A strict step follows when the creator channel starts its rooms private too, and
+        // it reports its own failure against the creator channel.
+        quiet: defaultMode !== 'public',
+      });
+      if (held) privacyDone = true;
+      else startMode = defaultMode;
+    }
 
     // Default-private primaries: lock or hide the new channel before the owner lands in
     // it (granting them access by id, since their move isn't cached yet). Hidden
@@ -1011,7 +1113,7 @@ export class VoiceFeature {
     // from the create above until this write lands: the create payload carries the copied
     // overwrites as they are, with no hide in them. It is a few requests, and closing it
     // means sending the bot's allow, the owner's access and the deny in the create itself.
-    if (startMode !== 'public') {
+    if (startMode !== 'public' && !privacyDone) {
       try {
         await this.deps.makePrivateOnCreate?.(
           guildId,
@@ -1157,7 +1259,7 @@ export class VoiceFeature {
           // On a replay that finds a live room the row says whether it is hidden, as it
           // does for the settings above.
           isHidden: startMode === 'hidden' || roomRow?.access?.hidden === true,
-          userLimit: primary?.template.limit ?? 0,
+          userLimit,
           ownerAccess: this.panelOwnerAccess(newChannelId, member.id),
         },
         // The row the insert above returned, which on a conflict is the LIVE
@@ -1237,6 +1339,94 @@ export class VoiceFeature {
     await this.deps.secondaries.remove(roomId);
     await this.deps.onSecondaryRemoved?.(guildId, roomId);
     await this.deps.actions.deleteChannel(guildId, roomId).catch(() => undefined);
+  }
+
+  /**
+   * Starts reading what this member remembered for this creator channel, or resolves to nothing
+   * at once for a creator channel that does not remember or a feature with nothing to read it
+   * with. **The promise never rejects**, and its catch is attached HERE, where it is made: it is
+   * awaited a good way down, after reads and a Discord create that can each throw first, and a
+   * rejection nobody was yet waiting for would be an unhandled one. A read that fails is logged
+   * with ids and reads as nothing saved, so a prefs error makes the room with the creator
+   * channel's defaults and never fails the join.
+   *
+   * `member_prefs.disabled` is asked only for a creator channel that remembers, through the
+   * gate's cached snapshot and failing open, so every other creator channel pays nothing.
+   * While it is on nothing is read at all. Read-only, so a replay (the sweep's catch-up call
+   * is one) can run it again and costs a read, never a write.
+   */
+  private startRememberedRead(
+    guildId: string,
+    primary: AutoChannelRow,
+    member: VoiceMember,
+  ): Promise<MemberRoomPrefs | undefined> {
+    const get = this.deps.memberPrefs?.get?.bind(this.deps.memberPrefs);
+    if (primary.template.rememberPrefs !== true || !get) return Promise.resolve(undefined);
+    const read = async (): Promise<MemberRoomPrefs | undefined> =>
+      (await this.memberPrefsPaused()) ? undefined : get(primary.channelId, member.id);
+    return read().catch((err: unknown) => {
+      this.deps.logger.warn(
+        { err, guildId, primaryId: primary.channelId, memberId: member.id },
+        'could not read remembered room settings; making the room from the creator channel defaults',
+      );
+      return undefined;
+    });
+  }
+
+  /** Whether `member_prefs.disabled` is on. Fails open, whatever the gate does. */
+  private async memberPrefsPaused(): Promise<boolean> {
+    try {
+      return (await this.deps.gate?.memberPrefsDisabled?.()) === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Makes a room as private as its creator remembered it, by the hook that answers and never
+   * throws, and says whether the room is now in that mode. A failure is logged with ids and the
+   * reason, never the owner's name, and the caller makes the room as its creator channel would
+   * have: nothing here deletes the room, and nothing here counts against the guild.
+   *
+   * A room whose only fault is its Join channel is in the mode that was asked for, so it is
+   * not described as open: the sweep makes the missing channel.
+   */
+  private async restorePrivacy(
+    guildId: string,
+    primaryId: string,
+    roomId: string,
+    member: VoiceMember,
+    settings: VoiceSettings,
+    opts: { mode: 'locked' | 'hidden'; quiet: boolean },
+  ): Promise<boolean> {
+    let result: PrivateCreation;
+    try {
+      result = await this.deps.tryMakePrivateOnCreate!(
+        guildId,
+        roomId,
+        member.id,
+        displayName(settings, member),
+        opts.mode,
+        { quiet: opts.quiet },
+      );
+    } catch (err) {
+      // The hook is meant to answer, but a preference must never fail a room, whatever it does.
+      result = { ok: false, reason: 'failed', error: err };
+    }
+    if (result.ok) return true;
+    this.deps.logger.warn(
+      {
+        guildId,
+        primaryId,
+        secondaryId: roomId,
+        mode: opts.mode,
+        reason: result.reason,
+        held: result.held === true,
+        err: withoutRequestBody(result.error),
+      },
+      'could not make a room private as its creator remembered',
+    );
+    return result.held === true;
   }
 
   /**

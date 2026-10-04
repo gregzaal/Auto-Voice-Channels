@@ -623,6 +623,10 @@ async function main(): Promise<void> {
       (await joinChannelsRepo.getBySecondary(cid))?.channelId ?? undefined,
     makePrivateOnCreate: (gid, cid, ownerId, ownerName, mode) =>
       privacy.makePrivateForCreation(gid, cid, ownerId, ownerName, mode),
+    // A privacy the member remembered goes through the method that answers, so a failure
+    // makes a plain room and never deletes one. Only the admin's own default may do that.
+    tryMakePrivateOnCreate: (gid, cid, ownerId, ownerName, mode, opts) =>
+      privacy.tryMakePrivateForCreation(gid, cid, ownerId, ownerName, mode, opts),
     // The creator's saved lists on the room they just made, and the sweep's pass that keeps
     // every room in line with them. Both are the privacy service's, and neither throws.
     applyAccessLists: (gid, cid, creator) => privacy.applyAccessLists(gid, cid, { creator }),

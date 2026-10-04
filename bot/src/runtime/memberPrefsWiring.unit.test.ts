@@ -109,3 +109,30 @@ describe('remembered room settings are saved by the services that change a room'
     expect(SOURCE.split(LEVER).length - 1).toBe(2);
   });
 });
+
+/**
+ * The restore reads the lever through the creation gate the feature already holds, and it makes
+ * a remembered privacy through a hook of its own. The hook is optional, and without it a
+ * remembered privacy is silently never restored.
+ */
+describe('remembered room settings are restored by the voice feature', () => {
+  it('through the creation gate, which answers the lever, and the repository, which it reads', () => {
+    const feature = statementFrom('const voiceFeature = new VoiceFeature({');
+    expect(feature).toContain('gate: creationGate,');
+    expect(feature).toContain('memberPrefs: memberRoomPrefsRepo,');
+  });
+
+  /**
+   * Not `makePrivateForCreation`, whose failure deletes the room: that is the admin's own
+   * default's rollback, and a member's earlier choice must never cost anybody a room.
+   */
+  it('makes a remembered privacy by the method that answers, not the one that throws', () => {
+    const feature = statementFrom('const voiceFeature = new VoiceFeature({');
+    expect(feature).toContain(
+      'tryMakePrivateOnCreate: (gid, cid, ownerId, ownerName, mode, opts) =>',
+    );
+    expect(feature).toContain(
+      'privacy.tryMakePrivateForCreation(gid, cid, ownerId, ownerName, mode, opts)',
+    );
+  });
+});

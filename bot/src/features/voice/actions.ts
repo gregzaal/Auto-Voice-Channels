@@ -366,6 +366,12 @@ export type RecordedAction =
       above?: boolean;
       reserveSlotAbove?: boolean;
       afterChannelIds?: string[];
+      /**
+       * Recorded because the limit a room is born with is decided by the CALLER (the creator
+       * channel's default, or the one a member remembered), and a restored 0 over a default
+       * limit is visible nowhere else.
+       */
+      userLimit?: number;
       bitrate?: number;
       rtcRegion?: string;
       videoQualityMode?: 1 | 2;
@@ -552,6 +558,7 @@ export class RecordingVoiceActions implements VoiceActions {
       ...(input.above !== undefined ? { above: input.above } : {}),
       ...(input.reserveSlotAbove !== undefined ? { reserveSlotAbove: input.reserveSlotAbove } : {}),
       ...(input.afterChannelIds ? { afterChannelIds: input.afterChannelIds } : {}),
+      ...(input.userLimit !== undefined ? { userLimit: input.userLimit } : {}),
       ...(input.bitrate !== undefined ? { bitrate: input.bitrate } : {}),
       ...(input.rtcRegion !== undefined ? { rtcRegion: input.rtcRegion } : {}),
       ...(input.videoQualityMode !== undefined ? { videoQualityMode: input.videoQualityMode } : {}),

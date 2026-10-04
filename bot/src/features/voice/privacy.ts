@@ -274,6 +274,12 @@ export type PrivateCreation =
       reason: 'unreadable' | 'not_ready' | 'refused' | 'gone' | 'failed';
       /** What was thrown, when something was: a caller that rolls back checks it for a permission error. */
       error?: unknown;
+      /**
+       * The room is in the mode that was asked for all the same: only its Join channel could not
+       * be made, which the sweep makes. A caller that falls back to a public room on failure
+       * must not, or it would describe a locked room as open.
+       */
+      held?: true;
     };
 
 /**
@@ -561,7 +567,7 @@ export class PrivacyService {
         case 'applied':
         case 'deferred':
           if (outcome.joinError !== undefined) {
-            return { ok: false, reason: 'failed', error: outcome.joinError };
+            return { ok: false, reason: 'failed', error: outcome.joinError, held: true };
           }
           this.deps.logger.info(
             { guildId, channelId, ownerId, mode },
