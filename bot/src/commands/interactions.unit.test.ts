@@ -5806,9 +5806,71 @@ describe('registerInteractionHandler (the restriction guard)', () => {
       const e = guardEnv(DENY_KAY);
       await fire(e, { kind: 'command', commandName: 'public', voiceChannelId: 'room-1' });
       expect(e.s.makePublic).toHaveBeenCalled();
+      // Private is denied here, so showing the room opens it: see the next describe.
       const shown = guardEnv(DENY_KAY);
       await fire(shown, { kind: 'command', commandName: 'unhide', voiceChannelId: 'room-1' });
-      expect(shown.s.unhide).toHaveBeenCalledWith('g1', 'room-1', KAY);
+      expect(shown.s.unhide).toHaveBeenCalledWith('g1', 'room-1', KAY, { open: true });
+    });
+
+    /**
+     * A hidden room is a locked one, so hiding a room and showing it would hand a member a locked
+     * room with a Join channel, which is what a Private rule exists to stop, through an undo that
+     * is never refused. For a member denied Private the undo opens the room to everyone, the way
+     * `/public` does, and for everyone else it is unchanged.
+     */
+    describe('showing a hidden room for a member denied Private', () => {
+      const via = {
+        command: (e: Env, extra: Partial<FakeInteractionOpts> = {}) =>
+          fire(e, { kind: 'command', commandName: 'unhide', voiceChannelId: 'room-1', ...extra }),
+        button: (e: Env, extra: Partial<FakeInteractionOpts> = {}) =>
+          fire(e, { kind: 'button', customId: controlPanelId('unhide', 'room-1'), ...extra }),
+      };
+
+      describe.each(Object.entries(via))('through the %s', (_door, press) => {
+        it('opens the room to everyone, and is not refused', async () => {
+          const e = guardEnv({ privacy: { users: [KAY] } });
+          const f = await press(e);
+          expect(notRefused(f)).toBe(true);
+          expect(e.s.unhide).toHaveBeenCalledWith('g1', 'room-1', KAY, { open: true });
+        });
+
+        it('opens it for a member whose ROLE is denied Private', async () => {
+          const e = guardEnv({ privacy: { roles: [OTHER_ROLE] } });
+          await press(e, { memberRoles: [OTHER_ROLE] });
+          expect(e.s.unhide).toHaveBeenCalledWith('g1', 'room-1', KAY, { open: true });
+        });
+
+        it.each([
+          ['a rule for somebody else', { privacy: { users: [OTHER] } }],
+          ['a rule on Hide alone', { hide: { users: [KAY] } }],
+          ['no rules at all', undefined],
+        ])('leaves it locked, as before, with %s', async (_name, rules) => {
+          const e = guardEnv(rules);
+          await press(e);
+          expect(e.s.unhide).toHaveBeenCalledWith('g1', 'room-1', KAY);
+        });
+
+        it('leaves it locked for a member who can manage channels', async () => {
+          const e = guardEnv({ privacy: { users: [KAY] } });
+          await press(e, { manageChannels: true });
+          expect(e.s.unhide).toHaveBeenCalledWith('g1', 'room-1', KAY);
+        });
+
+        it('leaves it locked while command_access.disabled is on', async () => {
+          const e = guardEnv({ privacy: { users: [KAY] } });
+          e.commandAccessDisabled.mockResolvedValue(true);
+          await press(e);
+          expect(e.s.unhide).toHaveBeenCalledWith('g1', 'room-1', KAY);
+        });
+
+        it('fails open when the check throws', async () => {
+          const e = guardEnv({ privacy: { users: [KAY] } });
+          e.commandAccessDisabled.mockRejectedValue(new Error('flag read failed'));
+          await press(e);
+          expect(e.s.unhide).toHaveBeenCalledWith('g1', 'room-1', KAY);
+          expect(e.warn).toHaveBeenCalled();
+        });
+      });
     });
 
     it('treats /limit 0 as removing a limit, so it is never restricted', async () => {
@@ -6026,7 +6088,7 @@ describe('registerInteractionHandler (the restriction guard)', () => {
       expect(e.s.makePublic).toHaveBeenCalledWith('g1', ROOM, KAY);
       const shown = guardEnv(DENY_KAY);
       await fire(shown, { kind: 'button', customId: controlPanelId('unhide', ROOM) });
-      expect(shown.s.unhide).toHaveBeenCalledWith('g1', ROOM, KAY);
+      expect(shown.s.unhide).toHaveBeenCalledWith('g1', ROOM, KAY, { open: true });
     });
 
     it('lets a member who is not denied Hide press it', async () => {

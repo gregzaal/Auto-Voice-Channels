@@ -734,11 +734,17 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
           interaction,
           await run(guildId, 'cmd:hide', () => deps.privacy.hide(guildId, channelId, userId)),
         );
-      case 'unhide':
+      case 'unhide': {
+        const open = await privateDeniedFor(interaction, settings);
         return replyResult(
           interaction,
-          await run(guildId, 'cmd:unhide', () => deps.privacy.unhide(guildId, channelId, userId)),
+          await run(guildId, 'cmd:unhide', () =>
+            open
+              ? deps.privacy.unhide(guildId, channelId, userId, { open: true })
+              : deps.privacy.unhide(guildId, channelId, userId),
+          ),
         );
+      }
       case 'reclaim':
         return replyResult(
           interaction,
@@ -2232,6 +2238,35 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
   }
 
   /**
+   * Whether the caller is denied Private, for the one place that is not a refusal: showing a
+   * hidden room. A hidden room is a locked one, so `/unhide` and the Unhide button would
+   * otherwise hand a member the Private rule exists to stop a locked room with a Join
+   * channel, by hiding a room and showing it. Showing is an undo and is never refused, so it
+   * opens the room to everyone instead of leaving it locked. Fails open, like the guard
+   * (a room that lands locked is what it did before), and is off while
+   * `command_access.disabled` is on. Logs nothing as a refusal.
+   */
+  async function privateDeniedFor(
+    interaction: Interaction,
+    settings: StoredSettings,
+  ): Promise<boolean> {
+    const guildId = interaction.guildId;
+    try {
+      if (guildId === null) return false;
+      const caller = {
+        userId: interaction.user.id,
+        roleIds: callerRoleIds(interaction),
+        canManage: callerCanManage(interaction),
+      };
+      if (mayUse('privacy', caller, readCommandAccess(settings ?? {}, guildId))) return false;
+      return !(await deps.commandAccessDisabled?.());
+    } catch (err) {
+      deps.logger.warn({ err, guildId }, 'could not check a restriction for unhide, allowing it');
+      return false;
+    }
+  }
+
+  /**
    * Whether to proceed, answering a refusal ephemerally.
    *
    * `safeReply` rather than `interaction.reply`: the interaction may already be
@@ -3704,12 +3739,17 @@ Already subscribed? Add the new server ` +
           () => deps.privacy.hide(guildId, roomId, userId),
           'panel:hide',
         );
-      case 'unhide':
+      case 'unhide': {
+        const open = await privateDeniedFor(interaction, settings);
         return replyPanelResult(
           interaction,
-          () => deps.privacy.unhide(guildId, roomId, userId),
+          () =>
+            open
+              ? deps.privacy.unhide(guildId, roomId, userId, { open: true })
+              : deps.privacy.unhide(guildId, roomId, userId),
           'panel:unhide',
         );
+      }
       case 'claim':
         return replyPanelResult(
           interaction,

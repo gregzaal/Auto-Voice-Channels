@@ -3492,6 +3492,34 @@ describe('PrivacyService (integration)', () => {
         expect((await saved())!.privacy).toBe('private');
       });
 
+      /**
+       * For a member denied Private the router asks for `open`: a hidden room is a locked one, so
+       * showing it must not leave a locked room with a Join channel. It is an undo that only
+       * removes, so what they remember goes the way `/public` takes it, and is never set to private.
+       */
+      it('opens a hidden room to everyone for /unhide with open, and remembers nothing for it', async () => {
+        await remembering.hide(GUILD, SEC, 'alice');
+        expect((await saved())!.privacy).toBe('hidden');
+
+        const res = await remembering.unhide(GUILD, SEC, 'alice', { open: true });
+
+        expect(res.ok).toBe(true);
+        expect(res.message).toBe('🔓 Your channel is now public.');
+        expect((await row()).state.private).toBeUndefined();
+        expect((await access())?.hidden).toBeUndefined();
+        expect(await joinRow()).toBeUndefined();
+        expect(liveJoinChannels()).toHaveLength(0);
+        expect(everyone()).toBeUndefined();
+        expect(await saved()).toBeUndefined();
+      });
+
+      it('still refuses /unhide with open on a room that is not hidden', async () => {
+        await remembering.makePrivate(GUILD, SEC, 'alice');
+        const res = await remembering.unhide(GUILD, SEC, 'alice', { open: true });
+        expect(res).toEqual({ ok: false, message: "This room isn't hidden." });
+        expect((await row()).state.private).toBe(true);
+      });
+
       it('takes the privacy back out for /public, from a locked room and from a hidden one', async () => {
         await remembering.makePrivate(GUILD, SEC, 'alice');
         expect((await remembering.makePublic(GUILD, SEC, 'alice')).ok).toBe(true);

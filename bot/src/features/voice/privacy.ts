@@ -652,11 +652,22 @@ export class PrivacyService {
     });
   }
 
-  /** Shows a hidden room in the channel list again. It stays locked. */
+  /**
+   * Shows a hidden room in the channel list again. It stays locked.
+   *
+   * **Unless the caller is denied Private (`opts.open`), when it is opened to everyone.** A
+   * hidden room is a locked one, so hiding and showing a room would otherwise be a way to
+   * make a locked room with a Join channel that a Private rule exists to stop, and showing
+   * a room is an undo that is never restricted. An undo that only removes is the way out:
+   * the room goes from hidden to public, as `/public` takes it, and what they remember is
+   * cleared and not set to `private`. The router knows who the caller is and what the
+   * rules say, and decides.
+   */
   async unhide(
     guildId: string,
     channelId: string | undefined,
     userId: string,
+    opts: { open?: boolean } = {},
   ): Promise<CommandResult> {
     return this.guarded('unhide', guildId, channelId, async () => {
       const opened = await this.open(guildId, channelId, userId, say.notOwnerUnhide);
@@ -669,10 +680,14 @@ export class PrivacyService {
         row,
         record: access,
         from: mode,
-        to: 'locked',
+        to: opts.open === true ? 'public' : 'locked',
         ownerId: row.ownerId,
         joinName: () => this.ownerJoinName(guildId, row),
       });
+      if (opts.open === true) {
+        await this.rememberPrivacy(row, userId, outcome, null);
+        return this.report(guildId, row.channelId, 'public', outcome);
+      }
       // A room that is shown again is still locked, so it is `private` that they now want. Left
       // as `hidden`, a member who hid a room and then showed it would be given a hidden room
       // next time.

@@ -116,7 +116,7 @@ export const FEATURE_LABELS: Record<CommandFeature, string> = {
  */
 export const FEATURE_COVERS: Record<CommandFeature, string> = {
   privacy:
-    'the /private command and the Private button. Opening a room again stays open to everyone',
+    'the /private command and the Private button. Opening a room again stays open to everyone. Showing a hidden room opens it to everyone too, so hiding and showing a room never leaves it locked',
   hide: 'the /hide command and the Hide button. Showing a room again stays open to everyone',
   limit:
     'the /limit command and the Size button. The /unlimit command and /limit 0 stay open to everyone',
@@ -222,6 +222,10 @@ export function nickFeatureFor(name: string | null): CommandFeature | null {
  * same act as their button: `limitset` and `renameset` are the modals the Size
  * and Name buttons open, and `transferpick` is the member picker Transfer opens,
  * so a rule has to stop every step and not only the first.
+ *
+ * `unhide` is `null` and is never refused, but it is not the same act for everyone: a hidden
+ * room is a locked one, so for a member denied Private the router has it open the room to
+ * everyone instead of leaving it locked (`privateDeniedFor` in `interactions.ts`).
  */
 export const PANEL_ACTION_FEATURE: Record<ControlPanelAction, CommandFeature | null> = {
   lock: 'privacy',
