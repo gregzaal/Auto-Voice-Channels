@@ -727,17 +727,19 @@ describe('GuildSettingsService (integration)', () => {
       expect(await stored()).toEqual({ name: 'Room ##' });
     });
 
-    /** What an admin reads when they turn it on: what it does, and what it stores. */
+    /**
+     * What an admin reads when they turn it on: what it does. The storage sentence was cut as
+     * redundant on 2026-10-04 (the first sentence says what is kept, and Privacy covers it).
+     */
     it('says what turning it on and off does', async () => {
       const service = serviceWith(undefined);
       await creatorWith();
 
       const on = await service.setRememberPrefs(GUILD, PRIMARY, true);
+      expect(on.message).toContain('**Remember user settings** is on');
       expect(on.message).toContain('name, size and privacy');
       expect(on.message).toContain("instead of this creator channel's defaults");
       expect(on.message).toContain('only remembered when the member set one themselves');
-      expect(on.message).toContain("each member's id and the name, size and privacy they choose");
-      expect(on.message).toContain('/privacy');
 
       const off = await service.setRememberPrefs(GUILD, PRIMARY, false);
       expect(off.message).toContain('kept and not used');
