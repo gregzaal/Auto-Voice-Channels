@@ -168,7 +168,7 @@ Shows the first part when the condition is true, the second when it's false. The
 
 Prefer `{{FULL}}` over `{{@@num@@ >= @@limit@@}}`: a channel with no limit has `@@limit@@` of `0`, so the comparison would call an empty unlimited channel full, and `FULL` knows better.
 
-**Nesting.** A conditional can sit inside the else part of another, and the inner one is worked out first. Use it when a room can be in more than one state and each state needs one mark. A hidden room is also `PRIVATE`, so two conditionals side by side (`{{PRIVATE ?? 🔒 }}{{HIDDEN ?? 🙈 }}`) show **both** marks on a hidden room. Nest them instead: `{{HIDDEN ?? 🙈 // {{PRIVATE ?? 🔒 }}}}`.
+**Nesting.** A conditional can sit inside the else part of another, and the inner one is worked out first. Use it when a room can be in more than one state and each state needs one mark. A hidden room is also `PRIVATE`, so two conditionals side by side (`{{PRIVATE ?? 🔒 }}{{HIDDEN ?? 🙈 }}`) show **both** marks on a hidden room. Nest them instead, and keep the ordinary text after them so a public room still has a name: `{{HIDDEN ?? 🙈 // {{PRIVATE ?? 🔒 }}}}@@owner@@'s room`.
 
 To check a role you need its ID number from the admin: `{{ROLE:998877 ?? 👑}}`. `ANY_ROLE` takes one the same way, and `MEMBER` and `OWNER` take a user ID.
 
