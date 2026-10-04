@@ -64,7 +64,7 @@ describe('the remembered settings orphan sweep is wired', () => {
  * with every test green because each builds its own service.
  */
 describe('the remembered settings repository reaches the admin readouts', () => {
-  it('the voice feature, which counts for the editor and /channelinfo', () => {
+  it('the voice feature, which counts for the editor and /channelinfo and restores for a member', () => {
     expect(statementFrom('const voiceFeature = new VoiceFeature({')).toContain(
       'memberPrefs: memberRoomPrefsRepo,',
     );
@@ -78,7 +78,8 @@ describe('the remembered settings repository reaches the admin readouts', () => 
 
   it('and nothing else is handed it, so a new consumer has to be added here too', () => {
     expect(SOURCE.split('memberRoomPrefsRepo').length - 1).toBe(
-      // the declaration, the sweep, the two readers, and the two services that save
+      // the declaration, the sweep, the voice feature (counts and restores), the settings
+      // service (clears), and the two services that save
       6,
     );
   });
