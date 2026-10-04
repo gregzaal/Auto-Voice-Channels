@@ -1476,10 +1476,7 @@ export class VoiceFeature {
       // The real gate fails open itself; a gate that throws must not take the lists with it.
       const disabled = await this.deps.gate?.roomAccessDisabled?.().catch(() => false);
       if (disabled) return;
-      const standing: CommandCaller | undefined =
-        member.roleIds === undefined
-          ? undefined
-          : { userId: member.id, roleIds: member.roleIds, canManage: member.canManage === true };
+      const standing = standingOf(member);
       if (savedListsInert(commandAccess, standing)) return;
       const result = await apply(guildId, roomId, { id: member.id, standing });
       if (result.status === 'failed') {
