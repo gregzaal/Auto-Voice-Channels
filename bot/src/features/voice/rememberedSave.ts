@@ -58,14 +58,17 @@ export interface RememberedSaveDeps {
   logger: Logger;
 }
 
-/** A thrown value as log fields: what failed, never what the database echoed of the statement. */
+/**
+ * A thrown value as log fields: the kind of error and its code, never its message. A driver's
+ * message can carry the statement it failed on with its parameters (a later drizzle does), and
+ * the parameter of a name save is the name the member typed.
+ */
 function failureFields(err: unknown): Record<string, unknown> {
   if (!(err instanceof Error)) return { errorName: typeof err };
   const code = (err as { code?: unknown }).code;
   return {
     errorName: err.name,
     ...(typeof code === 'string' || typeof code === 'number' ? { errorCode: code } : {}),
-    errorMessage: err.message,
   };
 }
 

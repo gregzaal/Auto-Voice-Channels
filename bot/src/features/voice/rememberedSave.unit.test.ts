@@ -175,9 +175,26 @@ describe('rememberSetting', () => {
         field: 'name',
         errorName: 'Error',
         errorCode: '57P01',
-        errorMessage: 'connection terminated',
       });
       expect(JSON.stringify(warn.mock.calls)).not.toContain('secret');
+    });
+
+    /**
+     * A driver's own message can be the statement with its parameters, which for a name save
+     * is the name the member typed. So the message is not logged, whatever it says.
+     */
+    it('never logs the error message, which can carry what the member typed', async () => {
+      const { deps, saveName, warn } = harness();
+      saveName.mockRejectedValue(
+        new Error('Failed query: insert into member_room_prefs params: a secret den name'),
+      );
+
+      await rememberSetting(deps, room(), 'alice', { field: 'name', value: 'a secret den name' });
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]![0]).toMatchObject({ field: 'name', errorName: 'Error' });
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('secret');
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('Failed query');
     });
 
     it('resolves for a thrown value that is not an Error', async () => {
