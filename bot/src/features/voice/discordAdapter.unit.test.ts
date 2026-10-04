@@ -3078,10 +3078,11 @@ describe('DiscordVoiceActions.moveMember', () => {
     setChannel: vi.fn().mockResolvedValue(undefined),
   });
 
-  it('moves a member as it always has when no options are given', async () => {
+  it('moves a member as it always has when no options are given, and says it did', async () => {
     const voice = inVoice('anywhere');
-    await new DiscordVoiceActions(clientFor(voice)).moveMember('g1', 'u1', 'room');
+    const moved = await new DiscordVoiceActions(clientFor(voice)).moveMember('g1', 'u1', 'room');
     expect(voice.setChannel).toHaveBeenCalledWith('room');
+    expect(moved).toBe(true);
   });
 
   it('disconnects a member who is still in the room it was told to take them out of', async () => {
@@ -3096,12 +3097,13 @@ describe('DiscordVoiceActions.moveMember', () => {
    * A disconnect takes the member out of whichever channel they are in NOW. The
    * block picked them from a cache read that may be seconds old.
    */
-  it('does nothing to a member who has moved to another channel', async () => {
+  it('does nothing to a member who has moved to another channel, and says nobody was moved', async () => {
     const voice = inVoice('somewhere-else');
-    await new DiscordVoiceActions(clientFor(voice)).moveMember('g1', 'u1', null, {
+    const moved = await new DiscordVoiceActions(clientFor(voice)).moveMember('g1', 'u1', null, {
       onlyFrom: 'room',
     });
     expect(voice.setChannel).not.toHaveBeenCalled();
+    expect(moved).toBe(false);
   });
 
   it('does nothing to a member who is not in voice at all', async () => {
@@ -3127,11 +3129,12 @@ describe('DiscordVoiceActions.moveMember', () => {
     voice.setChannel.mockRejectedValue(apiError(40032));
     await expect(
       new DiscordVoiceActions(clientFor(voice)).moveMember('g1', 'u1', null, { onlyFrom: 'room' }),
-    ).resolves.toBeUndefined();
-    // And for a plain move too: the old callers are not made to throw by it.
+    ).resolves.toBe(false);
+    // And for a plain move too: the old callers are not made to throw by it, and the one that
+    // cares (a room being made) is told that nobody was moved.
     await expect(
       new DiscordVoiceActions(clientFor(voice)).moveMember('g1', 'u1', 'room'),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
   });
 
   it('still swallows an unknown member and an unknown channel', async () => {
@@ -3140,7 +3143,7 @@ describe('DiscordVoiceActions.moveMember', () => {
       voice.setChannel.mockRejectedValue(apiError(code));
       await expect(
         new DiscordVoiceActions(clientFor(voice)).moveMember('g1', 'u1', 'x'),
-      ).resolves.toBeUndefined();
+      ).resolves.toBe(false);
     }
   });
 

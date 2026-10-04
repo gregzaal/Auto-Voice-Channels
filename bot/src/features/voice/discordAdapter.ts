@@ -948,7 +948,7 @@ export class DiscordVoiceActions implements VoiceActions {
     memberId: string,
     channelId: string | null,
     options?: MoveMemberOptions,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       const guild = await this.client.guilds.fetch(guildId);
       const member = await guild.members.fetch(memberId);
@@ -956,16 +956,20 @@ export class DiscordVoiceActions implements VoiceActions {
       // current, so this is as fresh as anything we can know without moving them.
       // The caller's own read can be seconds old, and a disconnect takes the member
       // out of whichever channel they are in now.
-      if (options?.onlyFrom !== undefined && member.voice.channelId !== options.onlyFrom) return;
+      if (options?.onlyFrom !== undefined && member.voice.channelId !== options.onlyFrom) {
+        return false;
+      }
       await member.voice.setChannel(channelId);
+      return true;
     } catch (err) {
-      // 40032: they left voice between the check and the move. Nothing to undo.
+      // 40032: they left voice between the check and the move. Nothing to undo, and
+      // nobody was moved, which the caller that cares (a room being made) is told.
       if (
         isApiError(err, UNKNOWN_MEMBER) ||
         isApiError(err, UNKNOWN_CHANNEL) ||
         isApiError(err, NOT_IN_VOICE)
       ) {
-        return;
+        return false;
       }
       throw err;
     }

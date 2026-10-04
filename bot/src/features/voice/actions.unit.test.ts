@@ -254,7 +254,7 @@ describe('RecordingVoiceActions.moveMember', () => {
   it('swallows a member who is not connected, as the adapter swallows 40032', async () => {
     const actions = new RecordingVoiceActions();
     actions.notConnectedMemberIds.add('u1');
-    await expect(actions.moveMember(GUILD, 'u1', null)).resolves.toBeUndefined();
+    await expect(actions.moveMember(GUILD, 'u1', null)).resolves.toBe(false);
     expect(actions.ofType('move')).toEqual([]);
   });
 

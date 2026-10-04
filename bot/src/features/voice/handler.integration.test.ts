@@ -840,11 +840,12 @@ describe('VoiceFeature (integration)', () => {
   });
 
   /**
-   * `moveMember` swallows 40032, so a creator who left voice while the room was
-   * being made is not an error. The room is kept (the reconciler removes an empty
-   * one) and is not rolled back, which only a permission error does.
+   * `moveMember` swallows 40032, so a creator who left voice while the room was being made is
+   * not an error. They have nobody to be moved in, so the room is empty and is removed at once:
+   * kept, it would have a companion text channel (a slot in a category capped at 50) and a
+   * panel for a room nobody is in, until the sweep deleted the lot minutes later.
    */
-  it('keeps the room, and does not fail, for a creator who left voice before the move', async () => {
+  it('removes the room, and does not fail, for a creator who left voice before the move', async () => {
     const problems = new PermissionProblemTracker();
     const f = new VoiceFeature({
       autoChannels,
@@ -864,9 +865,44 @@ describe('VoiceFeature (integration)', () => {
       f.handleVoiceStateUpdate({ guildId: GUILD, member: alice, afterChannelId: PRIMARY }),
     ).resolves.not.toThrow();
     expect(actions.ofType('create')).toHaveLength(1);
-    expect(actions.ofType('delete')).toEqual([]);
-    expect(await secondaries.listByGuild(GUILD)).toHaveLength(1);
+    const room = actions.ofType('create')[0]!.channelId;
+    expect(actions.ofType('delete').map((a) => a.channelId)).toEqual([room]);
+    expect(await secondaries.listByGuild(GUILD)).toEqual([]);
     expect(problems.recent(GUILD)).toEqual([]);
+  });
+
+  it('makes no companion channel or panel, and does not announce the room, for a creator who left before the move', async () => {
+    const told: string[] = [];
+    const posted = vi.fn();
+    const f = new VoiceFeature({
+      autoChannels,
+      secondaries,
+      guilds,
+      actions,
+      voice,
+      selfHosted: true,
+      logger: fakeLogger(),
+      serverLog: (_guild, _level, message) => told.push(message),
+      controlPanel: {
+        postForRoom: posted,
+      } as never,
+      companionText: {
+        createForRoom: vi.fn().mockRejectedValue(new Error('must not be asked')),
+      } as never,
+    });
+    const alice = member('alice');
+    voice.put(PRIMARY, alice);
+    actions.notConnectedMemberIds.add('alice');
+
+    const outcome = await f.handleVoiceStateUpdate({
+      guildId: GUILD,
+      member: alice,
+      afterChannelId: PRIMARY,
+    });
+
+    expect(outcome).toEqual([]);
+    expect(posted).not.toHaveBeenCalled();
+    expect(told).toEqual([]);
   });
 
   it('does not clear-and-re-record on every join when only the move fails', async () => {

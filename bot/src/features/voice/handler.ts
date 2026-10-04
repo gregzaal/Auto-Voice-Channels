@@ -1190,8 +1190,9 @@ export class VoiceFeature {
       }
     }
 
+    let moved: boolean;
     try {
-      await this.deps.actions.moveMember(guildId, member.id, newChannelId);
+      moved = await this.deps.actions.moveMember(guildId, member.id, newChannelId);
     } catch (err) {
       if (!isPermissionError(err)) throw err;
       // Created the channel but can't move the member into it (we've lost access to
@@ -1215,6 +1216,24 @@ export class VoiceFeature {
       this.deps.logger.warn(
         { guildId, primaryId: channelId, secondaryId: newChannelId, err },
         'created secondary but cannot move member into it',
+      );
+      return { action: 'skip' };
+    }
+
+    /**
+     * A creator who left voice while the room was being made (the move answers 40032, which the
+     * adapter swallows) has nobody to be moved in, and the room is empty. Everything below
+     * would make a companion channel in a category capped at 50 and post a panel for a room
+     * that nobody is in, and the sweep would delete it all minutes later. So it is removed
+     * now, like any room that could not be finished, and nothing here is an error: leaving a
+     * creator channel at once is ordinary. `=== false`, so an action seam that answers nothing
+     * still reads as moved.
+     */
+    if (moved === false) {
+      await this.discardUnfinishedRoom(guildId, newChannelId).catch(() => undefined);
+      this.deps.logger.info(
+        { guildId, primaryId: channelId, secondaryId: newChannelId },
+        'the creator left voice before the room was ready; removed it',
       );
       return { action: 'skip' };
     }

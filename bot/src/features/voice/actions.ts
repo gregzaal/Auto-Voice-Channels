@@ -226,13 +226,18 @@ export interface VoiceActions {
   /**
    * Moves a member to a channel (or disconnects them when channelId is null).
    * A member who is not in voice, or has left the server, is not an error.
+   *
+   * Resolves to whether anybody was moved: `false` for a member who was not connected or
+   * had left (or, with `onlyFrom`, was no longer in that channel), where nothing was done.
+   * Most callers have nothing to do about that. The create path does: a creator who left voice
+   * while their room was being made has no room to be moved into.
    */
   moveMember(
     guildId: string,
     memberId: string,
     channelId: string | null,
     options?: MoveMemberOptions,
-  ): Promise<void>;
+  ): Promise<boolean>;
   /** Sets a channel's user limit (0 = unlimited). */
   setUserLimit(guildId: string, channelId: string, limit: number): Promise<void>;
   /**
@@ -617,7 +622,7 @@ export class RecordingVoiceActions implements VoiceActions {
     memberId: string,
     channelId: string | null,
     options?: MoveMemberOptions,
-  ): Promise<void> {
+  ): Promise<boolean> {
     // Skipped before anything can fail, as the adapter does: it reads the member's
     // voice state right before moving them, and a member who is elsewhere is left be.
     if (
@@ -625,9 +630,9 @@ export class RecordingVoiceActions implements VoiceActions {
       this.memberChannels.has(memberId) &&
       this.memberChannels.get(memberId) !== options.onlyFrom
     ) {
-      return Promise.resolve();
+      return Promise.resolve(false);
     }
-    if (this.notConnectedMemberIds.has(memberId)) return Promise.resolve();
+    if (this.notConnectedMemberIds.has(memberId)) return Promise.resolve(false);
     if (this.failMove) {
       return Promise.reject(
         new DiscordAPIError(
@@ -647,7 +652,7 @@ export class RecordingVoiceActions implements VoiceActions {
       channelId,
       ...(options?.onlyFrom !== undefined ? { onlyFrom: options.onlyFrom } : {}),
     });
-    return Promise.resolve();
+    return Promise.resolve(true);
   }
 
   setUserLimit(guildId: string, channelId: string, limit: number): Promise<void> {
