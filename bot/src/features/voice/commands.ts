@@ -52,11 +52,13 @@ export interface VoiceCommandsDeps {
   feature: VoiceFeature;
   logger: Logger;
   /**
-   * What a member's `/limit` and `/name` are remembered in, for the creator channels that
-   * remember. Optional so a construction that predates it keeps working: absent means nothing
-   * is saved. See {@link rememberSetting} for who is saved for and when.
+   * What a member's `/limit` and `/name` (its name and its status) are remembered in, for the
+   * creator channels that remember. Optional so a construction that predates it keeps working:
+   * absent means nothing is saved. See {@link rememberSetting} for who is saved for and when.
    */
-  memberPrefs?: Pick<MemberRoomPrefsRepository, 'saveName' | 'saveLimit'> | undefined;
+  memberPrefs?:
+    | Pick<MemberRoomPrefsRepository, 'saveName' | 'saveLimit' | 'saveStatus'>
+    | undefined;
   /** The `member_prefs.disabled` lever, through the creation gate's cached snapshot. */
   memberPrefsDisabled?: RememberedSaveDeps['memberPrefsDisabled'];
 }
@@ -209,14 +211,17 @@ export class VoiceCommands {
       next[stateKey] = stored;
     }
     await this.deps.secondaries.updateState(id, next);
-    // A NAME the member set, or took back, and never the voice status: a status is about what
-    // is happening in this room now. Not a name that is only the cut of a longer template, which
+    // A name or a voice status the member set, or took back (the owner's call, 2026-10-04, to
+    // remember the status as well). Not a name that is only the cut of a longer template, which
     // is the same template cut short and not a new choice (the panel is answered above, so this
-    // is the backstop for a submit that did not say where it came from). Saved before the
-    // re-render, which can throw: the room already has the name, and a save that sat behind it
-    // would leave a member told the command failed about a room that was renamed and not
-    // remembered.
-    if (field === 'name' && (isReset || !isTruncatedPrefill(stored, row.state.template))) {
+    // is the backstop for a submit that did not say where it came from). A status has no such
+    // cut: no box shows less of it than the editor's, which holds all a save accepts. A blank
+    // status is saved as one, since it is not a reset. Saved before the re-render, which can
+    // throw: the room already has the name, and a save that sat behind it would leave a member
+    // told the command failed about a room that was renamed and not remembered.
+    if (field === 'status') {
+      await this.remember(row, userId, { field: 'status', value: isReset ? null : stored });
+    } else if (isReset || !isTruncatedPrefill(stored, row.state.template)) {
       await this.remember(row, userId, { field: 'name', value: isReset ? null : stored });
     }
     const r = await this.deps.feature.rerenderSecondary(guildId, id);

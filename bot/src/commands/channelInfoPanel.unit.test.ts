@@ -424,15 +424,15 @@ describe('the creator channel settings', () => {
         .find((line) => line.startsWith('Returning members get their own saved name'));
     };
 
-    it('says whether returning members get their own saved name, size and privacy', () => {
+    it('says whether returning members get their own saved name, status, size and privacy', () => {
       expect(remembered({})).toBe(
-        'Returning members get their own saved name, size and privacy: off',
+        'Returning members get their own saved name, status, size and privacy: off',
       );
       expect(remembered({ rememberPrefs: false })).toBe(
-        'Returning members get their own saved name, size and privacy: off',
+        'Returning members get their own saved name, status, size and privacy: off',
       );
       expect(remembered({ rememberPrefs: true })).toBe(
-        'Returning members get their own saved name, size and privacy: on',
+        'Returning members get their own saved name, status, size and privacy: on',
       );
     });
 
@@ -451,7 +451,7 @@ describe('the creator channel settings', () => {
     /** Rows kept while it is off are not what the line is about, and a count beside off would mislead. */
     it('shows no count beside off', () => {
       expect(remembered({ rememberPrefs: false, savedSettings: 12 })).toBe(
-        'Returning members get their own saved name, size and privacy: off',
+        'Returning members get their own saved name, status, size and privacy: off',
       );
     });
 
@@ -463,14 +463,14 @@ describe('the creator channel settings', () => {
     /** `member_prefs.disabled` is on: "on" would describe a feature that is doing nothing. */
     it('says it is switched off for now while the lever is on, and drops the count', () => {
       expect(remembered({ rememberPrefs: true, rememberPaused: true })).toBe(
-        'Returning members get their own saved name, size and privacy: on, but switched off for now',
+        'Returning members get their own saved name, status, size and privacy: on, but switched off for now',
       );
       expect(remembered({ rememberPrefs: true, rememberPaused: true, savedSettings: 9 })).toBe(
-        'Returning members get their own saved name, size and privacy: on, but switched off for now',
+        'Returning members get their own saved name, status, size and privacy: on, but switched off for now',
       );
       // Off stays off, and says nothing of the lever.
       expect(remembered({ rememberPrefs: false, rememberPaused: true })).toBe(
-        'Returning members get their own saved name, size and privacy: off',
+        'Returning members get their own saved name, status, size and privacy: off',
       );
     });
 

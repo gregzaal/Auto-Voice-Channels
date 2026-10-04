@@ -566,7 +566,10 @@ export interface PrimaryConfig {
   inheritperms?: string | undefined;
   /** Whether rooms from this creator channel get a private text channel. */
   textChannel?: boolean | undefined;
-  /** Whether a member who comes back gets the name, size and privacy they chose last time. */
+  /**
+   * Whether a member who comes back gets the name, status, size and privacy they chose last
+   * time.
+   */
   rememberPrefs?: boolean | undefined;
   /**
    * How many members have something saved for this creator channel. Present only while it
@@ -1123,6 +1126,10 @@ export class VoiceFeature {
         // The member's own template, exactly as `/name` would have stored it, so every later
         // render of this room reads it from the same place and agrees with `name` above.
         ...(remembered.name !== undefined ? { template: remembered.name } : {}),
+        // And their own status template, where `/name` stores it. A room's status is first set
+        // by the render that follows the owner's arrival, which reads it from here, so it
+        // costs no write of its own either.
+        ...(remembered.status !== undefined ? { statusTemplate: remembered.status } : {}),
       },
     });
     this.deps.countRoom?.('created', guildId);

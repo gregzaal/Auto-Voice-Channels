@@ -55,14 +55,14 @@ describe('copy rules', () => {
 describe('what turning it on says', () => {
   /**
    * The one place an admin chooses to have member ids and the settings they choose kept, so
-   * each thing it has to say is pinned: what members get, the one rule about names, and what
-   * is stored, which is all three of the things members get.
+   * each thing it has to say is pinned: what members get, the one rule about names and
+   * statuses, and what is stored, which is all four of the things members get.
    */
-  it('says what members get and that a name is only remembered when set', () => {
-    expect(REMEMBER_ON_NOTE).toContain('name, size and privacy');
+  it('says what members get and that a name or status is only remembered when set', () => {
+    expect(REMEMBER_ON_NOTE).toContain('name, status, size and privacy');
     expect(REMEMBER_ON_NOTE).toContain("instead of this creator channel's defaults");
     expect(REMEMBER_ON_NOTE).toContain(
-      'A name is only remembered when the member set one themselves',
+      'A name or status is only remembered when the member set it themselves',
     );
   });
 
@@ -97,7 +97,7 @@ describe('rememberedFieldValue', () => {
 
   it('says what an on creator channel does and what an off one does', () => {
     expect(rememberedFieldValue(true, undefined)).toContain(
-      "their own saved name, size and privacy, instead of this creator channel's defaults",
+      "their own saved name, status, size and privacy, instead of this creator channel's defaults",
     );
     expect(rememberedFieldValue(false, undefined)).toContain("this creator channel's defaults");
   });
@@ -175,7 +175,7 @@ describe('clearedNote', () => {
 });
 
 describe('rememberedInfoLine', () => {
-  const HEAD = 'Returning members get their own saved name, size and privacy';
+  const HEAD = 'Returning members get their own saved name, status, size and privacy';
 
   it('reads on or off, in the words of the rest of that section', () => {
     expect(rememberedInfoLine(false, undefined)).toBe(`${HEAD}: off`);

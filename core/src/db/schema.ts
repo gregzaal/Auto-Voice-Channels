@@ -471,6 +471,12 @@ export const memberRoomPrefs = pgTable(
     /** The room's user limit. 0 is a remembered "no limit", and null is nothing remembered. */
     userLimit: smallint('user_limit'),
     privacy: text('privacy', { enum: MEMBER_PREF_PRIVACIES }),
+    /**
+     * The voice status template the member set themselves (migration 0045, added after the rest
+     * of the table and nullable like it, so an insert that does not name it remembers nothing).
+     * An empty string is a remembered "no status", and null is nothing remembered.
+     */
+    statusTemplate: text('status_template'),
     updatedAt: updatedAt(),
     /**
      * When the orphan sweep first found no creator channel for this row, or null while there

@@ -333,6 +333,94 @@ describe('remembered room settings (integration)', () => {
     });
   });
 
+  // -- status -------------------------------------------------------------------------
+
+  /**
+   * A room's voice status is first set by the render after the owner arrives, never by the
+   * create, so a remembered status goes into the row the create writes and that render reads
+   * it from there, as a status set with `/name` would be.
+   */
+  describe('a remembered status', () => {
+    it('starts the room with it in the row, and its first render sets it with no rename', async () => {
+      await optIn();
+      await prefs.saveStatus(GUILD, PRIMARY, ALICE, 'AFK with @@creator@@');
+
+      const room = await join(feature);
+
+      expect((await secondaries.get(room))!.state.statusTemplate).toBe('AFK with @@creator@@');
+      expect(actions.ofType('status')).toEqual([]);
+      expect(await feature.rerenderSecondary(GUILD, room)).toEqual({ status: 'AFK with Alice' });
+      expect(actions.ofType('status').map((a) => a.status)).toEqual(['AFK with Alice']);
+      expect(actions.ofType('rename')).toEqual([]);
+      // And the next render has nothing left to do.
+      expect(await feature.rerenderSecondary(GUILD, room)).toEqual({});
+    });
+
+    /** A remembered "no status" is the member's choice and keeps the creator channel's off the room. */
+    it('can be a remembered no status, which keeps the creator channel’s status off the room', async () => {
+      await autoChannels.upsert(GUILD, PRIMARY, { name: "@@creator@@'s room", status: 'Lobby' });
+      await autoChannels.setRememberPrefs(GUILD, PRIMARY, true);
+      await prefs.saveStatus(GUILD, PRIMARY, ALICE, '');
+
+      const room = await join(feature);
+
+      expect((await secondaries.get(room))!.state.statusTemplate).toBe('');
+      expect(await feature.rerenderSecondary(GUILD, room)).toEqual({});
+      expect(actions.ofType('status')).toEqual([]);
+
+      // Bob saved nothing, so his room has the creator channel's status.
+      const bobs = await join(feature, member(BOB));
+      expect((await secondaries.get(bobs))!.state.statusTemplate).toBeUndefined();
+      expect(await feature.rerenderSecondary(GUILD, bobs)).toEqual({ status: 'Lobby' });
+    });
+
+    it('is not what the next member gets', async () => {
+      await optIn();
+      await prefs.saveStatus(GUILD, PRIMARY, ALICE, 'AFK');
+
+      const room = await join(feature, member(BOB));
+
+      expect((await secondaries.get(room))!.state.statusTemplate).toBeUndefined();
+    });
+
+    /** The status is masked like any other: the stored template keeps what the member typed. */
+    it('renders with a blocked word masked, and keeps the template as it was saved', async () => {
+      await optIn();
+      await prefs.saveStatus(GUILD, PRIMARY, ALICE, 'zzbadzz time');
+      await guilds.updateSettings(GUILD, { blocked_words: ['*bad*'] });
+      try {
+        const room = await join(feature);
+
+        expect((await secondaries.get(room))!.state.statusTemplate).toBe('zzbadzz time');
+        await feature.rerenderSecondary(GUILD, room);
+        expect(actions.ofType('status').map((a) => a.status)).toEqual(['zz***zz time']);
+      } finally {
+        // Guild settings outlive a test, and a list left behind would mask every later name.
+        await guilds.updateSettings(GUILD, { blocked_words: [] });
+      }
+    });
+
+    /**
+     * Name covers the voice status wherever a member sets it, so a member denied Name gets
+     * neither back, and nothing else they saved is withheld for it.
+     */
+    it('is withheld from a member denied Name, with the name, and the rest still restored', async () => {
+      await optIn();
+      await prefs.saveName(GUILD, PRIMARY, ALICE, 'Den');
+      await prefs.saveStatus(GUILD, PRIMARY, ALICE, 'AFK');
+      await prefs.saveLimit(GUILD, PRIMARY, ALICE, 3);
+      await restrict('rename', { users: [ALICE] });
+
+      const room = await join(feature);
+
+      const row = (await secondaries.get(room))!;
+      expect(row.state.template).toBeUndefined();
+      expect(row.state.statusTemplate).toBeUndefined();
+      expect(createdLimit()).toBe(3);
+      expect(await feature.rerenderSecondary(GUILD, room)).toEqual({});
+    });
+  });
+
   // -- limit --------------------------------------------------------------------------
 
   describe('a remembered limit', () => {
@@ -479,6 +567,7 @@ describe('remembered room settings (integration)', () => {
       await prefs.saveName(GUILD, PRIMARY, ALICE, 'Den');
       await prefs.saveLimit(GUILD, PRIMARY, ALICE, 5);
       await prefs.savePrivacy(GUILD, PRIMARY, ALICE, 'private');
+      await prefs.saveStatus(GUILD, PRIMARY, ALICE, 'AFK');
     };
 
     it.each(['rename', 'limit', 'privacy'] as const)(
@@ -491,6 +580,8 @@ describe('remembered room settings (integration)', () => {
 
         const row = (await secondaries.get(room))!;
         expect(row.state.template === 'Den').toBe(feat !== 'rename');
+        // Name covers the voice status, so the two go together.
+        expect(row.state.statusTemplate === 'AFK').toBe(feat !== 'rename');
         expect(createdLimit() === 5).toBe(feat !== 'limit');
         expect((await modeOf(room)) === 'locked').toBe(feat !== 'privacy');
       },
@@ -571,6 +662,7 @@ describe('remembered room settings (integration)', () => {
       await prefs.saveName(GUILD, PRIMARY, ALICE, 'Den');
       await prefs.saveLimit(GUILD, PRIMARY, ALICE, 5);
       await prefs.savePrivacy(GUILD, PRIMARY, ALICE, 'hidden');
+      await prefs.saveStatus(GUILD, PRIMARY, ALICE, 'AFK');
       // Turned off again: the rows are dormant and kept.
       await autoChannels.setRememberPrefs(GUILD, PRIMARY, false);
       expect(await prefs.countByPrimary(GUILD, PRIMARY)).toBe(1);
@@ -623,6 +715,7 @@ describe('remembered room settings (integration)', () => {
       await prefs.saveName(GUILD, PRIMARY, ALICE, 'Den');
       await prefs.saveLimit(GUILD, PRIMARY, ALICE, 5);
       await prefs.savePrivacy(GUILD, PRIMARY, ALICE, 'hidden');
+      await prefs.saveStatus(GUILD, PRIMARY, ALICE, 'AFK');
       prefsPaused = true;
       const get = vi.spyOn(prefs, 'get');
 
@@ -630,6 +723,7 @@ describe('remembered room settings (integration)', () => {
 
       expect(get).not.toHaveBeenCalled();
       expect((await secondaries.get(room))!.state.template).toBeUndefined();
+      expect((await secondaries.get(room))!.state.statusTemplate).toBeUndefined();
       expect(createdLimit()).toBe(0);
       expect(await modeOf(room)).toBe('public');
       expect(actions.ofType('create')[0]!.name).toBe("Alice's room");
@@ -915,13 +1009,15 @@ describe('remembered room settings (integration)', () => {
       await prefs.saveName(GUILD, PRIMARY, ALICE, "@@creator@@'s lounge");
       await prefs.saveLimit(GUILD, PRIMARY, ALICE, 4);
       await prefs.savePrivacy(GUILD, PRIMARY, ALICE, 'private');
+      await prefs.saveStatus(GUILD, PRIMARY, ALICE, 'AFK');
       const before = await env.handle.pool.query(
-        'SELECT user_id, name_template, user_limit, privacy, updated_at FROM member_room_prefs',
+        'SELECT user_id, name_template, user_limit, privacy, status_template, updated_at FROM member_room_prefs',
       );
       const saves = [
         vi.spyOn(prefs, 'saveName'),
         vi.spyOn(prefs, 'saveLimit'),
         vi.spyOn(prefs, 'savePrivacy'),
+        vi.spyOn(prefs, 'saveStatus'),
       ];
       const get = vi.spyOn(prefs, 'get');
       voice.put(PRIMARY, alice());
@@ -934,6 +1030,7 @@ describe('remembered room settings (integration)', () => {
       expect(actions.ofType('create')[0]!.name).toBe("Alice's lounge");
       expect(createdLimit()).toBe(4);
       expect(await modeOf(room)).toBe('locked');
+      expect((await secondaries.get(room))!.state.statusTemplate).toBe('AFK');
       expect(get).toHaveBeenCalledTimes(1);
 
       // The move lands, and the next pass finds her in the room and not the creator channel.
@@ -947,7 +1044,7 @@ describe('remembered room settings (integration)', () => {
       // The restore is read-only: it never reached a save path, and no row moved.
       for (const save of saves) expect(save).not.toHaveBeenCalled();
       const after = await env.handle.pool.query(
-        'SELECT user_id, name_template, user_limit, privacy, updated_at FROM member_room_prefs',
+        'SELECT user_id, name_template, user_limit, privacy, status_template, updated_at FROM member_room_prefs',
       );
       expect(after.rows).toEqual(before.rows);
     });
@@ -986,17 +1083,19 @@ describe('remembered room settings (integration)', () => {
   // -- the whole round trip ---------------------------------------------------------------
 
   describe('what a member sets in one room comes back in the next', () => {
-    it('saves a name, a size and a hide, restores all three, and a public room forgets the privacy', async () => {
+    it('saves a name, a status, a size and a hide, restores all four, and a public room forgets the privacy', async () => {
       await optIn();
       const first = await join(feature);
 
       expect((await commands.setName(GUILD, first, ALICE, "@@creator@@'s lounge")).ok).toBe(true);
+      expect((await commands.setStatus(GUILD, first, ALICE, 'AFK with @@creator@@')).ok).toBe(true);
       expect((await commands.setLimit(GUILD, first, ALICE, 5)).ok).toBe(true);
       expect((await privacy.hide(GUILD, first, ALICE)).ok).toBe(true);
       expect(await prefs.get(PRIMARY, ALICE)).toEqual({
         name: "@@creator@@'s lounge",
         limit: 5,
         privacy: 'hidden',
+        status: 'AFK with @@creator@@',
       });
 
       // She leaves, the empty room goes, and she joins again.
@@ -1016,24 +1115,34 @@ describe('remembered room settings (integration)', () => {
       expect(createdLimit()).toBe(5);
       expect(await modeOf(second)).toBe('hidden');
       expect(views).toEqual([{ isPrivate: true, isHidden: true, userLimit: 5 }]);
+      expect((await secondaries.get(second))!.state.statusTemplate).toBe('AFK with @@creator@@');
+      expect(await feature.rerenderSecondary(GUILD, second)).toEqual({ status: 'AFK with Alice' });
       // Nobody else is given her room.
       const bobs = await join(feature, member(BOB));
       expect(await modeOf(bobs)).toBe('public');
       expect((await secondaries.get(bobs))!.state.template).toBeUndefined();
+      expect((await secondaries.get(bobs))!.state.statusTemplate).toBeUndefined();
 
-      // Going public takes the privacy back out, and the name and size stay.
+      // Going public takes the privacy back out, and the name, status and size stay.
       expect((await privacy.makePublic(GUILD, second, ALICE)).ok).toBe(true);
       expect(await prefs.get(PRIMARY, ALICE)).toEqual({
         name: "@@creator@@'s lounge",
         limit: 5,
         privacy: null,
+        status: 'AFK with @@creator@@',
       });
+
+      // Resetting the status in her room takes it back out, and nothing else.
+      expect((await commands.setStatus(GUILD, second, ALICE, 'reset')).ok).toBe(true);
+      expect((await prefs.get(PRIMARY, ALICE))?.status).toBeNull();
+      expect((await prefs.get(PRIMARY, ALICE))?.name).toBe("@@creator@@'s lounge");
     });
 
     it('remembers nothing for a creator channel that was never opted in', async () => {
       const room = await join(feature);
 
       await commands.setName(GUILD, room, ALICE, 'Den');
+      await commands.setStatus(GUILD, room, ALICE, 'AFK');
       await commands.setLimit(GUILD, room, ALICE, 5);
       await privacy.makePrivate(GUILD, room, ALICE);
 

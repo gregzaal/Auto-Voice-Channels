@@ -296,7 +296,7 @@ describe('templatePanel remembered settings', () => {
       ),
     ).find((f) => f.name === FIELD)!;
     expect(on.value).toContain(
-      '**On.** A member who comes back gets a room that starts with their own saved name, size and privacy',
+      '**On.** A member who comes back gets a room that starts with their own saved name, status, size and privacy',
     );
     expect(on.value).toContain('1 member has saved settings.');
   });

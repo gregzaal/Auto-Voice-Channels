@@ -8,10 +8,10 @@
  * channel". The setting itself is called "Remember user settings" (the owner's name for it,
  * 2026-10-04), so an admin reads it as a switch about members rather than about the channel.
  *
- * **What is promised.** Name, size and privacy, and nothing else. A name is only remembered
- * when the member set one themselves, so a room that was merely named by the creator
- * channel's template never pins that name to a member. Privacy is private or hidden, never
- * public.
+ * **What is promised.** Name, status, size and privacy, and nothing else (the status since the
+ * owner's call of 2026-10-04). A name or status is only remembered when the member set it
+ * themselves, so a room that was merely named by the creator channel's template never pins that
+ * name to a member. Privacy is private or hidden, never public.
  */
 
 /** "1 member", "3 members". */
@@ -51,8 +51,8 @@ export function rememberedFieldValue(
     );
   }
   return on
-    ? '**On.** A member who comes back gets a room that starts with their own saved name, size and ' +
-        `privacy, instead of this creator channel's defaults.${savedSentence(on, saved)}`
+    ? '**On.** A member who comes back gets a room that starts with their own saved name, status, ' +
+        `size and privacy, instead of this creator channel's defaults.${savedSentence(on, saved)}`
     : `**Off.** Every new room starts from this creator channel's defaults.${savedSentence(on, saved)}`;
 }
 
@@ -65,8 +65,9 @@ export function rememberedFieldValue(
  */
 export const REMEMBER_ON_NOTE =
   '💾 **Remember user settings** is on for this creator channel. A member who comes back gets a ' +
-  'room that starts with the name, size and privacy they chose last time, instead of this ' +
-  "creator channel's defaults. A name is only remembered when the member set one themselves.";
+  'room that starts with the name, status, size and privacy they chose last time, instead of ' +
+  "this creator channel's defaults. A name or status is only remembered when the member set it " +
+  'themselves.';
 
 /**
  * What is added to {@link REMEMBER_ON_NOTE} while remembering is switched off for now, because
@@ -97,7 +98,7 @@ export function clearedNote(removed: number): string {
  * count, since a count beside "switched off for now" would read as members being served.
  */
 export function rememberedInfoLine(on: boolean, saved: number | undefined, paused = false): string {
-  const head = 'Returning members get their own saved name, size and privacy';
+  const head = 'Returning members get their own saved name, status, size and privacy';
   if (!on) return `${head}: off`;
   if (paused) return `${head}: on, but switched off for now`;
   if (saved === undefined) return `${head}: on`;

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   MAX_MEMBER_PREF_LIMIT,
   MAX_MEMBER_PREF_NAME_LENGTH,
+  MAX_MEMBER_PREF_STATUS_LENGTH,
   MEMBER_PREFS_ORPHAN_GRACE_MS,
   MEMBER_PREFS_ORPHAN_SWEEP_LIMIT,
 } from './memberRoomPrefs.js';
@@ -20,8 +21,9 @@ describe('remembered room settings limits', () => {
     expect(MEMBER_PREFS_ORPHAN_SWEEP_LIMIT).toBe(500);
   });
 
-  it('remembers a name up to what /name accepts, and a limit up to what Discord allows', () => {
+  it('remembers a name and a status up to what /name accepts, and a limit up to what Discord allows', () => {
     expect(MAX_MEMBER_PREF_NAME_LENGTH).toBe(1000);
+    expect(MAX_MEMBER_PREF_STATUS_LENGTH).toBe(1000);
     expect(MAX_MEMBER_PREF_LIMIT).toBe(99);
   });
 });

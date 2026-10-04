@@ -3524,12 +3524,17 @@ describe('PrivacyService (integration)', () => {
     describe('what each change remembers', () => {
       it('saves private for /private', async () => {
         expect((await remembering.makePrivate(GUILD, SEC, 'alice')).ok).toBe(true);
-        expect(await saved()).toEqual({ name: null, limit: null, privacy: 'private' });
+        expect(await saved()).toEqual({
+          name: null,
+          limit: null,
+          privacy: 'private',
+          status: null,
+        });
       });
 
       it('saves hidden for /hide', async () => {
         expect((await remembering.hide(GUILD, SEC, 'alice')).ok).toBe(true);
-        expect(await saved()).toEqual({ name: null, limit: null, privacy: 'hidden' });
+        expect(await saved()).toEqual({ name: null, limit: null, privacy: 'hidden', status: null });
       });
 
       /** A room shown again is still locked, so a hide then a show must not leave a hidden room behind. */
@@ -3585,7 +3590,7 @@ describe('PrivacyService (integration)', () => {
         await prefs.saveLimit(GUILD, PRIMARY, 'alice', 4);
         await remembering.makePrivate(GUILD, SEC, 'alice');
         await remembering.makePublic(GUILD, SEC, 'alice');
-        expect(await saved()).toEqual({ name: 'Den', limit: 4, privacy: null });
+        expect(await saved()).toEqual({ name: 'Den', limit: 4, privacy: null, status: null });
       });
 
       /**
@@ -3600,7 +3605,12 @@ describe('PrivacyService (integration)', () => {
         expect(res.ok).toBe(false);
         expect(res.message).toContain("I couldn't create its **⇩ Join** channel");
         expect((await row()).state.private).toBe(true);
-        expect(await saved()).toEqual({ name: null, limit: null, privacy: 'private' });
+        expect(await saved()).toEqual({
+          name: null,
+          limit: null,
+          privacy: 'private',
+          status: null,
+        });
       });
 
       it('saves private for a /unhide whose Join channel could not be made, the same way', async () => {

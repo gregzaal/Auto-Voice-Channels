@@ -71,8 +71,8 @@ export const primaryTemplateSchema = z
     textChannel: z.boolean().optional(),
     /**
      * When `true`, a member who comes back to this creator channel gets a room that starts with
-     * the name, size and privacy they chose last time, instead of the server defaults. Off when
-     * absent. Toggled from this creator channel's `/template` editor.
+     * the name, status, size and privacy they chose last time, instead of the server defaults.
+     * Off when absent. Toggled from this creator channel's `/template` editor.
      *
      * **Only the switch lives here.** What members saved is `member_room_prefs`, which is not
      * part of this template and so is neither exported nor imported. Turning the switch off

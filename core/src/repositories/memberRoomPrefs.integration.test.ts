@@ -3,8 +3,10 @@ import { sql } from 'drizzle-orm';
 import { AutoChannelRepository } from './autoChannels.js';
 import { MemberRoomPrefsRepository } from './memberRoomPrefs.js';
 import { autoChannels, memberRoomPrefs } from '../db/schema.js';
+import { runMigrations } from '../db/migrate.js';
 import {
   MAX_MEMBER_PREF_NAME_LENGTH,
+  MAX_MEMBER_PREF_STATUS_LENGTH,
   MEMBER_PREFS_ORPHAN_GRACE_MS,
 } from '../domain/memberRoomPrefs.js';
 import type { PgTestEnv } from '../test/pgContainer.js';
@@ -27,6 +29,7 @@ type Row = {
   privacy: string | null;
   updated_at: string | Date;
   orphaned_at: string | Date | null;
+  status_template: string | null;
 };
 
 describe('MemberRoomPrefsRepository (integration)', () => {
@@ -75,6 +78,7 @@ describe('MemberRoomPrefsRepository (integration)', () => {
       name: string | null;
       limit: number | null;
       privacy: string | null;
+      status: string | null;
       ageDays: number;
       /** How long ago the sweep stamped the row as an orphan. Unstamped when left out. */
       orphanedDaysAgo: number;
@@ -82,10 +86,11 @@ describe('MemberRoomPrefsRepository (integration)', () => {
   ) =>
     env.handle.db.execute(
       sql`INSERT INTO member_room_prefs
-            (primary_channel_id, user_id, guild_id, name_template, user_limit, privacy, updated_at,
-             orphaned_at)
+            (primary_channel_id, user_id, guild_id, name_template, user_limit, privacy,
+             status_template, updated_at, orphaned_at)
           VALUES (${over.primary ?? PRIMARY}, ${over.user ?? USER}, ${over.guild ?? GUILD},
                   ${over.name ?? null}, ${over.limit ?? null}, ${over.privacy ?? null},
+                  ${over.status ?? null},
                   now() - (${over.ageDays ?? 0}::double precision * interval '1 day'),
                   CASE WHEN ${over.orphanedDaysAgo ?? null}::double precision IS NULL THEN NULL
                        ELSE now() - (${over.orphanedDaysAgo ?? null}::double precision
@@ -114,6 +119,8 @@ describe('MemberRoomPrefsRepository (integration)', () => {
         { column_name: 'privacy', data_type: 'text', is_nullable: 'YES' },
         { column_name: 'updated_at', data_type: 'timestamp with time zone', is_nullable: 'NO' },
         { column_name: 'orphaned_at', data_type: 'timestamp with time zone', is_nullable: 'YES' },
+        // Migration 0045, added after the table was made, so it comes last.
+        { column_name: 'status_template', data_type: 'text', is_nullable: 'YES' },
       ]);
 
       const indexes = (
@@ -127,6 +134,53 @@ describe('MemberRoomPrefsRepository (integration)', () => {
       expect(defs).toContain('(guild_id)');
       expect(defs).toContain('member_room_prefs_user_idx');
       expect(defs).toContain('(user_id)');
+    });
+  });
+
+  /**
+   * Migration 0045, the remembered status, added to a table that 0044 had already made on a
+   * database (the owner's local one) that applied it. The harness applies every migration, so
+   * this checks what a second run does and what a row written without the column reads as.
+   */
+  describe('migration 0045', () => {
+    it('is a no-op the second time and keeps the rows it already holds', async () => {
+      await optIn();
+      await repo.saveStatus(GUILD, PRIMARY, USER, 'AFK');
+
+      await expect(runMigrations(env.handle.db)).resolves.toBeUndefined();
+
+      expect(await repo.get(PRIMARY, USER)).toEqual({
+        name: null,
+        limit: null,
+        privacy: null,
+        status: 'AFK',
+      });
+    });
+
+    it('added status_template as nullable text with no default', async () => {
+      const col = await env.handle.db.execute<{
+        data_type: string;
+        is_nullable: string;
+        column_default: string | null;
+      }>(
+        sql`SELECT data_type, is_nullable, column_default FROM information_schema.columns
+             WHERE table_name = 'member_room_prefs' AND column_name = 'status_template'`,
+      );
+      expect(col.rows).toEqual([{ data_type: 'text', is_nullable: 'YES', column_default: null }]);
+    });
+
+    /** What an insert that predates the column leaves: nothing remembered for the status. */
+    it('reads a row written without the column as no status remembered', async () => {
+      await env.handle.db.execute(
+        sql`INSERT INTO member_room_prefs (primary_channel_id, user_id, guild_id, name_template)
+            VALUES (${PRIMARY}, ${USER}, ${GUILD}, 'den')`,
+      );
+      expect(await repo.get(PRIMARY, USER)).toEqual({
+        name: 'den',
+        limit: null,
+        privacy: null,
+        status: null,
+      });
     });
   });
 
@@ -146,6 +200,7 @@ describe('MemberRoomPrefsRepository (integration)', () => {
         name: 'Kay: @@game_name@@',
         limit: null,
         privacy: null,
+        status: null,
       });
 
       expect(await repo.saveLimit(GUILD, PRIMARY, USER, 6)).toEqual({ status: 'saved' });
@@ -154,6 +209,7 @@ describe('MemberRoomPrefsRepository (integration)', () => {
         name: 'Kay: @@game_name@@',
         limit: 6,
         privacy: 'hidden',
+        status: null,
       });
 
       // One row, however many settings it holds.
@@ -196,7 +252,52 @@ describe('MemberRoomPrefsRepository (integration)', () => {
     it('remembers a limit of 0 as a choice, which is not the same as nothing', async () => {
       await optIn();
       await repo.saveLimit(GUILD, PRIMARY, USER, 0);
-      expect(await repo.get(PRIMARY, USER)).toEqual({ name: null, limit: 0, privacy: null });
+      expect(await repo.get(PRIMARY, USER)).toEqual({
+        name: null,
+        limit: 0,
+        privacy: null,
+        status: null,
+      });
+    });
+
+    it('stores a status beside the other settings, and changes only the status', async () => {
+      await optIn();
+      await repo.saveName(GUILD, PRIMARY, USER, 'den');
+      await repo.saveLimit(GUILD, PRIMARY, USER, 4);
+
+      expect(await repo.saveStatus(GUILD, PRIMARY, USER, 'AFK @@game_name@@')).toEqual({
+        status: 'saved',
+      });
+      expect(await repo.get(PRIMARY, USER)).toEqual({
+        name: 'den',
+        limit: 4,
+        privacy: null,
+        status: 'AFK @@game_name@@',
+      });
+
+      expect(await repo.saveStatus(GUILD, PRIMARY, USER, 'Back soon')).toEqual({ status: 'saved' });
+      const [after] = await rows();
+      expect(after).toMatchObject({
+        name_template: 'den',
+        user_limit: 4,
+        status_template: 'Back soon',
+      });
+      expect(await rows()).toHaveLength(1);
+    });
+
+    /**
+     * `/name` keeps a blank status (the room shows none) apart from a reset (the room goes back
+     * to the creator channel's status), so a blank one is the member's choice, like `/unlimit`.
+     */
+    it('remembers an empty status as "no status", which is not the same as nothing', async () => {
+      await optIn();
+      expect(await repo.saveStatus(GUILD, PRIMARY, USER, '')).toEqual({ status: 'saved' });
+      expect(await repo.get(PRIMARY, USER)).toEqual({
+        name: null,
+        limit: null,
+        privacy: null,
+        status: '',
+      });
     });
 
     it('keeps one member, and one creator channel, apart from another', async () => {
@@ -212,18 +313,29 @@ describe('MemberRoomPrefsRepository (integration)', () => {
     });
 
     /**
-     * Three commands can finish in the same moment, and an upsert that read the row first
+     * Several commands can finish in the same moment, and an upsert that read the row first
      * would let two of them both insert, one failing on the key, or one overwrite the other.
      */
-    it('keeps every setting when three saves for a new member run at once', async () => {
+    it('keeps every setting when four saves for a new member run at once', async () => {
       await optIn();
       const results = await Promise.all([
         repo.saveName(GUILD, PRIMARY, USER, 'den'),
         repo.saveLimit(GUILD, PRIMARY, USER, 3),
         repo.savePrivacy(GUILD, PRIMARY, USER, 'private'),
+        repo.saveStatus(GUILD, PRIMARY, USER, 'AFK'),
       ]);
-      expect(results).toEqual([{ status: 'saved' }, { status: 'saved' }, { status: 'saved' }]);
-      expect(await repo.get(PRIMARY, USER)).toEqual({ name: 'den', limit: 3, privacy: 'private' });
+      expect(results).toEqual([
+        { status: 'saved' },
+        { status: 'saved' },
+        { status: 'saved' },
+        { status: 'saved' },
+      ]);
+      expect(await repo.get(PRIMARY, USER)).toEqual({
+        name: 'den',
+        limit: 3,
+        privacy: 'private',
+        status: 'AFK',
+      });
       expect(await rows()).toHaveLength(1);
     });
   });
@@ -240,6 +352,8 @@ describe('MemberRoomPrefsRepository (integration)', () => {
       expect(await repo.savePrivacy(GUILD, PRIMARY, USER, 'private')).toEqual({
         status: 'notOptedIn',
       });
+      expect(await repo.saveStatus(GUILD, PRIMARY, USER, 'AFK')).toEqual({ status: 'notOptedIn' });
+      expect(await repo.saveStatus(GUILD, PRIMARY, USER, '')).toEqual({ status: 'notOptedIn' });
       expect(await rows()).toEqual([]);
     });
 
@@ -304,11 +418,21 @@ describe('MemberRoomPrefsRepository (integration)', () => {
       });
       expect(await repo.saveLimit(GUILD, PRIMARY, USER, 5)).toEqual({ status: 'notOptedIn' });
       // Still there, unchanged, for the day it is turned back on.
-      expect(await repo.get(PRIMARY, USER)).toEqual({ name: 'den', limit: null, privacy: null });
+      expect(await repo.get(PRIMARY, USER)).toEqual({
+        name: 'den',
+        limit: null,
+        privacy: null,
+        status: null,
+      });
 
       await optIn();
       expect(await repo.saveLimit(GUILD, PRIMARY, USER, 5)).toEqual({ status: 'saved' });
-      expect(await repo.get(PRIMARY, USER)).toEqual({ name: 'den', limit: 5, privacy: null });
+      expect(await repo.get(PRIMARY, USER)).toEqual({
+        name: 'den',
+        limit: 5,
+        privacy: null,
+        status: null,
+      });
     });
   });
 
@@ -334,6 +458,49 @@ describe('MemberRoomPrefsRepository (integration)', () => {
       expect((await repo.get(PRIMARY, USER))?.name).toBe('den');
     });
 
+    it('refuses a status past the cap and writes nothing, and takes one exactly at it', async () => {
+      await optIn();
+      const cap = 'x'.repeat(MAX_MEMBER_PREF_STATUS_LENGTH);
+      expect(await repo.saveStatus(GUILD, PRIMARY, USER, `${cap}y`)).toEqual({
+        status: 'tooLong',
+        max: MAX_MEMBER_PREF_STATUS_LENGTH,
+      });
+      expect(await rows()).toEqual([]);
+
+      expect(await repo.saveStatus(GUILD, PRIMARY, USER, cap)).toEqual({ status: 'saved' });
+      expect((await repo.get(PRIMARY, USER))?.status).toBe(cap);
+
+      // A refused status is not a clear: what the member had stays, rather than being cut.
+      await repo.saveStatus(GUILD, PRIMARY, USER, `${cap}y`);
+      expect((await repo.get(PRIMARY, USER))?.status).toBe(cap);
+    });
+
+    it('refuses a status Postgres cannot store', async () => {
+      await optIn();
+      expect(await repo.saveStatus(GUILD, PRIMARY, USER, 'a\u0000b')).toEqual({
+        status: 'invalid',
+      });
+      expect(await rows()).toEqual([]);
+    });
+
+    /** A hand edit or another build may leave one, and a restore must not hand it to a room. */
+    it('reads around a status a save would have refused', async () => {
+      await stage({ status: 'x'.repeat(MAX_MEMBER_PREF_STATUS_LENGTH + 1) });
+      expect(await repo.get(PRIMARY, USER)).toBeUndefined();
+
+      await stage({
+        user: OTHER_USER,
+        limit: 3,
+        status: 'x'.repeat(MAX_MEMBER_PREF_STATUS_LENGTH + 1),
+      });
+      expect(await repo.get(PRIMARY, OTHER_USER)).toEqual({
+        name: null,
+        limit: 3,
+        privacy: null,
+        status: null,
+      });
+    });
+
     it('refuses an empty name, a name Postgres cannot store, and a limit Discord would refuse', async () => {
       await optIn();
       expect(await repo.saveName(GUILD, PRIMARY, USER, '')).toEqual({ status: 'invalid' });
@@ -356,7 +523,12 @@ describe('MemberRoomPrefsRepository (integration)', () => {
     /** The column is text, so a newer build may store a mode this one cannot apply. */
     it('reads around a privacy it does not know', async () => {
       await stage({ name: 'den', privacy: 'sealed' });
-      expect(await repo.get(PRIMARY, USER)).toEqual({ name: 'den', limit: null, privacy: null });
+      expect(await repo.get(PRIMARY, USER)).toEqual({
+        name: 'den',
+        limit: null,
+        privacy: null,
+        status: null,
+      });
     });
 
     /**
@@ -369,6 +541,7 @@ describe('MemberRoomPrefsRepository (integration)', () => {
         name: null,
         limit: null,
         privacy: 'private',
+        status: null,
       });
 
       await stage({
@@ -380,7 +553,12 @@ describe('MemberRoomPrefsRepository (integration)', () => {
       expect(await repo.get(PRIMARY, OTHER_USER)).toBeUndefined();
 
       await stage({ user: 'user-3', name: 'den', limit: 0 });
-      expect(await repo.get(PRIMARY, 'user-3')).toEqual({ name: 'den', limit: 0, privacy: null });
+      expect(await repo.get(PRIMARY, 'user-3')).toEqual({
+        name: 'den',
+        limit: 0,
+        privacy: null,
+        status: null,
+      });
     });
   });
 
@@ -391,7 +569,12 @@ describe('MemberRoomPrefsRepository (integration)', () => {
       await repo.saveLimit(GUILD, PRIMARY, USER, 4);
 
       expect(await repo.saveName(GUILD, PRIMARY, USER, null)).toEqual({ status: 'cleared' });
-      expect(await repo.get(PRIMARY, USER)).toEqual({ name: null, limit: 4, privacy: null });
+      expect(await repo.get(PRIMARY, USER)).toEqual({
+        name: null,
+        limit: 4,
+        privacy: null,
+        status: null,
+      });
     });
 
     /** A row exists only while somebody has something remembered. */
@@ -399,11 +582,13 @@ describe('MemberRoomPrefsRepository (integration)', () => {
       ['name', (g: string) => repo.saveName(g, PRIMARY, USER, null)],
       ['limit', (g: string) => repo.saveLimit(g, PRIMARY, USER, null)],
       ['privacy', (g: string) => repo.savePrivacy(g, PRIMARY, USER, null)],
+      ['status', (g: string) => repo.saveStatus(g, PRIMARY, USER, null)],
     ])('deletes the row when the %s was the last thing in it', async (field, clear) => {
       await optIn();
       if (field === 'name') await repo.saveName(GUILD, PRIMARY, USER, 'den');
       if (field === 'limit') await repo.saveLimit(GUILD, PRIMARY, USER, 4);
       if (field === 'privacy') await repo.savePrivacy(GUILD, PRIMARY, USER, 'private');
+      if (field === 'status') await repo.saveStatus(GUILD, PRIMARY, USER, 'AFK');
 
       expect(await clear(GUILD)).toEqual({ status: 'cleared' });
       expect(await rows()).toEqual([]);
@@ -415,11 +600,56 @@ describe('MemberRoomPrefsRepository (integration)', () => {
       await repo.saveName(GUILD, PRIMARY, USER, 'den');
       await repo.saveLimit(GUILD, PRIMARY, USER, 4);
       await repo.savePrivacy(GUILD, PRIMARY, USER, 'hidden');
+      await repo.saveStatus(GUILD, PRIMARY, USER, 'AFK');
 
       await repo.saveName(GUILD, PRIMARY, USER, null);
       await repo.savePrivacy(GUILD, PRIMARY, USER, null);
-      expect(await rows()).toHaveLength(1);
       await repo.saveLimit(GUILD, PRIMARY, USER, null);
+      expect(await rows()).toHaveLength(1);
+      await repo.saveStatus(GUILD, PRIMARY, USER, null);
+      expect(await rows()).toEqual([]);
+    });
+
+    /**
+     * The row-emptied test names every setting column. Without the status in it, clearing the
+     * last of the other three would delete a row that still holds a status, and the member's
+     * status would be gone without anybody clearing it.
+     */
+    it('keeps a row that holds only a status when the other settings are cleared', async () => {
+      await optIn();
+      await repo.saveName(GUILD, PRIMARY, USER, 'den');
+      await repo.saveStatus(GUILD, PRIMARY, USER, '');
+
+      expect(await repo.saveName(GUILD, PRIMARY, USER, null)).toEqual({ status: 'cleared' });
+
+      expect(await repo.get(PRIMARY, USER)).toEqual({
+        name: null,
+        limit: null,
+        privacy: null,
+        status: '',
+      });
+    });
+
+    it('clears a remembered "no status", which is a value and not nothing', async () => {
+      await optIn();
+      await repo.saveLimit(GUILD, PRIMARY, USER, 2);
+      await repo.saveStatus(GUILD, PRIMARY, USER, '');
+
+      expect(await repo.saveStatus(GUILD, PRIMARY, USER, null)).toEqual({ status: 'cleared' });
+      expect(await repo.get(PRIMARY, USER)).toEqual({
+        name: null,
+        limit: 2,
+        privacy: null,
+        status: null,
+      });
+    });
+
+    it('clears a status while the creator channel does not remember, since it only removes', async () => {
+      await optIn();
+      await repo.saveStatus(GUILD, PRIMARY, USER, 'AFK');
+      await creators.upsert(GUILD, PRIMARY, { rememberPrefs: false });
+
+      expect(await repo.saveStatus(GUILD, PRIMARY, USER, null)).toEqual({ status: 'cleared' });
       expect(await rows()).toEqual([]);
     });
 
@@ -432,7 +662,12 @@ describe('MemberRoomPrefsRepository (integration)', () => {
       await repo.saveLimit(GUILD, PRIMARY, USER, 3);
       await repo.saveName(GUILD, PRIMARY, USER, null);
       await repo.saveName(GUILD, PRIMARY, USER, null);
-      expect(await repo.get(PRIMARY, USER)).toEqual({ name: null, limit: 3, privacy: null });
+      expect(await repo.get(PRIMARY, USER)).toEqual({
+        name: null,
+        limit: 3,
+        privacy: null,
+        status: null,
+      });
     });
 
     /**
@@ -454,7 +689,12 @@ describe('MemberRoomPrefsRepository (integration)', () => {
       );
 
       expect(result).toEqual({ status: 'cleared' });
-      expect(await repo.get(PRIMARY, USER)).toEqual({ name: null, limit: 4, privacy: null });
+      expect(await repo.get(PRIMARY, USER)).toEqual({
+        name: null,
+        limit: 4,
+        privacy: null,
+        status: null,
+      });
     });
 
     /** The same, with the other setting cleared a moment earlier: the last clear removes the row. */
@@ -484,7 +724,12 @@ describe('MemberRoomPrefsRepository (integration)', () => {
           repo.saveName(GUILD, PRIMARY, USER, null),
           repo.saveLimit(GUILD, PRIMARY, USER, 4),
         ]);
-        expect(await repo.get(PRIMARY, USER)).toEqual({ name: null, limit: 4, privacy: null });
+        expect(await repo.get(PRIMARY, USER)).toEqual({
+          name: null,
+          limit: 4,
+          privacy: null,
+          status: null,
+        });
         await repo.saveName(GUILD, PRIMARY, USER, 'den');
         await repo.saveLimit(GUILD, PRIMARY, USER, null);
       }
@@ -509,7 +754,12 @@ describe('MemberRoomPrefsRepository (integration)', () => {
           status: 'cleared',
         });
         expect(transaction).not.toHaveBeenCalled();
-        expect(await repo.get(PRIMARY, USER)).toEqual({ name: null, limit: 3, privacy: null });
+        expect(await repo.get(PRIMARY, USER)).toEqual({
+          name: null,
+          limit: 3,
+          privacy: null,
+          status: null,
+        });
 
         // Something to remove is still removed atomically, and the emptied row goes.
         expect(await repo.saveLimit(GUILD, PRIMARY, USER, null)).toEqual({ status: 'cleared' });
@@ -541,7 +791,12 @@ describe('MemberRoomPrefsRepository (integration)', () => {
       await creators.upsert(GUILD, PRIMARY, { rememberPrefs: false });
 
       await repo.saveName(GUILD, PRIMARY, USER, null);
-      expect(await repo.get(PRIMARY, USER)).toEqual({ name: null, limit: 4, privacy: null });
+      expect(await repo.get(PRIMARY, USER)).toEqual({
+        name: null,
+        limit: 4,
+        privacy: null,
+        status: null,
+      });
       await repo.saveLimit(GUILD, PRIMARY, USER, null);
       expect(await rows()).toEqual([]);
     });
@@ -583,9 +838,12 @@ describe('MemberRoomPrefsRepository (integration)', () => {
       await optIn();
       await repo.saveName(GUILD, PRIMARY, USER, 'a');
       await repo.saveLimit(GUILD, PRIMARY, OTHER_USER, 3);
+      // A member who saved only a status is counted and cleared with the rest.
+      await repo.saveStatus(GUILD, PRIMARY, 'user-3', 'AFK');
       await stage({ primary: OTHER_PRIMARY, name: 'elsewhere' });
 
-      expect(await repo.clearByPrimary(GUILD, PRIMARY)).toBe(2);
+      expect(await repo.countByPrimary(GUILD, PRIMARY)).toBe(3);
+      expect(await repo.clearByPrimary(GUILD, PRIMARY)).toBe(3);
       expect((await rows()).map((r) => r.primary_channel_id)).toEqual([OTHER_PRIMARY]);
       // A second press finds nothing, and that is not an error.
       expect(await repo.clearByPrimary(GUILD, PRIMARY)).toBe(0);
@@ -613,9 +871,10 @@ describe('MemberRoomPrefsRepository (integration)', () => {
       await stage({ name: 'a' });
       await stage({ primary: OTHER_PRIMARY, name: 'b' });
       await stage({ guild: OTHER_GUILD, primary: 'creator-3', name: 'c' });
+      await stage({ primary: 'creator-4', status: 'only a status' });
       await stage({ user: OTHER_USER, name: 'someone else' });
 
-      expect(await repo.deleteByUser(USER)).toBe(3);
+      expect(await repo.deleteByUser(USER)).toBe(4);
       expect((await rows()).map((r) => r.user_id)).toEqual([OTHER_USER]);
       expect(await repo.deleteByUser(USER)).toBe(0);
     });
@@ -623,9 +882,10 @@ describe('MemberRoomPrefsRepository (integration)', () => {
     it('deletes one server and leaves every other alone', async () => {
       await stage({ name: 'a' });
       await stage({ user: OTHER_USER, name: 'b' });
+      await stage({ user: 'user-3', status: 'only a status' });
       await stage({ guild: OTHER_GUILD, primary: 'creator-3', name: 'c' });
 
-      expect(await repo.deleteByGuild(GUILD)).toBe(2);
+      expect(await repo.deleteByGuild(GUILD)).toBe(3);
       expect((await rows()).map((r) => r.guild_id)).toEqual([OTHER_GUILD]);
     });
   });
@@ -657,6 +917,19 @@ describe('MemberRoomPrefsRepository (integration)', () => {
 
     it('deletes a row once it has been an orphan for the whole grace', async () => {
       await stage({ name: 'orphan', ageDays: 30, orphanedDaysAgo: 8 });
+      expect(await repo.sweepOrphans(SWEEP)).toEqual({ ...NOTHING, removed: 1 });
+      expect(await rows()).toEqual([]);
+    });
+
+    /** What a row holds is no part of the rule, so a row with only a status goes the same way. */
+    it('stamps and then deletes a row that holds only a status, like any other', async () => {
+      await stage({ status: 'AFK', ageDays: 30 });
+      expect(await repo.sweepOrphans(SWEEP)).toEqual({ ...NOTHING, marked: 1 });
+      expect(await rows()).toHaveLength(1);
+
+      await env.handle.db.execute(
+        sql`UPDATE member_room_prefs SET orphaned_at = now() - interval '8 days'`,
+      );
       expect(await repo.sweepOrphans(SWEEP)).toEqual({ ...NOTHING, removed: 1 });
       expect(await rows()).toEqual([]);
     });

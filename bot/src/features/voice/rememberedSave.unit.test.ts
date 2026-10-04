@@ -1,7 +1,9 @@
-import type { SaveMemberPrefResult } from '@avc/core';
+import { MAX_MEMBER_PREF_STATUS_LENGTH, type SaveMemberPrefResult } from '@avc/core';
 import { describe, expect, it, vi } from 'vitest';
+import { buildEditorModal } from '../../commands/templatePanel.js';
 import { fakeLogger } from '../../runtime/testUtils.js';
 import { buildRenameModal } from './controlPanel.js';
+import type { EditorState } from './handler.js';
 import {
   PANEL_NAME_MAX,
   isTruncatedPrefill,
@@ -27,29 +29,48 @@ function harness(over: Partial<RememberedSaveDeps> = {}) {
   const saveName = vi.fn().mockResolvedValue(SAVED);
   const saveLimit = vi.fn().mockResolvedValue(SAVED);
   const savePrivacy = vi.fn().mockResolvedValue(SAVED);
+  const saveStatus = vi.fn().mockResolvedValue(SAVED);
   const info = vi.fn();
   const warn = vi.fn();
   const deps: RememberedSaveDeps = {
-    memberPrefs: { saveName, saveLimit, savePrivacy },
+    memberPrefs: { saveName, saveLimit, savePrivacy, saveStatus },
     logger: { ...fakeLogger(), info, warn } as never,
     ...over,
   };
-  return { deps, saveName, saveLimit, savePrivacy, info, warn };
+  return { deps, saveName, saveLimit, savePrivacy, saveStatus, info, warn };
 }
 
 const NAME: RememberedSetting = { field: 'name', value: 'Den' };
 const LIMIT: RememberedSetting = { field: 'limit', value: 4 };
 const PRIVACY: RememberedSetting = { field: 'privacy', value: 'hidden' };
+const STATUS: RememberedSetting = { field: 'status', value: 'AFK' };
 
 describe('rememberSetting', () => {
   it('saves each setting for the owner, against the creator channel the room came from', async () => {
-    const { deps, saveName, saveLimit, savePrivacy } = harness();
+    const { deps, saveName, saveLimit, savePrivacy, saveStatus } = harness();
     await rememberSetting(deps, room(), 'alice', NAME);
     await rememberSetting(deps, room(), 'alice', LIMIT);
     await rememberSetting(deps, room(), 'alice', PRIVACY);
+    await rememberSetting(deps, room(), 'alice', STATUS);
     expect(saveName).toHaveBeenCalledWith(GUILD, PRIMARY, 'alice', 'Den');
     expect(saveLimit).toHaveBeenCalledWith(GUILD, PRIMARY, 'alice', 4);
     expect(savePrivacy).toHaveBeenCalledWith(GUILD, PRIMARY, 'alice', 'hidden');
+    expect(saveStatus).toHaveBeenCalledWith(GUILD, PRIMARY, 'alice', 'AFK');
+    // Each went to its own column and to no other.
+    for (const save of [saveName, saveLimit, savePrivacy, saveStatus]) {
+      expect(save).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  /** A blank status is a room left without one, which is a value and not a reset. */
+  it('saves a blank status as a value, and takes one back out on null', async () => {
+    const { deps, saveStatus } = harness();
+    await rememberSetting(deps, room(), 'alice', { field: 'status', value: '' });
+    await rememberSetting(deps, room(), 'alice', { field: 'status', value: null });
+    expect(saveStatus.mock.calls).toEqual([
+      [GUILD, PRIMARY, 'alice', ''],
+      [GUILD, PRIMARY, 'alice', null],
+    ]);
   });
 
   /**
@@ -58,33 +79,37 @@ describe('rememberSetting', () => {
    */
   describe('who it saves for', () => {
     it('does not save for somebody who is not the room owner', async () => {
-      const { deps, saveName, saveLimit, savePrivacy } = harness();
-      for (const setting of [NAME, LIMIT, PRIVACY]) {
+      const { deps, saveName, saveLimit, savePrivacy, saveStatus } = harness();
+      for (const setting of [NAME, LIMIT, PRIVACY, STATUS]) {
         await rememberSetting(deps, room('alice'), 'mallory', setting);
       }
       expect(saveName).not.toHaveBeenCalled();
       expect(saveLimit).not.toHaveBeenCalled();
       expect(savePrivacy).not.toHaveBeenCalled();
+      expect(saveStatus).not.toHaveBeenCalled();
     });
 
     it('does not save against a room that has no owner, whoever acts', async () => {
-      const { deps, saveName, saveLimit, savePrivacy } = harness();
-      for (const setting of [NAME, LIMIT, PRIVACY]) {
+      const { deps, saveName, saveLimit, savePrivacy, saveStatus } = harness();
+      for (const setting of [NAME, LIMIT, PRIVACY, STATUS]) {
         await rememberSetting(deps, room(null), 'mallory', setting);
       }
       expect(saveName).not.toHaveBeenCalled();
       expect(saveLimit).not.toHaveBeenCalled();
       expect(savePrivacy).not.toHaveBeenCalled();
+      expect(saveStatus).not.toHaveBeenCalled();
     });
 
     it('does not clear for somebody else either, so a moderator cannot take an owner’s setting back', async () => {
-      const { deps, saveName, saveLimit, savePrivacy } = harness();
+      const { deps, saveName, saveLimit, savePrivacy, saveStatus } = harness();
       await rememberSetting(deps, room('alice'), 'mod', { field: 'name', value: null });
       await rememberSetting(deps, room('alice'), 'mod', { field: 'limit', value: null });
       await rememberSetting(deps, room('alice'), 'mod', { field: 'privacy', value: null });
+      await rememberSetting(deps, room('alice'), 'mod', { field: 'status', value: null });
       expect(saveName).not.toHaveBeenCalled();
       expect(saveLimit).not.toHaveBeenCalled();
       expect(savePrivacy).not.toHaveBeenCalled();
+      expect(saveStatus).not.toHaveBeenCalled();
     });
   });
 
@@ -94,15 +119,17 @@ describe('rememberSetting', () => {
    */
   describe('while member_prefs.disabled is on', () => {
     it('stores nothing, for any setting', async () => {
-      const { deps, saveName, saveLimit, savePrivacy } = harness({
+      const { deps, saveName, saveLimit, savePrivacy, saveStatus } = harness({
         memberPrefsDisabled: () => Promise.resolve(true),
       });
-      for (const setting of [NAME, LIMIT, PRIVACY]) {
+      for (const setting of [NAME, LIMIT, PRIVACY, STATUS]) {
         await rememberSetting(deps, room(), 'alice', setting);
       }
+      await rememberSetting(deps, room(), 'alice', { field: 'status', value: '' });
       expect(saveName).not.toHaveBeenCalled();
       expect(saveLimit).not.toHaveBeenCalled();
       expect(savePrivacy).not.toHaveBeenCalled();
+      expect(saveStatus).not.toHaveBeenCalled();
     });
 
     it('stores a limit of 0 no more than any other value', async () => {
@@ -113,13 +140,17 @@ describe('rememberSetting', () => {
 
     it('still clears, for every setting, and does not even ask the lever', async () => {
       const asked = vi.fn(() => Promise.resolve(true));
-      const { deps, saveName, saveLimit, savePrivacy } = harness({ memberPrefsDisabled: asked });
+      const { deps, saveName, saveLimit, savePrivacy, saveStatus } = harness({
+        memberPrefsDisabled: asked,
+      });
       await rememberSetting(deps, room(), 'alice', { field: 'name', value: null });
       await rememberSetting(deps, room(), 'alice', { field: 'limit', value: null });
       await rememberSetting(deps, room(), 'alice', { field: 'privacy', value: null });
+      await rememberSetting(deps, room(), 'alice', { field: 'status', value: null });
       expect(saveName).toHaveBeenCalledWith(GUILD, PRIMARY, 'alice', null);
       expect(saveLimit).toHaveBeenCalledWith(GUILD, PRIMARY, 'alice', null);
       expect(savePrivacy).toHaveBeenCalledWith(GUILD, PRIMARY, 'alice', null);
+      expect(saveStatus).toHaveBeenCalledWith(GUILD, PRIMARY, 'alice', null);
       expect(asked).not.toHaveBeenCalled();
     });
 
@@ -195,6 +226,24 @@ describe('rememberSetting', () => {
       expect(warn.mock.calls[0]![0]).toMatchObject({ field: 'name', errorName: 'Error' });
       expect(JSON.stringify(warn.mock.calls)).not.toContain('secret');
       expect(JSON.stringify(warn.mock.calls)).not.toContain('Failed query');
+    });
+
+    it('logs a status that could not be saved by field and ids, and never what was typed', async () => {
+      const { deps, saveStatus, info, warn } = harness();
+      saveStatus.mockRejectedValueOnce(new Error('insert params: a secret status'));
+      await rememberSetting(deps, room(), 'alice', { field: 'status', value: 'a secret status' });
+      saveStatus.mockResolvedValueOnce({ status: 'tooLong', max: 1000 });
+      await rememberSetting(deps, room(), 'alice', { field: 'status', value: 'a secret status' });
+
+      expect(warn.mock.calls[0]![0]).toMatchObject({ field: 'status', errorName: 'Error' });
+      expect(info.mock.calls[0]![0]).toEqual({
+        guildId: GUILD,
+        channelId: ROOM,
+        userId: 'alice',
+        field: 'status',
+        status: 'tooLong',
+      });
+      expect(JSON.stringify([warn.mock.calls, info.mock.calls])).not.toContain('secret');
     });
 
     it('resolves for a thrown value that is not an Error', async () => {
@@ -276,5 +325,25 @@ describe('isTruncatedPrefill', () => {
     const modal = buildRenameModal('room-1', 'x').toJSON();
     const row = modal.components[0] as unknown as { components: { max_length?: number }[] };
     expect(row.components[0]!.max_length).toBe(PANEL_NAME_MAX);
+  });
+});
+
+/**
+ * The status has no truncation guard because the one box a member sets it in, the `/name`
+ * editor's, takes exactly as much as a save keeps. If the box grew past the cap, a status typed
+ * there would be refused as too long and silently not remembered, so the two are bound here.
+ */
+describe('the remembered status cap', () => {
+  it('is what the /name editor status box accepts', () => {
+    const state: EditorState = {
+      found: true,
+      scope: 'channel',
+      name: { effectiveTemplate: 'Room', preview: 'Room' },
+      status: { currentTemplate: 'AFK', effectiveTemplate: 'AFK', preview: 'AFK' },
+      ownerId: 'alice',
+    };
+    const modal = buildEditorModal('channel', 'status', 'room-1', state).toJSON();
+    const row = modal.components[0] as unknown as { components: { max_length?: number }[] };
+    expect(row.components[0]!.max_length).toBe(MAX_MEMBER_PREF_STATUS_LENGTH);
   });
 });

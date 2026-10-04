@@ -18,6 +18,13 @@ export type MemberPrefPrivacy = (typeof MEMBER_PREF_PRIVACIES)[number];
  */
 export const MAX_MEMBER_PREF_NAME_LENGTH = 1000;
 
+/**
+ * The longest voice status template one member can have remembered, which is the longest the
+ * `/name` editor's status box accepts (`TEMPLATE_INPUT_MAX`). That box is the only way a member
+ * sets their room's status, so a remembered status is never one they could not type again.
+ */
+export const MAX_MEMBER_PREF_STATUS_LENGTH = 1000;
+
 /** The most people Discord lets into a voice channel, so the largest limit worth remembering. */
 export const MAX_MEMBER_PREF_LIMIT = 99;
 

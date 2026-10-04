@@ -10,6 +10,7 @@ const prefs = (over: Partial<MemberRoomPrefs> = {}): MemberRoomPrefs => ({
   name: null,
   limit: null,
   privacy: null,
+  status: null,
   ...over,
 });
 
@@ -66,6 +67,14 @@ describe('restoreRemembered', () => {
       expect(out.limit).toBe(0);
     });
 
+    /** A blank status is a room the member chose to leave without one, not nothing remembered. */
+    it('restores a status, a remembered "no status" included', () => {
+      expect(restore(prefs({ status: 'AFK @@game_name@@' }))).toEqual({
+        status: 'AFK @@game_name@@',
+      });
+      expect(restore(prefs({ status: '' }))).toEqual({ status: '' });
+    });
+
     it('does not need to know who the member is when no rule names the feature', () => {
       expect(
         restore(prefs({ name: 'Den', limit: 3, privacy: 'private' }), { standing: undefined }),
@@ -91,6 +100,38 @@ describe('restoreRemembered', () => {
       expect(out).not.toHaveProperty(field);
       const kept = ['name', 'limit', 'privacy'].filter((f) => f !== field);
       for (const f of kept) expect(out).toHaveProperty(f);
+    });
+
+    /**
+     * Name covers the voice status wherever a member sets it (`FEATURE_COVERS.rename`), so a
+     * member denied Name gets back neither, and a rule on anything else leaves the status alone.
+     */
+    it('withholds a remembered status with the name, under a rule on Name and nothing else', () => {
+      const withStatus = prefs({ name: 'Den', limit: 5, status: 'AFK' });
+      const denied = (feature: 'rename' | 'limit' | 'privacy' | 'hide'): CommandAccess => ({
+        [feature]: { deny: { users: [ALICE], roles: [] } },
+      });
+      expect(restore(withStatus, { access: denied('rename') })).toEqual({ limit: 5 });
+      for (const other of ['limit', 'privacy', 'hide'] as const) {
+        expect(restore(withStatus, { access: denied(other) })).toHaveProperty('status', 'AFK');
+      }
+      // An allow list on Name that leaves the member out withholds it too.
+      const allowMods: CommandAccess = { rename: { allow: { users: [], roles: ['mods'] } } };
+      expect(restore(withStatus, { access: allowMods })).not.toHaveProperty('status');
+      // A member who can manage channels is never restricted.
+      expect(
+        restore(withStatus, {
+          access: denied('rename'),
+          standing: standing({ canManage: true }),
+        }),
+      ).toHaveProperty('status', 'AFK');
+    });
+
+    it('withholds a remembered status where a rule names Name and the member cannot be resolved', () => {
+      const access: CommandAccess = { rename: { deny: { users: ['somebody-else'], roles: [] } } };
+      expect(restore(prefs({ status: '', limit: 2 }), { access, standing: undefined })).toEqual({
+        limit: 2,
+      });
     });
 
     it('denies by role as well as by member', () => {

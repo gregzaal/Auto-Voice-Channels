@@ -4,6 +4,7 @@ import { autoChannels, memberRoomPrefs } from '../db/schema.js';
 import {
   MAX_MEMBER_PREF_LIMIT,
   MAX_MEMBER_PREF_NAME_LENGTH,
+  MAX_MEMBER_PREF_STATUS_LENGTH,
   MEMBER_PREF_PRIVACIES,
   type MemberPrefPrivacy,
 } from '../domain/memberRoomPrefs.js';
@@ -11,12 +12,13 @@ import {
 /**
  * What one member has remembered for rooms made from one creator channel. Each setting is
  * null when nothing is remembered for it, which is not the same as a value: a `limit` of 0
- * is a remembered "no limit".
+ * is a remembered "no limit", and a `status` of `''` a remembered "no status".
  */
 export interface MemberRoomPrefs {
   name: string | null;
   limit: number | null;
   privacy: MemberPrefPrivacy | null;
+  status: string | null;
 }
 
 /**
@@ -27,9 +29,10 @@ export interface MemberRoomPrefs {
  *   left. Idempotent: clearing something that was never saved answers the same.
  * - `notOptedIn`: the creator channel does not remember (or is not this server's, or is gone),
  *   so nothing was written. This is the common answer on a server that never turned it on.
- * - `tooLong`: the name is over {@link MAX_MEMBER_PREF_NAME_LENGTH}. Refused rather than cut:
- *   a template cut at a character limit is a different template, and the member is better
- *   served by not having it remembered than by having a broken one.
+ * - `tooLong`: the name is over {@link MAX_MEMBER_PREF_NAME_LENGTH}, or the status over
+ *   {@link MAX_MEMBER_PREF_STATUS_LENGTH}. Refused rather than cut: a template cut at a
+ *   character limit is a different template, and the member is better served by not having it
+ *   remembered than by having a broken one.
  * - `invalid`: a value that is not a setting at all (an empty name, a limit Discord would not
  *   accept), so a bug in a caller cannot store something a later restore would choke on.
  */
@@ -40,7 +43,7 @@ export type SaveMemberPrefResult =
   | { status: 'tooLong'; max: number }
   | { status: 'invalid' };
 
-type PrefColumn = 'name_template' | 'user_limit' | 'privacy';
+type PrefColumn = 'name_template' | 'user_limit' | 'privacy' | 'status_template';
 
 const isPrivacy = (value: string | null): value is MemberPrefPrivacy =>
   value !== null && (MEMBER_PREF_PRIVACIES as readonly string[]).includes(value);
@@ -52,6 +55,10 @@ const isName = (value: string | null): value is string =>
 /** A limit a save would have accepted, for the same reason. */
 const isLimit = (value: number | null): value is number =>
   value !== null && Number.isInteger(value) && value >= 0 && value <= MAX_MEMBER_PREF_LIMIT;
+
+/** A status a save would have accepted, for the same reason. Empty is "no status", a value. */
+const isStatus = (value: string | null): value is string =>
+  value !== null && value.length <= MAX_MEMBER_PREF_STATUS_LENGTH;
 
 /**
  * What one pass of the orphan sweep did, in rows.
@@ -94,6 +101,7 @@ export class MemberRoomPrefsRepository {
         name: memberRoomPrefs.nameTemplate,
         limit: memberRoomPrefs.userLimit,
         privacy: memberRoomPrefs.privacy,
+        status: memberRoomPrefs.statusTemplate,
       })
       .from(memberRoomPrefs)
       .where(
@@ -105,15 +113,19 @@ export class MemberRoomPrefsRepository {
       .limit(1);
     if (!row) return undefined;
     // The columns are plain text and a number, so a newer build may store a privacy this one
-    // does not know, and a hand edit or another build may leave a limit Discord refuses or an
-    // empty name. A reader must read around each rather than act on a value it cannot apply,
-    // which is what a save already refuses to store.
+    // does not know, and a hand edit or another build may leave a limit Discord refuses, an
+    // empty name or an overlong status. A reader must read around each rather than act on a
+    // value it cannot apply, which is what a save already refuses to store.
     const prefs: MemberRoomPrefs = {
       name: isName(row.name) ? row.name : null,
       limit: isLimit(row.limit) ? row.limit : null,
       privacy: isPrivacy(row.privacy) ? row.privacy : null,
+      status: isStatus(row.status) ? row.status : null,
     };
-    return prefs.name === null && prefs.limit === null && prefs.privacy === null
+    return prefs.name === null &&
+      prefs.limit === null &&
+      prefs.privacy === null &&
+      prefs.status === null
       ? undefined
       : prefs;
   }
@@ -172,9 +184,39 @@ export class MemberRoomPrefsRepository {
   }
 
   /**
+   * Remembers the voice status template a member set, or forgets it (`null`).
+   *
+   * Under the same rule as a name: only ever one the member set themselves. Unlike a name, an
+   * empty status is a value and not a reset. It is a room the member chose to leave without a
+   * status, which `/name` keeps apart from going back to the creator channel's status, so it is
+   * remembered as "no status" the way `/unlimit` is remembered as "no limit".
+   */
+  async saveStatus(
+    guildId: string,
+    primaryChannelId: string,
+    userId: string,
+    status: string | null,
+  ): Promise<SaveMemberPrefResult> {
+    if (status === null) {
+      return this.clearField(guildId, primaryChannelId, userId, 'status_template');
+    }
+    if (status.length > MAX_MEMBER_PREF_STATUS_LENGTH) {
+      return { status: 'tooLong', max: MAX_MEMBER_PREF_STATUS_LENGTH };
+    }
+    if (status.includes('\u0000')) return { status: 'invalid' };
+    return this.upsertField(
+      guildId,
+      primaryChannelId,
+      userId,
+      'status_template',
+      sql`${status}::text`,
+    );
+  }
+
+  /**
    * Writes one setting, and only for a creator channel that remembers.
    *
-   * The column is spliced in with `sql.raw`, which is safe only because it is one of three
+   * The column is spliced in with `sql.raw`, which is safe only because it is one of the four
    * literals this file passes, never text from a caller. The values are parameters, and the
    * guild reaches the statement twice: in the opt-in check, which also pins the creator
    * channel to this server, and on the conflict path, so a row that somehow belongs to
@@ -257,6 +299,7 @@ export class MemberRoomPrefsRepository {
       await tx.execute(sql`
         DELETE FROM member_room_prefs
          WHERE ${mine} AND name_template IS NULL AND user_limit IS NULL AND privacy IS NULL
+           AND status_template IS NULL
       `);
     });
     return { status: 'cleared' };

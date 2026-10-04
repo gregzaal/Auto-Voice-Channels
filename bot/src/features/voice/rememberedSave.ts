@@ -39,7 +39,8 @@ export function isTruncatedPrefill(submitted: string, existing: unknown): boolea
 export type RememberedSetting =
   | { field: 'name'; value: string | null }
   | { field: 'limit'; value: number | null }
-  | { field: 'privacy'; value: MemberPrefPrivacy | null };
+  | { field: 'privacy'; value: MemberPrefPrivacy | null }
+  | { field: 'status'; value: string | null };
 
 /**
  * What saving needs. Each service hands over only the writes it makes, so a construction that
@@ -47,7 +48,9 @@ export type RememberedSetting =
  */
 export interface RememberedSaveDeps {
   memberPrefs?:
-    | Partial<Pick<MemberRoomPrefsRepository, 'saveName' | 'saveLimit' | 'savePrivacy'>>
+    | Partial<
+        Pick<MemberRoomPrefsRepository, 'saveName' | 'saveLimit' | 'savePrivacy' | 'saveStatus'>
+      >
     | undefined;
   /**
    * Whether `member_prefs.disabled` is on, through the creation gate's cached snapshot (never an
@@ -86,7 +89,7 @@ function failureFields(err: unknown): Record<string, unknown> {
  * logged and nothing else. The member's room is already as they asked, so a save that failed
  * costs them next time's convenience and must not turn their command into an error, count
  * against the guild's circuit breaker or throw out of a task in its queue. What is logged is
- * ids and the error, never the name they typed.
+ * ids and the error, never the name or status they typed.
  *
  * **The lever stops what is STORED, and never what is taken back out.** A value is saved only
  * while `member_prefs.disabled` is off, and a `null` always goes through: a member resetting
@@ -110,7 +113,9 @@ export async function rememberSetting(
         ? await prefs.saveName?.(guildId, primaryChannelId, userId, setting.value)
         : setting.field === 'limit'
           ? await prefs.saveLimit?.(guildId, primaryChannelId, userId, setting.value)
-          : await prefs.savePrivacy?.(guildId, primaryChannelId, userId, setting.value);
+          : setting.field === 'status'
+            ? await prefs.saveStatus?.(guildId, primaryChannelId, userId, setting.value)
+            : await prefs.savePrivacy?.(guildId, primaryChannelId, userId, setting.value);
     // Neither is a fault in the member's command, and both are worth knowing about in the logs:
     // the repository refuses what a later restore could not apply.
     if (result?.status === 'invalid' || result?.status === 'tooLong') {

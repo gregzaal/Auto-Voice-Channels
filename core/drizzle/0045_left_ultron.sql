@@ -1,0 +1,1 @@
+ALTER TABLE "member_room_prefs" ADD COLUMN "status_template" text;

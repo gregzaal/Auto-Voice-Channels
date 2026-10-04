@@ -126,6 +126,7 @@ describe('schema remembered room settings', () => {
       memberRoomPrefs.nameTemplate,
       memberRoomPrefs.userLimit,
       memberRoomPrefs.privacy,
+      memberRoomPrefs.statusTemplate,
     ]) {
       expect(column.notNull).toBe(false);
       expect(column.hasDefault).toBe(false);

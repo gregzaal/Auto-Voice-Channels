@@ -27,6 +27,11 @@ export interface RememberedStart {
   limit?: number;
   /** A start mode STRICTER than the creator channel's own. Never `public`, which is never remembered. */
   privacy?: Exclude<StartMode, 'public'>;
+  /**
+   * The member's own voice status template, which the room starts with in place of the creator
+   * channel's. `''` is a remembered "no status" and is a value like any other.
+   */
+  status?: string;
 }
 
 /** How strict each start mode is, so "the stricter wins" is a comparison and not a case list. */
@@ -48,7 +53,8 @@ export function standingOf(member: VoiceMember): CommandCaller | undefined {
  *
  * **A restricted feature is inert for a denied member, saved data included** (see
  * `/restrict`): each field must pass {@link mayUse} for its own feature, so a member who was
- * denied Name after they saved one does not get it back. Name is Name, Size is Size, `private`
+ * denied Name after they saved one does not get it back. Name is Name, and so is the status,
+ * which Name covers wherever a member sets it (`FEATURE_COVERS.rename`). Size is Size, `private`
  * is Private and Public, and `hidden` is Hide. A remembered limit of 0 is `/unlimit`, an undo
  * direction no rule stops (`limitFeatureFor`), so it applies to a member denied Size: they
  * could remove the limit a second after the room was made, and a limit they could not choose
@@ -85,6 +91,7 @@ export function restoreRemembered(
 
   const start: RememberedStart = {};
   if (prefs.name !== null && permitted('rename')) start.name = prefs.name;
+  if (prefs.status !== null && permitted('rename')) start.status = prefs.status;
   if (prefs.limit !== null && permitted(limitFeatureFor(prefs.limit))) start.limit = prefs.limit;
   if (prefs.privacy !== null) {
     const mode: Exclude<StartMode, 'public'> = prefs.privacy === 'hidden' ? 'hidden' : 'locked';

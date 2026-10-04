@@ -770,10 +770,10 @@ describe('VoiceCommands (integration)', () => {
   });
 
   /**
-   * What an owner's `/limit` and `/name` leave behind for their next room from this creator
-   * channel. The save is the owner's own by equality, runs after the command has worked, is
-   * stopped by `member_prefs.disabled` for a value and never for a clear, and can never fail
-   * the command it follows.
+   * What an owner's `/limit` and `/name` (a name and a status) leave behind for their next room
+   * from this creator channel. The save is the owner's own by equality, runs after the command
+   * has worked, is stopped by `member_prefs.disabled` for a value and never for a clear, and
+   * can never fail the command it follows.
    */
   describe('remembering what the owner chose', () => {
     let prefs: MemberRoomPrefsRepository;
@@ -782,7 +782,10 @@ describe('VoiceCommands (integration)', () => {
 
     /** The commands as `index.ts` wires them, over a prefs repository a test may swap. */
     const build = (
-      memberPrefs: Pick<MemberRoomPrefsRepository, 'saveName' | 'saveLimit'> | null = prefs,
+      memberPrefs: Pick<
+        MemberRoomPrefsRepository,
+        'saveName' | 'saveLimit' | 'saveStatus'
+      > | null = prefs,
       logger = fakeLogger(),
     ): VoiceCommands => {
       const feature = new VoiceFeature({
@@ -818,14 +821,14 @@ describe('VoiceCommands (integration)', () => {
     describe('the limit', () => {
       it('saves a limit the owner sets, for the creator channel the room came from', async () => {
         expect((await remembering.setLimit(GUILD, SEC, 'alice', 5)).ok).toBe(true);
-        expect(await saved()).toEqual({ name: null, limit: 5, privacy: null });
+        expect(await saved()).toEqual({ name: null, limit: 5, privacy: null, status: null });
       });
 
       /** 0 is the member's explicit "no limit", which is not the same as never having chosen one. */
       it('saves /unlimit as 0, an explicit no limit', async () => {
         await remembering.setLimit(GUILD, SEC, 'alice', 5);
         expect((await remembering.unlimit(GUILD, SEC, 'alice')).ok).toBe(true);
-        expect(await saved()).toEqual({ name: null, limit: 0, privacy: null });
+        expect(await saved()).toEqual({ name: null, limit: 0, privacy: null, status: null });
       });
 
       it('saves nothing for a limit that was refused, or that Discord did not accept', async () => {
@@ -839,14 +842,16 @@ describe('VoiceCommands (integration)', () => {
     });
 
     describe('the name', () => {
-      it('saves the template as the room stores it, and not the voice status', async () => {
+      it('saves the template as the room stores it, and leaves the status as it was', async () => {
+        await remembering.setStatus(GUILD, SEC, 'alice', 'AFK');
         expect((await remembering.setName(GUILD, SEC, 'alice', '  My\nLounge  ')).ok).toBe(true);
         expect((await secondaries.get(SEC))!.state.template).toBe('My Lounge');
-        expect(await saved()).toEqual({ name: 'My Lounge', limit: null, privacy: null });
-
-        await remembering.setStatus(GUILD, SEC, 'alice', 'AFK');
-        await remembering.setStatus(GUILD, SEC, 'alice', 'reset');
-        expect(await saved()).toEqual({ name: 'My Lounge', limit: null, privacy: null });
+        expect(await saved()).toEqual({
+          name: 'My Lounge',
+          limit: null,
+          privacy: null,
+          status: 'AFK',
+        });
       });
 
       it('takes the saved name back out on a reset, and leaves the rest', async () => {
@@ -855,7 +860,7 @@ describe('VoiceCommands (integration)', () => {
 
         expect((await remembering.setName(GUILD, SEC, 'alice', 'reset')).ok).toBe(true);
 
-        expect(await saved()).toEqual({ name: null, limit: 5, privacy: null });
+        expect(await saved()).toEqual({ name: null, limit: 5, privacy: null, status: null });
       });
 
       it('reads a blank name as a reset too, and deletes the row when it was the last setting', async () => {
@@ -937,6 +942,155 @@ describe('VoiceCommands (integration)', () => {
           await remembering.setName(GUILD, SEC, 'alice', 'My');
           expect((await saved())!.name).toBe('My');
         });
+      });
+    });
+
+    /**
+     * The voice status set from the `/name` editor's status field, remembered since the owner's
+     * call of 2026-10-04, under every rule the name has.
+     */
+    describe('the status', () => {
+      it('saves the status template as the room stores it, and leaves the name as it was', async () => {
+        await remembering.setName(GUILD, SEC, 'alice', 'Den');
+        expect((await remembering.setStatus(GUILD, SEC, 'alice', '  AFK @@game_name@@ ')).ok).toBe(
+          true,
+        );
+        expect((await secondaries.get(SEC))!.state.statusTemplate).toBe('AFK @@game_name@@');
+        expect(await saved()).toEqual({
+          name: 'Den',
+          limit: null,
+          privacy: null,
+          status: 'AFK @@game_name@@',
+        });
+      });
+
+      it('takes the saved status back out on a reset, and leaves the rest', async () => {
+        await remembering.setLimit(GUILD, SEC, 'alice', 5);
+        await remembering.setStatus(GUILD, SEC, 'alice', 'AFK');
+
+        expect((await remembering.setStatus(GUILD, SEC, 'alice', 'reset')).ok).toBe(true);
+
+        expect((await secondaries.get(SEC))!.state.statusTemplate).toBeUndefined();
+        expect(await saved()).toEqual({ name: null, limit: 5, privacy: null, status: null });
+      });
+
+      /**
+       * A blank status leaves the room with none, which `/name` keeps apart from a reset to the
+       * creator channel's status, so it is the member's choice and is remembered as one.
+       */
+      it('saves a blank status as no status, and a reset then takes it back out', async () => {
+        const res = await remembering.setStatus(GUILD, SEC, 'alice', '   ');
+        expect(res.message).toContain('it will stay blank');
+        expect((await secondaries.get(SEC))!.state.statusTemplate).toBe('');
+        expect(await saved()).toEqual({ name: null, limit: null, privacy: null, status: '' });
+
+        await remembering.setStatus(GUILD, SEC, 'alice', 'reset');
+        expect(await saved()).toBeUndefined();
+        expect(await prefs.countByPrimary(GUILD, PRIMARY)).toBe(0);
+      });
+
+      /**
+       * The name's cut-prefill guard is for the panel's 100-character Name box. No box shows less
+       * of a status than the editor's, so a status that starts like a longer one is a new choice.
+       */
+      it('saves a status that is the start of a longer one, which no box cuts', async () => {
+        const LONG = `${'a'.repeat(60)} ${'b'.repeat(60)} ${'c'.repeat(60)}`;
+        const CUT = LONG.slice(0, 100).trim();
+        await remembering.setStatus(GUILD, SEC, 'alice', LONG);
+        expect((await saved())!.status).toBe(LONG);
+
+        await remembering.setStatus(GUILD, SEC, 'alice', CUT);
+        expect((await saved())!.status).toBe(CUT);
+      });
+
+      /** A status is not flattened the way a name is, so it is remembered with its line breaks. */
+      it('keeps line breaks in a status, as the room stores it', async () => {
+        await remembering.setStatus(GUILD, SEC, 'alice', 'AFK\nback at 9');
+        expect((await secondaries.get(SEC))!.state.statusTemplate).toBe('AFK\nback at 9');
+        expect((await saved())!.status).toBe('AFK\nback at 9');
+      });
+
+      it('saves for a moderator setting their own room’s status', async () => {
+        const res = await remembering.setStatus(GUILD, SEC, 'alice', 'Mine', { admin: true });
+        expect(res.ok).toBe(true);
+        expect((await saved())!.status).toBe('Mine');
+      });
+
+      it('saves nothing, for anybody, when a moderator sets somebody else’s status', async () => {
+        const res = await remembering.setStatus(GUILD, SEC, 'mallory', 'Hijacked', {
+          admin: true,
+        });
+
+        expect(res.ok).toBe(true);
+        expect((await secondaries.get(SEC))!.state.statusTemplate).toBe('Hijacked');
+        expect(await prefs.countByPrimary(GUILD, PRIMARY)).toBe(0);
+        // And a moderator’s reset does not take the owner’s own status back out.
+        await remembering.setStatus(GUILD, SEC, 'alice', 'Mine');
+        await remembering.setStatus(GUILD, SEC, 'mallory', 'reset', { admin: true });
+        expect((await saved())!.status).toBe('Mine');
+      });
+
+      it('saves nothing for a room that has no owner, whoever changes it', async () => {
+        await env.handle.pool.query(
+          'UPDATE secondary_channels SET owner_id = NULL WHERE channel_id = $1',
+          [SEC],
+        );
+
+        expect((await remembering.setStatus(GUILD, SEC, 'mallory', 'Mine')).ok).toBe(true);
+        expect(
+          (await remembering.setStatus(GUILD, SEC, 'mallory', 'Mine', { admin: true })).ok,
+        ).toBe(true);
+
+        expect(await prefs.countByPrimary(GUILD, PRIMARY)).toBe(0);
+      });
+
+      it('saves nothing for a status that was refused, and leaves what was saved', async () => {
+        await remembering.setStatus(GUILD, SEC, 'alice', 'AFK');
+        const refused = await remembering.setStatus(GUILD, SEC, 'alice', 'bad words', {
+          refuseText: () => Promise.resolve('That has a word this server does not allow.'),
+        });
+        expect(refused.ok).toBe(false);
+        expect((await saved())!.status).toBe('AFK');
+      });
+
+      it('stores nothing for a creator channel that does not remember', async () => {
+        await autoChannels.setRememberPrefs(GUILD, PRIMARY, false);
+
+        expect((await remembering.setStatus(GUILD, SEC, 'alice', 'AFK')).ok).toBe(true);
+
+        expect(await prefs.countByPrimary(GUILD, PRIMARY)).toBe(0);
+        expect((await secondaries.get(SEC))!.state.statusTemplate).toBe('AFK');
+      });
+
+      it('stores nothing while member_prefs.disabled is on, and still takes a status back out', async () => {
+        await remembering.setStatus(GUILD, SEC, 'alice', 'AFK');
+        paused = true;
+
+        await remembering.setStatus(GUILD, SEC, 'alice', 'Changed');
+        await remembering.setStatus(GUILD, SEC, 'alice', '');
+        expect((await saved())!.status).toBe('AFK');
+
+        await remembering.setStatus(GUILD, SEC, 'alice', 'reset');
+        expect(await saved()).toBeUndefined();
+      });
+
+      it('saves a status, and takes one back out, even when the re-render after it throws', async () => {
+        const rerender = vi
+          .spyOn(VoiceFeature.prototype, 'rerenderSecondary')
+          .mockRejectedValue(new Error('discord down'));
+        try {
+          await expect(remembering.setStatus(GUILD, SEC, 'alice', 'AFK')).rejects.toThrow(
+            'discord down',
+          );
+          expect((await saved())!.status).toBe('AFK');
+
+          await expect(remembering.setStatus(GUILD, SEC, 'alice', 'reset')).rejects.toThrow(
+            'discord down',
+          );
+          expect(await saved()).toBeUndefined();
+        } finally {
+          rerender.mockRestore();
+        }
       });
     });
 
@@ -1037,18 +1191,22 @@ describe('VoiceCommands (integration)', () => {
           {
             saveName: () => Promise.reject(new Error('db down')),
             saveLimit: () => Promise.reject(new Error('db down')),
+            saveStatus: () => Promise.reject(new Error('db down')),
           },
           { ...fakeLogger(), warn } as never,
         );
 
         const limit = await failing.setLimit(GUILD, SEC, 'alice', 5);
         const name = await failing.setName(GUILD, SEC, 'alice', 'a secret den name');
+        const status = await failing.setStatus(GUILD, SEC, 'alice', 'a secret status');
 
         expect(limit.ok).toBe(true);
         expect(name.ok).toBe(true);
+        expect(status.ok).toBe(true);
         expect(actions.ofType('limit').at(-1)).toMatchObject({ channelId: SEC, limit: 5 });
         expect((await secondaries.get(SEC))!.state.template).toBe('a secret den name');
-        expect(warn).toHaveBeenCalledTimes(2);
+        expect((await secondaries.get(SEC))!.state.statusTemplate).toBe('a secret status');
+        expect(warn).toHaveBeenCalledTimes(3);
         expect(JSON.stringify(warn.mock.calls)).not.toContain('secret');
       });
     });
@@ -1065,7 +1223,7 @@ describe('VoiceCommands (integration)', () => {
         await remembering.setLimit(GUILD, SEC, 'alice', 5);
         await remembering.unlimit(GUILD, SEC, 'alice');
         await remembering.setName(GUILD, SEC, 'alice', 'Changed');
-        expect(await saved()).toEqual({ name: 'Mine', limit: null, privacy: null });
+        expect(await saved()).toEqual({ name: 'Mine', limit: null, privacy: null, status: null });
 
         await remembering.setName(GUILD, SEC, 'alice', 'reset');
         expect(await saved()).toBeUndefined();
