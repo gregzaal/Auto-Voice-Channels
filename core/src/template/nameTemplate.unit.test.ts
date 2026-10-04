@@ -1187,6 +1187,22 @@ describe('HIDDEN', () => {
     expect(renderChannelName(template, ctx('public'))).toBe('🔓');
   });
 
+  /**
+   * The template the assistant's prompt teaches for "one mark per mode". Two conditionals side by
+   * side show both marks on a hidden room, because it is also PRIVATE, which is why the prompt
+   * says to nest.
+   */
+  it('shows one mark per mode with the nested form the assistant teaches, and two side by side', () => {
+    const nested = "{{HIDDEN ?? 🙈 // {{PRIVATE ?? 🔒 }}}}@@owner@@'s room";
+    expect(renderChannelName(nested, ctx('hidden'))).toBe("🙈 a's room");
+    expect(renderChannelName(nested, ctx('locked'))).toBe("🔒 a's room");
+    expect(renderChannelName(nested, ctx('public'))).toBe("a's room");
+
+    const sideBySide = "{{PRIVATE ?? 🔒 }}{{HIDDEN ?? 🙈 }}@@owner@@'s room";
+    expect(renderChannelName(sideBySide, ctx('hidden'))).toContain('🔒');
+    expect(renderChannelName(sideBySide, ctx('hidden'))).toContain('🙈');
+  });
+
   it('works with no else branch, as a bare mark', () => {
     // The space after `??` belongs to the branch, so it is the mark's own separator.
     expect(renderChannelName('Room{{HIDDEN ?? 🙈}}', ctx('hidden'))).toBe('Room 🙈');

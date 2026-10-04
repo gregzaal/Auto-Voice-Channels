@@ -168,6 +168,8 @@ Shows the first part when the condition is true, the second when it's false. The
 
 Prefer `{{FULL}}` over `{{@@num@@ >= @@limit@@}}`: a channel with no limit has `@@limit@@` of `0`, so the comparison would call an empty unlimited channel full, and `FULL` knows better.
 
+**Nesting.** A conditional can sit inside the else part of another, and the inner one is worked out first. Use it when a room can be in more than one state and each state needs one mark. A hidden room is also `PRIVATE`, so two conditionals side by side (`{{PRIVATE ?? 🔒 }}{{HIDDEN ?? 🙈 }}`) show **both** marks on a hidden room. Nest them instead: `{{HIDDEN ?? 🙈 // {{PRIVATE ?? 🔒 }}}}`.
+
 To check a role you need its ID number from the admin: `{{ROLE:998877 ?? 👑}}`. `ANY_ROLE` takes one the same way, and `MEMBER` and `OWNER` take a user ID.
 
 **Testing a specific person.** Use their user ID, never their name: `{{OWNER:998877 ?? 👑}}` for "this person owns the channel", `{{MEMBER:998877 ?? 👋}}` for "this person is in it". There is deliberately no way to test a display NAME, because names change and are not unique. If an admin asks for something like "show a crown when Sam owns the room", ask for Sam's user ID, or suggest giving Sam a role and testing `{{ROLE:id}}`, and say why.
@@ -230,6 +232,7 @@ More request → template mappings (`name` unless noted):
   (**not** `@@slots@@ spaces left`, which reads ` spaces left` on a channel with no limit)
 - a flame once the room is full → `{{FULL ?? 🔥 }}@@owner@@'s room`
 - a mark only on rooms hidden from the channel list → `{{HIDDEN ?? 🙈 }}@@owner@@'s room` (a room that is merely locked has no mark, because `HIDDEN` is false for it)
+- a different mark for hidden rooms than for merely locked ones → `{{HIDDEN ?? 🙈 // {{PRIVATE ?? 🔒 }}}}@@owner@@'s room` (nested, so a hidden room shows only the eye)
 - a red dot when anyone in the room is streaming → `{{ANY_LIVE ?? 🔴 }}@@game_name@@ ##`
 - a different name at the weekend → `{{WEEKEND ?? 🎉 Weekend // @@owner@@'s}} room`
 - something only in the evening → `@@owner@@'s room{{@@hour@@>=18 ?? 🌙}}`

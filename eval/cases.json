@@ -125,12 +125,13 @@
       }
     },
     {
-      "$comment": "Both variables in one reply: a lock for private rooms and a different mark for hidden ones. Passes only if the model knows HIDDEN exists and that PRIVATE alone cannot tell the two apart.",
+      "$comment": "Both variables in one reply: a lock for private rooms and a different mark for hidden ones. A hidden room is also PRIVATE, so two conditionals side by side mark it twice. Passes only if the model nests one inside the other, in either order, which is what the prompt's Nesting paragraph teaches.",
       "group": "conditionals",
       "request": "Show a padlock on locked rooms, and an eye with a line through it on rooms that are hidden from the channel list.",
       "expect": {
         "field": "name",
-        "contains": ["HIDDEN", "PRIVATE"]
+        "contains": ["HIDDEN", "PRIVATE"],
+        "containsAny": ["// {{PRIVATE", "// {{HIDDEN", "?? {{PRIVATE", "?? {{HIDDEN"]
       }
     },
     {

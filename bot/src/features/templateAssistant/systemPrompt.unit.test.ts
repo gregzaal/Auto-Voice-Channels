@@ -48,6 +48,16 @@ describe('the assistant system prompt', () => {
     }
   });
 
+  /**
+   * A hidden room is also PRIVATE, so "a padlock on locked rooms and an eye on hidden ones" written
+   * as two conditionals side by side marks a hidden room twice, and nothing in the validator or
+   * the preview would flag it. The prompt has to show the nested form, which core pins to render.
+   */
+  it('teaches the nested form for one mark per room mode', () => {
+    expect(TEMPLATE_ASSISTANT_SYSTEM_PROMPT).toContain('**Nesting.**');
+    expect(TEMPLATE_ASSISTANT_SYSTEM_PROMPT).toContain('{{HIDDEN ?? 🙈 // {{PRIVATE ?? 🔒 }}}}');
+  });
+
   it('documents the block constructs', () => {
     for (const construct of ['[[a/b/c]]', '<<one/many>>', '__empty/in-use__', '""mode:text""']) {
       expect(TEMPLATE_ASSISTANT_SYSTEM_PROMPT).toContain(construct);
