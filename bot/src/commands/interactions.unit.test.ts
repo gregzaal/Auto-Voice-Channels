@@ -3632,7 +3632,10 @@ describe('registerInteractionHandler (room control panel)', () => {
     });
     env.client.emit('interactionCreate', interaction);
     await flush();
-    expect(vc.setName).toHaveBeenCalledWith('g1', 'room-9', 'u1', 'reset', { admin: false });
+    expect(vc.setName).toHaveBeenCalledWith('g1', 'room-9', 'u1', 'reset', {
+      admin: false,
+      fromPanel: true,
+    });
   });
 
   /**

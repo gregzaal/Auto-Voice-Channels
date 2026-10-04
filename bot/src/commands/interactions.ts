@@ -3886,6 +3886,7 @@ Already subscribed? Add the new server ` +
         () =>
           deps.voiceCommands.setName(guildId, parsed.roomId, userId, raw === '' ? 'reset' : raw, {
             admin: hasManageChannels(interaction),
+            fromPanel: true,
           }),
         'panel:rename',
       );

@@ -790,6 +790,42 @@ describe('VoiceCommands (integration)', () => {
           expect((await secondaries.get(SEC))!.state.template).toBe(CUT);
         });
 
+        /**
+         * The box is pressed Save on without a change, twice: the first used to cut the room's
+         * template to what the box showed, and the second then read that cut as a whole template
+         * of its own and remembered it over the longer one. Unchanged is no change at all.
+         */
+        it('changes nothing from the panel, however many times it is pressed', async () => {
+          await remembering.setName(GUILD, SEC, 'alice', LONG);
+
+          for (let press = 0; press < 3; press += 1) {
+            const res = await remembering.setName(GUILD, SEC, 'alice', CUT, { fromPanel: true });
+            expect(res.ok).toBe(true);
+            expect(res.message).toContain("Left this channel's name as it was");
+            expect((await secondaries.get(SEC))!.state.template).toBe(LONG);
+            expect((await saved())!.name).toBe(LONG);
+          }
+        });
+
+        it('still applies a name changed in the panel box, and a short one, and a reset', async () => {
+          await remembering.setName(GUILD, SEC, 'alice', LONG);
+
+          await remembering.setName(GUILD, SEC, 'alice', `${CUT}!`, { fromPanel: true });
+          expect((await secondaries.get(SEC))!.state.template).toBe(`${CUT}!`);
+          expect((await saved())!.name).toBe(`${CUT}!`);
+
+          await remembering.setName(GUILD, SEC, 'alice', 'Den', { fromPanel: true });
+          expect((await secondaries.get(SEC))!.state.template).toBe('Den');
+          expect((await saved())!.name).toBe('Den');
+
+          await remembering.setName(GUILD, SEC, 'alice', LONG);
+          expect(
+            (await remembering.setName(GUILD, SEC, 'alice', 'reset', { fromPanel: true })).ok,
+          ).toBe(true);
+          expect((await secondaries.get(SEC))!.state.template).toBeUndefined();
+          expect(await saved()).toBeUndefined();
+        });
+
         it('does remember a name that was really changed, or written whole again', async () => {
           await remembering.setName(GUILD, SEC, 'alice', LONG);
           await remembering.setName(GUILD, SEC, 'alice', `${CUT}!`);
@@ -872,6 +908,31 @@ describe('VoiceCommands (integration)', () => {
     });
 
     describe('when saving goes wrong', () => {
+      /**
+       * The room has its name by the time the re-render runs, and the re-render reaches Discord,
+       * so it can throw. A save that sat behind it would leave a member told the command failed
+       * about a room that was renamed, and not remembered.
+       */
+      it('saves a name, and takes one back out, even when the re-render after it throws', async () => {
+        const rerender = vi
+          .spyOn(VoiceFeature.prototype, 'rerenderSecondary')
+          .mockRejectedValue(new Error('discord down'));
+        try {
+          await expect(remembering.setName(GUILD, SEC, 'alice', 'Mine')).rejects.toThrow(
+            'discord down',
+          );
+          expect((await secondaries.get(SEC))!.state.template).toBe('Mine');
+          expect((await saved())!.name).toBe('Mine');
+
+          await expect(remembering.setName(GUILD, SEC, 'alice', 'reset')).rejects.toThrow(
+            'discord down',
+          );
+          expect(await saved()).toBeUndefined();
+        } finally {
+          rerender.mockRestore();
+        }
+      });
+
       /** The command has already worked, so a failed save costs next time’s convenience and nothing else. */
       it('never fails the command, and logs ids and never what was typed', async () => {
         const warn = vi.fn();

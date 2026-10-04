@@ -114,14 +114,16 @@ export class VoiceCommands {
    * Overrides the channel's name (or `reset`s to the inherited template). The
    * value may use template tokens (`@@game_name@@`, `##`, …) and is re-evaluated
    * on game/membership changes. Owner only, unless `opts.admin` (a server admin
-   * may rename any managed channel — this absorbs the old `/rename`).
+   * may rename any managed channel — this absorbs the old `/rename`). `opts.fromPanel`
+   * is the room panel's Name box, whose prefill stops at 100 characters: submitting
+   * what it showed of a longer template changes nothing (see {@link isTruncatedPrefill}).
    */
   setName(
     guildId: string,
     channelId: string | undefined,
     userId: string,
     name: string,
-    opts: { admin?: boolean } = {},
+    opts: { admin?: boolean; fromPanel?: boolean } = {},
   ): Promise<CommandResult> {
     return this.setChannelField(guildId, channelId, userId, 'name', name, opts);
   }
@@ -147,7 +149,7 @@ export class VoiceCommands {
     userId: string,
     field: 'name' | 'status',
     value: string,
-    opts: { admin?: boolean },
+    opts: { admin?: boolean; fromPanel?: boolean },
   ): Promise<CommandResult> {
     const found = await this.resolveSecondary(guildId, channelId);
     if ('error' in found) return found.error;
@@ -166,6 +168,20 @@ export class VoiceCommands {
 
     const next = { ...row.state };
     const stored = field === 'name' ? trimmed.replace(/[\r\n]+/g, ' ') : trimmed;
+    // The panel's Name box shows the first 100 characters of a longer template, so Save pressed
+    // without a change submits that cut. Writing it would cut the room's own template, and the
+    // next such submit (the room's template is now the cut, which no longer reads as a cut of
+    // anything) would then overwrite the longer name the member remembered. Nothing to do.
+    if (
+      opts.fromPanel &&
+      field === 'name' &&
+      !isReset &&
+      isTruncatedPrefill(stored, row.state.template)
+    ) {
+      return ok(
+        "Left this channel's name as it was, because the box only shows the first 100 characters of a longer name.",
+      );
+    }
     if (isReset) {
       delete next[stateKey];
     } else {
@@ -173,13 +189,17 @@ export class VoiceCommands {
       next[stateKey] = stored;
     }
     await this.deps.secondaries.updateState(id, next);
-    const r = await this.deps.feature.rerenderSecondary(guildId, id);
     // A NAME the member set, or took back, and never the voice status: a status is about what
-    // is happening in this room now. Not the panel's prefill of a longer template, which is
-    // the same template cut short and not a new choice.
+    // is happening in this room now. Not a name that is only the cut of a longer template, which
+    // is the same template cut short and not a new choice (the panel is answered above, so this
+    // is the backstop for a submit that did not say where it came from). Saved before the
+    // re-render, which can throw: the room already has the name, and a save that sat behind it
+    // would leave a member told the command failed about a room that was renamed and not
+    // remembered.
     if (field === 'name' && (isReset || !isTruncatedPrefill(stored, row.state.template))) {
       await this.remember(row, userId, { field: 'name', value: isReset ? null : stored });
     }
+    const r = await this.deps.feature.rerenderSecondary(guildId, id);
     const note = rateLimitNote(r.rateLimited ? 1 : 0);
     return ok(
       isReset
