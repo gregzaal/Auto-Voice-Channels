@@ -155,6 +155,13 @@ export interface AccessPlanInput {
    * `skippedRoleIds`, leaving that role as it is.
    */
   uneditableRoleIds?: readonly string[] | undefined;
+  /**
+   * Whether a lock or a hide may flip roles' Connect allows to denies. True unless the caller
+   * says otherwise: `room_access.disabled` says otherwise, which is the off switch for this
+   * behaviour. Off, nothing new is flipped, what an earlier plan flipped stays recorded, and
+   * going public still gives it back.
+   */
+  flipRoleConnect?: boolean | undefined;
 }
 
 /**
@@ -605,6 +612,7 @@ export function planAccess(input: AccessPlanInput): AccessPlan {
   const connectSpared = new Set([everyoneId, leaveRoleId].filter((id) => id !== null));
   if (mode === 'public') {
     for (const roleId of sortedUnique(aliveConnect)) {
+      if (roleId === everyoneId) continue;
       if (uneditable.has(roleId)) {
         skipped.add(roleId);
         connectFlipped.add(roleId);
@@ -615,8 +623,11 @@ export function planAccess(input: AccessPlanInput): AccessPlan {
       setBit(work.get(k)!, CONNECT, 'allow');
     }
   } else {
-    for (const roleId of aliveConnect) if (!connectSpared.has(roleId)) connectFlipped.add(roleId);
-    for (const o of work.values()) {
+    // What a previous plan flipped stays named whatever `connectSpared` says now: the bot's own
+    // role can be unknown to one plan (its member not cached) and known to the next, and a role
+    // dropped here would stay denied with nothing naming it, so nothing would ever restore it.
+    for (const roleId of aliveConnect) if (roleId !== everyoneId) connectFlipped.add(roleId);
+    for (const o of input.flipRoleConnect === false ? [] : work.values()) {
       if (o.type !== OVERWRITE_ROLE || connectSpared.has(o.id)) continue;
       if ((o.allow & CONNECT) === 0n) continue;
       if (uneditable.has(o.id)) {

@@ -16,6 +16,7 @@ import type { CommandResult } from './commands.js';
 import type { GuildVoiceView, VoiceMember } from './types.js';
 import { describeError } from '../../ops/describeError.js';
 import {
+  CONNECT,
   OVERWRITE_MEMBER,
   OVERWRITE_ROLE,
   VIEW_CHANNEL,
@@ -1528,6 +1529,20 @@ export class PrivacyService {
     }
   }
 
+  /** Whether a plan into `mode` has a role whose Connect allow it would flip. */
+  private wouldFlipRoleConnect(
+    guildId: string,
+    mode: AccessMode,
+    current: readonly ResolvedOverwrite[],
+  ): boolean {
+    return (
+      mode !== 'public' &&
+      current.some(
+        (o) => o.type === OVERWRITE_ROLE && o.id !== guildId && (o.allow & CONNECT) !== 0n,
+      )
+    );
+  }
+
   /** Whether `room_access.disabled` is on. Never throws: a failed read counts as not disabled. */
   private async accessPaused(): Promise<boolean> {
     try {
@@ -2181,6 +2196,11 @@ export class PrivacyService {
         viewerRoleId,
         leaveRoleId: roles?.leaveRoleId ?? null,
         uneditableRoleIds: roles?.uneditableRoleIds ?? [],
+        // The one off switch for a lock taking role Connect: `room_access.disabled`. Asked only
+        // when a lock or a hide would actually flip a role, so a server with no role that grants
+        // Connect, and every command the lever does not stop, never pays for the read.
+        flipRoleConnect:
+          !this.wouldFlipRoleConnect(guildId, to, current) || !(await this.accessPaused()),
       },
     };
   }

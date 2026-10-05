@@ -760,6 +760,74 @@ describe('role Connect', () => {
     expect(find(p, r(MEMBERS))).toEqual({ allow: VC, deny: 0n });
     expect(p.facts.neutralisedConnect).toEqual([]);
   });
+
+  /**
+   * The bot's own role is unknown to a plan whose member is not cached and known to the next.
+   * A role the first plan flipped and the second now spares must stay named, or it stays denied
+   * with nothing naming it and nothing ever puts it back.
+   */
+  it('keeps naming a role it flipped when a later plan spares that role', () => {
+    const first = plan({
+      mode: 'locked',
+      previousMode: 'public',
+      current: [role('botrole', VC)],
+      leaveRoleId: null,
+    });
+    expect(first.facts.neutralisedConnect).toEqual(['botrole']);
+    const second = plan({
+      mode: 'locked',
+      previousMode: 'locked',
+      current: first.desired,
+      record: recordOf(first.facts),
+      leaveRoleId: 'botrole',
+    });
+    expect(second.facts.neutralisedConnect).toEqual(['botrole']);
+    expect(second.diff).toEqual({ upserts: [], deletes: [] });
+    const open = plan({
+      mode: 'public',
+      previousMode: 'locked',
+      current: second.desired,
+      record: recordOf(second.facts),
+      leaveRoleId: 'botrole',
+    });
+    expect(find(open, r('botrole'))).toEqual({ allow: VC, deny: 0n });
+  });
+
+  it('flips nothing new when told not to, keeps what was flipped, and still gives it back', () => {
+    const locked = plan({ mode: 'locked', previousMode: 'public', current: gated });
+    // A role added to the channel after the lock, with the switch off.
+    const grown = [...locked.desired, role('late', VC)];
+    const paused = plan({
+      mode: 'locked',
+      previousMode: 'locked',
+      current: grown,
+      record: recordOf(locked.facts),
+      flipRoleConnect: false,
+    });
+    expect(find(paused, r('late'))).toEqual({ allow: VC, deny: 0n });
+    expect(find(paused, r(MEMBERS))).toEqual({ allow: V, deny: C });
+    expect(paused.facts.neutralisedConnect).toEqual([MEMBERS]);
+    const open = plan({
+      mode: 'public',
+      previousMode: 'locked',
+      current: paused.desired,
+      record: recordOf(paused.facts),
+      flipRoleConnect: false,
+    });
+    expect(find(open, r(MEMBERS))).toEqual({ allow: VC, deny: 0n });
+  });
+
+  it('never restores, flips or names @everyone, whatever a record says', () => {
+    const p = plan({
+      mode: 'public',
+      previousMode: 'locked',
+      current: [everyone(0n, VC)],
+      record: { neutralisedConnect: [GUILD] },
+    });
+    // Never given an allow. Its Connect deny is cleared by the unknown baseline, as /public always has.
+    expect(find(p, r(GUILD))).toEqual({ allow: 0n, deny: V });
+    expect(p.facts.neutralisedConnect).toEqual([]);
+  });
 });
 
 describe('blocks', () => {

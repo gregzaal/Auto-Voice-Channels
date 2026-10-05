@@ -676,6 +676,85 @@ describe('the sweep keeps saved lists and hidden rooms in line (integration)', (
     });
   });
 
+  // -- role Connect on a lock --------------------------------------------------------
+
+  /**
+   * A role's Connect allow beats `@everyone`'s deny, so a lock in a role-gated server locked
+   * nobody out until v2.3.1 flipped it. Rooms an earlier build locked carry no record of
+   * the flip, and the sweep has to catch them up, once, and put the roles back when the room
+   * goes public.
+   */
+  describe('a lock takes role Connect', () => {
+    const gatedRoom = async () => {
+      await room('r1');
+      actions.seedOverwrites('r1', [roleOw(GUILD, 0n, V), roleOw('members', VC)]);
+      await privacy.makePrivate(GUILD, 'r1', 'alice');
+    };
+    /** What an earlier build left: the lock, with the role's Connect allow intact and no record of a flip. */
+    const asAnEarlierBuildLeftIt = async () => {
+      actions.seedOverwrites('r1', [
+        ...actions.overwritesOf('r1').filter((o) => o.id !== 'members'),
+        roleOw('members', VC),
+      ]);
+      const record = { ...(await access('r1')) } as Record<string, unknown>;
+      delete record.neutralisedConnect;
+      await stageAccess('r1', record);
+    };
+
+    it('catches up a room an earlier build locked, once, and a second sweep writes nothing', async () => {
+      await gatedRoom();
+      await asAnEarlierBuildLeftIt();
+
+      await sweep();
+
+      expect(bits(held('r1', 'members', OVERWRITE_ROLE))).toEqual({ allow: V, deny: C });
+      expect((await access('r1'))?.neutralisedConnect).toEqual(['members']);
+      const once = await snapshot('r1');
+      await sweep();
+      expect(await snapshot('r1')).toEqual(once);
+    });
+
+    it('re-denies a role somebody gave its Connect back by hand', async () => {
+      await gatedRoom();
+      actions.seedOverwrites('r1', [
+        ...actions.overwritesOf('r1').filter((o) => o.id !== 'members'),
+        roleOw('members', VC),
+      ]);
+
+      await sweep();
+
+      expect(bits(held('r1', 'members', OVERWRITE_ROLE))).toEqual({ allow: V, deny: C });
+    });
+
+    it('puts a role back in a room that reads public and records nothing else', async () => {
+      // The room an older build opened: public by its flag, the role still denied Connect, and a
+      // record that names only the flip. The sweep must still visit it, or the role stays denied.
+      await room('r1');
+      actions.seedOverwrites('r1', [roleOw(GUILD, 0n, V), roleOw('members', V, C)]);
+      await stageAccess('r1', { creatorId: 'alice', neutralisedConnect: ['members'] });
+
+      await sweep();
+
+      expect(bits(held('r1', 'members', OVERWRITE_ROLE))).toEqual({ allow: VC, deny: 0n });
+      expect((await access('r1'))?.neutralisedConnect).toBeUndefined();
+    });
+
+    it('is switched off by room_access.disabled: nothing new is flipped, and nothing already flipped is lost', async () => {
+      await gatedRoom();
+      await asAnEarlierBuildLeftIt();
+      leverOn = true;
+
+      await sweep();
+      expect(bits(held('r1', 'members', OVERWRITE_ROLE))).toEqual({ allow: VC, deny: 0n });
+
+      // A lock made while it is on flips nothing, and /public still gives back what it took earlier.
+      await room('r2');
+      actions.seedOverwrites('r2', [roleOw(GUILD, 0n, V), roleOw('members', VC)]);
+      await privacy.makePrivate(GUILD, 'r2', 'alice');
+      expect(bits(held('r2', 'members', OVERWRITE_ROLE))).toEqual({ allow: VC, deny: 0n });
+    });
+  });
+
   // -- the Join channel --------------------------------------------------------------
 
   describe('a locked room has exactly one Join channel', () => {

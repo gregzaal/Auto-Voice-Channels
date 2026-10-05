@@ -13,6 +13,7 @@ const full = {
   hidden: true,
   baseline: { view: 'allow', connect: 'none' },
   neutralised: [{ roleId: '1418271927263854600', view: 'allow' }],
+  neutralisedConnect: ['1418271927263854600'],
   viewerRoleId: '1418271927263854601',
   trusted: ['u1', 'u2'],
   blocked: ['u3'],
@@ -25,6 +26,17 @@ describe('roomAccessSchema', () => {
   it('accepts an empty record and a fully populated one', () => {
     expect(roomAccessSchema.safeParse({}).success).toBe(true);
     expect(roomAccessSchema.safeParse(full).success).toBe(true);
+  });
+
+  it('reads the roles a lock took Connect from, and refuses a list that is not ids', () => {
+    expect(parseRoomAccess({ neutralisedConnect: ['r1', 'r2'] })).toEqual({
+      neutralisedConnect: ['r1', 'r2'],
+    });
+    expect(roomAccessSchema.safeParse({ neutralisedConnect: [1] }).success).toBe(false);
+    // An older build that has never heard of the field still reads the rest of the record.
+    expect(parseRoomAccess({ hidden: true, neutralisedConnect: ['r1'] })).toMatchObject({
+      hidden: true,
+    });
   });
 
   /**
