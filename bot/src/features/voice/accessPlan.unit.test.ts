@@ -99,6 +99,7 @@ function recordOf(facts: AccessFacts): RoomAccess {
   return {
     ...(facts.baseline ? { baseline: facts.baseline } : {}),
     neutralised: facts.neutralised,
+    neutralisedConnect: facts.neutralisedConnect,
     ...(facts.viewerRoleId ? { viewerRoleId: facts.viewerRoleId } : {}),
     trusted: facts.trusted,
     admitted: facts.admitted,
@@ -256,13 +257,15 @@ describe('public to hidden', () => {
         previousMode: 'public',
         current: [role(MEMBERS, VC), role(HELPERS, V | SPEAK)],
       });
-      expect(find(p, r(MEMBERS))).toEqual({ allow: C, deny: V });
+      // A hide is a lock too, so the Connect allow is flipped with it (see "role Connect").
+      expect(find(p, r(MEMBERS))).toEqual({ allow: 0n, deny: VC });
       // Other bits are untouched.
       expect(find(p, r(HELPERS))).toEqual({ allow: SPEAK, deny: V });
       expect(p.facts.neutralised).toEqual([
         { roleId: HELPERS, view: 'allow' },
         { roleId: MEMBERS, view: 'allow' },
       ]);
+      expect(p.facts.neutralisedConnect).toEqual([MEMBERS]);
       expect(p.facts.hidden).toBe(true);
     });
 
@@ -274,15 +277,16 @@ describe('public to hidden', () => {
       expect(p.facts.neutralised).toEqual([]);
     });
 
-    it('leaves a role with no View allow alone', () => {
+    it('leaves a role with no View allow alone, apart from its Connect allow', () => {
       const p = plan({
         mode: 'hidden',
         previousMode: 'public',
         current: [role('muted', 0n, V), role('talkers', C | SPEAK)],
       });
       expect(find(p, r('muted'))).toEqual({ allow: 0n, deny: V });
-      expect(find(p, r('talkers'))).toEqual({ allow: C | SPEAK, deny: 0n });
+      expect(find(p, r('talkers'))).toEqual({ allow: SPEAK, deny: C });
       expect(p.facts.neutralised).toEqual([]);
+      expect(p.facts.neutralisedConnect).toEqual(['talkers']);
     });
 
     it('leaves the moderator role and the bot role alone and does not count them', () => {
@@ -422,7 +426,7 @@ describe('hidden to locked', () => {
     member(ALICE, VC),
     everyone(0n, VC),
     role(MODS, V),
-    role(MEMBERS, C, V),
+    role(MEMBERS, 0n, VC),
   ];
 
   it.each<[OverwriteBit | undefined, bigint, bigint]>([
@@ -458,10 +462,13 @@ describe('hidden to locked', () => {
       record: {
         baseline: { view: 'none', connect: 'none' },
         neutralised: [{ roleId: MEMBERS, view: 'allow' }],
+        neutralisedConnect: [MEMBERS],
         viewerRoleId: MODS,
       },
     });
-    expect(find(p, r(MEMBERS))).toEqual({ allow: VC, deny: 0n });
+    // View goes back, and the lock keeps Connect denied for the role.
+    expect(find(p, r(MEMBERS))).toEqual({ allow: V, deny: C });
+    expect(p.facts.neutralisedConnect).toEqual([MEMBERS]);
     // The moderator grant was View alone, so taking it back empties the overwrite.
     expect(find(p, r(MODS))).toBeUndefined();
     // The owner and the occupant keep View and Connect: harmless in a locked room.
@@ -623,6 +630,135 @@ describe('locked or hidden to public', () => {
     // And leaves @everyone alone: there is nothing to restore in a room that was
     // not locked.
     expect(find(p, r(GUILD))).toBeUndefined();
+  });
+});
+
+/**
+ * A role's Connect allow beats `@everyone`'s Connect deny, so in a server that gates a category
+ * with a role override ("Members: allow View and Connect", copied onto every room) a plain
+ * lock locked nobody out. Measured on the dev application 2026-10-05: after `/private`, a member
+ * holding that role could still connect. A lock now flips each role's Connect allow, and
+ * `/public` puts it back.
+ */
+describe('role Connect', () => {
+  const gated = [everyone(0n, V), role(MEMBERS, VC), role(HELPERS, V | SPEAK)];
+
+  it('is flipped to a deny on a lock, leaving View and every other bit alone', () => {
+    const p = plan({ mode: 'locked', previousMode: 'public', current: gated });
+    expect(find(p, r(MEMBERS))).toEqual({ allow: V, deny: C });
+    // No Connect allow, nothing to flip.
+    expect(find(p, r(HELPERS))).toEqual({ allow: V | SPEAK, deny: 0n });
+    expect(p.facts.neutralisedConnect).toEqual([MEMBERS]);
+    // A lock never touches View, so nothing is recorded for it.
+    expect(p.facts.neutralised).toEqual([]);
+  });
+
+  it('leaves the owner and the occupants a way in, by member overwrite', () => {
+    const p = plan({ mode: 'locked', previousMode: 'public', current: gated, occupants: [ALICE] });
+    expect(find(p, m(OWNER))).toEqual({ allow: C, deny: 0n });
+    expect(find(p, m(ALICE))).toEqual({ allow: C, deny: 0n });
+  });
+
+  it('leaves @everyone to its baseline and the bot role alone', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'public',
+      current: [everyone(C), role('botrole', VC), role(MEMBERS, C)],
+      leaveRoleId: 'botrole',
+    });
+    expect(find(p, r(GUILD))).toEqual({ allow: 0n, deny: C });
+    expect(find(p, r('botrole'))).toEqual({ allow: VC, deny: 0n });
+    expect(p.facts.neutralisedConnect).toEqual([MEMBERS]);
+    expect(p.facts.baselineCaptured).toEqual({ view: 'none', connect: 'allow' });
+  });
+
+  it('is put back by /public, and the record forgets it', () => {
+    const locked = plan({ mode: 'locked', previousMode: 'public', current: gated });
+    const out = plan({
+      mode: 'public',
+      previousMode: 'locked',
+      current: locked.desired,
+      record: recordOf(locked.facts),
+    });
+    expect(find(out, r(MEMBERS))).toEqual({ allow: VC, deny: 0n });
+    expect(out.facts.neutralisedConnect).toEqual([]);
+  });
+
+  it('survives a lock turning into a hide, and a hide turning back into a lock', () => {
+    const locked = plan({ mode: 'locked', previousMode: 'public', current: gated });
+    const hidden = plan({
+      mode: 'hidden',
+      previousMode: 'locked',
+      current: locked.desired,
+      record: recordOf(locked.facts),
+    });
+    expect(find(hidden, r(MEMBERS))).toEqual({ allow: 0n, deny: VC });
+    expect(hidden.facts.neutralisedConnect).toEqual([MEMBERS]);
+    const back = plan({
+      mode: 'locked',
+      previousMode: 'hidden',
+      current: hidden.desired,
+      record: recordOf(hidden.facts),
+    });
+    expect(find(back, r(MEMBERS))).toEqual({ allow: V, deny: C });
+    expect(back.facts.neutralisedConnect).toEqual([MEMBERS]);
+  });
+
+  it('is flipped again when somebody gives the role its Connect allow back, as a hide is', () => {
+    const locked = plan({ mode: 'locked', previousMode: 'public', current: gated });
+    const edited = locked.desired.map((o) => (o.id === MEMBERS ? role(MEMBERS, VC) : o));
+    const again = plan({
+      mode: 'locked',
+      previousMode: 'locked',
+      current: edited,
+      record: recordOf(locked.facts),
+    });
+    expect(find(again, r(MEMBERS))).toEqual({ allow: V, deny: C });
+    expect(again.facts.neutralisedConnect).toEqual([MEMBERS]);
+  });
+
+  it('is not put back when a human has since changed the role, and not recreated when it was deleted', () => {
+    const locked = plan({ mode: 'locked', previousMode: 'public', current: gated });
+    const changed = locked.desired.map((o) => (o.id === MEMBERS ? role(MEMBERS, V) : o));
+    const out = plan({
+      mode: 'public',
+      previousMode: 'locked',
+      current: changed,
+      record: recordOf(locked.facts),
+    });
+    expect(find(out, r(MEMBERS))).toEqual({ allow: V, deny: 0n });
+    expect(out.facts.neutralisedConnect).toEqual([]);
+    const deleted = locked.desired.filter((o) => o.id !== MEMBERS);
+    const gone = plan({
+      mode: 'public',
+      previousMode: 'locked',
+      current: deleted,
+      record: recordOf(locked.facts),
+    });
+    expect(find(gone, r(MEMBERS))).toBeUndefined();
+  });
+
+  it('is never a reason to refuse: a role the bot cannot edit is skipped and reported', () => {
+    const p = plan({
+      mode: 'locked',
+      previousMode: 'public',
+      current: gated,
+      uneditableRoleIds: [MEMBERS],
+    });
+    expect(find(p, r(MEMBERS))).toEqual({ allow: VC, deny: 0n });
+    expect(p.skippedRoleIds).toEqual([MEMBERS]);
+    expect(p.facts.neutralisedConnect).toEqual([]);
+  });
+
+  it('is named before the write, so a half-applied lock still has its way back', () => {
+    const p = plan({ mode: 'locked', previousMode: 'public', current: gated });
+    expect(p.factsBeforeWrite.neutralisedConnect).toEqual([MEMBERS]);
+  });
+
+  it('does nothing in a public room', () => {
+    const p = plan({ mode: 'public', previousMode: 'public', current: gated });
+    expect(find(p, r(MEMBERS))).toEqual({ allow: VC, deny: 0n });
+    expect(p.facts.neutralisedConnect).toEqual([]);
   });
 });
 
@@ -1150,9 +1286,10 @@ describe('a role that is neutralised and also the moderator role', () => {
 
   it('is granted View, and stays recorded with the allow it had', () => {
     const first = gated();
-    expect(find(first, r(MEMBERS))).toEqual({ allow: C, deny: V });
+    expect(find(first, r(MEMBERS))).toEqual({ allow: 0n, deny: VC });
     const second = makeViewer(first);
-    expect(find(second, r(MEMBERS))).toEqual({ allow: VC, deny: 0n });
+    // The moderator role sees the room and does not join it: View only.
+    expect(find(second, r(MEMBERS))).toEqual({ allow: V, deny: C });
     expect(second.facts.viewerRoleId).toBe(MEMBERS);
     expect(second.facts.neutralised).toEqual([{ roleId: MEMBERS, view: 'allow' }]);
   });
@@ -1167,8 +1304,11 @@ describe('a role that is neutralised and also the moderator role', () => {
         record: recordOf(second.facts),
         viewerRoleId: MEMBERS,
       });
-      // Not View cleared, which is what taking the grant back alone would do.
-      expect(find(out, r(MEMBERS))).toEqual({ allow: VC, deny: 0n });
+      // Not View cleared, which is what taking the grant back alone would do. A lock keeps
+      // the role's Connect denied, and going public gives it back.
+      expect(find(out, r(MEMBERS))).toEqual(
+        mode === 'locked' ? { allow: V, deny: C } : { allow: VC, deny: 0n },
+      );
       expect(out.facts.neutralised).toEqual([]);
       expect(out.facts.viewerRoleId).toBeNull();
     }
@@ -1183,7 +1323,7 @@ describe('a role that is neutralised and also the moderator role', () => {
       record: recordOf(second.facts),
       viewerRoleId: null,
     });
-    expect(find(third, r(MEMBERS))).toEqual({ allow: C, deny: V });
+    expect(find(third, r(MEMBERS))).toEqual({ allow: 0n, deny: VC });
     expect(third.facts.neutralised).toEqual([{ roleId: MEMBERS, view: 'allow' }]);
     expect(third.facts.viewerRoleId).toBeNull();
   });
@@ -1483,15 +1623,7 @@ describe('round trips', () => {
           viewerRoleId: MODS,
         });
         current = p.desired;
-        record = {
-          ...(p.facts.baseline ? { baseline: p.facts.baseline } : {}),
-          neutralised: p.facts.neutralised,
-          ...(p.facts.viewerRoleId ? { viewerRoleId: p.facts.viewerRoleId } : {}),
-          trusted: p.facts.trusted,
-          admitted: p.facts.admitted,
-          blocked: p.facts.blocked,
-          hidden: p.facts.hidden,
-        };
+        record = recordOf(p.facts);
         previousMode = mode;
       }
       const roles = (list: readonly ResolvedOverwrite[]) =>
@@ -1587,9 +1719,12 @@ describe('idempotency', () => {
       to === 'hidden'
         ? {
             neutralised: first.facts.neutralised,
+            neutralisedConnect: first.facts.neutralisedConnect,
             ...(first.facts.viewerRoleId ? { viewerRoleId: first.facts.viewerRoleId } : {}),
           }
-        : {};
+        : to === 'locked'
+          ? { neutralisedConnect: first.facts.neutralisedConnect }
+          : {};
     const replay = plan({
       ...inputs(from, to),
       current: first.desired,
@@ -1624,6 +1759,7 @@ describe('idempotency', () => {
       record: {
         ...(first.facts.baseline ? { baseline: first.facts.baseline } : {}),
         neutralised: first.facts.neutralised,
+        neutralisedConnect: first.facts.neutralisedConnect,
         ...(first.facts.viewerRoleId ? { viewerRoleId: first.facts.viewerRoleId } : {}),
         trusted: first.facts.trusted,
         admitted: first.facts.admitted,

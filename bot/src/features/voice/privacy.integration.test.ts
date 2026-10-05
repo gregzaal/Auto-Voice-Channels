@@ -726,11 +726,13 @@ describe('PrivacyService (integration)', () => {
 
       expect((await privacy.makePrivate(GUILD, SEC, 'alice')).ok).toBe(true);
       expect(bits(held('musicbot'))).toEqual({ allow: C, deny: 0n });
+      // The lock took the role's Connect, so the bot's own grant is what lets it stay.
+      expect(bits(held('role-music', OVERWRITE_ROLE))).toEqual({ allow: V, deny: C });
 
       expect((await privacy.hide(GUILD, SEC, 'alice')).ok).toBe(true);
       expect(bits(held('musicbot'))).toEqual({ allow: VC, deny: 0n });
       // Its own role's overwrite was flipped like any other, and the bot still sees the room.
-      expect(bits(held('role-music', OVERWRITE_ROLE))).toEqual({ allow: C, deny: V });
+      expect(bits(held('role-music', OVERWRITE_ROLE))).toEqual({ allow: 0n, deny: VC });
       // The AVC bot has its own allow and is never granted as an occupant.
       expect(bits(held(BOT))).toEqual({ allow: BOT_ACCESS, deny: 0n });
     });
@@ -758,6 +760,25 @@ describe('PrivacyService (integration)', () => {
         trusted: ['carol'],
         blocked: ['mallory'],
       });
+    });
+
+    /**
+     * Why a lock flips role Connect: a role's allow beats `@everyone`'s deny, so in a server that
+     * gates its category with a role override a plain lock locked nobody out (measured on the
+     * dev application, 2026-10-05). The record is stored and read back through Postgres.
+     */
+    it('a lock takes the Connect a role-gated category gave its members, and /public gives it back', async () => {
+      actions.seedOverwrites(SEC, [roleOw(GUILD, 0n, V), roleOw(GATE, V | C)]);
+
+      expect((await privacy.makePrivate(GUILD, SEC, 'alice')).ok).toBe(true);
+      expect(bits(held(GATE, OVERWRITE_ROLE))).toEqual({ allow: V, deny: C });
+      // The owner still gets in, by member overwrite, which Discord applies after any role's.
+      expect(bits(held('alice'))).toEqual({ allow: C, deny: 0n });
+      expect((await access())?.neutralisedConnect).toEqual([GATE]);
+
+      expect((await privacy.makePublic(GUILD, SEC, 'alice')).ok).toBe(true);
+      expect(bits(held(GATE, OVERWRITE_ROLE))).toEqual({ allow: V | C, deny: 0n });
+      expect((await access())?.neutralisedConnect).toBeUndefined();
     });
 
     /** A Connect deny the creator channel gave `@everyone` is not the lock, and `/public` must not wipe it. */

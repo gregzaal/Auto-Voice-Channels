@@ -204,6 +204,7 @@ describe('RecordingVoiceActions overwrites', () => {
       record: {
         baseline: plan.facts.baseline ?? {},
         neutralised: plan.facts.neutralised,
+        neutralisedConnect: plan.facts.neutralisedConnect,
       },
     });
     expect(again.ok && again.diff).toEqual({ upserts: [], deletes: [] });

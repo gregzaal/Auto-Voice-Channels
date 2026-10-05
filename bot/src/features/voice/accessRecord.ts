@@ -9,6 +9,7 @@ import type { AccessFacts, AccessMode } from './accessPlan.js';
 const PLANNED = [
   'baseline',
   'neutralised',
+  'neutralisedConnect',
   'viewerRoleId',
   'trusted',
   'admitted',
@@ -36,6 +37,9 @@ export function recordWithFacts(current: RoomAccess | null, facts: AccessFacts):
     ...rest,
     ...(facts.baseline ? { baseline: facts.baseline } : {}),
     ...(facts.neutralised.length > 0 ? { neutralised: facts.neutralised } : {}),
+    ...(facts.neutralisedConnect.length > 0
+      ? { neutralisedConnect: facts.neutralisedConnect }
+      : {}),
     ...(facts.viewerRoleId ? { viewerRoleId: facts.viewerRoleId } : {}),
     ...(facts.trusted.length > 0 ? { trusted: facts.trusted } : {}),
     ...(facts.admitted.length > 0 ? { admitted: facts.admitted } : {}),

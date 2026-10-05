@@ -192,6 +192,15 @@ export interface AccessFacts {
    * flipped to a deny, or a View deny the moderator grant flipped to an allow.
    */
   neutralised: NeutralisedRole[];
+  /**
+   * Roles whose Connect allow a lock or a hide flipped to a deny, sorted: the ones
+   * to put back when the room goes public. A role's Connect allow beats `@everyone`'s
+   * Connect deny, so in a server that gates a category with a role override a lock
+   * would otherwise lock nobody out. A list of ids and not entries in `neutralised`,
+   * because a flip only ever goes from an allow, and because an older build reads that
+   * list and would restore a View it never changed.
+   */
+  neutralisedConnect: string[];
   /** The moderator role this plan leaves holding View (written by us), or null. */
   viewerRoleId: string | null;
   /** Members whose saved-trusted, admitted and blocked overwrites we now hold on the room. */
@@ -464,6 +473,16 @@ export function planAccess(input: AccessPlanInput): AccessPlan {
     const grantedView = entry.roleId === priorViewer && (o.allow & VIEW_CHANNEL) !== 0n;
     if ((o.deny & VIEW_CHANNEL) !== 0n || grantedView) aliveEntries.set(entry.roleId, entry);
   }
+  /**
+   * Roles a PREVIOUS plan's lock flipped the Connect of, that are still how it left them:
+   * the overwrite is there and still denies Connect. One a human has since changed or
+   * deleted is no longer ours to put back. Read before anything below edits the channel.
+   */
+  const aliveConnect = new Set<string>();
+  for (const roleId of record?.neutralisedConnect ?? []) {
+    const o = work.get(key(OVERWRITE_ROLE, roleId));
+    if (o && (o.deny & CONNECT) !== 0n) aliveConnect.add(roleId);
+  }
   /** Roles this plan would have changed but may not, because the bot cannot edit them. */
   const skipped = new Set<string>();
 
@@ -570,6 +589,47 @@ export function planAccess(input: AccessPlanInput): AccessPlan {
   }
 
   /**
+   * Roles' Connect. A role's Connect allow beats `@everyone`'s Connect deny, the same way
+   * its View allow beats the View deny, so in a server that gates a category with a role
+   * override ("Members: allow View and Connect", copied onto every room) a lock would
+   * lock nobody out. A locked or hidden room flips each such allow to a deny on the
+   * room's own copy and records it, and going public puts it back. The owner, the
+   * occupants, trusted and admitted members hold member overwrites, which Discord applies
+   * after every role overwrite, so they keep their way in, and a knock that is approved
+   * gives the same. `@everyone` has its own baseline and the bot's own role is left alone.
+   *
+   * A role the caller says the bot cannot edit is skipped and reported, never a reason to
+   * refuse: a lock that left one role able to join is still a lock for everyone else.
+   */
+  const connectFlipped = new Set<string>();
+  const connectSpared = new Set([everyoneId, leaveRoleId].filter((id) => id !== null));
+  if (mode === 'public') {
+    for (const roleId of sortedUnique(aliveConnect)) {
+      if (uneditable.has(roleId)) {
+        skipped.add(roleId);
+        connectFlipped.add(roleId);
+        continue;
+      }
+      const k = key(OVERWRITE_ROLE, roleId);
+      touched.add(k);
+      setBit(work.get(k)!, CONNECT, 'allow');
+    }
+  } else {
+    for (const roleId of aliveConnect) if (!connectSpared.has(roleId)) connectFlipped.add(roleId);
+    for (const o of work.values()) {
+      if (o.type !== OVERWRITE_ROLE || connectSpared.has(o.id)) continue;
+      if ((o.allow & CONNECT) === 0n) continue;
+      if (uneditable.has(o.id)) {
+        skipped.add(o.id);
+        continue;
+      }
+      connectFlipped.add(o.id);
+      touched.add(key(o.type, o.id));
+      setBit(o, CONNECT, 'deny');
+    }
+  }
+
+  /**
    * `@everyone`, last.
    *
    * Locked denies Connect. Hidden denies View and Connect. Leaving a mode puts back
@@ -616,6 +676,7 @@ export function planAccess(input: AccessPlanInput): AccessPlan {
     baseline: mode === 'public' && previousMode !== 'public' ? null : keptBaseline,
     baselineCaptured: Object.keys(captured).length > 0 ? captured : null,
     neutralised,
+    neutralisedConnect: sortedUnique(connectFlipped),
     viewerRoleId: viewerFact,
     // Public leaves trusted and admitted overwrites on the room, so the record
     // keeps them too, but never a member who has since been blocked.
@@ -644,6 +705,8 @@ export function planAccess(input: AccessPlanInput): AccessPlan {
     baseline: keptBaseline,
     baselineCaptured: facts.baselineCaptured,
     neutralised: [...named.values()].sort((a, b) => compareIds(a.roleId, b.roleId)),
+    // Named until the restore has landed, like the roles above.
+    neutralisedConnect: sortedUnique([...aliveConnect, ...connectFlipped]),
     // Single-valued, so a CHANGE of moderator role names the old one: a role that can
     // still see a hidden room is the leak, and one left holding a stray View on a room
     // that is no longer hidden is not.

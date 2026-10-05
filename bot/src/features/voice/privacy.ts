@@ -393,6 +393,7 @@ function recordsAccess(record: RoomAccess | null): boolean {
     record.baseline !== undefined ||
     record.viewerRoleId !== undefined ||
     (record.neutralised?.length ?? 0) > 0 ||
+    (record.neutralisedConnect?.length ?? 0) > 0 ||
     (record.trusted?.length ?? 0) > 0 ||
     (record.blocked?.length ?? 0) > 0 ||
     (record.admitted?.length ?? 0) > 0 ||
@@ -2156,6 +2157,7 @@ export class PrivacyService {
     const roleIds = new Set<string>([
       ...current.filter((o) => o.type === OVERWRITE_ROLE).map((o) => o.id),
       ...(record?.neutralised ?? []).map((n) => n.roleId),
+      ...(record?.neutralisedConnect ?? []),
       ...(record?.viewerRoleId ? [record.viewerRoleId] : []),
       ...(viewerRoleId ? [viewerRoleId] : []),
     ]);

@@ -89,6 +89,14 @@ export const roomAccessSchema = z
       .array(z.object({ roleId: z.string(), view: overwriteBit }).passthrough())
       .optional(),
     /**
+     * Role overwrites whose Connect allow a lock or a hide flipped to a deny, so a
+     * locked room locks out a role-gated server's members too (a role's allow beats
+     * the `@everyone` deny). `/public` puts each back to an allow. Separate from
+     * `neutralised` so an older build, which restores only the View it knows about,
+     * never reads one of these as a View it changed.
+     */
+    neutralisedConnect: z.array(z.string()).optional(),
+    /**
      * The moderator role granted View on this room, so a change or removal of
      * the setting can revoke it. Manage Channels alone does not reveal a hidden
      * room.

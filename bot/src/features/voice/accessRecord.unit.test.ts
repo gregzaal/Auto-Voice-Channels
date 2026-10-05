@@ -17,6 +17,7 @@ const facts = (over: Partial<AccessFacts> = {}): AccessFacts => ({
   baseline: null,
   baselineCaptured: null,
   neutralised: [],
+  neutralisedConnect: [],
   viewerRoleId: null,
   trusted: [],
   admitted: [],
