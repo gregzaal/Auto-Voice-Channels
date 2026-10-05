@@ -145,8 +145,11 @@ export interface AccessPlanInput {
    */
   leaveRoleId?: string | null | undefined;
   /**
-   * Roles the caller knows the bot cannot edit (above its own top role). Writing
-   * an overwrite for one would fail the whole bulk request, so none is attempted:
+   * Roles the caller knows the bot cannot edit an overwrite for. Production fills
+   * none: Discord does not apply the role hierarchy to a channel's overwrites
+   * (measured 2026-10-05, a bot without Administrator wrote overwrites for a role above
+   * its top role), so this is for a write Discord does refuse, and for the tests.
+   * Writing an overwrite for one would fail the whole bulk request, so none is attempted:
    * a hide that one of them would defeat is refused (`role_defeats_hide`), and a
    * restore, a take-back or a grant that needs one is skipped and reported in
    * `skippedRoleIds`, leaving that role as it is.

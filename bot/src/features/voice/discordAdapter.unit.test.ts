@@ -1536,12 +1536,24 @@ describe('DiscordVoiceView.botRoleAccess', () => {
     } as unknown as Client);
   };
 
-  it('reports the roles at or above the bot as ones it cannot edit', () => {
+  /**
+   * Measured on the dev application on 2026-10-05: a bot with only Manage Channels and
+   * Manage Roles wrote View allow and View deny overwrites for a role above its top role
+   * and Discord answered 204. A server that gives all its bots one shared role, which
+   * is then the bot's own top role, was refused a hide on the strength of the old rule.
+   */
+  it('reports no role as one it cannot edit, whatever its position', () => {
     const v = viewWith({ low: 1, bots: 5, same: 5, high: 9 }, ['bots'], 'bots');
-    expect(v.botRoleAccess(GUILD, ['low', 'same', 'high'])?.uneditableRoleIds).toEqual([
-      'same',
-      'high',
-    ]);
+    expect(v.botRoleAccess(GUILD, ['low', 'same', 'high'])?.uneditableRoleIds).toEqual([]);
+  });
+
+  it('reports no role as uneditable when the bot holds a shared role as its top role', () => {
+    // The bot's managed role (2) sits below the role every bot in the server shares (7).
+    const v = viewWith({ managed: 2, sharedBots: 7 }, ['managed', 'sharedBots'], 'managed');
+    expect(v.botRoleAccess(GUILD, ['sharedBots'])).toEqual({
+      leaveRoleId: 'managed',
+      uneditableRoleIds: [],
+    });
   });
 
   it("names the bot's own managed role, and never calls it uneditable", () => {

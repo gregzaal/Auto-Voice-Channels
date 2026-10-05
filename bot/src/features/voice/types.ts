@@ -60,7 +60,10 @@ export interface BotChannelPermissions {
 export interface BotRoleAccess {
   /** The bot's own managed role, whose overwrite is left exactly as it is, or null. */
   leaveRoleId: string | null;
-  /** The roles, of those asked about, that the bot cannot edit an overwrite for. */
+  /**
+   * The roles, of those asked about, that the bot cannot edit an overwrite for. Discord's
+   * adapter reports none: the role hierarchy does not apply to a channel's overwrites.
+   */
   uneditableRoleIds: string[];
 }
 
@@ -148,15 +151,13 @@ export interface GuildVoiceView {
    */
   memberFacts?(guildId: string, memberId: string): MemberFacts | undefined;
   /**
-   * What the bot's own role position means for a set of roles: which of them it
-   * cannot edit an overwrite for, and which is its own managed role. `undefined`
-   * when the guild or the bot's member is not in the cache.
+   * Which role is the bot's own managed role, and which of a set of roles it cannot edit
+   * an overwrite for. `undefined` when the guild or the bot's member is not in the cache.
    *
-   * Optional and read like {@link memberFacts}. Writing an overwrite for a role
-   * above the bot's top role is assumed to fail, and one failure refuses a whole
-   * bulk write, so the planner is told up front and refuses a hide such a role
-   * would defeat. Unverified against Discord: see `uneditableRoleIds` in
-   * `accessPlan.ts`.
+   * Optional and read like {@link memberFacts}. The second half is empty in production:
+   * writing an overwrite for a role above the bot's top role works (measured 2026-10-05),
+   * so the planner is never told to refuse a hide on the strength of a role's position.
+   * It stays for a write Discord does refuse, and for the tests.
    */
   botRoleAccess?(guildId: string, roleIds: readonly string[]): BotRoleAccess | undefined;
   /**

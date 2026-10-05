@@ -131,10 +131,11 @@ describe('permissionProblemMessage', () => {
     expect(msg).toContain('who can see or join');
     expect(msg).toContain('Manage Roles');
     expect(msg).toContain('The room itself is working');
-    // The same operation covers a role above the bot and the limit on overrides, so
-    // a missing permission is the usual cause and not the only one it names.
+    // The same operation covers the limit on overrides too, so a missing permission is
+    // the usual cause and not the only one. A role's position is not a cause: Discord
+    // lets the bot edit an overwrite for a role above its own top role.
     expect(msg).toContain('usually because');
-    expect(msg).toContain('sits above mine');
+    expect(msg).not.toContain('sits above');
     // The room is fine, so neither the create copy nor the lost-access copy is true.
     expect(msg).not.toContain('lost access');
     expect(msg).not.toContain('could not create');

@@ -286,7 +286,7 @@ export function permissionProblemMessage(
     return (
       `⚠️ I could not change who can see or join <#${channelId}>. This is usually because I am ` +
       'missing **Manage Roles** (to set permission overrides) on the category the rooms are made ' +
-      'in, or on my role, or because a role that has an override on the room sits above mine. ' +
+      'in, or on my role. ' +
       'The room itself is working, but hiding it, saved blocks and saved trusted members may ' +
       'not be in effect until this is fixed.'
     );
@@ -454,9 +454,8 @@ export function permissionProblemSummary(problems: readonly ProblemLike[]): stri
     lines.push(
       `I could not change who can see or join ${list(accessChanges)}. This is usually because I ` +
         'am missing **Manage Roles** (to set permission overrides) on the category the rooms are ' +
-        'made in, or on my role, or because a role that has an override on a room sits above ' +
-        'mine. The rooms are working, but hiding a room, saved blocks and saved trusted members ' +
-        'may not be in effect until this is fixed.',
+        'made in, or on my role. The rooms are working, but hiding a room, saved blocks and ' +
+        'saved trusted members may not be in effect until this is fixed.',
     );
   }
   if (access.length > 0) {
