@@ -170,6 +170,12 @@ export class Reconciler {
      */
     const failures: string[] = [];
     /**
+     * The errors behind `failures`, one per distinct cause, so the alert says why and not only
+     * which guilds. Keyed by type and message: a shared cause is one entry however many guilds
+     * it failed, and a post stays inside Discord's message limit.
+     */
+    const causes = new Map<string, { guildIds: string[]; error: unknown }>();
+    /**
      * Permission refusals, counted apart from faults.
      *
      * Kept out of `failures` rather than filtered at the report, because the
@@ -194,6 +200,11 @@ export class Reconciler {
           }
           this.deps.logger.error({ err, guildId: id }, 'guild reconcile failed (isolated)');
           failures.push(id);
+          const cause =
+            err instanceof Error ? `${err.name}: ${err.message}` : `thrown: ${String(err)}`;
+          const seen = causes.get(cause);
+          if (seen) seen.guildIds.push(id);
+          else causes.set(cause, { guildIds: [id], error: err });
         }
       }
     };
@@ -205,6 +216,11 @@ export class Reconciler {
         failed: failures.length,
         of: ids.length,
         sample: failures.slice(0, 5),
+        // Written out by the reporter (`withErrorDetails`). At most three causes and five ids
+        // each, for the same message limit.
+        errors: [...causes.values()]
+          .slice(0, 3)
+          .map((c) => ({ guildIds: c.guildIds.slice(0, 5), error: c.error })),
         // Reported alongside so a sweep that is failing AND being refused reads
         // as one event rather than two unrelated numbers.
         ...(denied.length > 0 ? { deniedOnPermissions: denied.length } : {}),

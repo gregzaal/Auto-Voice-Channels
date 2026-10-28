@@ -69,6 +69,28 @@ describe('Reconciler sweep failure classification', () => {
     );
   });
 
+  /** A list of guild ids says which guilds; the error is what says why. */
+  it('carries the errors behind reconcile.failed, one per distinct cause', async () => {
+    const dropped = new Error('connection terminated unexpectedly');
+    const refused = new Error('Invalid Form Body');
+    const { reconciler, report } = reconcilerWith(async (id) => {
+      if (id === 'g3' || id === 'g4') throw dropped;
+      if (id === 'g7') throw refused;
+      return {};
+    });
+    await reconciler.reconcileGuilds(guilds(20));
+    expect(report).toHaveBeenCalledWith(
+      'reconcile.failed',
+      expect.any(String),
+      expect.objectContaining({
+        errors: [
+          { guildIds: ['g3', 'g4'], error: dropped },
+          { guildIds: ['g7'], error: refused },
+        ],
+      }),
+    );
+  });
+
   /**
    * Half the fleet refusing at once is not a hundred guild admins acting
    * together, it is our own role or a Discord-side change.

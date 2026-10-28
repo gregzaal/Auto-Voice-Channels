@@ -332,7 +332,7 @@ export class BillingReconciler {
       void this.runOnce().catch((err: unknown) => {
         this.deps.logger.error({ err }, 'billing reconcile tick failed');
         this.deps.report?.('billing.tick', 'Billing reconcile tick failed', {
-          error: err instanceof Error ? err.message : String(err),
+          error: err,
         });
       });
     }, this.intervalMs);

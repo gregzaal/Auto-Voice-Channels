@@ -443,7 +443,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       deps.reportError?.('Interaction handling failed', {
         guildId: interaction.guildId ?? undefined,
         type: interaction.type,
-        error: String(err),
+        error: err,
       });
       void safeReply(interaction, `⚠️ Something went wrong handling that: ${describeError(err)}`);
     });
@@ -4062,7 +4062,7 @@ Already subscribed? Add the new server ` +
        * what every command says about that.
        */
       deps.logger.warn({ err, guildId, name }, 'control panel action failed');
-      deps.reportError?.('Control panel action failed', { guildId, name, error: String(err) });
+      deps.reportError?.('Control panel action failed', { guildId, name, error: err });
       await interaction.editReply({
         content:
           `⚠️ I couldn't do that: ${describeError(err)}. If this keeps happening, AVC may be ` +
@@ -4280,7 +4280,7 @@ Already subscribed? Add the new server ` +
       deps.reportError?.('Control panel action failed', {
         guildId,
         name: 'panel:kick',
-        error: String(err),
+        error: err,
       });
       await interaction.editReply({
         content: `⚠️ I couldn't start that vote: ${describeError(err)}.`,
@@ -4517,7 +4517,7 @@ Already subscribed? Add the new server ` +
       deps.reportError?.('Control panel setting failed', {
         guildId,
         entry: key,
-        error: String(err),
+        error: err,
       });
       await interaction.followUp({
         content: `⚠️ I couldn't save that: ${describeError(err)}.`,
@@ -4554,7 +4554,7 @@ Already subscribed? Add the new server ` +
       deps.reportError?.('Control panel setting failed', {
         guildId,
         entry,
-        error: String(err),
+        error: err,
       });
       await interaction.followUp({
         content: `⚠️ I couldn't save that: ${describeError(err)}.`,

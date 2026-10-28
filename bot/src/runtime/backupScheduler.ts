@@ -378,7 +378,7 @@ export class BackupScheduler {
           details: { error: message },
         })
         .catch(() => {});
-      this.deps.report('backup.failed', 'Postgres backup failed', { error: message });
+      this.deps.report('backup.failed', 'Postgres backup failed', { error });
     } finally {
       storage.destroy();
     }
@@ -447,7 +447,7 @@ export class BackupScheduler {
         })
         .catch(() => {});
       this.deps.report('backup.drill.error', 'Backup restore drill could not run', {
-        error: message,
+        error,
       });
     } finally {
       storage.destroy();

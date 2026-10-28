@@ -1,7 +1,10 @@
+import { DiscordAPIError } from 'discord.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   AdminChannelReporter,
   RecordingErrorReporter,
+  errorDetail,
+  withErrorDetails,
   TeeErrorReporter,
   type ErrorReporter,
 } from './errorReporter.js';
@@ -348,5 +351,89 @@ describe('RecordingErrorReporter', () => {
     reporter.report('db.ping', 'x', { guildId: 'g1' });
     await flush();
     expect(seen).toMatchObject({ instance: 'inst-a', guildId: 'g1' });
+  });
+});
+
+describe('error details in alerts', () => {
+  const discordError = () =>
+    new DiscordAPIError(
+      { code: 50035, message: 'Invalid Form Body' } as never,
+      50035,
+      400,
+      'PATCH',
+      'https://discord.com/api/v10/channels/123',
+      { body: { permission_overwrites: [{ id: 'member-id' }] } } as never,
+    );
+
+  it('writes an error out as its type, message, code, status, request and top frames', () => {
+    const detail = errorDetail(discordError());
+    expect(detail).toMatchObject({
+      type: 'DiscordAPIError[50035]',
+      message: 'Invalid Form Body',
+      code: 50035,
+      status: 400,
+      request: 'PATCH https://discord.com/api/v10/channels/123',
+    });
+    expect((detail.stack as string[]).length).toBeGreaterThan(0);
+    expect((detail.stack as string[]).length).toBeLessThanOrEqual(5);
+  });
+
+  it('never carries the body a Discord request sent', () => {
+    expect(JSON.stringify(errorDetail(discordError()))).not.toContain('member-id');
+  });
+
+  it('follows a cause', () => {
+    const err = new Error('outer', { cause: new Error('inner') });
+    expect(errorDetail(err).cause).toMatchObject({ type: 'Error', message: 'inner' });
+  });
+
+  it('describes something thrown that is not an Error', () => {
+    expect(errorDetail('plain')).toEqual({ message: 'plain' });
+  });
+
+  it('finds errors however the context nests them, and leaves the rest alone', () => {
+    const at = new Date(0);
+    const out = withErrorDetails({
+      guildId: 'g1',
+      error: new Error('top'),
+      errors: [{ guildIds: ['g2'], error: new Error('nested') }],
+      at,
+    });
+    expect(out).toMatchObject({
+      guildId: 'g1',
+      error: { type: 'Error', message: 'top' },
+      errors: [{ guildIds: ['g2'], error: { type: 'Error', message: 'nested' } }],
+    });
+    expect(out.at).toBe(at);
+  });
+
+  it('posts the error, and not an empty object, to the admin channel', async () => {
+    const { client, sent } = fakeClient();
+    new AdminChannelReporter({ client, channelId: 'c', logger }).report('x', 'Failed', {
+      error: new Error('the actual reason'),
+    });
+    await flush();
+    expect(sent[0]).toContain('the actual reason');
+  });
+
+  it('stores the error written out in the alert row', async () => {
+    const { client } = fakeClient();
+    const channel = new AdminChannelReporter({ client, channelId: 'c', logger, throttleMs: 0 });
+    let seen: Record<string, unknown> | undefined;
+    new RecordingErrorReporter({
+      alerts: {
+        raise: async (input: { details?: Record<string, unknown> }) => {
+          seen = input.details;
+          return { opened: true, id: 1 };
+        },
+        markDelivered: async () => {},
+        markDeliveryFailed: async () => {},
+      } as never,
+      channel,
+      logger,
+      instanceId: 'inst-a',
+    }).report('x', 'Failed', { error: new Error('stored reason') });
+    await flush();
+    expect(seen).toMatchObject({ error: { type: 'Error', message: 'stored reason' } });
   });
 });

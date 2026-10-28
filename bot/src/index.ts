@@ -1359,7 +1359,7 @@ async function main(): Promise<void> {
   });
   client.on('error', (err) => {
     logger.error({ err }, 'gateway error');
-    errorReporter.report('gateway.error', 'Gateway error', { error: String(err) });
+    errorReporter.report('gateway.error', 'Gateway error', { error: err });
   });
   client.on('shardDisconnect', (event, shardId) => {
     // Logged with the close code, which is the first thing anyone reading a
@@ -1604,7 +1604,7 @@ async function main(): Promise<void> {
          * log line nobody is tailing.
          */
         errorReporter.report('db.ping', 'Database health ping failed', {
-          error: err instanceof Error ? err.message : String(err),
+          error: err,
         });
       },
     );

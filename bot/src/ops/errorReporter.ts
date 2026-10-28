@@ -136,7 +136,9 @@ export class AdminChannelReporter implements ErrorReporter {
 
     const carried = entry.suppressed;
     const suppressedNote = carried > 0 ? `\n_(+${carried} suppressed)_` : '';
-    const detail = Object.keys(context).length ? `\n\`\`\`json\n${safeJson(context)}\n\`\`\`` : '';
+    const detail = Object.keys(context).length
+      ? `\n\`\`\`json\n${safeJson(withErrorDetails(context))}\n\`\`\``
+      : '';
     const tag =
       this.opts.fleet && this.opts.instanceId
         ? `[${this.opts.fleet}:${this.opts.instanceId}] `
@@ -241,6 +243,65 @@ export class TeeErrorReporter implements ErrorReporter {
   }
 }
 
+/**
+ * Stack frames an alert carries: enough to place the throw, few enough that the post stays
+ * inside Discord's message limit with the rest of the context beside it.
+ */
+const ALERT_STACK_FRAMES = 5;
+/** How deep {@link withErrorDetails} looks for errors, and how many `cause`s it follows. */
+const MAX_ERROR_DEPTH = 3;
+
+/**
+ * An error as an alert shows it: what it is, what it said, the code and HTTP status Discord or
+ * Postgres gave it, the request it answered, and where it was thrown.
+ *
+ * `JSON.stringify` writes an `Error` as `{}`, which is how an alert used to arrive carrying a
+ * guild id and nothing about why. Deliberately NOT the whole object: a Discord error keeps the
+ * body it sent (a room's overwrites name every member in it) and a Postgres error can keep row
+ * values, and neither belongs in a channel post.
+ */
+export function errorDetail(err: unknown, depth = 0): Record<string, unknown> {
+  if (!(err instanceof Error)) return { message: String(err) };
+  const e = err as Error & { code?: unknown; status?: unknown; method?: unknown; url?: unknown };
+  const stack = (err.stack ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('at '))
+    .slice(0, ALERT_STACK_FRAMES)
+    .map((line) => line.replace(/file:\/\/\/app\//g, ''));
+  return {
+    type: err.name,
+    message: err.message,
+    ...(typeof e.code === 'string' || typeof e.code === 'number' ? { code: e.code } : {}),
+    ...(typeof e.status === 'number' ? { status: e.status } : {}),
+    ...(typeof e.method === 'string' && typeof e.url === 'string'
+      ? { request: `${e.method} ${e.url}` }
+      : {}),
+    ...(stack.length > 0 ? { stack } : {}),
+    ...(err.cause !== undefined && depth < MAX_ERROR_DEPTH
+      ? { cause: errorDetail(err.cause, depth + 1) }
+      : {}),
+  };
+}
+
+/**
+ * The context with every `Error` in it, however nested, written out by {@link errorDetail}.
+ *
+ * Done here, once, for every alert, so a caller reports the error it caught as it caught it
+ * (`{ error: err }`) and the post and the stored row both say what went wrong.
+ */
+export function withErrorDetails(context: Record<string, unknown>): Record<string, unknown> {
+  const visit = (value: unknown, depth: number): unknown => {
+    if (value instanceof Error) return errorDetail(value);
+    if (depth >= MAX_ERROR_DEPTH || typeof value !== 'object' || value === null) return value;
+    if (Array.isArray(value)) return value.map((v) => visit(v, depth + 1));
+    // Plain objects only: a Date or a Map is left for JSON to write as it always has.
+    if (Object.getPrototypeOf(value) !== Object.prototype) return value;
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, visit(v, depth + 1)]));
+  };
+  return visit(context, 0) as Record<string, unknown>;
+}
+
 function safeJson(value: unknown): string {
   try {
     return JSON.stringify(value, null, 2).slice(0, 1500);
@@ -280,7 +341,7 @@ export class PersistentErrorReporter implements ErrorReporter {
         message,
         target,
         audience: this.opts.audience ?? 'hosted',
-        details: context,
+        details: withErrorDetails(context),
       })
       .catch((err: unknown) => {
         this.opts.logger.warn({ err, kind }, 'could not persist an operational alert');
@@ -334,7 +395,7 @@ export class RecordingErrorReporter implements ErrorReporter {
         audience: this.opts.audience ?? 'hosted',
         // Stamped so the retry loop and the reconciler agree about who raised
         // this, the same way the watcher stamps what it raises.
-        details: { ...context, instance: this.opts.instanceId },
+        details: { ...withErrorDetails(context), instance: this.opts.instanceId },
       });
       const result = await outcome;
       if (result === 'sent') {

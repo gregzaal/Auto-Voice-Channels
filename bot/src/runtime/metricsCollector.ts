@@ -695,7 +695,7 @@ export class MetricsCollector {
       this.lastFlushError = (err as Error).message;
       this.deps.logger.warn({ err, pending: this.accumulator.size }, 'metrics flush failed');
       this.deps.report?.('metrics.flush', 'Metrics flush failed', {
-        error: this.lastFlushError,
+        error: err,
         pending: this.accumulator.size,
       });
     }
@@ -767,7 +767,7 @@ export class MetricsCollector {
        */
       this.deps.report?.(`metrics.rollup.${stage}`, `Metrics rollup stage ${stage} failed`, {
         stage,
-        error: (err as Error).message,
+        error: err,
       });
     };
 

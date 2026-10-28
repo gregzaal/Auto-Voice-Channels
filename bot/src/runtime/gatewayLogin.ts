@@ -245,7 +245,7 @@ export function connectGateway(deps: GatewayLoginDeps): Promise<GatewayLoginOutc
           deps.report(
             'gateway.login_fatal',
             'Gateway login was refused for a reason retrying cannot fix; the gateway will stay down',
-            { error: err instanceof Error ? err.message : String(err), attempt },
+            { error: err, attempt },
           );
           fail(err);
           return;
@@ -260,7 +260,7 @@ export function connectGateway(deps: GatewayLoginDeps): Promise<GatewayLoginOutc
          */
         if (attempt === 1) {
           deps.report('gateway.login_failed', 'Gateway login failed; retrying in the background', {
-            error: err instanceof Error ? err.message : String(err),
+            error: err,
           });
         }
         /**
