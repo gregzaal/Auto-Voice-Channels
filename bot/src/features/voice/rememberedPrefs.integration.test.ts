@@ -340,6 +340,61 @@ describe('remembered room settings (integration)', () => {
    * create, so a remembered status goes into the row the create writes and that render reads
    * it from there, as a status set with `/name` would be.
    */
+  describe('a name Discord refuses (a Server Discovery server)', () => {
+    it('is answered plainly, leaves the room as it was and remembers nothing', async () => {
+      await optIn();
+      await prefs.saveName(GUILD, PRIMARY, ALICE, 'Den');
+      const room = await join(feature);
+      const before = (await secondaries.get(room))!.state;
+      actions.refuseNamesMatching = /badword/;
+
+      const result = await commands.setName(GUILD, room, ALICE, 'badword lounge', {
+        fromPanel: true,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain('Server Discovery');
+      const after = (await secondaries.get(room))!.state;
+      expect(after.template).toBe(before.template);
+      expect(after.name).toBe(before.name);
+      expect((await prefs.get(PRIMARY, ALICE))?.name).toBe('Den');
+      expect(actions.ofType('rename')).toEqual([]);
+    });
+
+    it('costs that room and not the guild sweep, and is not asked again', async () => {
+      await optIn();
+      const room = await join(feature);
+      const other = await join(feature, member(BOB));
+      // A name rendered from what is stored, as a game title can produce one.
+      const row = (await secondaries.get(room))!;
+      await secondaries.updateState(room, { ...row.state, template: 'badword room' });
+      // A room the sweep has to rename, after the refused one.
+      await secondaries.mergeState(other, { name: 'stale' });
+      actions.refuseNamesMatching = /badword/;
+
+      await feature.reconcileGuild(GUILD);
+      await feature.reconcileGuild(GUILD);
+
+      expect(actions.ofType('rename').map((a) => a.channelId)).toEqual([other]);
+      const refusals = warn.mock.calls.filter(([, msg]) => msg === 'Discord refused a room name');
+      expect(refusals).toEqual([
+        [expect.objectContaining({ guildId: GUILD, secondaryId: room }), expect.any(String)],
+      ]);
+    });
+
+    it('makes the room with the creator channel’s own name when the remembered one is refused, and forgets it', async () => {
+      await optIn();
+      await prefs.saveName(GUILD, PRIMARY, ALICE, 'badword lounge');
+      actions.refuseNamesMatching = /badword/;
+
+      const room = await join(feature);
+
+      expect(actions.ofType('create').map((a) => a.name)).toEqual(["Alice's room"]);
+      expect((await secondaries.get(room))!.state.template).toBeUndefined();
+      expect((await prefs.get(PRIMARY, ALICE))?.name).toBeUndefined();
+    });
+  });
+
   describe('a remembered status', () => {
     it('starts the room with it in the row, and its first render sets it with no rename', async () => {
       await optIn();

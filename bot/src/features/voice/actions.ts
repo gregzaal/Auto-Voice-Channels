@@ -445,6 +445,31 @@ export type RecordedAction =
       above: boolean;
     };
 
+/** The Invalid Form Body Discord answers a name it does not allow in a Discovery server with. */
+export function nameRefusedError(method: 'PATCH' | 'POST'): DiscordAPIError {
+  return new DiscordAPIError(
+    {
+      code: 50035,
+      message: 'Invalid Form Body',
+      errors: {
+        name: {
+          _errors: [
+            {
+              code: 'INVALID_COMMUNITY_PROPERTY_NAME',
+              message: 'Contains words not allowed for servers in Server Discovery.',
+            },
+          ],
+        },
+      },
+    } as never,
+    50035,
+    400,
+    method,
+    'https://discord.test',
+    {} as never,
+  );
+}
+
 /**
  * In-memory recorder used by tests. Records every action and assigns synthetic
  * channel ids on create. Tolerates deleting unknown channels (idempotent).
@@ -459,6 +484,11 @@ export class RecordingVoiceActions implements VoiceActions {
   failRenameForChannel?: string;
   /** When set, `renameChannel` reports this channel id as deleted on Discord. */
   renameGoneForChannel?: string;
+  /**
+   * When set, `renameChannel` and `createVoiceChannel` refuse a name it matches, as Discord
+   * refuses a name with words it does not allow in a Server Discovery server.
+   */
+  refuseNamesMatching?: RegExp;
   /** When true, `createVoiceChannel` throws Missing Permissions (tests the create path). */
   failCreate = false;
   /** When true, `moveMember` throws Missing Permissions (tests the created-but-stranded path). */
@@ -550,6 +580,9 @@ export class RecordingVoiceActions implements VoiceActions {
         ),
       );
     }
+    if (this.refuseNamesMatching?.test(input.name)) {
+      return Promise.reject(nameRefusedError('POST'));
+    }
     const channelId = `${this.idPrefix}-${++this.seq}`;
     this.created.add(channelId);
     this.actions.push({
@@ -610,6 +643,7 @@ export class RecordingVoiceActions implements VoiceActions {
         ),
       );
     }
+    if (this.refuseNamesMatching?.test(name)) return Promise.reject(nameRefusedError('PATCH'));
     this.actions.push({ type: 'rename', guildId, channelId, name });
     if (this.renameGoneForChannel === channelId) {
       return Promise.resolve({ rateLimited: false, channelGone: true });

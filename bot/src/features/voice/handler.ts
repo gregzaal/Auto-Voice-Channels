@@ -14,7 +14,7 @@ import type {
   StartMode,
 } from '@avc/core';
 import { isEntitled, startModeOf } from '@avc/core';
-import type { VoiceActions } from './actions.js';
+import type { CreateVoiceChannelInput, VoiceActions } from './actions.js';
 import type { GuildVoiceView, MemberActivity, VoiceMember, VoiceStateEvent } from './types.js';
 import {
   getChannelGames,
@@ -31,7 +31,12 @@ import {
   readGroups,
   type VoiceSettings,
 } from './guildSettings.js';
-import { ChannelObfuscatedError, isPermissionError, withoutRequestBody } from './discordAdapter.js';
+import {
+  ChannelObfuscatedError,
+  isPermissionError,
+  nameRefusalOf,
+  withoutRequestBody,
+} from './discordAdapter.js';
 import { CreationRefusedError, type PrivateCreation } from './privacy.js';
 import {
   LOST_ACCESS_RETRY_MS,
@@ -114,6 +119,11 @@ function renameLogMessage(channelId: string, name: string, rateLimited: boolean)
   return rateLimited
     ? `⏳ Rename of <#${channelId}> to **${name}** deferred. Discord is rate-limiting renames on this channel, so the new name will apply within a few minutes.`
     : `✏️ <#${channelId}> renamed to **${name}**`;
+}
+
+/** What a member or admin is told when Discord refused the name they set. */
+export function nameRefusedMessage(reason: string): string {
+  return `Discord didn't accept that name in this server: ${reason} The channel keeps its old name.`;
 }
 
 /** Decision returned by a {@link CreationGate}. */
@@ -243,10 +253,11 @@ export interface VoiceFeatureDeps {
    * here, so the feature is testable without it, and absent means "not counted" rather than
    * "nobody", and a room made from the creator channel's own defaults.
    *
-   * `get` is optional on its own: a construction that only counts restores nothing.
+   * `get` is optional on its own: a construction that only counts restores nothing. `saveName`
+   * only forgets a remembered name Discord refused when a room was made.
    */
   memberPrefs?: Pick<MemberRoomPrefsRepository, 'countByPrimary'> &
-    Partial<Pick<MemberRoomPrefsRepository, 'get'>>;
+    Partial<Pick<MemberRoomPrefsRepository, 'get' | 'saveName'>>;
   /**
    * Called after a secondary's record is removed (deletion or reconcile), so
    * dependent resources (e.g. a private channel's "⇩ Join" companion) can be
@@ -477,6 +488,12 @@ export interface RerenderResult {
   status?: string;
   /** True when the rename was deferred by Discord's per-channel rate limit. */
   rateLimited?: boolean;
+  /**
+   * Discord's reason when it refused the rendered name ({@link nameRefusalOf}). The channel
+   * kept its old name, and the refused one is stored as rendered so the same name is not
+   * asked for again on every render.
+   */
+  nameRefused?: string;
 }
 
 /**
@@ -1029,33 +1046,37 @@ export class VoiceFeature {
     // Generate the per-channel random seed once, here, so `[[random]]` picks are
     // fixed for this channel's lifetime and never trigger a later rename.
     const seed = randomSeed();
-    const name = renderChannelName(template, {
-      ...this.buildRenderContext({
-        channelId,
-        settings,
-        members: [member],
-        index,
-        ownerId: member.id,
-        seed,
-        // The room does not exist yet, so `{{PRIVATE}}` and `{{HIDDEN}}` have to come
-        // from the primary's intent. `makePrivateOnCreate` runs AFTER this render, so
-        // reading them back would render `false` and cost an immediate second
-        // rename on every default-private room. A hidden room is private as well.
-        isPrivate: startMode !== 'public',
-        isHidden: startMode === 'hidden',
-        startAt: primary?.template.startAt,
-        // On the create path the joining member IS the original creator, so
-        // the token renders correctly on the very first name.
-        originalCreatorId: member.id,
-        originalCreatorName: member.displayName,
-      }),
-      // `buildRenderContext` reads the LIVE channel's limit, and the live
-      // channel here is the CREATOR channel, which is not the room being made.
-      // The room is created with the limit decided above (the member's remembered one,
-      // else the primary's configured default), so that is the honest value for this
-      // one render.
-      userLimit,
-    });
+    const renderName = (tmpl: string): string =>
+      renderChannelName(tmpl, {
+        ...this.buildRenderContext({
+          channelId,
+          settings,
+          members: [member],
+          index,
+          ownerId: member.id,
+          seed,
+          // The room does not exist yet, so `{{PRIVATE}}` and `{{HIDDEN}}` have to come
+          // from the primary's intent. `makePrivateOnCreate` runs AFTER this render, so
+          // reading them back would render `false` and cost an immediate second
+          // rename on every default-private room. A hidden room is private as well.
+          isPrivate: startMode !== 'public',
+          isHidden: startMode === 'hidden',
+          startAt: primary?.template.startAt,
+          // On the create path the joining member IS the original creator, so
+          // the token renders correctly on the very first name.
+          originalCreatorId: member.id,
+          originalCreatorName: member.displayName,
+        }),
+        // `buildRenderContext` reads the LIVE channel's limit, and the live
+        // channel here is the CREATOR channel, which is not the room being made.
+        // The room is created with the limit decided above (the member's remembered one,
+        // else the primary's configured default), so that is the honest value for this
+        // one render.
+        userLimit,
+      });
+    let name = renderName(template);
+    /** The member's remembered name, unless Discord refused it and the room fell back. */
+    let rememberedName = remembered.name;
 
     // Copy the primary's own bitrate/region/video-quality/nsfw, matching the
     // legacy bot (`create_secondary`). `voicePropertiesOf` is "cannot say" when
@@ -1067,7 +1088,7 @@ export class VoiceFeature {
     const primaryProps = this.deps.voice.voicePropertiesOf?.(channelId);
     let newChannelId: string;
     try {
-      newChannelId = await this.deps.actions.createVoiceChannel({
+      const input: CreateVoiceChannelInput = {
         guildId,
         name,
         userLimit,
@@ -1100,7 +1121,34 @@ export class VoiceFeature {
         // `/inheritpermissions` can switch the source to the category or a specific
         // channel. Unset must NOT fall through to Discord's category-sync.
         inheritFrom: primary?.template.inheritperms ?? 'primary',
-      });
+      };
+      try {
+        newChannelId = await this.deps.actions.createVoiceChannel(input);
+      } catch (err) {
+        /**
+         * A remembered name Discord refuses (a Server Discovery server's word list) would fail
+         * every room this member makes here, so the room is made with the creator channel's own
+         * name instead, and the remembered one is forgotten. A refused name that is the creator
+         * channel's own still throws, as it always did: there is nothing of the member's to drop.
+         */
+        const refused = nameRefusalOf(err);
+        if (refused === undefined || rememberedName === undefined) throw err;
+        this.deps.logger.warn(
+          { guildId, primaryId: channelId, memberId: member.id, reason: refused },
+          'Discord refused a remembered room name; using the creator channel name',
+        );
+        rememberedName = undefined;
+        name = renderName(primary?.template.name ?? settings.channelNameTemplate);
+        newChannelId = await this.deps.actions.createVoiceChannel({ ...input, name });
+        await this.deps.memberPrefs
+          ?.saveName?.(guildId, channelId, member.id, null)
+          .catch((clearErr: unknown) =>
+            this.deps.logger.warn(
+              { guildId, primaryId: channelId, memberId: member.id, err: clearErr },
+              'could not forget a refused remembered room name',
+            ),
+          );
+      }
     } catch (err) {
       if (!isPermissionError(err)) throw err;
       // Can't create the channel (missing perms — usually Manage Roles to copy the
@@ -1131,7 +1179,7 @@ export class VoiceFeature {
         originalCreatorName: member.displayName,
         // The member's own template, exactly as `/name` would have stored it, so every later
         // render of this room reads it from the same place and agrees with `name` above.
-        ...(remembered.name !== undefined ? { template: remembered.name } : {}),
+        ...(rememberedName !== undefined ? { template: rememberedName } : {}),
         // And their own status template, where `/name` stores it. A room's status is first set
         // by the render that follows the owner's arrival, which reads it from here, so it
         // costs no write of its own either.
@@ -1877,15 +1925,27 @@ export class VoiceFeature {
       try {
         rename = await this.deps.actions.renameChannel(guildId, channelId, result.name);
       } catch (err) {
-        // Recoverable (grant the permission back), so an interactive caller keeps
-        // the row — and the template the admin just wrote — and reports instead.
-        if (!isPermissionError(err) || opts.onUnmanageable !== 'abandon') throw err;
-        // Background caller: the channel still exists but an override hid it.
-        // Stop managing it, or reconcile retries the impossible rename forever.
-        await this.abandonManaged(guildId, channelId, 'rename', err);
-        return {};
+        // Never accepted however often it is asked, so stored as rendered (below) rather than
+        // thrown, as for a room (see `rerenderSecondary`). The caller is told why.
+        const refused = nameRefusalOf(err);
+        if (refused !== undefined) {
+          this.deps.logger.warn(
+            { guildId, managedId: channelId, reason: refused },
+            'Discord refused a managed channel name',
+          );
+          delete result.name;
+          result.nameRefused = refused;
+        } else {
+          // Recoverable (grant the permission back), so an interactive caller keeps
+          // the row — and the template the admin just wrote — and reports instead.
+          if (!isPermissionError(err) || opts.onUnmanageable !== 'abandon') throw err;
+          // Background caller: the channel still exists but an override hid it.
+          // Stop managing it, or reconcile retries the impossible rename forever.
+          await this.abandonManaged(guildId, channelId, 'rename', err);
+          return {};
+        }
       }
-      if (rename.channelGone) {
+      if (rename?.channelGone) {
         // Confirmed deleted on Discord — objective and unrecoverable, so the row
         // goes whoever asked. Nothing to notify about on the background path: the
         // admin deleted it, which is not a problem to report back to them.
@@ -1901,12 +1961,15 @@ export class VoiceFeature {
         }
         return {};
       }
-      if (rename.rateLimited) result.rateLimited = true;
-      this.deps.serverLog?.(
-        guildId,
-        2,
-        renameLogMessage(channelId, result.name, rename.rateLimited),
-      );
+      // Undefined when the name was refused: nothing was renamed, so nothing is logged as one.
+      if (rename && result.name !== undefined) {
+        if (rename.rateLimited) result.rateLimited = true;
+        this.deps.serverLog?.(
+          guildId,
+          2,
+          renameLogMessage(channelId, result.name, rename.rateLimited),
+        );
+      }
     }
     if (result.status !== undefined) {
       await this.deps.actions.setVoiceStatus(guildId, channelId, result.status);
@@ -2085,7 +2148,19 @@ export class VoiceFeature {
     const trimmed = value.trim().replace(/[\r\n]+/g, ' ');
     if (trimmed === '') return { ok: false, message: "The name template can't be empty." };
     await this.deps.managed.setTemplate(guildId, channelId, { ...row.template, name: trimmed });
-    await this.rerenderManaged(guildId, channelId);
+    const { nameRefused } = await this.rerenderManaged(guildId, channelId);
+    if (nameRefused !== undefined) {
+      // Put back the template and the name the channel still has, so no render asks again.
+      await this.deps.managed.setTemplate(guildId, channelId, row.template);
+      const now = await this.deps.managed.get(channelId);
+      if (now) {
+        await this.deps.managed.updateState(guildId, channelId, {
+          ...now.state,
+          name: row.state.name,
+        });
+      }
+      return { ok: false, message: nameRefusedMessage(nameRefused) };
+    }
     return { ok: true, message: "Updated this channel's name template." };
   }
 
@@ -2418,9 +2493,22 @@ export class VoiceFeature {
     }
 
     let rateLimited = false;
+    let nameRefused: string | undefined;
     if (nameChanged) {
-      ({ rateLimited } = await this.deps.actions.renameChannel(guildId, channelId, name));
-      this.deps.serverLog?.(guildId, 2, renameLogMessage(channelId, name, rateLimited));
+      try {
+        ({ rateLimited } = await this.deps.actions.renameChannel(guildId, channelId, name));
+        this.deps.serverLog?.(guildId, 2, renameLogMessage(channelId, name, rateLimited));
+      } catch (err) {
+        // A name Discord will never take (a Server Discovery server's word list). Thrown, it
+        // failed the guild's sweep every five minutes for the life of the room. Stored below as
+        // if rendered, so it is asked for again only once the render changes.
+        nameRefused = nameRefusalOf(err);
+        if (nameRefused === undefined) throw err;
+        this.deps.logger.warn(
+          { guildId, secondaryId: channelId, reason: nameRefused },
+          'Discord refused a room name',
+        );
+      }
     }
     if (statusChanged) {
       await this.deps.actions.setVoiceStatus(guildId, channelId, status);
@@ -2461,9 +2549,10 @@ export class VoiceFeature {
       're-rendered secondary channel',
     );
     return {
-      ...(nameChanged ? { name } : {}),
+      ...(nameChanged && nameRefused === undefined ? { name } : {}),
       ...(statusChanged ? { status } : {}),
       ...(rateLimited ? { rateLimited: true } : {}),
+      ...(nameRefused !== undefined ? { nameRefused } : {}),
     };
   }
 

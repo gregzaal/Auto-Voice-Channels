@@ -6,7 +6,7 @@ import type {
 } from '@avc/core';
 import type { VoiceActions } from './actions.js';
 import { claimFeatureFor } from './commandAccess.js';
-import type { VoiceFeature } from './handler.js';
+import { nameRefusedMessage, type RerenderResult, type VoiceFeature } from './handler.js';
 import {
   isTruncatedPrefill,
   rememberSetting,
@@ -224,15 +224,37 @@ export class VoiceCommands {
     // Saved before the re-render, which can throw: the room already has the name, and a save
     // that sat behind it would leave a member told the command failed about a room that was
     // renamed and not remembered.
+    //
+    // A name is remembered after the re-render instead, unless Discord refused it, which it
+    // would refuse in every later room too. A re-render that throws still remembers it.
     if (field === 'status') {
       await this.remember(row, userId, {
         field: 'status',
         value: isReset || clearedStatus ? null : stored,
       });
-    } else if (isReset || !isTruncatedPrefill(stored, row.state.template)) {
-      await this.remember(row, userId, { field: 'name', value: isReset ? null : stored });
     }
-    const r = await this.deps.feature.rerenderSecondary(guildId, id);
+    let r: RerenderResult | undefined;
+    try {
+      r = await this.deps.feature.rerenderSecondary(guildId, id);
+    } finally {
+      if (
+        field === 'name' &&
+        r?.nameRefused === undefined &&
+        (isReset || !isTruncatedPrefill(stored, row.state.template))
+      ) {
+        await this.remember(row, userId, { field: 'name', value: isReset ? null : stored });
+      }
+    }
+    if (field === 'name' && r.nameRefused !== undefined) {
+      // The room kept its name, so its template and stored name go back to match it. Over what
+      // the re-render wrote, which may have touched other keys.
+      const now = (await this.deps.secondaries.get(id))?.state ?? row.state;
+      const restored = { ...now, name: row.state.name };
+      if (row.state.template === undefined) delete restored.template;
+      else restored.template = row.state.template;
+      await this.deps.secondaries.updateState(id, restored);
+      return fail(nameRefusedMessage(r.nameRefused));
+    }
     const note = rateLimitNote(r.rateLimited ? 1 : 0);
     return ok(
       isReset

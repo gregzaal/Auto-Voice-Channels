@@ -151,6 +151,23 @@ export function isPermissionError(err: unknown): boolean {
 }
 
 /**
+ * Discord's reason when it refused a channel's NAME, or undefined for any other error.
+ *
+ * A server in Server Discovery refuses names holding words Discord does not allow there
+ * (`INVALID_COMMUNITY_PROPERTY_NAME`), and nothing a retry does changes that: the same name
+ * is refused every time. Read from the field errors and not the code alone, because an
+ * Invalid Form Body about any other field (a bitrate, an overwrite) is a different problem.
+ */
+export function nameRefusalOf(err: unknown): string | undefined {
+  if (!isApiError(err, INVALID_FORM_BODY)) return undefined;
+  const errors = ((err as DiscordAPIError).rawError as { errors?: unknown }).errors;
+  if (typeof errors !== 'object' || errors === null || !('name' in errors)) return undefined;
+  const reasons = (errors.name as { _errors?: { message?: unknown }[] } | null)?._errors;
+  const message = Array.isArray(reasons) ? reasons[0]?.message : undefined;
+  return typeof message === 'string' ? message : 'Discord did not accept the name.';
+}
+
+/**
  * Whether Discord says the thing is already gone.
  *
  * Distinct from a permission error, and the pair together are the only

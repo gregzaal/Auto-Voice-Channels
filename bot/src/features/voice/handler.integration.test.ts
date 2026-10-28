@@ -3403,6 +3403,24 @@ describe('VoiceFeature (integration)', () => {
       expect(after!.template).toEqual(before);
     });
 
+    it('answers a name template Discord refuses, keeps the old one and does not ask again', async () => {
+      voice.put(ADOPTED, member('alice'));
+      await f.adoptChannel(GUILD, ADOPTED, 'General');
+      const before = (await managed.get(ADOPTED))!;
+      actions.refuseNamesMatching = /badword/;
+      const renames = actions.ofType('rename').length;
+
+      const result = await f.setManagedName(GUILD, ADOPTED, 'badword hall');
+
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain('Server Discovery');
+      const after = (await managed.get(ADOPTED))!;
+      expect(after.template).toEqual(before.template);
+      expect(after.state.name).toBe(before.state.name);
+      expect(await f.rerenderManaged(GUILD, ADOPTED, { onUnmanageable: 'abandon' })).toEqual({});
+      expect(actions.ofType('rename')).toHaveLength(renames);
+    });
+
     it('stops tracking managed and secondary channels deleted on Discord', async () => {
       voice.put(ADOPTED, member('alice'));
       await f.adoptChannel(GUILD, ADOPTED, 'General');

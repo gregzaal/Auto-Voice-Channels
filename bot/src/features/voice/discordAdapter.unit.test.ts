@@ -8,6 +8,7 @@ import {
 import type { Client, GuildMember, VoiceState } from 'discord.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ResolvedOverwrite } from './accessPlan.js';
+import { nameRefusedError } from './actions.js';
 import {
   CHANNEL_OBFUSCATED,
   ChannelObfuscatedError,
@@ -16,6 +17,7 @@ import {
   everyoneViewDenied,
   isPermissionError,
   maskOverwrites,
+  nameRefusalOf,
   normalizeVoiceState,
   withBotAccess,
 } from './discordAdapter.js';
@@ -3165,5 +3167,31 @@ describe('DiscordVoiceActions.moveMember', () => {
     await expect(
       new DiscordVoiceActions(clientFor(voice)).moveMember('g1', 'u1', null, { onlyFrom: 'room' }),
     ).rejects.toBeInstanceOf(DiscordAPIError);
+  });
+});
+
+describe('nameRefusalOf', () => {
+  const formError = (errors: unknown) =>
+    new DiscordAPIError(
+      { code: 50035, message: 'Invalid Form Body', errors } as never,
+      50035,
+      400,
+      'PATCH',
+      'https://discord.test',
+      {} as never,
+    );
+
+  it('reads the reason Discord gave for refusing a name', () => {
+    expect(nameRefusalOf(nameRefusedError('PATCH'))).toBe(
+      'Contains words not allowed for servers in Server Discovery.',
+    );
+  });
+
+  it('is undefined for an Invalid Form Body about another field, and for any other error', () => {
+    expect(nameRefusalOf(formError({ bitrate: { _errors: [{ message: 'too high' }] } }))).toBe(
+      undefined,
+    );
+    expect(nameRefusalOf(formError(undefined))).toBe(undefined);
+    expect(nameRefusalOf(new Error('Invalid Form Body'))).toBe(undefined);
   });
 });
