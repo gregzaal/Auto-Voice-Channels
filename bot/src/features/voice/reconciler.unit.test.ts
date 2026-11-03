@@ -1,5 +1,6 @@
 import { DiscordAPIError } from 'discord.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CircuitOpenError } from '../../runtime/circuitBreaker.js';
 import { fakeLogger } from '../../runtime/testUtils.js';
 import { Reconciler } from './reconciler.js';
 
@@ -88,6 +89,48 @@ describe('Reconciler sweep failure classification', () => {
           { guildIds: ['g7'], error: refused },
         ],
       }),
+    );
+  });
+
+  /** A retry-after in the message is not a different fault. */
+  it('groups failures whose messages differ only in their numbers', async () => {
+    const { reconciler, report } = reconcilerWith(async (id) => {
+      if (id === 'g3') throw new CircuitOpenError(1200);
+      if (id === 'g4') throw new CircuitOpenError(4500);
+      return {};
+    });
+    await reconciler.reconcileGuilds(guilds(20));
+    const context = report.mock.calls[0]![2] as { errors: { guildIds: string[] }[] };
+    expect(context.errors.map((e) => e.guildIds)).toEqual([['g3', 'g4']]);
+  });
+
+  /** The post is cut at 1500 characters, and a later cause is what to lose. */
+  it('puts the errors after the counts', async () => {
+    const { reconciler, report } = reconcilerWith(async (id) => {
+      if (id === 'g3') throw apiError(50013, 'Missing Permissions');
+      if (id === 'g4') throw new Error('connection terminated unexpectedly');
+      return {};
+    });
+    await reconciler.reconcileGuilds(guilds(20));
+    const context = report.mock.calls[0]![2] as Record<string, unknown>;
+    expect(context).toHaveProperty('deniedOnPermissions', 1);
+    expect(Object.keys(context).at(-1)).toBe('errors');
+  });
+
+  it('keeps sweeping after a guild throws something that cannot be printed', async () => {
+    const reached: string[] = [];
+    const { reconciler, report } = reconcilerWith(async (id) => {
+      reached.push(id);
+      // No prototype, so no toString.
+      if (id === 'g3') throw Object.create(null);
+      return {};
+    });
+    await reconciler.reconcileGuilds(guilds(20));
+    expect(reached).toHaveLength(20);
+    expect(report).toHaveBeenCalledWith(
+      'reconcile.failed',
+      expect.any(String),
+      expect.objectContaining({ failed: 1, sample: ['g3'] }),
     );
   });
 

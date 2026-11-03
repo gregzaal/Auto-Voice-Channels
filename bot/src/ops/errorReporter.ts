@@ -252,6 +252,23 @@ const ALERT_STACK_FRAMES = 5;
 const MAX_ERROR_DEPTH = 3;
 
 /**
+ * A frame from a dependency or from Node itself. A Discord error's first five frames are all
+ * `@discordjs/rest` and the task queue, so without this the frame that placed the request never
+ * made the cut.
+ */
+const LIBRARY_FRAME = /node_modules|\(node:|^at node:/;
+
+/**
+ * A request URL as an alert shows it: no query string, and the token an interaction or webhook
+ * route carries replaced. `/interactions/{id}/{token}/callback` and `/webhooks/{app}/{token}/...`
+ * can answer as the bot for fifteen minutes, so whoever reads the admin channel or the alerts
+ * table must not get one.
+ */
+export function redactRequestUrl(url: string): string {
+  return url.split('?')[0]!.replace(/\/(interactions|webhooks)\/(\d+)\/[^/]+/g, '/$1/$2/:token');
+}
+
+/**
  * An error as an alert shows it: what it is, what it said, the code and HTTP status Discord or
  * Postgres gave it, the request it answered, and where it was thrown.
  *
@@ -263,10 +280,14 @@ const MAX_ERROR_DEPTH = 3;
 export function errorDetail(err: unknown, depth = 0): Record<string, unknown> {
   if (!(err instanceof Error)) return { message: String(err) };
   const e = err as Error & { code?: unknown; status?: unknown; method?: unknown; url?: unknown };
-  const stack = (err.stack ?? '')
+  const frames = (err.stack ?? '')
     .split('\n')
     .map((line) => line.trim())
-    .filter((line) => line.startsWith('at '))
+    .filter((line) => line.startsWith('at '));
+  // Library frames only when there is nothing else, so an error thrown wholly inside a
+  // dependency still says where.
+  const own = frames.filter((line) => !LIBRARY_FRAME.test(line));
+  const stack = (own.length > 0 ? own : frames)
     .slice(0, ALERT_STACK_FRAMES)
     .map((line) => line.replace(/file:\/\/\/app\//g, ''));
   return {
@@ -275,7 +296,7 @@ export function errorDetail(err: unknown, depth = 0): Record<string, unknown> {
     ...(typeof e.code === 'string' || typeof e.code === 'number' ? { code: e.code } : {}),
     ...(typeof e.status === 'number' ? { status: e.status } : {}),
     ...(typeof e.method === 'string' && typeof e.url === 'string'
-      ? { request: `${e.method} ${e.url}` }
+      ? { request: `${e.method} ${redactRequestUrl(e.url)}` }
       : {}),
     ...(stack.length > 0 ? { stack } : {}),
     ...(err.cause !== undefined && depth < MAX_ERROR_DEPTH
@@ -289,6 +310,12 @@ export function errorDetail(err: unknown, depth = 0): Record<string, unknown> {
  *
  * Done here, once, for every alert, so a caller reports the error it caught as it caught it
  * (`{ error: err }`) and the post and the stored row both say what went wrong.
+ *
+ * Never throws: it runs synchronously inside `report()`, which is void by contract and called
+ * from catch blocks and `client.on('error')`, where a throw is an uncaught exception. Something
+ * it cannot write out (a `cause` with no prototype, a throwing getter) leaves only the context's
+ * plain values. Never the raw objects: a Discord error keeps `url` and `requestBody` as its own
+ * enumerable fields, so `JSON.stringify` would write the token and the body this exists to drop.
  */
 export function withErrorDetails(context: Record<string, unknown>): Record<string, unknown> {
   const visit = (value: unknown, depth: number): unknown => {
@@ -299,7 +326,17 @@ export function withErrorDetails(context: Record<string, unknown>): Record<strin
     if (Object.getPrototypeOf(value) !== Object.prototype) return value;
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, visit(v, depth + 1)]));
   };
-  return visit(context, 0) as Record<string, unknown>;
+  try {
+    return visit(context, 0) as Record<string, unknown>;
+  } catch {
+    try {
+      return Object.fromEntries(
+        Object.entries(context).filter(([, v]) => v === null || typeof v !== 'object'),
+      );
+    } catch {
+      return {};
+    }
+  }
 }
 
 function safeJson(value: unknown): string {

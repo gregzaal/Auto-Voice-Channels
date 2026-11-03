@@ -102,6 +102,25 @@ const DENIED_MIN_GUILDS = 10;
 const DEFAULT_RECONCILE_CONCURRENCY = 10;
 
 /**
+ * What groups a sweep's failures into one cause in `reconcile.failed`: the error's type and its
+ * message with the numbers taken out. `CircuitOpenError` puts its retry-after in the message, so
+ * keyed on the message as it is, every tripped guild was a cause of its own and three of them
+ * filled the post ahead of the fault that tripped them.
+ *
+ * Never throws. It runs inside the per-guild catch, and a throw there would reject the worker
+ * and end the sweep for every guild after it.
+ */
+function causeKey(err: unknown): string {
+  try {
+    return err instanceof Error
+      ? `${err.name}: ${err.message.replace(/\d+/g, '#')}`
+      : `thrown: ${String(err)}`;
+  } catch {
+    return 'thrown: (unprintable)';
+  }
+}
+
+/**
  * Orchestrates reconciliation: which guilds to converge and when. The actual
  * per-guild diff/converge lives in {@link VoiceFeature.reconcileGuild}; this
  * class decides scope (a shard's guilds on READY, or only guilds with managed
@@ -200,8 +219,7 @@ export class Reconciler {
           }
           this.deps.logger.error({ err, guildId: id }, 'guild reconcile failed (isolated)');
           failures.push(id);
-          const cause =
-            err instanceof Error ? `${err.name}: ${err.message}` : `thrown: ${String(err)}`;
+          const cause = causeKey(err);
           const seen = causes.get(cause);
           if (seen) seen.guildIds.push(id);
           else causes.set(cause, { guildIds: [id], error: err });
@@ -216,14 +234,15 @@ export class Reconciler {
         failed: failures.length,
         of: ids.length,
         sample: failures.slice(0, 5),
-        // Written out by the reporter (`withErrorDetails`). At most three causes and five ids
-        // each, for the same message limit.
-        errors: [...causes.values()]
-          .slice(0, 3)
-          .map((c) => ({ guildIds: c.guildIds.slice(0, 5), error: c.error })),
         // Reported alongside so a sweep that is failing AND being refused reads
         // as one event rather than two unrelated numbers.
         ...(denied.length > 0 ? { deniedOnPermissions: denied.length } : {}),
+        // Written out by the reporter (`withErrorDetails`). At most three causes and five ids
+        // each, for the same message limit, and last, because the post is cut at 1500
+        // characters and a later cause is the thing to lose rather than the counts.
+        errors: [...causes.values()]
+          .slice(0, 3)
+          .map((c) => ({ guildIds: c.guildIds.slice(0, 5), error: c.error })),
       });
     }
 

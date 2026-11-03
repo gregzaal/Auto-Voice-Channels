@@ -436,4 +436,73 @@ describe('error details in alerts', () => {
     await flush();
     expect(seen).toMatchObject({ error: { type: 'Error', message: 'stored reason' } });
   });
+
+  /** Either token answers as the bot for fifteen minutes. */
+  it('never carries the token an interaction or webhook request holds', () => {
+    const requestOf = (url: string) =>
+      errorDetail(
+        new DiscordAPIError(
+          { code: 10062, message: 'Unknown interaction' } as never,
+          10062,
+          404,
+          'POST',
+          url,
+          {} as never,
+        ),
+      ).request;
+    expect(requestOf('https://discord.com/api/v10/interactions/111/secret-token/callback')).toBe(
+      'POST https://discord.com/api/v10/interactions/111/:token/callback',
+    );
+    expect(
+      requestOf('https://discord.com/api/v10/webhooks/222/secret-token/messages/@original?wait=1'),
+    ).toBe('POST https://discord.com/api/v10/webhooks/222/:token/messages/@original');
+  });
+
+  it('places the throw with our own frames, not the library frames above them', () => {
+    const err = new Error('refused');
+    err.stack = [
+      'Error: refused',
+      '    at handleErrors (file:///app/node_modules/.pnpm/@discordjs+rest@2.6.1/node_modules/@discordjs/rest/dist/index.mjs:1:1)',
+      '    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)',
+      '    at async VoiceDiscordAdapter.renameChannel (file:///app/bot/dist/features/voice/discordAdapter.js:10:5)',
+    ].join('\n');
+    expect(errorDetail(err).stack).toEqual([
+      'at async VoiceDiscordAdapter.renameChannel (bot/dist/features/voice/discordAdapter.js:10:5)',
+    ]);
+  });
+
+  it('keeps library frames when nothing else places the throw', () => {
+    const err = new Error('inside a dependency');
+    err.stack = 'Error: inside a dependency\n    at run (node:internal/timers:1:1)';
+    expect(errorDetail(err).stack).toEqual(['at run (node:internal/timers:1:1)']);
+  });
+
+  /**
+   * `report()` runs inside `client.on('error')`, where a throw exits the process. And the
+   * fallback must not be the raw error, whose own fields hold the token and the body.
+   */
+  it('never throws on an error it cannot write out, and never falls back to the raw error', async () => {
+    const err = new DiscordAPIError(
+      { code: 50035, message: 'Invalid Form Body' } as never,
+      50035,
+      400,
+      'POST',
+      'https://discord.com/api/v10/interactions/111/secret-token/callback',
+      { body: { permission_overwrites: [{ id: 'member-id' }] } } as never,
+    );
+    // No prototype, so no toString: describing it throws.
+    err.cause = Object.create(null);
+    expect(withErrorDetails({ guildId: 'g1', error: err })).toEqual({ guildId: 'g1' });
+
+    const { client, sent } = fakeClient();
+    expect(() =>
+      new AdminChannelReporter({ client, channelId: 'c', logger }).report('x', 'Failed', {
+        error: err,
+      }),
+    ).not.toThrow();
+    await flush();
+    expect(sent[0]).toContain('Failed');
+    expect(sent[0]).not.toContain('secret-token');
+    expect(sent[0]).not.toContain('member-id');
+  });
 });
