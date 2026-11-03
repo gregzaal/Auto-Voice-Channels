@@ -318,12 +318,21 @@ export function errorDetail(err: unknown, depth = 0): Record<string, unknown> {
  * enumerable fields, so `JSON.stringify` would write the token and the body this exists to drop.
  */
 export function withErrorDetails(context: Record<string, unknown>): Record<string, unknown> {
+  // What JSON would write, with every error in it written out instead of as its own fields.
+  const throughJson = (value: unknown): unknown => {
+    const json = JSON.stringify(value, (_key, v: unknown) =>
+      v instanceof Error ? errorDetail(v) : v,
+    );
+    return json === undefined ? undefined : JSON.parse(json);
+  };
   const visit = (value: unknown, depth: number): unknown => {
     if (value instanceof Error) return errorDetail(value);
-    if (depth >= MAX_ERROR_DEPTH || typeof value !== 'object' || value === null) return value;
+    if (typeof value !== 'object' || value === null || value instanceof Date) return value;
+    // Past the depth, and inside anything that is not a plain object or an array, only JSON is
+    // left to write it, and JSON writes a Discord error's own `url` and `requestBody`.
+    const plain = Array.isArray(value) || Object.getPrototypeOf(value) === Object.prototype;
+    if (depth >= MAX_ERROR_DEPTH || !plain) return throughJson(value);
     if (Array.isArray(value)) return value.map((v) => visit(v, depth + 1));
-    // Plain objects only: a Date or a Map is left for JSON to write as it always has.
-    if (Object.getPrototypeOf(value) !== Object.prototype) return value;
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, visit(v, depth + 1)]));
   };
   try {

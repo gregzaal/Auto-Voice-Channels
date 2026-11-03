@@ -477,6 +477,27 @@ describe('error details in alerts', () => {
     expect(errorDetail(err).stack).toEqual(['at run (node:internal/timers:1:1)']);
   });
 
+  /** Left to JSON, a Discord error writes its own `url` and `requestBody` fields. */
+  it('writes out an error nested past the depth it walks, or inside a class instance', () => {
+    const err = new DiscordAPIError(
+      { code: 50035, message: 'Invalid Form Body' } as never,
+      50035,
+      400,
+      'POST',
+      'https://discord.com/api/v10/interactions/111/secret-token/callback',
+      { body: { permission_overwrites: [{ id: 'member-id' }] } } as never,
+    );
+    class Holder {
+      constructor(readonly error: unknown) {}
+    }
+    const out = JSON.stringify(
+      withErrorDetails({ a: { b: { c: { d: err } } }, held: new Holder(err) }),
+    );
+    expect(out).not.toContain('secret-token');
+    expect(out).not.toContain('member-id');
+    expect(out).toContain('Invalid Form Body');
+  });
+
   /**
    * `report()` runs inside `client.on('error')`, where a throw exits the process. And the
    * fallback must not be the raw error, whose own fields hold the token and the body.
