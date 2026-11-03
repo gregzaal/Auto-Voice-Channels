@@ -1,5 +1,24 @@
+import { Readable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
-import { restoreErrorsAreIgnorable } from './restore.js';
+import { restoreBackup, restoreErrorsAreIgnorable } from './restore.js';
+import type { BackupStorage } from './storage.js';
+
+/**
+ * A drill's error reaches the `backup.drill.error` alert, the admin channel and `ops_audit`, so
+ * the connection string it names must not ride along with its password.
+ */
+describe('restoreBackup refusing a target with no database', () => {
+  it('says what is wrong without the connection string', async () => {
+    const attempt = restoreBackup({
+      storage: { getStream: async () => Readable.from([]) } as unknown as BackupStorage,
+      backup: { key: 'v2/drill/a.dump', createdAt: new Date(0), sizeBytes: 0, manifest: null },
+      targetDatabaseUrl: 'postgres://drill:hunter2@db.internal:5432',
+      countTables: async () => 0,
+    });
+    await expect(attempt).rejects.toThrow('names no database');
+    await expect(attempt).rejects.not.toThrow('hunter2');
+  });
+});
 
 /**
  * The real stderr from a drill against Fly Managed Postgres on 2026-08-19.

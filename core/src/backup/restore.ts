@@ -212,7 +212,11 @@ export async function restoreBackup(opts: RestoreOptions): Promise<RestoreResult
   const pgEnv = pgEnvFromUrl(opts.targetDatabaseUrl);
   const dbName = pgEnv.PGDATABASE;
   if (!dbName) {
-    throw new Error(`Target connection string names no database: ${opts.targetDatabaseUrl}`);
+    // Not the string itself, which holds the password: a drill's error reaches the
+    // `backup.drill.error` alert, the admin channel and `ops_audit`.
+    throw new Error(
+      'Target connection string names no database. Put the database name in its path, as in postgres://user@host:5432/name.',
+    );
   }
 
   const child = spawn(
