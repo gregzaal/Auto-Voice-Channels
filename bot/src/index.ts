@@ -708,6 +708,7 @@ async function main(): Promise<void> {
     // (never a name reset, which takes it back out).
     memberPrefs: memberRoomPrefsRepo,
     memberPrefsDisabled: () => creationGate.memberPrefsDisabled(),
+    dispatcher,
   });
   const settingsService = new GuildSettingsService({
     guilds: settingsCache,

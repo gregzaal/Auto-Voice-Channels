@@ -2206,6 +2206,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       await interaction.editReply(
         toUpdate(renderEditorPanel(scope, channelId, applied.state, applied.opts)),
       );
+      followUpLater(interaction, applied.later);
     } else {
       await interaction.followUp({ content: `⚠️ ${applied.message}`, ephemeral: true });
     }
@@ -2275,7 +2276,12 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
     value: string,
     settings: StoredSettings,
   ): Promise<
-    | { ok: true; state: EditorState; opts: { updated: true; note?: string } }
+    | {
+        ok: true;
+        state: EditorState;
+        opts: { updated: true; note?: string };
+        later?: Promise<string | undefined>;
+      }
     | { ok: false; message: string }
   > {
     const guildId = interaction.guildId!;
@@ -2363,6 +2369,7 @@ export function registerInteractionHandler(deps: InteractionDeps): () => void {
       ok: true,
       state,
       opts: { updated: true, ...(note ? { note } : {}) },
+      ...(result.later ? { later: result.later } : {}),
     };
   }
 
@@ -4024,6 +4031,31 @@ Already subscribed? Add the new server ` +
   }
 
   /**
+   * Tells the member privately what a command could only learn after it answered
+   * ({@link CommandResult.later}): a rename Discord rate limited and then refused when it was
+   * finally sent. A rename deferred under the limit of two per ten minutes lands inside the
+   * interaction's fifteen-minute window, and a follow-up that misses it is only logged.
+   */
+  function followUpLater(
+    interaction: ButtonInteraction | StringSelectMenuInteraction | ModalSubmitInteraction,
+    later: Promise<string | undefined> | undefined,
+  ): void {
+    if (later === undefined) return;
+    void later
+      .then((message) =>
+        message === undefined
+          ? undefined
+          : interaction.followUp({ content: `⚠️ ${message}`, flags: MessageFlags.Ephemeral }),
+      )
+      .catch((err: unknown) => {
+        deps.logger.warn(
+          { err, guildId: interaction.guildId },
+          'could not follow up a deferred rename',
+        );
+      });
+  }
+
+  /**
    * Runs one panel action and answers with exactly what the slash command
    * would have said.
    *
@@ -4048,6 +4080,7 @@ Already subscribed? Add the new server ` +
     try {
       const result = await run(guildId, name, task);
       await interaction.editReply({ content: formatResult(result), components: [] });
+      followUpLater(interaction, result.later);
     } catch (err) {
       /**
        * Caught here rather than in `route` because the interaction is already

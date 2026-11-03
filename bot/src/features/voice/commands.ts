@@ -4,6 +4,7 @@ import type {
   SecondaryChannelRepository,
   SecondaryChannelRow,
 } from '@avc/core';
+import type { GuildDispatcher } from '../../runtime/dispatcher.js';
 import type { VoiceActions } from './actions.js';
 import { claimFeatureFor } from './commandAccess.js';
 import { nameRefusedMessage, type RerenderResult, type VoiceFeature } from './handler.js';
@@ -19,6 +20,12 @@ import type { GuildVoiceView } from './types.js';
 export interface CommandResult {
   ok: boolean;
   message: string;
+  /**
+   * Something to tell the member once an outcome the reply could not wait for is known: a
+   * rename Discord rate limited and then refused when it was finally sent. Resolves to
+   * undefined when there is nothing to say. Never rejects.
+   */
+  later?: Promise<string | undefined>;
 }
 
 const ok = (message: string): CommandResult => ({ ok: true, message });
@@ -33,6 +40,23 @@ export type RefuseText = (text: string) => Promise<string | null>;
 
 /** Discord's hard cap on a voice channel's user limit. */
 export const MAX_USER_LIMIT = 99;
+
+/**
+ * What a member is told when a rename Discord held back under its rate limit is refused once it
+ * is sent, minutes after the reply. Names the name, because by then they may have set another.
+ */
+export function deferredNameRefusedMessage(name: string, reason: string, kept: boolean): string {
+  const sentence = /[.!?]$/.test(reason) ? reason : `${reason}.`;
+  return `Discord didn't accept the name "${name}" in this server: ${sentence}${kept ? ' The room keeps its old name.' : ''}`;
+}
+
+/** `later`, settled only once this command's own remembering is done too. Never rejects. */
+function afterRemembering(
+  later: Promise<string | undefined>,
+  remembered: Promise<void> | undefined,
+): Promise<string | undefined> {
+  return remembered === undefined ? later : Promise.all([later, remembered]).then(([m]) => m);
+}
 
 /**
  * A note appended to a command reply when `count` room renames were deferred
@@ -61,6 +85,11 @@ export interface VoiceCommandsDeps {
     | undefined;
   /** The `member_prefs.disabled` lever, through the creation gate's cached snapshot. */
   memberPrefsDisabled?: RememberedSaveDeps['memberPrefsDisabled'];
+  /**
+   * The guild queue, for the write a deferred rename's refusal makes minutes after the command
+   * answered. Absent runs it inline, which only a test does.
+   */
+  dispatcher?: Pick<GuildDispatcher, 'dispatch'> | undefined;
 }
 
 /**
@@ -74,6 +103,20 @@ export interface VoiceCommandsDeps {
  * creator may reclaim it from a caretaker at any time.
  */
 export class VoiceCommands {
+  /**
+   * Each room's `/name` whose rename Discord is holding back under its rate limit, until Discord
+   * answers: the template that command wrote, and what it will tell the member. In memory, so a
+   * restart drops it, along with the follow-up and the remembering that waited on it.
+   */
+  private readonly deferredNames = new Map<
+    string,
+    {
+      template: string | undefined;
+      refusal: Promise<string | undefined>;
+      later: Promise<string | undefined>;
+    }
+  >();
+
   constructor(private readonly deps: VoiceCommandsDeps) {}
 
   /** Sets the channel's user limit (0..99; 0 = unlimited). Owner only. */
@@ -226,43 +269,173 @@ export class VoiceCommands {
     // renamed and not remembered.
     //
     // A name is remembered after the re-render instead, unless Discord refused it, which it
-    // would refuse in every later room too. A re-render that throws still remembers it.
+    // would refuse in every later room too. A re-render that throws still remembers it, and a
+    // rename Discord deferred is remembered once it lands (below).
     if (field === 'status') {
       await this.remember(row, userId, {
         field: 'status',
         value: isReset || clearedStatus ? null : stored,
       });
     }
+    const rememberName =
+      field === 'name' && (isReset || !isTruncatedPrefill(stored, row.state.template));
+    const nameToRemember = isReset ? null : stored;
+    /**
+     * The same name sent again while Discord still holds the first one back renders what is
+     * already stored, so no rename is asked for and nothing would wait on Discord's answer. It
+     * shares the first one's, whoever sent either: remembered for its own sender once it lands,
+     * and the member told if it does not. Not a resend whose render changed (a new game in a
+     * template with a token), which asked Discord for its own rename.
+     */
+    const pending = field === 'name' ? this.deferredNames.get(id) : undefined;
+    let sharing = false;
     let r: RerenderResult | undefined;
     try {
       r = await this.deps.feature.rerenderSecondary(guildId, id);
     } finally {
+      sharing =
+        pending !== undefined &&
+        pending.template === next.template &&
+        r !== undefined &&
+        r.name === undefined &&
+        r.nameRefused === undefined &&
+        r.deferredRefusal === undefined;
       if (
-        field === 'name' &&
+        rememberName &&
+        !sharing &&
         r?.nameRefused === undefined &&
-        (isReset || !isTruncatedPrefill(stored, row.state.template))
+        r?.deferredRefusal === undefined
       ) {
-        await this.remember(row, userId, { field: 'name', value: isReset ? null : stored });
+        await this.remember(row, userId, { field: 'name', value: nameToRemember });
       }
     }
     if (field === 'name' && r.nameRefused !== undefined) {
       // The room kept its name, so its template and stored name go back to match it. Over what
       // the re-render wrote, which may have touched other keys.
-      const now = (await this.deps.secondaries.get(id))?.state ?? row.state;
-      const restored = { ...now, name: row.state.name };
-      if (row.state.template === undefined) delete restored.template;
-      else restored.template = row.state.template;
-      await this.deps.secondaries.updateState(id, restored);
-      return fail(nameRefusedMessage(r.nameRefused));
+      await this.restoreName(id, row.state);
+      return fail(nameRefusedMessage(r.nameRefused, 'room'));
     }
     const note = rateLimitNote(r.rateLimited ? 1 : 0);
-    return ok(
+    const result = ok(
       isReset
         ? `Reset this channel's ${field} to the inherited template.${note}`
         : clearedStatus
           ? `Cleared this channel's status, it will stay blank.${note}`
           : `Updated this channel's ${field}.${note}`,
     );
+    if (field === 'name' && r.deferredRefusal !== undefined) {
+      /**
+       * Discord queued the rename under its limit of two per ten minutes and will only say
+       * whether it takes the name when it is sent. Refused then, the room goes back and the
+       * member is told, as an immediate refusal does, and the name is not remembered: before
+       * this, the reply said "Updated", the name was remembered, and every later room asked
+       * Discord for it again.
+       */
+      const wrote = { template: next.template, name: r.name };
+      const refusal = r.deferredRefusal;
+      const remembered = rememberName
+        ? this.rememberOnceLanded(guildId, id, row, userId, nameToRemember, refusal, wrote)
+        : undefined;
+      const later = refusal
+        .then(async (reason) => {
+          if (reason === undefined) return undefined;
+          const outcome = await this.restoreAfterDeferredRefusal(guildId, id, row.state, wrote);
+          // Nothing to say about a name a newer one has replaced: the member would read it as
+          // being about the newer one.
+          if (outcome === 'replaced') return undefined;
+          return deferredNameRefusedMessage(wrote.name ?? '', reason, outcome === 'restored');
+        })
+        .catch((err: unknown) => {
+          this.deps.logger.warn(
+            { err, guildId, channelId: id },
+            'could not settle a deferred rename',
+          );
+          return undefined;
+        });
+      result.later = afterRemembering(later, remembered);
+      this.deferredNames.set(id, { template: next.template, refusal, later });
+      void later.then(() => {
+        if (this.deferredNames.get(id)?.later === later) this.deferredNames.delete(id);
+      });
+    } else if (sharing && pending !== undefined) {
+      const remembered = rememberName
+        ? this.rememberOnceLanded(guildId, id, row, userId, nameToRemember, pending.refusal, {
+            template: next.template,
+          })
+        : undefined;
+      result.later = afterRemembering(pending.later, remembered);
+    }
+    return result;
+  }
+
+  /**
+   * Remembers a name once the rename Discord held back for it lands, and only while the room
+   * still has the template its command wrote. A newer `/name` that asked for no rename of its
+   * own (a template rendering the same text) was remembered when it was sent, and the older
+   * rename landing must not put the older choice back over it. A room deleted in the meantime
+   * still remembers it: the member chose it, and left.
+   */
+  private rememberOnceLanded(
+    guildId: string,
+    channelId: string,
+    row: SecondaryChannelRow,
+    userId: string,
+    value: string | null,
+    refusal: Promise<string | undefined>,
+    wrote: { template: string | undefined },
+  ): Promise<void> {
+    return refusal
+      .then(async (reason) => {
+        if (reason !== undefined) return;
+        const current = (await this.deps.secondaries.get(channelId))?.state;
+        if (current !== undefined && current.template !== wrote.template) return;
+        await this.remember(row, userId, { field: 'name', value });
+      })
+      .catch((err: unknown) => {
+        this.deps.logger.warn({ err, guildId, channelId }, 'could not remember a deferred rename');
+      });
+  }
+
+  /**
+   * Puts a room's template and stored name back to `prior` after Discord refused the name, over
+   * whatever else is in its state now (`current`, or read fresh).
+   */
+  private async restoreName(
+    channelId: string,
+    prior: SecondaryChannelRow['state'],
+    current?: SecondaryChannelRow['state'],
+  ): Promise<void> {
+    const now = current ?? (await this.deps.secondaries.get(channelId))?.state ?? prior;
+    const restored = { ...now, name: prior.name };
+    if (prior.template === undefined) delete restored.template;
+    else restored.template = prior.template;
+    await this.deps.secondaries.updateState(channelId, restored);
+  }
+
+  /**
+   * {@link restoreName} for a refusal that arrived minutes after the command answered, so only
+   * while the room's template and name are still what that command wrote. A later `/name` (or
+   * the room being gone) is `replaced`. A render that moved the stored name on (a game change
+   * in a template with a token) is `moved`, and is left alone too: the name Discord holds may by
+   * then be that newer render's, which a restore would leave unmatched by the stored one. In the
+   * guild's queue, because it is a read and a whole write and nothing else orders it now.
+   */
+  private async restoreAfterDeferredRefusal(
+    guildId: string,
+    channelId: string,
+    prior: SecondaryChannelRow['state'],
+    wrote: { template: string | undefined; name: string | undefined },
+  ): Promise<'restored' | 'moved' | 'replaced'> {
+    const task = async (): Promise<'restored' | 'moved' | 'replaced'> => {
+      const current = (await this.deps.secondaries.get(channelId))?.state;
+      if (!current || current.template !== wrote.template) return 'replaced';
+      if (current.name !== wrote.name) return 'moved';
+      await this.restoreName(channelId, prior, current);
+      return 'restored';
+    };
+    return this.deps.dispatcher
+      ? this.deps.dispatcher.dispatch(guildId, 'name:deferred-refusal', task)
+      : task();
   }
 
   /** Transfers ownership to another member who is in the channel. Owner only. */

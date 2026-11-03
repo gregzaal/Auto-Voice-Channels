@@ -121,9 +121,16 @@ function renameLogMessage(channelId: string, name: string, rateLimited: boolean)
     : `✏️ <#${channelId}> renamed to **${name}**`;
 }
 
-/** What a member or admin is told when Discord refused the name they set. */
-export function nameRefusedMessage(reason: string): string {
-  return `Discord didn't accept that name in this server: ${reason} The channel keeps its old name.`;
+/**
+ * Rooms in a row a remembered name that renders differently each time may be refused in before
+ * it is forgotten. See where room creation falls back from a refused name.
+ */
+const REMEMBERED_NAME_REFUSALS = 3;
+
+/** What a member or admin is told when Discord refused the name they set, on a room or a channel. */
+export function nameRefusedMessage(reason: string, what: 'room' | 'channel' = 'channel'): string {
+  const sentence = /[.!?]$/.test(reason) ? reason : `${reason}.`;
+  return `Discord didn't accept that name in this server: ${sentence} The ${what} keeps its old name.`;
 }
 
 /** Decision returned by a {@link CreationGate}. */
@@ -494,6 +501,11 @@ export interface RerenderResult {
    * asked for again on every render.
    */
   nameRefused?: string;
+  /**
+   * With `rateLimited` only: resolves to Discord's reason if the queued rename is refused when
+   * it is finally sent, else undefined. The refused name stays stored as rendered either way.
+   */
+  deferredRefusal?: Promise<string | undefined>;
 }
 
 /**
@@ -780,6 +792,12 @@ export class VoiceFeature {
    * longer edit them. In memory, so a restart asks once more.
    */
   private readonly unrenamable = new Map<string, { guildId: string; at: number }>();
+  /**
+   * How many rooms in a row Discord refused a member's remembered name in, by guild, creator
+   * channel and member, with the name it counts, so a name the member changed starts again. In
+   * memory, so a restart starts every count again.
+   */
+  private readonly refusedRememberedNames = new Map<string, { template: string; count: number }>();
 
   async handleVoiceStateUpdate(event: VoiceStateEvent): Promise<string[]> {
     if (event.beforeChannelId === event.afterChannelId) return []; // mute/unmute
@@ -1122,33 +1140,74 @@ export class VoiceFeature {
         // channel. Unset must NOT fall through to Discord's category-sync.
         inheritFrom: primary?.template.inheritperms ?? 'primary',
       };
-      try {
-        newChannelId = await this.deps.actions.createVoiceChannel(input);
-      } catch (err) {
-        /**
-         * A remembered name Discord refuses (a Server Discovery server's word list) would fail
-         * every room this member makes here, so the room is made with the creator channel's own
-         * name instead, and the remembered one is forgotten. A refused name that is the creator
-         * channel's own still throws, as it always did: there is nothing of the member's to drop.
-         */
-        const refused = nameRefusalOf(err);
-        if (refused === undefined || rememberedName === undefined) throw err;
-        this.deps.logger.warn(
-          { guildId, primaryId: channelId, memberId: member.id, reason: refused },
-          'Discord refused a remembered room name; using the creator channel name',
-        );
-        rememberedName = undefined;
-        name = renderName(primary?.template.name ?? settings.channelNameTemplate);
-        newChannelId = await this.deps.actions.createVoiceChannel({ ...input, name });
-        await this.deps.memberPrefs
-          ?.saveName?.(guildId, channelId, member.id, null)
-          .catch((clearErr: unknown) =>
-            this.deps.logger.warn(
-              { guildId, primaryId: channelId, memberId: member.id, err: clearErr },
-              'could not forget a refused remembered room name',
-            ),
+      /**
+       * A name Discord refuses (a Server Discovery server's word list) is refused every time,
+       * so a room made with it would fail on every join and on every sweep that catches up on
+       * the members waiting in the creator channel. The room falls back instead: from the
+       * member's remembered name to the creator channel's template, and from that (a display
+       * name in `@@owner@@`, or the template's own words) to a plain numbered name.
+       *
+       * Undefined when Discord refused the name. Any other error is the caller's, as before.
+       */
+      const tryCreate = async (tryName: string): Promise<string | undefined> => {
+        try {
+          return await this.deps.actions.createVoiceChannel({ ...input, name: tryName });
+        } catch (err) {
+          const reason = nameRefusalOf(err);
+          if (reason === undefined) throw err;
+          this.deps.logger.warn(
+            { guildId, primaryId: channelId, memberId: member.id, reason },
+            'Discord refused a room name at creation',
           );
+          return undefined;
+        }
+      };
+      const refusalKey = `${guildId}:${channelId}:${member.id}`;
+      let created = await tryCreate(name);
+      if (created !== undefined && rememberedName !== undefined) {
+        this.refusedRememberedNames.delete(refusalKey);
       }
+      if (created === undefined && rememberedName !== undefined) {
+        /**
+         * Forgotten at once when nothing in it can change, which is when it renders to its own
+         * text: Discord will refuse that every time. One that renders differently is kept,
+         * because what Discord refused may be what a token rendered (a game's title in
+         * `@@game_name@@`) and the next room may render something else, but only for
+         * {@link REMEMBERED_NAME_REFUSALS} rooms in a row: words of its own that Discord refuses
+         * would otherwise cost a refused request on every room and never be used.
+         */
+        const counted = this.refusedRememberedNames.get(refusalKey);
+        const refusals = counted?.template === rememberedName ? counted.count + 1 : 1;
+        const forget = name === rememberedName || refusals >= REMEMBERED_NAME_REFUSALS;
+        if (forget) this.refusedRememberedNames.delete(refusalKey);
+        else {
+          this.refusedRememberedNames.set(refusalKey, {
+            template: rememberedName,
+            count: refusals,
+          });
+        }
+        rememberedName = undefined;
+        const creatorName = renderName(primary?.template.name ?? settings.channelNameTemplate);
+        if (creatorName !== name) {
+          name = creatorName;
+          created = await tryCreate(name);
+        }
+        if (forget) {
+          await this.deps.memberPrefs
+            ?.saveName?.(guildId, channelId, member.id, null)
+            .catch((clearErr: unknown) =>
+              this.deps.logger.warn(
+                { guildId, primaryId: channelId, memberId: member.id, err: clearErr },
+                'could not forget a refused remembered room name',
+              ),
+            );
+        }
+      }
+      // `name` stays the refused one in the room's state, as a refused rename is stored, so the
+      // render that follows the owner's arrival does not ask Discord for it again.
+      newChannelId =
+        created ??
+        (await this.deps.actions.createVoiceChannel({ ...input, name: renderName('Room ##') }));
     } catch (err) {
       if (!isPermissionError(err)) throw err;
       // Can't create the channel (missing perms — usually Manage Roles to copy the
@@ -2494,9 +2553,14 @@ export class VoiceFeature {
 
     let rateLimited = false;
     let nameRefused: string | undefined;
+    let deferredRefusal: Promise<string | undefined> | undefined;
     if (nameChanged) {
       try {
-        ({ rateLimited } = await this.deps.actions.renameChannel(guildId, channelId, name));
+        ({ rateLimited, deferredRefusal } = await this.deps.actions.renameChannel(
+          guildId,
+          channelId,
+          name,
+        ));
         this.deps.serverLog?.(guildId, 2, renameLogMessage(channelId, name, rateLimited));
       } catch (err) {
         // A name Discord will never take (a Server Discovery server's word list). Thrown, it
@@ -2553,6 +2617,7 @@ export class VoiceFeature {
       ...(statusChanged ? { status } : {}),
       ...(rateLimited ? { rateLimited: true } : {}),
       ...(nameRefused !== undefined ? { nameRefused } : {}),
+      ...(deferredRefusal !== undefined ? { deferredRefusal } : {}),
     };
   }
 

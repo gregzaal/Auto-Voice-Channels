@@ -18,7 +18,7 @@ import {
   VIEW_CHANNEL,
   type ResolvedOverwrite,
 } from './accessPlan.js';
-import { RecordingVoiceActions } from './actions.js';
+import { NAME_REFUSED_REASON, RecordingVoiceActions } from './actions.js';
 import { VoiceCommands } from './commands.js';
 import { VoiceFeature, type CreationGate, type VoiceFeatureDeps } from './handler.js';
 import { PermissionProblemTracker } from './permissionProblems.js';
@@ -392,6 +392,204 @@ describe('remembered room settings (integration)', () => {
       expect(actions.ofType('create').map((a) => a.name)).toEqual(["Alice's room"]);
       expect((await secondaries.get(room))!.state.template).toBeUndefined();
       expect((await prefs.get(PRIMARY, ALICE))?.name).toBeUndefined();
+    });
+
+    /** What Discord refused may be what the token rendered, which the next room may not. */
+    it('keeps a remembered name with a token when what the token rendered was refused', async () => {
+      await optIn();
+      await prefs.saveName(GUILD, PRIMARY, ALICE, '@@creator@@ den');
+      actions.refuseNamesMatching = /Alice den/;
+
+      const room = await join(feature);
+
+      expect(actions.ofType('create').map((a) => a.name)).toEqual(["Alice's room"]);
+      expect((await secondaries.get(room))!.state.template).toBeUndefined();
+      expect((await prefs.get(PRIMARY, ALICE))?.name).toBe('@@creator@@ den');
+    });
+
+    it('makes a plain numbered room when the creator channel’s name is refused too, and the sweep does not ask again', async () => {
+      await optIn();
+      // The member's display name is what Discord refuses, in the creator channel's template.
+      actions.refuseNamesMatching = /Alice/;
+
+      const room = await join(feature);
+      await feature.reconcileGuild(GUILD);
+      await feature.reconcileGuild(GUILD);
+
+      expect(actions.ofType('create').map((a) => a.name)).toEqual(['Room #1']);
+      // Stored as rendered, as a refused rename is, so no render asks for it again.
+      expect((await secondaries.get(room))!.state.name).toBe("Alice's room");
+      expect(actions.ofType('rename')).toEqual([]);
+    });
+
+    it('makes a room for a member waiting in the creator channel without failing the sweep', async () => {
+      await optIn();
+      actions.refuseNamesMatching = /Alice/;
+      voice.put(PRIMARY, alice());
+
+      const drift = await feature.reconcileGuild(GUILD);
+
+      expect(drift.created).toHaveLength(1);
+      expect(actions.ofType('create').map((a) => a.name)).toEqual(['Room #1']);
+    });
+
+    it('puts the room back and tells the member when a rate-limited rename is refused once it is sent', async () => {
+      await optIn();
+      await prefs.saveName(GUILD, PRIMARY, ALICE, 'Den');
+      const room = await join(feature);
+      const before = (await secondaries.get(room))!.state;
+      actions.simulateRenameRateLimit = true;
+      actions.refuseNamesMatching = /badword/;
+
+      const result = await commands.setName(GUILD, room, ALICE, 'badword lounge', {
+        fromPanel: true,
+      });
+
+      expect(result.ok).toBe(true);
+      const told = await result.later;
+      expect(told).toContain('"badword lounge"');
+      expect(told).toContain('Server Discovery');
+      expect(told).toContain('keeps its old name');
+      const after = (await secondaries.get(room))!.state;
+      expect(after.template).toBe(before.template);
+      expect(after.name).toBe(before.name);
+      expect((await prefs.get(PRIMARY, ALICE))?.name).toBe('Den');
+    });
+
+    it('remembers a rate-limited rename only once it lands', async () => {
+      await optIn();
+      const room = await join(feature);
+      let send!: (reason: string | undefined) => void;
+      vi.spyOn(actions, 'renameChannel').mockResolvedValueOnce({
+        rateLimited: true,
+        deferredRefusal: new Promise((resolve) => (send = resolve)),
+      });
+
+      const result = await commands.setName(GUILD, room, ALICE, 'Lounge', { fromPanel: true });
+      expect((await prefs.get(PRIMARY, ALICE))?.name).toBeUndefined();
+
+      send(undefined);
+
+      expect(await result.later).toBeUndefined();
+      expect((await prefs.get(PRIMARY, ALICE))?.name).toBe('Lounge');
+    });
+
+    /**
+     * The member sees no rename and sends it again. That renders what is already stored, so no
+     * rename is asked for and nothing of its own waits on Discord.
+     */
+    it('waits on the first answer when the same name is sent again while Discord holds it', async () => {
+      await optIn();
+      await prefs.saveName(GUILD, PRIMARY, ALICE, 'Den');
+      const room = await join(feature);
+      const before = (await secondaries.get(room))!.state;
+      let send!: (reason: string | undefined) => void;
+      vi.spyOn(actions, 'renameChannel').mockResolvedValueOnce({
+        rateLimited: true,
+        deferredRefusal: new Promise((resolve) => (send = resolve)),
+      });
+
+      const first = await commands.setName(GUILD, room, ALICE, 'badword lounge', {
+        fromPanel: true,
+      });
+      const again = await commands.setName(GUILD, room, ALICE, 'badword lounge', {
+        fromPanel: true,
+      });
+      expect((await prefs.get(PRIMARY, ALICE))?.name).toBe('Den');
+
+      send(NAME_REFUSED_REASON);
+
+      expect(await first.later).toContain('"badword lounge"');
+      expect(await again.later).toContain('"badword lounge"');
+      expect((await prefs.get(PRIMARY, ALICE))?.name).toBe('Den');
+      expect((await secondaries.get(room))!.state.template).toBe(before.template);
+    });
+
+    it('forgets a remembered name with a token after three rooms in a row refuse it', async () => {
+      await optIn();
+      await prefs.saveName(GUILD, PRIMARY, ALICE, '@@creator@@ den');
+      actions.refuseNamesMatching = /Alice den/;
+
+      await join(feature);
+      await join(feature);
+      expect((await prefs.get(PRIMARY, ALICE))?.name).toBe('@@creator@@ den');
+      await join(feature);
+
+      expect((await prefs.get(PRIMARY, ALICE))?.name).toBeUndefined();
+    });
+
+    it('counts the refusals of a remembered name again once the member changes it', async () => {
+      await optIn();
+      await prefs.saveName(GUILD, PRIMARY, ALICE, '@@creator@@ den');
+      actions.refuseNamesMatching = /Alice (den|lair)/;
+
+      await join(feature);
+      await join(feature);
+      await prefs.saveName(GUILD, PRIMARY, ALICE, '@@creator@@ lair');
+      await join(feature);
+
+      expect((await prefs.get(PRIMARY, ALICE))?.name).toBe('@@creator@@ lair');
+    });
+
+    it('does not put an older name back over a newer one when the older rename lands', async () => {
+      await optIn();
+      const room = await join(feature);
+      let send!: (reason: string | undefined) => void;
+      vi.spyOn(actions, 'renameChannel').mockResolvedValueOnce({
+        rateLimited: true,
+        deferredRefusal: new Promise((resolve) => (send = resolve)),
+      });
+
+      const older = await commands.setName(GUILD, room, ALICE, 'Alice den', { fromPanel: true });
+      // Renders the same text, so it asks Discord for no rename of its own.
+      await commands.setName(GUILD, room, ALICE, '@@creator@@ den', { fromPanel: true });
+      send(undefined);
+      await older.later;
+
+      expect((await prefs.get(PRIMARY, ALICE))?.name).toBe('@@creator@@ den');
+    });
+
+    it('remembers a resend for its own sender when the held-back rename it shares lands', async () => {
+      await optIn();
+      const room = await join(feature);
+      let send!: (reason: string | undefined) => void;
+      vi.spyOn(actions, 'renameChannel').mockResolvedValueOnce({
+        rateLimited: true,
+        deferredRefusal: new Promise((resolve) => (send = resolve)),
+      });
+
+      const byAdmin = await commands.setName(GUILD, room, BOB, 'Lounge', {
+        admin: true,
+        fromPanel: true,
+      });
+      const byOwner = await commands.setName(GUILD, room, ALICE, 'Lounge', { fromPanel: true });
+      expect((await prefs.get(PRIMARY, ALICE))?.name).toBeUndefined();
+      send(undefined);
+
+      expect(await byOwner.later).toBeUndefined();
+      expect(await byAdmin.later).toBeUndefined();
+      expect((await prefs.get(PRIMARY, ALICE))?.name).toBe('Lounge');
+    });
+
+    it('leaves a newer name alone when an older rate-limited rename is refused', async () => {
+      await optIn();
+      const room = await join(feature);
+      let send!: (reason: string | undefined) => void;
+      vi.spyOn(actions, 'renameChannel').mockResolvedValueOnce({
+        rateLimited: true,
+        deferredRefusal: new Promise((resolve) => (send = resolve)),
+      });
+      const first = await commands.setName(GUILD, room, ALICE, 'badword lounge', {
+        fromPanel: true,
+      });
+      await commands.setName(GUILD, room, ALICE, 'Lounge', { fromPanel: true });
+
+      send(NAME_REFUSED_REASON);
+
+      // Said about the older name, the member would read it as being about the newer one.
+      expect(await first.later).toBeUndefined();
+      expect((await secondaries.get(room))!.state.template).toBe('Lounge');
+      expect((await prefs.get(PRIMARY, ALICE))?.name).toBe('Lounge');
     });
   });
 

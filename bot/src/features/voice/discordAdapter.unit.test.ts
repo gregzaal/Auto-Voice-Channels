@@ -8,7 +8,7 @@ import {
 import type { Client, GuildMember, VoiceState } from 'discord.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ResolvedOverwrite } from './accessPlan.js';
-import { nameRefusedError } from './actions.js';
+import { NAME_REFUSED_REASON, nameRefusedError } from './actions.js';
 import {
   CHANNEL_OBFUSCATED,
   ChannelObfuscatedError,
@@ -572,7 +572,52 @@ describe('DiscordVoiceActions.renameChannel (rate-limit probe)', () => {
     const actions = new DiscordVoiceActions(clientWith(channel));
     const pending = actions.renameChannel('g1', 'c1', 'New name');
     await vi.advanceTimersByTimeAsync(2600); // past RENAME_PROBE_MS (2500)
-    await expect(pending).resolves.toEqual({ rateLimited: true });
+    await expect(pending).resolves.toEqual({
+      rateLimited: true,
+      deferredRefusal: expect.any(Promise),
+    });
+  });
+
+  /** Sent minutes after the command answered, so this promise is how anyone hears of it. */
+  it("says when Discord refuses a deferred rename's name once it is sent", async () => {
+    vi.useFakeTimers();
+    let send!: (err: unknown) => void;
+    const channel = {
+      isVoiceBased: () => true,
+      setName: vi.fn().mockReturnValue(new Promise((_, reject) => (send = reject))),
+    };
+    const actions = new DiscordVoiceActions(clientWith(channel));
+    const pending = actions.renameChannel('g1', 'c1', 'New name');
+    await vi.advanceTimersByTimeAsync(2600);
+    const { deferredRefusal } = await pending;
+    send(nameRefusedError('PATCH'));
+    await expect(deferredRefusal).resolves.toBe(NAME_REFUSED_REASON);
+  });
+
+  it('resolves a deferred rename that applies, or fails otherwise, to no refusal', async () => {
+    vi.useFakeTimers();
+    let settle!: { ok: () => void; fail: (err: unknown) => void };
+    const channel = {
+      isVoiceBased: () => true,
+      setName: vi
+        .fn()
+        .mockImplementation(
+          () => new Promise<void>((ok, fail) => (settle = { ok: () => ok(), fail })),
+        ),
+    };
+    const actions = new DiscordVoiceActions(clientWith(channel));
+
+    const first = actions.renameChannel('g1', 'c1', 'New name');
+    await vi.advanceTimersByTimeAsync(2600);
+    const applied = (await first).deferredRefusal;
+    settle.ok();
+    await expect(applied).resolves.toBeUndefined();
+
+    const second = actions.renameChannel('g1', 'c1', 'Other name');
+    await vi.advanceTimersByTimeAsync(2600);
+    const failed = (await second).deferredRefusal;
+    settle.fail(new Error('socket hang up'));
+    await expect(failed).resolves.toBeUndefined();
   });
 
   it('reports not rate-limited when the rename applies promptly', async () => {
@@ -1715,6 +1760,20 @@ describe('DiscordVoiceActions.createVoiceChannel bitrate/region/video-quality/ns
     const secondArg = guild.channels.create.mock.calls[1]![0] as Record<string, unknown>;
     expect(secondArg).not.toHaveProperty('rtcRegion');
     expect(secondArg.name).toBe('x');
+  });
+
+  /** The caller falls back to another name, so a second try with this one is wasted. */
+  it('does not retry without the copied properties when Discord refused the name', async () => {
+    const { client, guild } = makeClient();
+    guild.channels.create.mockReset().mockRejectedValueOnce(nameRefusedError('POST'));
+    await expect(
+      new DiscordVoiceActions(client).createVoiceChannel({
+        guildId: 'g1',
+        name: 'badword room',
+        rtcRegion: 'deprecated-region',
+      }),
+    ).rejects.toThrow();
+    expect(guild.channels.create).toHaveBeenCalledTimes(1);
   });
 
   it('does not retry a permission error, and does not retry when nothing was copied', async () => {

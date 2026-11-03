@@ -148,6 +148,13 @@ export interface RenameResult {
    */
   rateLimited: boolean;
   /**
+   * With `rateLimited` only: Discord's reason if the queued rename is refused when it is
+   * finally sent (as `nameRefusalOf` reads it), or undefined once it applies or fails for any other
+   * reason. A deferred rename is sent minutes after the caller has answered, so this is the
+   * only way a refusal of it reaches anyone. Never rejects.
+   */
+  deferredRefusal?: Promise<string | undefined>;
+  /**
    * True when the channel is confirmed to no longer exist on Discord. Callers
    * must stop tracking it rather than retry — nothing will ever make the rename
    * succeed. Never set for a channel that merely became invisible to the bot:
@@ -445,6 +452,9 @@ export type RecordedAction =
       above: boolean;
     };
 
+/** Discord's reason in {@link nameRefusedError}. */
+export const NAME_REFUSED_REASON = 'Contains words not allowed for servers in Server Discovery.';
+
 /** The Invalid Form Body Discord answers a name it does not allow in a Discovery server with. */
 export function nameRefusedError(method: 'PATCH' | 'POST'): DiscordAPIError {
   return new DiscordAPIError(
@@ -456,7 +466,7 @@ export function nameRefusedError(method: 'PATCH' | 'POST'): DiscordAPIError {
           _errors: [
             {
               code: 'INVALID_COMMUNITY_PROPERTY_NAME',
-              message: 'Contains words not allowed for servers in Server Discovery.',
+              message: NAME_REFUSED_REASON,
             },
           ],
         },
@@ -643,12 +653,22 @@ export class RecordingVoiceActions implements VoiceActions {
         ),
       );
     }
-    if (this.refuseNamesMatching?.test(name)) return Promise.reject(nameRefusedError('PATCH'));
+    const refused = this.refuseNamesMatching?.test(name) === true;
+    // A rate-limited rename is queued, and Discord only refuses it when it is finally sent.
+    if (refused && !this.simulateRenameRateLimit) {
+      return Promise.reject(nameRefusedError('PATCH'));
+    }
     this.actions.push({ type: 'rename', guildId, channelId, name });
     if (this.renameGoneForChannel === channelId) {
       return Promise.resolve({ rateLimited: false, channelGone: true });
     }
-    return Promise.resolve({ rateLimited: this.simulateRenameRateLimit });
+    if (this.simulateRenameRateLimit) {
+      return Promise.resolve({
+        rateLimited: true,
+        deferredRefusal: Promise.resolve(refused ? NAME_REFUSED_REASON : undefined),
+      });
+    }
+    return Promise.resolve({ rateLimited: false });
   }
 
   moveMember(

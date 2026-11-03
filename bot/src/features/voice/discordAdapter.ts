@@ -582,9 +582,12 @@ export class DiscordVoiceActions implements VoiceActions {
     try {
       channel = await guild.channels.create({ ...baseOptions, ...copiedProps });
     } catch (err) {
+      // Not for a refused name, which dropping the properties cannot cure: the caller falls
+      // back to another name, and a retry here is only a second request Discord refuses.
       const retryWithoutCopiedProps =
         err instanceof DiscordAPIError &&
         !isPermissionError(err) &&
+        nameRefusalOf(err) === undefined &&
         Object.keys(copiedProps).length > 0;
       if (!retryWithoutCopiedProps) throw err;
       this.logger?.warn(
@@ -952,12 +955,18 @@ export class DiscordVoiceActions implements VoiceActions {
     if (outcome === 'gone') return { rateLimited: false, channelGone: true };
     if (outcome === 'done') return { rateLimited: false };
 
-    void apply.catch((err: unknown) => {
-      if (!isApiError(err, UNKNOWN_CHANNEL)) {
-        this.logger?.warn({ err, channelId }, 'deferred channel rename ultimately failed');
-      }
-    });
-    return { rateLimited: true };
+    const deferredRefusal = apply.then(
+      () => undefined,
+      (err: unknown) => {
+        // Every caller's rename comes through here (rooms, adopted channels, Join channels), so
+        // this is the one log line a refusal of any of them is sure to get.
+        if (!isApiError(err, UNKNOWN_CHANNEL)) {
+          this.logger?.warn({ err, channelId }, 'deferred channel rename ultimately failed');
+        }
+        return nameRefusalOf(err);
+      },
+    );
+    return { rateLimited: true, deferredRefusal };
   }
 
   async moveMember(
