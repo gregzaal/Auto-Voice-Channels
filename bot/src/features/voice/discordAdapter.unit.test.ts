@@ -861,6 +861,13 @@ describe('DiscordVoiceActions on an obfuscated channel', () => {
     expect(setUserLimit).not.toHaveBeenCalled();
   });
 
+  it('refuses to delete it, so an empty-looking room it cannot see is not dropped', async () => {
+    const del = vi.fn();
+    const actions = new DiscordVoiceActions(clientWith(obfuscated({ delete: del })));
+    await expect(actions.deleteChannel('g1', 'c1')).rejects.toBeInstanceOf(ChannelObfuscatedError);
+    expect(del).not.toHaveBeenCalled();
+  });
+
   it('leaves an ordinary channel alone', async () => {
     const setName = vi.fn().mockResolvedValue(undefined);
     const channel = { isVoiceBased: () => true, flags: { bitfield: 0 }, setName };

@@ -886,6 +886,10 @@ export class DiscordVoiceActions implements VoiceActions {
   async deleteChannel(_guildId: string, channelId: string): Promise<void> {
     try {
       const channel = await this.client.channels.fetch(channelId);
+      // Refused before asking, as the other writes are. Discord would answer Missing Access, a
+      // permission failure like any other, and the caller must tell a room it cannot see (kept
+      // until it can) from one it may not delete.
+      if (channel && isObfuscated(channel)) throw new ChannelObfuscatedError(channelId);
       if (channel?.isVoiceBased()) await channel.delete();
     } catch (err) {
       if (isApiError(err, UNKNOWN_CHANNEL)) return;

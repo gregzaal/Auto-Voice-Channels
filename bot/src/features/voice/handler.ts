@@ -694,7 +694,8 @@ type CreateOutcome =
   | { action: 'would-create' }
   | { action: 'skip' };
 
-type CleanupOutcome = { action: 'deleted' | 'would-delete' | 'skip' };
+/** `unseen`: the bot cannot see the room, so cannot delete it, and kept it. */
+type CleanupOutcome = { action: 'deleted' | 'would-delete' | 'skip' | 'unseen' };
 
 /** Whose templates an editor panel edits: one channel (`/name`) or a primary (`/template`). */
 export type EditorScope = 'channel' | 'primary' | 'adopted';
@@ -789,9 +790,11 @@ export class VoiceFeature {
 
   /**
    * Rooms the sweep has stopped renaming for a while, by channel id, because the bot can no
-   * longer edit them. In memory, so a restart asks once more.
+   * longer edit them. `unseen` ones are rooms the bot cannot see, kept rather than deleted as
+   * empty (the adapter refuses the delete): the flag holds back telling the guild again for the
+   * wait, and a dry run reads it. In memory, so a restart asks once more.
    */
-  private readonly unrenamable = new Map<string, { guildId: string; at: number }>();
+  private readonly unrenamable = new Map<string, { guildId: string; at: number; unseen?: true }>();
   /**
    * How many rooms in a row Discord refused a member's remembered name in, by guild, creator
    * channel and member, with the name it counts, so a name the member changed starts again. In
@@ -1727,14 +1730,28 @@ export class VoiceFeature {
     const remaining = this.deps.voice.membersInChannel(channelId).filter((m) => !m.bot);
     if (remaining.length > 0) return { action: 'skip' };
 
-    if (opts.dryRun) return { action: 'would-delete' };
+    // A dry run asks nothing, so it reports what the last real run found.
+    if (opts.dryRun) return { action: this.leftUnseen(channelId) ? 'unseen' : 'would-delete' };
 
     try {
       await this.deps.actions.deleteChannel(guildId, channelId);
     } catch (err) {
       if (!isPermissionError(err)) throw err;
-      // We've lost access to a channel we manage (a permission override hid it from
-      // us): stop tracking it so we don't retry the impossible delete on every
+      if (err instanceof ChannelObfuscatedError) {
+        // Discord shows the bot only the shell of a channel it cannot see. It keeps sending the
+        // voice states in one (seen on the dev application on 2026-11-04, live and in a fresh
+        // GUILD_CREATE, and not in Discord's docs), so the room is empty, but the bot cannot
+        // delete it. It keeps its record, its text and Join channels and its number, and is not
+        // renamed for a while, like a room the bot cannot rename. Dropping it left an empty
+        // channel nothing tracked, for good. Asked again every sweep, since the adapter
+        // recognises the shell from its cache without a request, so one the bot can see again
+        // is deleted as soon as it is empty. Told and logged once per wait.
+        if (!this.leftUnseen(channelId)) this.giveUpRenaming(guildId, channelId, err, true);
+        return { action: 'unseen' };
+      }
+      // We've lost access to a channel we manage (a permission override hid it from us,
+      // where Discord does not show the bot an obfuscated shell, or Manage Channels was
+      // taken away): stop tracking it so we don't retry the impossible delete on every
       // reconcile, and tell the admin how to restore access.
       await this.deps.secondaries.remove(channelId);
       await this.deps.onSecondaryRemoved?.(guildId, channelId);
@@ -2668,9 +2685,17 @@ export class VoiceFeature {
     }
   }
 
-  /** Remembers a room the sweep could not rename, and tells the guild once. Ids only in the log. */
-  private giveUpRenaming(guildId: string, channelId: string, err: unknown): void {
-    this.unrenamable.set(channelId, { guildId, at: Date.now() });
+  /**
+   * Remembers a room the sweep could not rename, or (`unseen`) one kept rather than deleted as
+   * empty because the bot cannot see it (by the sweep, a member leaving or a lapsed guild's
+   * cleanup), and tells the guild once. Ids only in the log.
+   */
+  private giveUpRenaming(guildId: string, channelId: string, err: unknown, unseen = false): void {
+    this.unrenamable.set(channelId, {
+      guildId,
+      at: Date.now(),
+      ...(unseen ? { unseen: true as const } : {}),
+    });
     // A channel the bot can no longer see is lost access, recorded as the access pass does,
     // so a room both of them find is one incident.
     const operation = err instanceof ChannelObfuscatedError ? 'delete' : 'rename';
@@ -2683,8 +2708,16 @@ export class VoiceFeature {
     }
     this.deps.logger.warn(
       { err: withoutRequestBody(err), guildId, channelId },
-      'could not rename a room, leaving it alone for a while',
+      unseen
+        ? 'could not delete an empty room the bot cannot see, leaving it alone for a while'
+        : 'could not rename a room, leaving it alone for a while',
     );
+  }
+
+  /** Whether a room the bot cannot see was recorded as such within the last wait. */
+  private leftUnseen(channelId: string): boolean {
+    const left = this.unrenamable.get(channelId);
+    return left?.unseen === true && Date.now() - left.at < LOST_ACCESS_RETRY_MS;
   }
 
   /** Forgets the rooms of a guild that no longer exist, so the map holds only rooms still being left alone. */
@@ -3667,7 +3700,8 @@ export class VoiceFeature {
       if (nonBot.length === 0) {
         const { action } = await this.maybeCleanup(guildId, channelId, { dryRun });
         if (action === 'deleted' || action === 'would-delete') drift.deletedEmpty.push(channelId);
-        continue;
+        // A room the bot cannot see is kept, so it keeps its place in the numbering.
+        if (action !== 'unseen') continue;
       }
       survivors.push(secondary);
     }
@@ -3697,7 +3731,8 @@ export class VoiceFeature {
     // number is never duplicated within its scope. A **grouped** category numbers
     // across ALL its primaries as one block; ungrouped primaries number
     // independently (the legacy per-primary `check_rename`).
-    this.forgetGoneRooms(guildId, survivors);
+    // Not on a dry run, whose survivors leave out every room it only reports as emptied.
+    if (!dryRun) this.forgetGoneRooms(guildId, survivors);
     const groups = readGroups((await this.deps.guilds.ensure(guildId)).settings);
     const byCreated = (a: SecondaryChannelRow, b: SecondaryChannelRow): number =>
       a.createdAt.getTime() - b.createdAt.getTime() || a.channelId.localeCompare(b.channelId);

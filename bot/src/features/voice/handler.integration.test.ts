@@ -9,6 +9,7 @@ import {
   db,
   startModeOf,
 } from '@avc/core';
+import { DiscordAPIError } from 'discord.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PgTestEnv } from '../../test/pgContainer.js';
 import { startPostgres } from '../../test/pgContainer.js';
@@ -1235,6 +1236,152 @@ describe('VoiceFeature (integration)', () => {
       await feature.reconcileGuild(GUILD, { dryRun: true });
       expect(actions.ofType('rename')).toEqual([]);
       expect(problems.recent(GUILD)).toEqual([]);
+    });
+
+    /**
+     * Discord shows the bot only the shell of a channel it cannot View, which the bot cannot
+     * delete. Dropping such a room once it emptied deleted its text and Join channels and left
+     * the room itself untracked for good, so it is kept until the bot can see it again.
+     */
+    describe('a room the bot cannot see that looks empty', () => {
+      let deletes: string[];
+      let removed: string[];
+
+      beforeEach(() => {
+        deletes = [];
+        removed = [];
+        feature = new VoiceFeature({
+          autoChannels,
+          secondaries,
+          guilds,
+          actions,
+          voice,
+          selfHosted: true,
+          logger: fakeLogger(),
+          permissionProblems: problems,
+          serverLog: (_guild, level, message) => {
+            if (level === 1) told.push(message);
+          },
+          onSecondaryRemoved: (_g, channelId) => {
+            removed.push(channelId);
+            return Promise.resolve();
+          },
+        });
+        voice.drop('r1', 'alice');
+        const del = actions.deleteChannel.bind(actions);
+        actions.deleteChannel = (guildId, channelId) => {
+          if (channelId !== 'r1') return del(guildId, channelId);
+          deletes.push(channelId);
+          return Promise.reject(new ChannelObfuscatedError('r1'));
+        };
+      });
+
+      it('keeps its record, companions and number, and is recorded once', async () => {
+        await feature.reconcileGuild(GUILD);
+
+        expect(await secondaries.get('r1')).toBeDefined();
+        expect(removed).toEqual([]);
+        expect((await secondaries.get('r2'))!.state.index).toBe(1);
+        expect((await secondaries.get('r3'))!.state.index).toBe(2);
+        expect(actions.ofType('rename').map((a) => a.channelId)).toEqual(['r2', 'r3']);
+        expect(problems.recent(GUILD)).toEqual([
+          expect.objectContaining({ channelId: 'r1', operation: 'delete' }),
+        ]);
+        expect(told).toHaveLength(1);
+
+        await feature.reconcileGuild(GUILD);
+
+        // Asked again (the adapter answers from its cache), and still neither dropped nor told.
+        expect(deletes).toEqual(['r1', 'r1']);
+        expect(await secondaries.get('r1')).toBeDefined();
+        expect(removed).toEqual([]);
+        expect(problems.recent(GUILD)).toHaveLength(1);
+        expect(told).toHaveLength(1);
+      });
+
+      it('is deleted on the next sweep once the bot can see it again and it is empty', async () => {
+        await feature.reconcileGuild(GUILD);
+        actions.deleteChannel = (guildId, channelId) => {
+          deletes.push(channelId);
+          return Promise.resolve();
+        };
+
+        await feature.reconcileGuild(GUILD);
+
+        expect(deletes).toEqual(['r1', 'r1']);
+        expect(await secondaries.get('r1')).toBeUndefined();
+        expect(removed).toEqual(['r1']);
+      });
+
+      it('is told about again only after the wait', async () => {
+        await feature.reconcileGuild(GUILD);
+        problems.clear(GUILD, 'r1');
+        await feature.reconcileGuild(GUILD);
+        expect(problems.recent(GUILD)).toEqual([]);
+
+        const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 7 * 60 * 60 * 1000);
+        try {
+          await feature.reconcileGuild(GUILD);
+        } finally {
+          clock.mockRestore();
+        }
+
+        expect(problems.recent(GUILD)).toEqual([
+          expect.objectContaining({ channelId: 'r1', operation: 'delete' }),
+        ]);
+        expect(await secondaries.get('r1')).toBeDefined();
+      });
+
+      it('is reported as kept by a dry run, which forgets nothing', async () => {
+        await feature.reconcileGuild(GUILD);
+
+        const drift = await feature.reconcileGuild(GUILD, { dryRun: true });
+
+        expect(drift.deletedEmpty).not.toContain('r1');
+        expect(deletes).toEqual(['r1']);
+        problems.clear(GUILD, 'r1');
+        await feature.reconcileGuild(GUILD);
+        // Still within the wait the first run started, so not told again.
+        expect(problems.recent(GUILD)).toEqual([]);
+      });
+
+      it('is kept when the last member it could see leaves it', async () => {
+        voice.put('r1', member('bob'));
+        voice.drop('r1', 'bob');
+
+        const touched = await feature.handleVoiceStateUpdate({
+          guildId: GUILD,
+          member: member('bob'),
+          beforeChannelId: 'r1',
+        });
+
+        expect(deletes).toEqual(['r1']);
+        expect(await secondaries.get('r1')).toBeDefined();
+        expect(removed).toEqual([]);
+        expect(touched).toContain('r1');
+        expect(problems.recent(GUILD)).toEqual([
+          expect.objectContaining({ channelId: 'r1', operation: 'delete' }),
+        ]);
+      });
+
+      it('still stops managing an empty room on a Missing Access delete', async () => {
+        actions.deleteChannel = () =>
+          Promise.reject(
+            new DiscordAPIError(
+              { code: 50001, message: 'Missing Access' } as never,
+              50001,
+              403,
+              'DELETE',
+              'https://discord.test',
+              {} as never,
+            ),
+          );
+
+        await feature.reconcileGuild(GUILD);
+
+        expect(await secondaries.get('r1')).toBeUndefined();
+        expect(removed).toEqual(['r1']);
+      });
     });
   });
 
