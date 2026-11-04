@@ -376,6 +376,120 @@ describe('PrivacyService (integration)', () => {
     expect(actions.ofType('rename')).toHaveLength(0);
   });
 
+  describe('an owner name Discord refuses (Server Discovery)', () => {
+    beforeEach(() => {
+      actions.refuseNamesMatching = /Badword/;
+    });
+
+    it('makes the Join channel under the plain name, and the lock succeeds', async () => {
+      nicks.set('alice', 'Badword Alice');
+      const res = await privacy.makePrivate(GUILD, SEC, 'alice');
+      expect(res.ok).toBe(true);
+      expect(liveJoinChannels().map((a) => a.name)).toEqual(['⇩ Join owner']);
+      expect((await joinRow())?.channelId).toBe(liveJoinChannels()[0]!.channelId);
+    });
+
+    it('renames to the plain name on a handover, and re-points the creator', async () => {
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      const joinId = actions.ofType('joinChannel')[0]!.channelId;
+
+      await expect(privacy.handleOwnerChanged(GUILD, SEC, 'bob', 'Badword Bob')).resolves.toBe(
+        undefined,
+      );
+
+      expect(actions.ofType('rename')).toEqual([
+        expect.objectContaining({ channelId: joinId, name: '⇩ Join owner' }),
+      ]);
+      expect((await joinChannels.getBySecondary(SEC))!.creatorId).toBe('bob');
+    });
+
+    it('renames to the plain name once a held-back rename is refused', async () => {
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      const joinId = actions.ofType('joinChannel')[0]!.channelId;
+      actions.simulateRenameRateLimit = true;
+
+      await privacy.handleOwnerChanged(GUILD, SEC, 'bob', 'Badword Bob');
+
+      await vi.waitFor(() =>
+        expect(actions.ofType('rename').map((a) => a.name)).toEqual([
+          '⇩ Join Badword Bob',
+          '⇩ Join owner',
+        ]),
+      );
+      expect(actions.ofType('rename').every((a) => a.channelId === joinId)).toBe(true);
+    });
+
+    it('leaves a held-back refusal alone once a later owner has renamed the channel', async () => {
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      actions.simulateRenameRateLimit = true;
+      let refuse!: (reason: string) => void;
+      const rename = actions.renameChannel.bind(actions);
+      actions.renameChannel = async (guildId, channelId, name) => {
+        const result = await rename(guildId, channelId, name);
+        if (!name.includes('Badword')) return result;
+        return { ...result, deferredRefusal: new Promise((r) => (refuse = r)) };
+      };
+
+      await privacy.handleOwnerChanged(GUILD, SEC, 'bob', 'Badword Bob');
+      await privacy.handleOwnerChanged(GUILD, SEC, 'carol', 'Carol');
+      refuse('Contains words not allowed for servers in Server Discovery.');
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(actions.ofType('rename').map((a) => a.name)).toEqual([
+        '⇩ Join Badword Bob',
+        '⇩ Join Carol',
+      ]);
+    });
+
+    it('leaves it alone when the same owner is handed the room again under a name Discord takes', async () => {
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      actions.simulateRenameRateLimit = true;
+      let refuse!: (reason: string) => void;
+      const rename = actions.renameChannel.bind(actions);
+      actions.renameChannel = async (guildId, channelId, name) => {
+        const result = await rename(guildId, channelId, name);
+        if (!name.includes('Badword')) return result;
+        return { ...result, deferredRefusal: new Promise((r) => (refuse = r)) };
+      };
+
+      await privacy.handleOwnerChanged(GUILD, SEC, 'bob', 'Badword Bob');
+      await privacy.handleOwnerChanged(GUILD, SEC, 'carol', 'Carol');
+      await privacy.handleOwnerChanged(GUILD, SEC, 'bob', 'Bob');
+      refuse('Contains words not allowed for servers in Server Discovery.');
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(actions.ofType('rename').map((a) => a.name)).toEqual([
+        '⇩ Join Badword Bob',
+        '⇩ Join Carol',
+        '⇩ Join Bob',
+      ]);
+    });
+
+    it('gives the plain name in the guild queue when there is one', async () => {
+      const dispatched: string[] = [];
+      privacy = build({
+        dispatcher: {
+          dispatch: <T>(_guildId: string, name: string, task: () => Promise<T>) => {
+            dispatched.push(name);
+            return task();
+          },
+        } as PrivacyServiceDeps['dispatcher'],
+      });
+      await privacy.makePrivate(GUILD, SEC, 'alice');
+      actions.simulateRenameRateLimit = true;
+
+      await privacy.handleOwnerChanged(GUILD, SEC, 'bob', 'Badword Bob');
+
+      await vi.waitFor(() =>
+        expect(actions.ofType('rename').map((a) => a.name)).toEqual([
+          '⇩ Join Badword Bob',
+          '⇩ Join owner',
+        ]),
+      );
+      expect(dispatched).toEqual(['join:deferred-refusal']);
+    });
+  });
+
   it('cleanupForSecondary removes the join channel when the private channel is deleted', async () => {
     await privacy.makePrivate(GUILD, SEC, 'alice');
     const joinId = actions.ofType('joinChannel')[0]!.channelId;

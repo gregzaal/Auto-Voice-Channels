@@ -496,6 +496,8 @@ async function main(): Promise<void> {
     // Late-bound like `rerender`, for the same cycle.
     ownerName: (gid: string, member): Promise<string> => voiceFeature.nameFor(gid, member),
     permissionProblems,
+    // For the plain name a "⇩ Join" channel takes when Discord refuses a rename it held back.
+    dispatcher,
     serverLog: (gid, level, message) => serverLogger.log(gid, level, message),
     // The `room_access.disabled` lever, through the creation gate's cached snapshot.
     roomAccessDisabled: () => creationGate.roomAccessDisabled(),

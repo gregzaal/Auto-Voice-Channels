@@ -11,7 +11,8 @@ import type {
   SecondaryChannelRepository,
   SecondaryChannelRow,
 } from '@avc/core';
-import type { ApplyOverwritesResult, VoiceActions } from './actions.js';
+import type { GuildDispatcher } from '../../runtime/dispatcher.js';
+import type { ApplyOverwritesResult, RenameResult, VoiceActions } from './actions.js';
 import type { CommandResult } from './commands.js';
 import type { GuildVoiceView, VoiceMember } from './types.js';
 import { describeError } from '../../ops/describeError.js';
@@ -41,7 +42,12 @@ import {
   withPending,
 } from './accessRecord.js';
 import { savedListsInert, type CommandAccess, type CommandCaller } from './commandAccess.js';
-import { ChannelObfuscatedError, isPermissionError, withoutRequestBody } from './discordAdapter.js';
+import {
+  ChannelObfuscatedError,
+  isPermissionError,
+  nameRefusalOf,
+  withoutRequestBody,
+} from './discordAdapter.js';
 import {
   LOST_ACCESS_RETRY_MS,
   permissionProblemMessage,
@@ -71,6 +77,12 @@ import { roomMode } from './roomMode.js';
 
 const ok = (message: string): CommandResult => ({ ok: true, message });
 const fail = (message: string): CommandResult => ({ ok: false, message });
+
+/**
+ * The "⇩ Join" channel's name when it cannot name the owner: nobody to name, or a name Discord
+ * refuses (a Server Discovery server refuses names holding words it does not allow there).
+ */
+const JOIN_FALLBACK_NAME = '⇩ Join owner';
 
 export interface PrivacyServiceDeps {
   secondaries: SecondaryChannelRepository;
@@ -111,6 +123,12 @@ export interface PrivacyServiceDeps {
   ownerName?: (guildId: string, member: VoiceMember) => Promise<string>;
   /** Where an access change the bot lacks the permission for is recorded. */
   permissionProblems?: PermissionProblemTracker;
+  /**
+   * The guild queue, for the rename a "⇩ Join" channel gets when Discord refuses a rename it
+   * held back, minutes after the change that asked for it. Absent runs it inline, which only a
+   * test does.
+   */
+  dispatcher?: Pick<GuildDispatcher, 'dispatch'> | undefined;
   serverLog?: (guildId: string, level: 1 | 2 | 3, message: string) => void;
   /**
    * Whether `room_access.disabled` is on (the creation gate's cached snapshot, never an
@@ -472,6 +490,14 @@ export class PrivacyService {
 
   /** Sweep incidents already told to a guild, by room and operation, and when. See {@link SWEEP_TOLD_FOR_MS}. */
   private readonly sweepTold = new Map<string, number>();
+
+  /**
+   * The latest rename asked of each "⇩ Join" channel, by a count, while one Discord held back may
+   * still be refused. A refusal gives the channel the plain name only if no rename was asked
+   * after it. In memory: a restart drops the outcome of a held-back rename anyway.
+   */
+  private readonly joinRenames = new Map<string, number>();
+  private joinRenameCount = 0;
 
   // -- the four commands --------------------------------------------------------
 
@@ -1468,7 +1494,12 @@ export class PrivacyService {
       const row = await this.deps.joinChannels.getBySecondary(secondaryChannelId);
       if (row) {
         await this.deps.joinChannels.setCreatorBySecondary(secondaryChannelId, newOwnerId);
-        await this.deps.actions.renameChannel(guildId, row.channelId, `⇩ Join ${newOwnerName}`);
+        await this.renameJoinChannel(
+          guildId,
+          secondaryChannelId,
+          row.channelId,
+          `⇩ Join ${newOwnerName}`,
+        );
         this.deps.logger.info(
           { guildId, secondaryChannelId, joinChannelId: row.channelId, newOwnerId },
           're-pointed join channel at new owner',
@@ -2424,7 +2455,7 @@ export class PrivacyService {
   /** The "⇩ Join {owner}" name, with the owner's `/nick` applied. */
   private async ownerJoinName(guildId: string, row: SecondaryChannelRow): Promise<string> {
     const owner = this.deps.voice.membersInChannel(row.channelId).find((m) => m.id === row.ownerId);
-    if (!owner) return '⇩ Join owner';
+    if (!owner) return JOIN_FALLBACK_NAME;
     const name = this.deps.ownerName
       ? await this.deps.ownerName(guildId, owner)
       : owner.displayName;
@@ -2449,7 +2480,7 @@ export class PrivacyService {
     const existing = await this.deps.joinChannels.getBySecondary(roomChannelId);
     if (existing) return { channelId: existing.channelId, created: false };
 
-    const channelId = await this.deps.actions.createJoinChannel(guildId, name, roomChannelId);
+    const channelId = await this.createJoinChannel(guildId, roomChannelId, name);
     try {
       await this.deps.joinChannels.create({
         channelId,
@@ -2468,6 +2499,88 @@ export class PrivacyService {
       return { channelId: kept.channelId, created: false };
     }
     return { channelId, created: true };
+  }
+
+  /**
+   * Creates a "⇩ Join" channel under `name`, or under the plain name when Discord refuses the
+   * owner's. Without it the room never got one, so nobody could knock, and the sweep asked for
+   * the same refused name every pass.
+   */
+  private async createJoinChannel(
+    guildId: string,
+    roomChannelId: string,
+    name: string,
+  ): Promise<string> {
+    try {
+      return await this.deps.actions.createJoinChannel(guildId, name, roomChannelId);
+    } catch (err) {
+      const reason = nameRefusalOf(err);
+      if (reason === undefined || name === JOIN_FALLBACK_NAME) throw err;
+      this.deps.logger.info(
+        { guildId, roomChannelId, reason },
+        'Discord refused a join channel name, using the plain one',
+      );
+      return this.deps.actions.createJoinChannel(guildId, JOIN_FALLBACK_NAME, roomChannelId);
+    }
+  }
+
+  /**
+   * Renames a room's "⇩ Join" channel for its new owner, or to the plain name when Discord
+   * refuses the owner's. A rename Discord holds back under its limit of two per ten minutes is
+   * only refused when it is finally sent, and the plain name follows it then, in the guild's
+   * queue, unless a later handover has asked for a name of its own (discord.js sends one
+   * channel's renames in order, so that one lands after) or the channel no longer fronts the
+   * room.
+   */
+  private async renameJoinChannel(
+    guildId: string,
+    roomChannelId: string,
+    joinChannelId: string,
+    name: string,
+  ): Promise<void> {
+    const asked = ++this.joinRenameCount;
+    this.joinRenames.set(joinChannelId, asked);
+    const settle = (): void => {
+      if (this.joinRenames.get(joinChannelId) === asked) this.joinRenames.delete(joinChannelId);
+    };
+    let renamed: RenameResult;
+    try {
+      renamed = await this.deps.actions.renameChannel(guildId, joinChannelId, name);
+    } catch (err) {
+      settle();
+      const reason = nameRefusalOf(err);
+      if (reason === undefined || name === JOIN_FALLBACK_NAME) throw err;
+      this.deps.logger.info(
+        { guildId, roomChannelId, joinChannelId, reason },
+        'Discord refused a join channel name, using the plain one',
+      );
+      await this.deps.actions.renameChannel(guildId, joinChannelId, JOIN_FALLBACK_NAME);
+      return;
+    }
+    if (renamed.deferredRefusal === undefined) {
+      settle();
+      return;
+    }
+    const task = async (): Promise<void> => {
+      if (this.joinRenames.get(joinChannelId) !== asked) return;
+      const current = await this.deps.joinChannels.getBySecondary(roomChannelId);
+      if (current?.channelId !== joinChannelId) return;
+      await this.deps.actions.renameChannel(guildId, joinChannelId, JOIN_FALLBACK_NAME);
+    };
+    void renamed.deferredRefusal
+      .then(async (reason) => {
+        if (reason === undefined) return;
+        await (this.deps.dispatcher
+          ? this.deps.dispatcher.dispatch(guildId, 'join:deferred-refusal', task)
+          : task());
+      })
+      .catch((err: unknown) => {
+        this.deps.logger.warn(
+          { err, guildId, roomChannelId, joinChannelId },
+          'could not rename a join channel after Discord refused its name',
+        );
+      })
+      .finally(settle);
   }
 
   /**

@@ -495,8 +495,8 @@ export class RecordingVoiceActions implements VoiceActions {
   /** When set, `renameChannel` reports this channel id as deleted on Discord. */
   renameGoneForChannel?: string;
   /**
-   * When set, `renameChannel` and `createVoiceChannel` refuse a name it matches, as Discord
-   * refuses a name with words it does not allow in a Server Discovery server.
+   * When set, `renameChannel`, `createVoiceChannel` and `createJoinChannel` refuse a name it
+   * matches, as Discord refuses a name with words it does not allow in a Server Discovery server.
    */
   refuseNamesMatching?: RegExp;
   /** When true, `createVoiceChannel` throws Missing Permissions (tests the create path). */
@@ -834,6 +834,7 @@ export class RecordingVoiceActions implements VoiceActions {
   }
 
   createJoinChannel(guildId: string, name: string, nearChannelId: string): Promise<string> {
+    if (this.refuseNamesMatching?.test(name)) return Promise.reject(nameRefusedError('POST'));
     const channelId = `${this.idPrefix}-join-${++this.seq}`;
     this.created.add(channelId);
     this.actions.push({ type: 'joinChannel', guildId, channelId, name, nearChannelId });

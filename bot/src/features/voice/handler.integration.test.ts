@@ -264,6 +264,39 @@ describe('VoiceFeature (integration)', () => {
     expect(rename.name).not.toContain('Unknown');
   });
 
+  it('still makes the leaving owner a room when the Join channel cannot be re-pointed', async () => {
+    const f = new VoiceFeature({
+      autoChannels,
+      secondaries,
+      guilds,
+      actions,
+      voice,
+      selfHosted: true,
+      logger: fakeLogger(),
+      onOwnerChanged: () => Promise.reject(new Error('Missing Permissions')),
+    });
+    const alice = member('alice');
+    voice.put(PRIMARY, alice);
+    await f.handleVoiceStateUpdate({ guildId: GUILD, member: alice, afterChannelId: PRIMARY });
+    const secondaryId = actions.ofType('create')[0]!.channelId;
+    voice.put(secondaryId, alice);
+    voice.put(secondaryId, member('bob'));
+
+    // alice (owner) moves from her room straight into the creator channel.
+    voice.drop(secondaryId, 'alice');
+    voice.put(PRIMARY, alice);
+    const touched = await f.handleVoiceStateUpdate({
+      guildId: GUILD,
+      member: alice,
+      beforeChannelId: secondaryId,
+      afterChannelId: PRIMARY,
+    });
+
+    expect((await secondaries.get(secondaryId))!.ownerId).toBe('bob');
+    expect(touched).toContain(secondaryId);
+    expect(actions.ofType('create')).toHaveLength(2);
+  });
+
   it('keeps ownership when a non-owner leaves', async () => {
     const alice = member('alice');
     voice.put(PRIMARY, alice);

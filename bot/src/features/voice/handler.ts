@@ -1813,8 +1813,17 @@ export class VoiceFeature {
       'transferred ownership after owner left',
     );
     this.deps.serverLog?.(guildId, 2, `👑 <@${newOwner.id}> now owns <#${channelId}>`);
-    // Re-point a private channel's "⇩ Join" companion (no-op if not private).
-    await this.deps.onOwnerChanged?.(guildId, channelId, newOwner.id, newOwnerName);
+    // Re-point a private channel's "⇩ Join" companion (no-op if not private). Caught: thrown,
+    // it ended the whole voice event, so the room was not re-rendered and a leaver who moved
+    // into a creator channel got no room.
+    try {
+      await this.deps.onOwnerChanged?.(guildId, channelId, newOwner.id, newOwnerName);
+    } catch (err) {
+      this.deps.logger.warn(
+        { err, guildId, channelId, newOwnerId: newOwner.id },
+        'could not re-point the join channel after the owner left',
+      );
+    }
   }
 
   /**
