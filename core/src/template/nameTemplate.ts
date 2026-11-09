@@ -122,10 +122,25 @@ export interface GameResolution {
  * The "playing" game names for a member. Prefers the structured `activities`
  * (the source of truth when present, keeping game detection consistent with the
  * party tokens) and falls back to the flat `playing` list otherwise.
+ *
+ * **Newest-started first, then by name, never in Discord's order.** Discord does
+ * not keep a member's activities in a stable order between presence updates, and
+ * this order decides a tie: one member playing two games is a tie of one each, so
+ * a room named after `tied[0]` flipped between the two on every update, spending
+ * Discord's two renames per ten minutes on it. The newest-started game wins
+ * because a game left running all day (or an app Discord detects as one) would
+ * otherwise name the room over the one the member just launched.
  */
 function playingNames(m: VoiceMember): string[] {
-  if (m.activities) return m.activities.filter((a) => a.kind === 'playing').map((a) => a.name);
-  return m.playing;
+  if (!m.activities) return m.playing;
+  return m.activities
+    .filter((a) => a.kind === 'playing')
+    .sort(
+      (a, b) =>
+        (b.startedAt ?? -Infinity) - (a.startedAt ?? -Infinity) ||
+        (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+    )
+    .map((a) => a.name);
 }
 
 /**

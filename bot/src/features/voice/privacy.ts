@@ -2528,9 +2528,8 @@ export class PrivacyService {
    * Renames a room's "⇩ Join" channel for its new owner, or to the plain name when Discord
    * refuses the owner's. A rename Discord holds back under its limit of two per ten minutes is
    * only refused when it is finally sent, and the plain name follows it then, in the guild's
-   * queue, unless a later handover has asked for a name of its own (discord.js sends one
-   * channel's renames in order, so that one lands after) or the channel no longer fronts the
-   * room.
+   * queue, unless a later handover has asked for a name of its own (the adapter sends only the
+   * newest name asked for, so that one replaces it) or the channel no longer fronts the room.
    */
   private async renameJoinChannel(
     guildId: string,

@@ -21,6 +21,12 @@ export interface MemberActivity {
   details?: string;
   /** Rich-presence party: `size` is `[current, max]`. */
   party?: { id?: string; size?: [number, number] };
+  /**
+   * When the game says it started, in epoch milliseconds, absent when it reports no start time.
+   * Orders one member's games, so someone playing two at once names the room after the one they
+   * started last. Not Discord's `created_at`, which nothing promises stays put between updates.
+   */
+  startedAt?: number;
 }
 
 export interface VoiceMember {

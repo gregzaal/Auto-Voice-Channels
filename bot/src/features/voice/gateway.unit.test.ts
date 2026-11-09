@@ -38,4 +38,21 @@ describe('gameSignature', () => {
     expect(gameSignature({ activities: [playing('X', { state: 'Lobby' })] })).not.toBe(base);
     expect(gameSignature({ activities: [streaming('My Stream')] })).not.toBe(base);
   });
+
+  it('ignores Discord reordering the same activities', () => {
+    const a = gameSignature({ activities: [playing('Minecraft'), playing('Desktop Mate')] });
+    const b = gameSignature({ activities: [playing('Desktop Mate'), playing('Minecraft')] });
+    expect(a).toBe(b);
+  });
+
+  it('reads start times only when they pick between two games', () => {
+    const at = (ms: number) => ({ timestamps: { start: new Date(ms) } });
+    // One game resetting its clock each round renames nothing, so renders nothing.
+    expect(gameSignature({ activities: [playing('X', at(1000))] })).toBe(
+      gameSignature({ activities: [playing('X', at(2000))] }),
+    );
+    expect(
+      gameSignature({ activities: [playing('X', at(1000)), playing('Y', at(1500))] }),
+    ).not.toBe(gameSignature({ activities: [playing('X', at(2000)), playing('Y', at(1500))] }));
+  });
 });

@@ -20,6 +20,7 @@ interface PresenceLike {
     state?: string | null;
     details?: string | null;
     party?: { size?: readonly [number, number] } | null;
+    timestamps?: { start?: Date | null } | null;
   }[];
 }
 
@@ -28,15 +29,29 @@ interface PresenceLike {
  * Playing/Streaming activities' name/state/details/party size. Status and
  * custom-status changes (the bulk of presence traffic) leave it unchanged, so we
  * can cheaply skip the rerender they'd otherwise trigger.
+ *
+ * Sorted, because Discord reorders a member's activities between updates and the
+ * order is not something a name reads: unsorted, every reorder cost a render.
+ *
+ * Start times only when the member is playing two or more games, the one case a
+ * name reads them, to pick between those games. Plenty of games reset theirs
+ * every round, and for a single game that is a render for nothing.
  */
 export function gameSignature(presence: PresenceLike | null | undefined): string {
   if (!presence) return '';
-  return presence.activities
-    .filter((a) => a.type === ActivityType.Playing || a.type === ActivityType.Streaming)
+  const games = presence.activities.filter(
+    (a) => a.type === ActivityType.Playing || a.type === ActivityType.Streaming,
+  );
+  const withStart = games.filter((a) => a.type === ActivityType.Playing).length > 1;
+  return games
     .map(
       (a) =>
-        `${a.type}:${a.name}:${a.state ?? ''}:${a.details ?? ''}:${a.party?.size?.join('/') ?? ''}`,
+        `${a.type}:${a.name}:${a.state ?? ''}:${a.details ?? ''}:${a.party?.size?.join('/') ?? ''}` +
+        (withStart && a.type === ActivityType.Playing
+          ? `:${a.timestamps?.start?.getTime() ?? ''}`
+          : ''),
     )
+    .sort()
     .join('|');
 }
 

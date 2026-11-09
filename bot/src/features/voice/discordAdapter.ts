@@ -306,6 +306,7 @@ function toActivity(a: Activity): MemberActivity {
     ...(a.party?.size
       ? { party: { ...(a.party.id ? { id: a.party.id } : {}), size: a.party.size } }
       : {}),
+    ...(a.timestamps?.start ? { startedAt: a.timestamps.start.getTime() } : {}),
   };
 }
 
@@ -456,11 +457,57 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
+ * One channel's rename request in flight, and the newest name asked for behind it.
+ *
+ * **At most one rename per channel is ever sent at a time, and the newest name wins.**
+ * Discord allows two renames per channel per ten minutes, and the library answers a
+ * 429 by queueing every later rename of that channel behind it, then sending each in
+ * turn. A room whose rendered name changed faster than that sent every intermediate
+ * name, two per ten minutes, for as long as the changes kept coming, and a name that
+ * flipped back and forth was the worst case: each flip queued another rename, and the
+ * room visibly changed back and forth twice every ten minutes long after the flipping
+ * had stopped.
+ *
+ * Per instance, which is enough: a channel is renamed by the instance that owns its
+ * shard, and an overlap during a rolling deploy is no worse than it was before.
+ */
+interface RenameSlot {
+  /** The name the request in flight carries. */
+  sending: string;
+  /** Cancels the request while it is still waiting out the rate limit. */
+  controller: AbortController;
+  /** Whether nobody awaits the request any more, so a failure is logged where it lands. */
+  deferred: boolean;
+  /**
+   * The callers this request answers: those who asked for `sending`, and those whose names
+   * were replaced before a request of theirs was ever sent. Told Discord's refusal when the
+   * request settles, or carried on to the next one if it is cancelled.
+   */
+  waiters: RefusalWaiter[];
+  /**
+   * The newest name asked for since, different from `sending`, with its callers and those of
+   * every name it replaced. Sent once the request in flight settles, unless the channel
+   * already has it by then.
+   */
+  next?: { name: string; waiters: RefusalWaiter[] };
+}
+
+/** One caller's `deferredRefusal`, resolved with Discord's refusal, or undefined for none. */
+type RefusalWaiter = (reason: string | undefined) => void;
+
+function tell(waiters: readonly RefusalWaiter[], reason: string | undefined): void {
+  for (const resolve of waiters) resolve(reason);
+}
+
+/**
  * Real discord.js implementation of the voice side-effect seam. All mutating
  * calls tolerate already-applied state (deleted channel / absent member) so the
  * dispatcher can replay events idempotently.
  */
 export class DiscordVoiceActions implements VoiceActions {
+  /** See {@link RenameSlot}. Keyed by channel id, removed once nothing is in flight. */
+  private readonly renames = new Map<string, RenameSlot>();
+
   constructor(
     private readonly client: Client,
     private readonly logger?: Logger,
@@ -935,15 +982,27 @@ export class DiscordVoiceActions implements VoiceActions {
     // Renaming the shell would target `___hidden___` and could never succeed.
     if (isObfuscated(channel)) throw new ChannelObfuscatedError(channelId);
 
+    // A rename already in flight for this channel: this name waits behind it, replacing
+    // any older one that was waiting, and is sent only if it is still wanted once that
+    // request settles. See `RenameSlot`.
+    const inFlight = this.renames.get(channelId);
+    if (inFlight) return { rateLimited: true, deferredRefusal: this.queueRename(inFlight, name) };
+
     // discord.js queues a rate-limited edit rather than throwing, which could
     // otherwise block the per-guild work queue for up to 10 minutes. Race the
     // rename against a short probe: if it hasn't applied, report it as deferred
     // and let it complete in the background (it still converges).
-    const apply = channel.setName(name);
+    const { slot, apply } = this.sendRename(channelId, name, false, []);
+    const deferredRefusal = new Promise<string | undefined>((resolve) =>
+      slot.waiters.push(resolve),
+    );
     const outcome = await Promise.race([
       apply.then(
         () => 'done' as const,
         async (err: unknown) => {
+          // A newer name replaced this one inside the probe window. It is that name's
+          // turn now, which is a deferral as far as this caller is concerned.
+          if (slot.controller.signal.aborted) return 'pending' as const;
           if (isApiError(err, UNKNOWN_CHANNEL)) return 'gone' as const;
           // The channel came from the cache, so this edit is the first call that
           // actually reached Discord — and a 50001 here may mean "deleted" just as
@@ -958,19 +1017,134 @@ export class DiscordVoiceActions implements VoiceActions {
     ]);
     if (outcome === 'gone') return { rateLimited: false, channelGone: true };
     if (outcome === 'done') return { rateLimited: false };
-
-    const deferredRefusal = apply.then(
-      () => undefined,
-      (err: unknown) => {
-        // Every caller's rename comes through here (rooms, adopted channels, Join channels), so
-        // this is the one log line a refusal of any of them is sure to get.
-        if (!isApiError(err, UNKNOWN_CHANNEL)) {
-          this.logger?.warn({ err, channelId }, 'deferred channel rename ultimately failed');
-        }
-        return nameRefusalOf(err);
-      },
-    );
+    slot.deferred = true;
     return { rateLimited: true, deferredRefusal };
+  }
+
+  /**
+   * Sends one rename and records it as this channel's request in flight.
+   *
+   * A raw PATCH rather than `setName`, for the `signal`: discord.js has no way to cancel a
+   * rename sent through a channel object, and cancelling the one waiting out the limit is
+   * how a name that is no longer wanted never reaches Discord. The body keeps its `name`
+   * key, so the library still queues it as the rename it is. The channel cache catches up
+   * from the gateway's update, as it does for the raw overwrite write.
+   *
+   * `deferred` is whether the request already runs with nobody awaiting it: a failure is
+   * then logged here, since no caller will log it. A caller still inside its probe window
+   * gets the error thrown instead, and logs it itself.
+   */
+  private sendRename(
+    channelId: string,
+    name: string,
+    deferred: boolean,
+    waiters: RefusalWaiter[],
+  ): { slot: RenameSlot; apply: Promise<unknown> } {
+    const controller = new AbortController();
+    const apply = this.client.rest.patch(`/channels/${channelId}`, {
+      body: { name },
+      signal: controller.signal,
+    });
+    const slot: RenameSlot = { sending: name, controller, deferred, waiters };
+    this.renames.set(channelId, slot);
+    void apply
+      .then(
+        () => this.afterRename(channelId, slot, { kind: 'applied' }),
+        (err: unknown) =>
+          this.afterRename(
+            channelId,
+            slot,
+            controller.signal.aborted ? { kind: 'cancelled' } : { kind: 'failed', err },
+          ),
+      )
+      .catch((err: unknown) => {
+        if (this.renames.get(channelId) === slot) this.renames.delete(channelId);
+        tell([...slot.waiters, ...(slot.next?.waiters ?? [])], undefined);
+        this.logger?.warn({ err, channelId }, 'could not settle a channel rename');
+      });
+    return { slot, apply };
+  }
+
+  /**
+   * Puts `name` behind the request in flight. Resolves to Discord's refusal of the name the
+   * channel is finally sent in its place, which is this one unless a newer one replaces it
+   * first, or undefined once that applies, fails otherwise, or the channel already has it.
+   * Never rejects.
+   *
+   * **A replaced name hears about its replacement, not "no refusal".** Its caller reads
+   * undefined as "landed": `/name` remembers the template and tells nobody. A template whose
+   * every rendering Discord refuses would then be remembered for the member's next room
+   * because a presence change re-rendered it before the first rendering was sent.
+   */
+  private queueRename(slot: RenameSlot, name: string): Promise<string | undefined> {
+    return new Promise((resolve) => {
+      if (name === slot.sending && !slot.controller.signal.aborted) {
+        // Asking again for the name already on its way, so whatever waited behind it is now
+        // answered by it.
+        slot.waiters.push(...(slot.next?.waiters ?? []), resolve);
+        delete slot.next;
+        return;
+      }
+      if (slot.next) slot.next.name = name;
+      else slot.next = { name, waiters: [] };
+      slot.next.waiters.push(resolve);
+      // Whatever the request in flight carries is no longer wanted. A request still waiting
+      // out the limit never reaches Discord. One already sent settles as it was always going
+      // to, and `afterRename` asks Discord which happened.
+      slot.controller.abort();
+    });
+  }
+
+  /**
+   * Once a channel's request in flight settles: sends the name waiting behind it, if the
+   * channel does not have that name already, or frees the channel for the next rename.
+   *
+   * Unless the request applied, the channel's real name is asked for rather than assumed. A
+   * cancel can lose the race to the wire, and a failure can come after a retry that landed.
+   * That is a GET, which is not in the rename's rate-limit bucket. The slot stays registered
+   * across it, so a rename asked for meanwhile still waits behind it rather than racing it.
+   */
+  private async afterRename(
+    channelId: string,
+    slot: RenameSlot,
+    outcome: { kind: 'applied' } | { kind: 'cancelled' } | { kind: 'failed'; err: unknown },
+  ): Promise<void> {
+    let current: string | undefined;
+    let gone = false;
+    if (outcome.kind === 'applied') {
+      current = slot.sending;
+      tell(slot.waiters, undefined);
+    } else if (outcome.kind === 'failed') {
+      // Every caller's rename comes through here (rooms, adopted channels, Join channels),
+      // so this is the one log line a deferred refusal of any of them is sure to get.
+      gone = isApiError(outcome.err, UNKNOWN_CHANNEL);
+      if (slot.deferred && !gone) {
+        this.logger?.warn(
+          { err: outcome.err, channelId },
+          'deferred channel rename ultimately failed',
+        );
+      }
+      tell(slot.waiters, nameRefusalOf(outcome.err));
+    }
+    // A cancelled request's callers were not answered: they wait on whatever is sent next.
+    const carried = outcome.kind === 'cancelled' ? slot.waiters : [];
+    if (outcome.kind !== 'applied' && !gone && slot.next) {
+      try {
+        const fresh = await this.client.channels.fetch(channelId, { force: true });
+        current = (fresh && 'name' in fresh ? fresh.name : undefined) ?? undefined;
+      } catch (fetchErr) {
+        gone = isApiError(fetchErr, UNKNOWN_CHANNEL);
+      }
+    }
+    // Read after the fetch: a rename asked for while it was out is the newest one.
+    const next = slot.next;
+    if (!next || gone || next.name === current) {
+      if (this.renames.get(channelId) === slot) this.renames.delete(channelId);
+      tell([...carried, ...(next?.waiters ?? [])], undefined);
+      return;
+    }
+    // Replaces this slot synchronously, so nothing can slip in between.
+    this.sendRename(channelId, next.name, true, [...carried, ...next.waiters]);
   }
 
   async moveMember(

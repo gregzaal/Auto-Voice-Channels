@@ -558,6 +558,58 @@ describe('DiscordVoiceActions.deleteChannel', () => {
   });
 });
 
+/**
+ * Rename requests as the adapter sends them, raw PATCHes with a signal, each held
+ * until the test settles it. A held request stands for one sleeping out the 429,
+ * which in @discordjs/rest notices a cancel only when the sleep ends: `release`
+ * ends it, rejecting a cancelled request as the library does and applying any
+ * other. `ignoresCancel` stands for a request already on the wire.
+ */
+function fakeRenames(channelName = 'Old name') {
+  const sent: {
+    name: string;
+    signal: AbortSignal;
+    ok: () => void;
+    fail: (err: unknown) => void;
+    release: () => void;
+  }[] = [];
+  const state = { ignoresCancel: false, liveName: channelName };
+  const patch = vi.fn(
+    (_route: string, opts: { body: { name: string }; signal: AbortSignal }) =>
+      new Promise((resolve, reject) => {
+        const ok = () => {
+          state.liveName = opts.body.name;
+          resolve({});
+        };
+        sent.push({
+          name: opts.body.name,
+          signal: opts.signal,
+          ok,
+          fail: reject,
+          release: () =>
+            opts.signal.aborted && !state.ignoresCancel
+              ? reject(
+                  Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }),
+                )
+              : ok(),
+        });
+      }),
+  );
+  const channel = { isVoiceBased: () => true, name: channelName };
+  const fetch = vi.fn((_id: string, opts?: { force?: boolean }) =>
+    Promise.resolve(opts?.force ? { ...channel, name: state.liveName } : channel),
+  );
+  const client = { channels: { fetch }, rest: { patch } } as unknown as Client;
+  return { sent, state, patch, fetch, client, names: () => sent.map((s) => s.name) };
+}
+
+/** Renames `name` and waits out the probe, so it is the one waiting out the limit. */
+async function deferredRename(actions: DiscordVoiceActions, name: string) {
+  const pending = actions.renameChannel('g1', 'c1', name);
+  await vi.advanceTimersByTimeAsync(2600); // past RENAME_PROBE_MS (2500)
+  return pending;
+}
+
 describe('DiscordVoiceActions.renameChannel (rate-limit probe)', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -565,14 +617,9 @@ describe('DiscordVoiceActions.renameChannel (rate-limit probe)', () => {
 
   it('reports rateLimited when the rename outlives the probe window', async () => {
     vi.useFakeTimers();
-    const channel = {
-      isVoiceBased: () => true,
-      setName: vi.fn().mockReturnValue(new Promise(() => {})),
-    };
-    const actions = new DiscordVoiceActions(clientWith(channel));
-    const pending = actions.renameChannel('g1', 'c1', 'New name');
-    await vi.advanceTimersByTimeAsync(2600); // past RENAME_PROBE_MS (2500)
-    await expect(pending).resolves.toEqual({
+    const { client } = fakeRenames();
+    const actions = new DiscordVoiceActions(client);
+    await expect(deferredRename(actions, 'New name')).resolves.toEqual({
       rateLimited: true,
       deferredRefusal: expect.any(Promise),
     });
@@ -581,51 +628,39 @@ describe('DiscordVoiceActions.renameChannel (rate-limit probe)', () => {
   /** Sent minutes after the command answered, so this promise is how anyone hears of it. */
   it("says when Discord refuses a deferred rename's name once it is sent", async () => {
     vi.useFakeTimers();
-    let send!: (err: unknown) => void;
-    const channel = {
-      isVoiceBased: () => true,
-      setName: vi.fn().mockReturnValue(new Promise((_, reject) => (send = reject))),
-    };
-    const actions = new DiscordVoiceActions(clientWith(channel));
-    const pending = actions.renameChannel('g1', 'c1', 'New name');
-    await vi.advanceTimersByTimeAsync(2600);
-    const { deferredRefusal } = await pending;
-    send(nameRefusedError('PATCH'));
+    const { client, sent } = fakeRenames();
+    const actions = new DiscordVoiceActions(client);
+    const { deferredRefusal } = await deferredRename(actions, 'New name');
+    sent[0]!.fail(nameRefusedError('PATCH'));
     await expect(deferredRefusal).resolves.toBe(NAME_REFUSED_REASON);
   });
 
   it('resolves a deferred rename that applies, or fails otherwise, to no refusal', async () => {
     vi.useFakeTimers();
-    let settle!: { ok: () => void; fail: (err: unknown) => void };
-    const channel = {
-      isVoiceBased: () => true,
-      setName: vi
-        .fn()
-        .mockImplementation(
-          () => new Promise<void>((ok, fail) => (settle = { ok: () => ok(), fail })),
-        ),
-    };
-    const actions = new DiscordVoiceActions(clientWith(channel));
+    const { client, sent } = fakeRenames();
+    const actions = new DiscordVoiceActions(client);
 
-    const first = actions.renameChannel('g1', 'c1', 'New name');
-    await vi.advanceTimersByTimeAsync(2600);
-    const applied = (await first).deferredRefusal;
-    settle.ok();
+    const applied = (await deferredRename(actions, 'New name')).deferredRefusal;
+    sent[0]!.ok();
     await expect(applied).resolves.toBeUndefined();
 
-    const second = actions.renameChannel('g1', 'c1', 'Other name');
-    await vi.advanceTimersByTimeAsync(2600);
-    const failed = (await second).deferredRefusal;
-    settle.fail(new Error('socket hang up'));
+    const failed = (await deferredRename(actions, 'Other name')).deferredRefusal;
+    sent[1]!.fail(new Error('socket hang up'));
     await expect(failed).resolves.toBeUndefined();
   });
 
   it('reports not rate-limited when the rename applies promptly', async () => {
     vi.useFakeTimers();
-    const channel = { isVoiceBased: () => true, setName: vi.fn().mockResolvedValue(undefined) };
-    const actions = new DiscordVoiceActions(clientWith(channel));
-    await expect(actions.renameChannel('g1', 'c1', 'New name')).resolves.toEqual({
-      rateLimited: false,
+    const { client, sent, patch } = fakeRenames();
+    const actions = new DiscordVoiceActions(client);
+    const pending = actions.renameChannel('g1', 'c1', 'New name');
+    await vi.advanceTimersByTimeAsync(0);
+    sent[0]!.ok();
+    await expect(pending).resolves.toEqual({ rateLimited: false });
+    // Raw, keeping the `name` key that files it behind the channel's rename limit.
+    expect(patch).toHaveBeenCalledWith('/channels/c1', {
+      body: { name: 'New name' },
+      signal: expect.any(AbortSignal),
     });
   });
 
@@ -633,6 +668,259 @@ describe('DiscordVoiceActions.renameChannel (rate-limit probe)', () => {
     const channel = { isVoiceBased: () => false };
     const actions = new DiscordVoiceActions(clientWith(channel));
     await expect(actions.renameChannel('g1', 'c1', 'x')).resolves.toEqual({ rateLimited: false });
+  });
+});
+
+/**
+ * Discord allows two renames per channel per ten minutes and the library queues
+ * the rest. Before this, every name a room rendered while one was waiting was
+ * queued too and sent in turn, so a name flipping between two games renamed the
+ * room back and forth twice every ten minutes for as long as the flipping lasted.
+ */
+describe('DiscordVoiceActions.renameChannel (one rename per channel in flight)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('sends only the newest of the names asked for while one waits out the limit', async () => {
+    vi.useFakeTimers();
+    const { client, sent, names } = fakeRenames();
+    const actions = new DiscordVoiceActions(client);
+    await deferredRename(actions, 'A');
+    for (const name of ['B', 'C', 'D']) {
+      await expect(actions.renameChannel('g1', 'c1', name)).resolves.toEqual({
+        rateLimited: true,
+        deferredRefusal: expect.any(Promise),
+      });
+    }
+    expect(names()).toEqual(['A']);
+    expect(sent[0]!.signal.aborted).toBe(true);
+    // The limit clears: 'A' is dropped unsent, and only the newest name goes.
+    sent[0]!.release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(names()).toEqual(['A', 'D']);
+  });
+
+  it('sends nothing more when the name flips back before the waiting one is sent', async () => {
+    vi.useFakeTimers();
+    const { client, sent, names } = fakeRenames('Old name');
+    const actions = new DiscordVoiceActions(client);
+    await deferredRename(actions, 'Flipped');
+    const back = await actions.renameChannel('g1', 'c1', 'Old name');
+    sent[0]!.release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(names()).toEqual(['Flipped']);
+    await expect(back.deferredRefusal).resolves.toBeUndefined();
+    // And the channel is free again: the next rename is sent straight away.
+    void actions.renameChannel('g1', 'c1', 'Later');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(names()).toEqual(['Flipped', 'Later']);
+  });
+
+  it('asks Discord whether a cancelled rename landed anyway, rather than assuming', async () => {
+    vi.useFakeTimers();
+    const { client, state, sent, names } = fakeRenames('Old name');
+    const actions = new DiscordVoiceActions(client);
+    await deferredRename(actions, 'Flipped');
+    await actions.renameChannel('g1', 'c1', 'Old name');
+    // Discord applied it, but the library reports the cancel.
+    state.liveName = 'Flipped';
+    sent[0]!.release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(names()).toEqual(['Flipped', 'Old name']);
+  });
+
+  it('sends the newest name after a request the cancel could not stop', async () => {
+    vi.useFakeTimers();
+    const { client, state, sent, names } = fakeRenames();
+    state.ignoresCancel = true;
+    const actions = new DiscordVoiceActions(client);
+    await deferredRename(actions, 'A');
+    void actions.renameChannel('g1', 'c1', 'B');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(names()).toEqual(['A']);
+    sent[0]!.release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(names()).toEqual(['A', 'B']);
+  });
+
+  /**
+   * Not "no refusal" for a replaced name: `/name` reads undefined as landed, so it would
+   * remember a template Discord refuses because a presence change re-rendered it first.
+   */
+  it('tells every replaced caller the refusal of the name sent in their place', async () => {
+    vi.useFakeTimers();
+    const { client, sent } = fakeRenames();
+    const actions = new DiscordVoiceActions(client);
+    const first = await deferredRename(actions, 'A');
+    const replaced = await actions.renameChannel('g1', 'c1', 'B');
+    const newest = await actions.renameChannel('g1', 'c1', 'C');
+    sent[0]!.release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sent.map((s) => s.name)).toEqual(['A', 'C']);
+    sent[1]!.fail(nameRefusedError('PATCH'));
+    for (const r of [first, replaced, newest]) {
+      await expect(r.deferredRefusal).resolves.toBe(NAME_REFUSED_REASON);
+    }
+  });
+
+  it('tells replaced callers there was no refusal when the channel already has the newest name', async () => {
+    vi.useFakeTimers();
+    const { client, sent } = fakeRenames('Old name');
+    const actions = new DiscordVoiceActions(client);
+    const first = await deferredRename(actions, 'A');
+    const back = await actions.renameChannel('g1', 'c1', 'Old name');
+    sent[0]!.release();
+    await expect(first.deferredRefusal).resolves.toBeUndefined();
+    await expect(back.deferredRefusal).resolves.toBeUndefined();
+  });
+
+  it('asks Discord for the real name when a cancelled rename fails, since a retry may have landed', async () => {
+    vi.useFakeTimers();
+    const { client, state, sent, fetch, names } = fakeRenames('Old name');
+    state.ignoresCancel = true;
+    const actions = new DiscordVoiceActions(client);
+    await deferredRename(actions, 'A');
+    const back = await actions.renameChannel('g1', 'c1', 'Old name');
+    // An earlier attempt applied 'A', then the library gave up on a 5xx.
+    state.liveName = 'A';
+    sent[0]!.fail(new Error('Service Unavailable'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetch).toHaveBeenCalledWith('c1', { force: true });
+    expect(names()).toEqual(['A', 'Old name']);
+    sent[1]!.ok();
+    await expect(back.deferredRefusal).resolves.toBeUndefined();
+  });
+
+  it('sends nothing more for a channel the follow-up fetch finds deleted', async () => {
+    vi.useFakeTimers();
+    const { client, sent, fetch, names } = fakeRenames();
+    const actions = new DiscordVoiceActions(client);
+    await deferredRename(actions, 'A');
+    const replaced = await actions.renameChannel('g1', 'c1', 'B');
+    fetch.mockImplementation(() => Promise.reject(apiError(UNKNOWN_CHANNEL)));
+    sent[0]!.release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(names()).toEqual(['A']);
+    await expect(replaced.deferredRefusal).resolves.toBeUndefined();
+  });
+
+  it('sends the name asked for while it was checking what the channel is called', async () => {
+    vi.useFakeTimers();
+    const { client, sent, fetch, names } = fakeRenames('Old name');
+    const actions = new DiscordVoiceActions(client);
+    await deferredRename(actions, 'A');
+    await actions.renameChannel('g1', 'c1', 'Old name');
+    let answer!: () => void;
+    fetch.mockImplementationOnce(
+      (_id: string, opts?: { force?: boolean }) =>
+        new Promise((resolve) => {
+          if (!opts?.force) throw new Error('expected the forced fetch');
+          answer = () => resolve({ name: 'Old name' });
+        }),
+    );
+    sent[0]!.release();
+    await vi.advanceTimersByTimeAsync(0);
+    void actions.renameChannel('g1', 'c1', 'Newest');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(names()).toEqual(['A']);
+    answer();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(names()).toEqual(['A', 'Newest']);
+  });
+
+  it('shares the refusal of the request in flight with a caller asking for the same name', async () => {
+    vi.useFakeTimers();
+    const { client, sent } = fakeRenames();
+    const actions = new DiscordVoiceActions(client);
+    await deferredRename(actions, 'A');
+    const again = await actions.renameChannel('g1', 'c1', 'A');
+    expect(sent[0]!.signal.aborted).toBe(false);
+    sent[0]!.fail(nameRefusedError('PATCH'));
+    await expect(again.deferredRefusal).resolves.toBe(NAME_REFUSED_REASON);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('defers the first caller when a newer name replaces its rename inside the probe', async () => {
+    vi.useFakeTimers();
+    const { client, sent, names } = fakeRenames();
+    const actions = new DiscordVoiceActions(client);
+    const first = actions.renameChannel('g1', 'c1', 'A');
+    await vi.advanceTimersByTimeAsync(0);
+    void actions.renameChannel('g1', 'c1', 'B');
+    await vi.advanceTimersByTimeAsync(0);
+    sent[0]!.release();
+    await expect(first).resolves.toEqual({
+      rateLimited: true,
+      deferredRefusal: expect.any(Promise),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(names()).toEqual(['A', 'B']);
+  });
+
+  it('keeps channels apart', async () => {
+    vi.useFakeTimers();
+    const { client, names } = fakeRenames();
+    const actions = new DiscordVoiceActions(client);
+    await deferredRename(actions, 'A');
+    void actions.renameChannel('g1', 'c2', 'B');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(names()).toEqual(['A', 'B']);
+  });
+
+  /**
+   * Against the real request handler, nothing of its queueing mocked: a rename answered with
+   * a 429 sleeps it out, and a cancel during the sleep must keep it off the wire afterwards.
+   * The fake above assumes exactly that, so this pins the assumption to the library.
+   */
+  it('keeps a cancelled rename off the wire once the 429 it drew has been waited out', async () => {
+    const headers = {
+      'content-type': 'application/json',
+      'x-ratelimit-limit': '10',
+      'x-ratelimit-remaining': '9',
+      'x-ratelimit-reset-after': '10',
+      'x-ratelimit-bucket': 'channel-edit',
+    };
+    const wire: string[] = [];
+    const rest = new REST({
+      version: '10',
+      makeRequest: ((_url: string, init: { body?: string; signal?: AbortSignal }) => {
+        // As undici does: a request whose signal is already aborted never leaves.
+        if (init.signal?.aborted) {
+          return Promise.reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+        }
+        const { name } = JSON.parse(init.body ?? '{}') as { name: string };
+        wire.push(name);
+        if (name === 'A') {
+          return Promise.resolve(
+            new Response('{"message":"You are being rate limited.","retry_after":0.3}', {
+              status: 429,
+              headers: { ...headers, 'retry-after': '0.3' },
+            }),
+          );
+        }
+        return Promise.resolve(new Response('{}', { status: 200, headers }));
+      }) as never,
+    });
+    rest.setToken('token');
+    await rest.patch('/channels/c1', { body: { name: 'Old name' } });
+    const channel = { isVoiceBased: () => true, name: 'Old name' };
+    const client = {
+      channels: { fetch: vi.fn().mockResolvedValue(channel) },
+      rest,
+    } as unknown as Client;
+    const actions = new DiscordVoiceActions(client);
+
+    const first = actions.renameChannel('g1', 'c1', 'A');
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    await actions.renameChannel('g1', 'c1', 'B');
+    await expect(first).resolves.toMatchObject({ rateLimited: true });
+    await vi.waitFor(() => expect(wire).toEqual(['Old name', 'A', 'B']), { timeout: 2000 });
+    // Settled: nothing more reaches Discord, and the next rename goes straight through.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(wire).toEqual(['Old name', 'A', 'B']);
+    await expect(actions.renameChannel('g1', 'c1', 'C')).resolves.toEqual({ rateLimited: false });
+    expect(wire).toEqual(['Old name', 'A', 'B', 'C']);
   });
 });
 
@@ -718,6 +1006,7 @@ describe('DiscordVoiceActions.renameChannel (deleted vs merely hidden)', () => {
           opts?.force ? onForce() : Promise.resolve(channel),
         ),
       },
+      rest: { patch: vi.fn(missingAccess) },
     } as unknown as Client;
   }
 
@@ -726,7 +1015,7 @@ describe('DiscordVoiceActions.renameChannel (deleted vs merely hidden)', () => {
   const missingAccess = () => Promise.reject(apiError(50001));
 
   it('reports channelGone when a forced re-fetch proves the channel is deleted', async () => {
-    const channel = { isVoiceBased: () => true, setName: vi.fn(missingAccess) };
+    const channel = { isVoiceBased: () => true };
     const actions = new DiscordVoiceActions(
       clientWithForce(channel, () => Promise.reject(apiError(UNKNOWN_CHANNEL))),
     );
@@ -737,7 +1026,7 @@ describe('DiscordVoiceActions.renameChannel (deleted vs merely hidden)', () => {
   });
 
   it('rethrows when the channel is still there — hidden, not deleted', async () => {
-    const channel = { isVoiceBased: () => true, setName: vi.fn(missingAccess) };
+    const channel = { isVoiceBased: () => true };
     const actions = new DiscordVoiceActions(
       clientWithForce(channel, () => Promise.resolve(channel)),
     );
@@ -747,7 +1036,7 @@ describe('DiscordVoiceActions.renameChannel (deleted vs merely hidden)', () => {
   it('does NOT claim the channel is gone when the re-fetch itself fails', async () => {
     // A timeout or 5xx during an outage is not evidence of deletion. Claiming it
     // would drop a live channel's row, which is much worse than one more retry.
-    const channel = { isVoiceBased: () => true, setName: vi.fn(missingAccess) };
+    const channel = { isVoiceBased: () => true };
     const actions = new DiscordVoiceActions(
       clientWithForce(channel, () => Promise.reject(new Error('ETIMEDOUT'))),
     );
@@ -830,13 +1119,17 @@ describe('DiscordVoiceActions on an obfuscated channel', () => {
     expect(isPermissionError(new Error('anything else'))).toBe(false);
   });
 
-  it('refuses to rename it and never calls setName', async () => {
-    const setName = vi.fn();
-    const actions = new DiscordVoiceActions(clientWith(obfuscated({ setName })));
+  it('refuses to rename it and never sends the rename', async () => {
+    const patch = vi.fn();
+    const client = {
+      channels: { fetch: vi.fn().mockResolvedValue(obfuscated()) },
+      rest: { patch },
+    } as unknown as Client;
+    const actions = new DiscordVoiceActions(client);
     await expect(actions.renameChannel('g1', 'c1', 'x')).rejects.toBeInstanceOf(
       ChannelObfuscatedError,
     );
-    expect(setName).not.toHaveBeenCalled();
+    expect(patch).not.toHaveBeenCalled();
   });
 
   it('refuses to edit its limit or its overwrites', async () => {
@@ -869,11 +1162,18 @@ describe('DiscordVoiceActions on an obfuscated channel', () => {
   });
 
   it('leaves an ordinary channel alone', async () => {
-    const setName = vi.fn().mockResolvedValue(undefined);
-    const channel = { isVoiceBased: () => true, flags: { bitfield: 0 }, setName };
-    const actions = new DiscordVoiceActions(clientWith(channel));
+    const patch = vi.fn().mockResolvedValue({});
+    const channel = { isVoiceBased: () => true, flags: { bitfield: 0 } };
+    const client = {
+      channels: { fetch: vi.fn().mockResolvedValue(channel) },
+      rest: { patch },
+    } as unknown as Client;
+    const actions = new DiscordVoiceActions(client);
     await expect(actions.renameChannel('g1', 'c1', 'x')).resolves.toEqual({ rateLimited: false });
-    expect(setName).toHaveBeenCalledWith('x');
+    expect(patch).toHaveBeenCalledWith(
+      '/channels/c1',
+      expect.objectContaining({ body: { name: 'x' } }),
+    );
   });
 });
 

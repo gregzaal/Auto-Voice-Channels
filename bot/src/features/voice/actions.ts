@@ -143,15 +143,18 @@ export interface CreateVoiceChannelInput {
 export interface RenameResult {
   /**
    * True when the rename did not apply within the probe window because Discord
-   * is rate-limiting edits to this channel (2 per 10 min). The rename is still
-   * queued and will apply once the limit clears — callers should tell the user.
+   * is rate-limiting edits to this channel (2 per 10 min), or because another
+   * rename of the channel is already waiting. The newest name asked for applies
+   * once the limit clears, and a name a newer one replaces first is never sent.
+   * Callers should tell the user.
    */
   rateLimited: boolean;
   /**
-   * With `rateLimited` only: Discord's reason if the queued rename is refused when it is
-   * finally sent (as `nameRefusalOf` reads it), or undefined once it applies or fails for any other
-   * reason. A deferred rename is sent minutes after the caller has answered, so this is the
-   * only way a refusal of it reaches anyone. Never rejects.
+   * With `rateLimited` only: Discord's reason if the name finally sent in this one's place is
+   * refused (as `nameRefusalOf` reads it), which is this name unless a newer one replaced it
+   * first, or undefined once that applies, fails for any other reason, or turns out to be the
+   * channel's name already. A deferred rename is sent minutes after the caller has answered, so
+   * this is the only way a refusal of it reaches anyone. Never rejects.
    */
   deferredRefusal?: Promise<string | undefined>;
   /**

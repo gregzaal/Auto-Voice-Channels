@@ -208,6 +208,40 @@ describe('resolveGames', () => {
       names: ['Chatting'],
     });
   });
+
+  describe('one member playing two games', () => {
+    const minecraft = { kind: 'playing' as const, name: 'Minecraft', startedAt: 1000 };
+    const mate = { kind: 'playing' as const, name: 'Desktop Mate', startedAt: 2000 };
+    const solo = (activities: VoiceMember['activities']) => [
+      member({ id: 'ana', playing: [], activities }),
+    ];
+
+    // Discord reorders a member's activities between presence updates. Read in
+    // its order, the room renamed itself on every update.
+    it('names the same game whichever order Discord lists them in', () => {
+      for (const mode of ['top', 'shared'] as const) {
+        expect(resolveGames(solo([minecraft, mate]), { mode, ownerId: 'ana' })).toEqual(
+          resolveGames(solo([mate, minecraft]), { mode, ownerId: 'ana' }),
+        );
+      }
+    });
+
+    it('names the one started last', () => {
+      expect(resolveGames(solo([minecraft, mate]), { mode: 'top', ownerId: 'ana' })).toEqual({
+        names: ['Desktop Mate'],
+        representative: 'Desktop Mate',
+      });
+      expect(resolveGames(solo([minecraft, mate])).names).toEqual(['Desktop Mate', 'Minecraft']);
+    });
+
+    it('falls back to the name, after any game with a start time, when there is none', () => {
+      const halo = { kind: 'playing' as const, name: 'Halo' };
+      const doom = { kind: 'playing' as const, name: 'Doom' };
+      expect(resolveGames(solo([halo, doom]), { mode: 'top' }).names).toEqual(['Doom']);
+      expect(resolveGames(solo([doom, halo]), { mode: 'top' }).names).toEqual(['Doom']);
+      expect(resolveGames(solo([halo, minecraft]), { mode: 'top' }).names).toEqual(['Minecraft']);
+    });
+  });
 });
 
 describe('toRoman', () => {
