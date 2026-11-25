@@ -44,6 +44,7 @@ import {
 import { savedListsInert, type CommandAccess, type CommandCaller } from './commandAccess.js';
 import {
   ChannelObfuscatedError,
+  channelLimitOf,
   isPermissionError,
   nameRefusalOf,
   withoutRequestBody,
@@ -2515,7 +2516,14 @@ export class PrivacyService {
       return await this.deps.actions.createJoinChannel(guildId, name, roomChannelId);
     } catch (err) {
       const reason = nameRefusalOf(err);
-      if (reason === undefined || name === JOIN_FALLBACK_NAME) throw err;
+      // A full category or server refuses the plain name too, so it is not asked for.
+      if (
+        reason === undefined ||
+        name === JOIN_FALLBACK_NAME ||
+        channelLimitOf(err) !== undefined
+      ) {
+        throw err;
+      }
       this.deps.logger.info(
         { guildId, roomChannelId, reason },
         'Discord refused a join channel name, using the plain one',

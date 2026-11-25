@@ -14,6 +14,7 @@ export * from './companionText.js';
 export * from './reconciler.js';
 export * from './settings.js';
 export * from './permissionProblems.js';
+export * from './channelLimits.js';
 export * from './votekick.js';
 export * from './renameScheduler.js';
 export * from './discordAdapter.js';

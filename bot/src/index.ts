@@ -70,6 +70,7 @@ import { buildGatewayClient } from './gateway/client.js';
 import { createGatewayHealth } from './gateway/gatewayHealth.js';
 import {
   AccessCommands,
+  ChannelLimitTracker,
   CompanionTextService,
   ControlPanelPoster,
   DiscordVoiceActions,
@@ -469,6 +470,41 @@ async function main(): Promise<void> {
   // two has to be wired after the other exists.
   permissionProblems.onRecord = (guildId) => problemNotifier.record(guildId);
   permissionProblems.onResolved = (guildId) => problemNotifier.resolved(guildId);
+  /**
+   * Creator channels Discord refused a room for because a category or the server is full: the
+   * short cooldown that stops a refused create per join, and the one message in the creator
+   * channel's own chat that tells the waiting member why. Mentions exactly the member it names
+   * and nobody else, and is switched off with the problem notices (`problems.notify_disabled`).
+   */
+  const channelLimits = new ChannelLimitTracker({
+    chat: {
+      send: async (channelId, content, mentionId) => {
+        const channel = await client.channels.fetch(channelId);
+        if (!channel?.isTextBased() || !('send' in channel)) {
+          throw new Error(`channel ${channelId} has no chat`);
+        }
+        const message = await channel.send({ content, allowedMentions: { users: [mentionId] } });
+        return message.id;
+      },
+      edit: async (channelId, messageId, content, mentionId) => {
+        const channel = await client.channels.fetch(channelId);
+        if (!channel?.isTextBased() || !('messages' in channel)) {
+          throw new Error(`channel ${channelId} has no chat`);
+        }
+        await channel.messages.edit(messageId, {
+          content,
+          allowedMentions: { users: [mentionId] },
+        });
+      },
+      remove: async (channelId, messageId) => {
+        const channel = await client.channels.fetch(channelId);
+        if (!channel?.isTextBased() || !('messages' in channel)) return;
+        await channel.messages.delete(messageId);
+      },
+    },
+    noticesDisabled: () => problemNotifier.noticesDisabled(),
+    logger: logger.child({ component: 'channel-limits' }),
+  });
   // Private-channel "⇩ Join" mechanism. Wired into the feature's cleanup hook so
   // a private channel's companion is deleted whenever the channel goes away.
   const privacy = new PrivacyService({
@@ -636,6 +672,7 @@ async function main(): Promise<void> {
     roomAccess: privacy,
     serverLog: (gid, level, message) => serverLogger.log(gid, level, message),
     permissionProblems,
+    channelLimits,
     countRoom: (event, guildId) => {
       metricsCollector.increment(
         event === 'created' ? METRICS.ROOMS_CREATED : METRICS.ROOMS_DELETED,
@@ -1453,6 +1490,7 @@ async function main(): Promise<void> {
         ai: assistant ? { ...assistant.stats } : null,
         backup: backupScheduler ? { ...backupScheduler.stats } : { enabled: false },
         problems: problemNotifier.snapshot(),
+        channelLimits: channelLimits.snapshot(),
         metrics: { ...metricsCollector.stats },
         alerts: { ...alertScheduler.stats },
         topgg: topggScheduler ? { ...topggScheduler.stats } : { configured: false },

@@ -33,10 +33,13 @@ import {
 } from './guildSettings.js';
 import {
   ChannelObfuscatedError,
+  channelLimitOf,
   isPermissionError,
   nameRefusalOf,
   withoutRequestBody,
+  type ChannelLimit,
 } from './discordAdapter.js';
+import { ChannelLimitTracker } from './channelLimits.js';
 import { CreationRefusedError, type PrivateCreation } from './privacy.js';
 import {
   LOST_ACCESS_RETRY_MS,
@@ -439,6 +442,13 @@ export interface VoiceFeatureDeps {
    */
   permissionProblems?: PermissionProblemTracker;
   /**
+   * Creator channels Discord refused a room for because a category or the server is full: the
+   * cooldown that stops one refused create per join, and the message that tells the waiting
+   * member why. Absent: one without a chat is made, so the cooldown still applies and nobody is
+   * posted to.
+   */
+  channelLimits?: ChannelLimitTracker;
+  /**
    * Counts a room's birth or death, for the metric store. Fire-and-forget and
    * optional. Counted here because `secondary_channels` rows are deleted with
    * the channel they describe, so an uncounted room is unrecoverable, not
@@ -788,7 +798,11 @@ export interface GuildDrift {
  *   channel.
  */
 export class VoiceFeature {
-  constructor(private readonly deps: VoiceFeatureDeps) {}
+  private readonly channelLimits: ChannelLimitTracker;
+
+  constructor(private readonly deps: VoiceFeatureDeps) {
+    this.channelLimits = deps.channelLimits ?? new ChannelLimitTracker({ logger: deps.logger });
+  }
 
   /**
    * Rooms the sweep has stopped renaming for a while, by channel id, because the bot can no
@@ -840,7 +854,7 @@ export class VoiceFeature {
     }
 
     if (afterChannelId !== undefined) {
-      await this.maybeCreate(guildId, afterChannelId, event.member);
+      await this.maybeCreate(guildId, afterChannelId, event.member, { joined: true });
       // Joining an existing secondary (not a primary) may change its name, and
       // appends the member to its arrival roster.
       if (await this.deps.secondaries.isSecondary(guildId, afterChannelId)) {
@@ -874,7 +888,8 @@ export class VoiceFeature {
     guildId: string,
     channelId: string,
     member: VoiceMember,
-    opts: ReconcileOptions = {},
+    /** `joined`: a member's own join, as against the sweep catching up on who is waiting. */
+    opts: ReconcileOptions & { joined?: boolean } = {},
   ): Promise<CreateOutcome> {
     /**
      * One read, not two: `isPrimary` and `get` fetch the SAME ROW, and this is
@@ -921,6 +936,22 @@ export class VoiceFeature {
         );
         return { action: 'skip' };
       }
+    }
+
+    /**
+     * A creator channel Discord has just refused a room for, because its category or the server
+     * is full, is not asked again for a couple of minutes (see `CHANNEL_LIMIT_COOLDOWN_MS`). The
+     * member is still told, and nothing else here runs: no read, no reorder, no request. After
+     * the gates above, so a server that is paused or not entitled is told nothing.
+     */
+    const limited = this.channelLimits.coolingDown(channelId);
+    if (limited !== undefined) {
+      await this.channelLimits.tellMember(channelId, member.id, opts.joined === true);
+      this.deps.logger.debug(
+        { guildId, primaryId: channelId, memberId: member.id, limit: limited },
+        'skipping creation: the channel limit was reached moments ago',
+      );
+      return { action: 'skip' };
     }
 
     // What this member left behind for this creator channel, started HERE and not at the top:
@@ -1158,6 +1189,8 @@ export class VoiceFeature {
         try {
           return await this.deps.actions.createVoiceChannel({ ...input, name: tryName });
         } catch (err) {
+          // A full category or server refuses every name, so no other name is tried.
+          if (channelLimitOf(err) !== undefined) throw err;
           const reason = nameRefusalOf(err);
           if (reason === undefined) throw err;
           this.deps.logger.warn(
@@ -1214,6 +1247,11 @@ export class VoiceFeature {
         created ??
         (await this.deps.actions.createVoiceChannel({ ...input, name: renderName('Room ##') }));
     } catch (err) {
+      const limit = channelLimitOf(err);
+      if (limit !== undefined) {
+        await this.channelLimitReached(guildId, channelId, member.id, limit, opts.joined === true);
+        return { action: 'skip' };
+      }
       if (!isPermissionError(err)) throw err;
       // Can't create the channel (missing perms — usually Manage Roles to copy the
       // creator channel's permissions). Tell the admin instead of failing silently.
@@ -1284,13 +1322,34 @@ export class VoiceFeature {
     // means sending the bot's allow, the owner's access and the deny in the create itself.
     if (startMode !== 'public' && !privacyDone) {
       try {
-        await this.deps.makePrivateOnCreate?.(
-          guildId,
-          newChannelId,
-          member.id,
-          joinDisplayName(settings, member),
-          startMode,
-        );
+        try {
+          await this.deps.makePrivateOnCreate?.(
+            guildId,
+            newChannelId,
+            member.id,
+            joinDisplayName(settings, member),
+            startMode,
+          );
+        } catch (err) {
+          /**
+           * The room is locked, and only its "⇩ Join" channel could not be made, because the room
+           * took the category's last slot or the server's. A channel can only come from that
+           * create, so a channel limit here means exactly that. The room is the member's and is
+           * moved into as usual: thrown, it was left empty with the member still waiting, the
+           * sweep deleted it and made another for them, which took the slot back, and round it
+           * went. The sweep makes the Join channel once there is space.
+           */
+          if (startMode !== 'locked' || channelLimitOf(err) === undefined) throw err;
+          this.deps.logger.warn(
+            {
+              guildId,
+              primaryId: channelId,
+              secondaryId: newChannelId,
+              limit: channelLimitOf(err),
+            },
+            'made a locked room but no room for its join channel',
+          );
+        }
       } catch (err) {
         // A refusal is a failure of the same kind as a missing permission: the plan will
         // not hide the room (a role the bot cannot edit would still show it), so the room
@@ -1388,7 +1447,14 @@ export class VoiceFeature {
      * create, turning a four-notice ladder into one notice per room for any
      * guild that can make rooms but not their text channels.
      */
-    this.deps.permissionProblems?.clear(guildId, channelId, ['create', 'move', 'privacy']);
+    this.deps.permissionProblems?.clear(guildId, channelId, [
+      'create',
+      'move',
+      'privacy',
+      'category_full',
+      'server_full',
+    ]);
+    await this.channelLimits.resolved(channelId);
 
     /**
      * The creator's saved trusted and blocked lists, applied to the room they just made.
@@ -2098,12 +2164,43 @@ export class VoiceFeature {
   }
 
   /**
+   * Discord refused a room from this creator channel because its category or the server is full.
+   *
+   * Handled like a missing permission, never thrown: nothing is wrong with the bot or the guild's
+   * setup, so it must not fail the guild's task, count against its circuit breaker, or reach the
+   * sweep as a reconcile failure. The server's mods are told through the problem list (deduped,
+   * backed off and cleared when a room is next made), `/logging` once per incident, and the
+   * member in the creator channel's chat. The cooldown it starts keeps the next joins from
+   * asking Discord again.
+   */
+  private async channelLimitReached(
+    guildId: string,
+    channelId: string,
+    memberId: string,
+    limit: ChannelLimit,
+    joined: boolean,
+  ): Promise<void> {
+    const operation = limit === 'category' ? 'category_full' : 'server_full';
+    const news = this.channelLimits.refused(guildId, channelId, limit);
+    // Every time, so the incident stays fresh for the notifier, which drops one not seen lately.
+    this.deps.permissionProblems?.record(guildId, { channelId, operation, at: Date.now() });
+    if (news) this.deps.serverLog?.(guildId, 1, permissionProblemMessage(channelId, operation));
+    this.deps.logger.warn(
+      { guildId, primaryId: channelId, memberId, limit },
+      'Discord refused a room: the channel limit is reached',
+    );
+    await this.channelLimits.tellMember(channelId, memberId, joined);
+  }
+
+  /**
    * Drops tracking for a channel Discord reports as deleted. This is the
    * cheap, immediate path; the confirm-on-rename fallback in
    * {@link rerenderManaged} covers deletions that happen while the shard is
    * disconnected, where this event is never delivered.
    */
   async handleChannelDeleted(guildId: string, channelId: string): Promise<void> {
+    // Any channel gone may be the space a full category or server was waiting for.
+    this.channelLimits.releaseGuild(guildId);
     const secondary = await this.deps.secondaries.get(channelId);
     if (secondary && secondary.guildId === guildId) {
       await this.deps.secondaries.remove(channelId);
@@ -2150,6 +2247,7 @@ export class VoiceFeature {
     if (primary && primary.guildId === guildId) {
       await this.deps.autoChannels.remove(guildId, channelId);
       this.deps.permissionProblems?.clear(guildId, channelId);
+      this.channelLimits.forget(channelId);
       this.deps.logger.info(
         { guildId, primaryChannelId: channelId },
         'creator channel deleted on Discord; stopped tracking it',

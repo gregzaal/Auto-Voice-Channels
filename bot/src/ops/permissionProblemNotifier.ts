@@ -582,6 +582,15 @@ export class PermissionProblemNotifier {
     return stored;
   }
 
+  /**
+   * Whether notices the bot sends on its own are switched off: `problems.notify_disabled` or
+   * `global.pause`, from the same cached read as this notifier's own. Never throws, and fails
+   * open. Shared with the message that tells a member a full category stopped their room.
+   */
+  noticesDisabled(): Promise<boolean> {
+    return this.disabled();
+  }
+
   private async disabled(): Promise<boolean> {
     if (!this.opts.flags) return false;
     const now = this.now();

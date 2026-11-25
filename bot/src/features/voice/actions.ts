@@ -543,6 +543,12 @@ export class RecordingVoiceActions implements VoiceActions {
   refuseNamesMatching?: RegExp;
   /** When true, `createVoiceChannel` throws Missing Permissions (tests the create path). */
   failCreate = false;
+  /** When set, `createVoiceChannel` is refused as Discord refuses a create into a full category or server. */
+  channelLimit?: 'category' | 'server';
+  /** When set, `createJoinChannel` is refused the same way. */
+  joinChannelLimit?: 'category' | 'server';
+  /** Every `createVoiceChannel` call, refused ones included: the requests Discord would see. */
+  createAttempts = 0;
   /** When true, `moveMember` throws Missing Permissions (tests the created-but-stranded path). */
   failMove = false;
   /** When true, `setPrivacy` throws Missing Permissions (tests the created-but-unlockable path). */
@@ -620,6 +626,8 @@ export class RecordingVoiceActions implements VoiceActions {
   }
 
   createVoiceChannel(input: CreateVoiceChannelInput): Promise<string> {
+    this.createAttempts += 1;
+    if (this.channelLimit) return Promise.reject(channelLimitError(this.channelLimit));
     if (this.failCreate) {
       return Promise.reject(
         new DiscordAPIError(
@@ -876,6 +884,7 @@ export class RecordingVoiceActions implements VoiceActions {
   }
 
   createJoinChannel(guildId: string, name: string, nearChannelId: string): Promise<string> {
+    if (this.joinChannelLimit) return Promise.reject(channelLimitError(this.joinChannelLimit));
     if (this.refuseNamesMatching?.test(name)) return Promise.reject(nameRefusedError('POST'));
     const channelId = `${this.idPrefix}-join-${++this.seq}`;
     this.created.add(channelId);

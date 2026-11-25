@@ -198,7 +198,9 @@ describe('channelLimitOf', () => {
           {
             code: 50035,
             message: 'Invalid Form Body',
-            errors: { parent_id: { _errors: [{ code: 'CHANNEL_PARENT_INVALID_TYPE', message: 'x' }] } },
+            errors: {
+              parent_id: { _errors: [{ code: 'CHANNEL_PARENT_INVALID_TYPE', message: 'x' }] },
+            },
           } as never,
           50035,
           400,

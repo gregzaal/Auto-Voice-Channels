@@ -319,7 +319,9 @@ export const RUNTIME_FLAGS = {
    *
    * Guards unsolicited customer notices: with it set, a
    * problem still lands in `/setup` and in a configured `/logging` channel, and
-   * nothing is sent anywhere on its own. `global.pause` stops it too.
+   * nothing is sent anywhere on its own. That includes the message in a creator
+   * channel's chat telling a member that a full category or server stopped
+   * their room. `global.pause` stops it too.
    *
    * Reach for it if the notices turn out to be too frequent or to be reaching
    * the wrong person. Neither is visible from inside the fleet, which is what
