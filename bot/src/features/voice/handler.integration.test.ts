@@ -1231,6 +1231,43 @@ describe('VoiceFeature (integration)', () => {
       await expect(feature.reconcileGuild(GUILD)).rejects.toThrow('boom');
     });
 
+    /**
+     * The debounced rename after a join, leave or game change reaches the same room. It threw to
+     * the guild's queue every time, logged at error level and counted against the guild's
+     * circuit breaker, while the sweep had already given up on the room.
+     */
+    it('is given up on the same way by the rename after a voice or presence event', async () => {
+      let attempts = 0;
+      failFirstRoom(() => {
+        attempts += 1;
+        return new ChannelObfuscatedError('r1');
+      });
+
+      await expect(
+        feature.rerenderChannelName(GUILD, 'r1', { onUnmanageable: 'abandon' }),
+      ).resolves.toEqual({});
+      expect(attempts).toBe(1);
+      expect(await secondaries.get('r1')).toBeDefined();
+      expect(problems.recent(GUILD)).toEqual([
+        expect.objectContaining({ channelId: 'r1', operation: 'delete' }),
+      ]);
+      expect(told).toHaveLength(1);
+
+      // The next event, and the next sweep, leave it alone within the wait.
+      await feature.rerenderChannelName(GUILD, 'r1', { onUnmanageable: 'abandon' });
+      await feature.reconcileGuild(GUILD);
+      expect(attempts).toBe(1);
+      expect(problems.recent(GUILD)).toHaveLength(1);
+      expect(told).toHaveLength(1);
+    });
+
+    it('still reports a lost room to an interactive caller', async () => {
+      failFirstRoom(() => new ChannelObfuscatedError('r1'));
+      await expect(feature.rerenderChannelName(GUILD, 'r1')).rejects.toBeInstanceOf(
+        ChannelObfuscatedError,
+      );
+    });
+
     it('does not act, or remember anything, under a dry run', async () => {
       failFirstRoom(() => new ChannelObfuscatedError('r1'));
       await feature.reconcileGuild(GUILD, { dryRun: true });

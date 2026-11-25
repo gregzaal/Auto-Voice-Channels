@@ -476,7 +476,8 @@ export interface ReconcileOptions {
    * and leaves the row alone, since an admin who just wrote a template must
    * never have it binned for a problem they can fix by granting a permission.
    * A confirmed *deleted* channel is dropped either way, since no template
-   * can outlive the channel it names.
+   * can outlive the channel it names. A room keeps its row under `abandon`:
+   * it is left alone for a while and asked about again, as the sweep does.
    */
   onUnmanageable?: 'abandon' | 'report';
 }
@@ -2169,6 +2170,11 @@ export class VoiceFeature {
     if (await this.isManaged(guildId, channelId)) {
       return this.rerenderManaged(guildId, channelId, opts);
     }
+    // A background caller gives up on a room the bot can no longer see or rename the way the
+    // sweep does, and in the same record, so the two agree on when to ask again. Thrown, it
+    // reached the guild's queue on every join, leave and game change while the sweep had
+    // already left the room alone, logged as an error and counted against the guild.
+    if (opts.onUnmanageable === 'abandon') return this.rerenderInSweep(guildId, channelId, opts);
     return this.rerenderSecondary(guildId, channelId, opts);
   }
 
@@ -2648,8 +2654,8 @@ export class VoiceFeature {
   }
 
   /**
-   * {@link rerenderSecondary} for the sweep's renumbering, where a room the bot can no longer
-   * edit costs that room and not the guild.
+   * {@link rerenderSecondary} for the sweep's renumbering and the debounced rename after an
+   * event, where a room the bot can no longer edit costs that room and not the guild.
    *
    * The loops that call this have no other per-room catch, so a rename that threw ended the
    * guild's sweep at that room: the rooms after it were never renumbered and members whose
