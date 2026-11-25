@@ -11,6 +11,7 @@ import {
   type BillingMeta,
 } from '../domain/billing.js';
 import { TIER_IDS, type TierId } from '../domain/tiers.js';
+import { wellFormedJson } from '../template/wellFormed.js';
 
 /** zod schema validating a guild row read from the DB (boundary validation). */
 export const guildRowSchema = z.object({
@@ -421,13 +422,17 @@ export class GuildRepository {
    * writers (e.g. a future dashboard alongside the bot) can't clobber each other
    * the way a read-modify-write would. Shallow, like the previous JS spread:
    * top-level keys in the patch replace existing ones.
+   *
+   * Every settings write here passes the patch through `wellFormedJson`: settings carry
+   * text from Discord (a game alias is keyed by the game's reported name), which can hold
+   * half of a surrogate pair, and Postgres refuses that in jsonb.
    */
   async updateSettings(guildId: string, patch: Record<string, unknown>): Promise<GuildRow> {
     await this.ensure(guildId);
     const [updated] = await this.db
       .update(guilds)
       .set({
-        settings: sql`${guilds.settings} || ${JSON.stringify(patch)}::jsonb`,
+        settings: sql`${guilds.settings} || ${JSON.stringify(wellFormedJson(patch))}::jsonb`,
         updatedAt: new Date(),
       })
       .where(eq(guilds.guildId, guildId))
@@ -461,7 +466,7 @@ export class GuildRepository {
     const [updated] = await this.db
       .update(guilds)
       .set({
-        settings: sql`${JSON.stringify(patch)}::jsonb || ${guilds.settings}`,
+        settings: sql`${JSON.stringify(wellFormedJson(patch))}::jsonb || ${guilds.settings}`,
         updatedAt: new Date(),
       })
       .where(eq(guilds.guildId, guildId))
@@ -537,7 +542,7 @@ export class GuildRepository {
         // into a tuple of placeholders, which Postgres reads as a record and
         // refuses to cast. The keys are few (at most the settings keys),
         // and each stays a bound parameter this way.
-        let next = sql`${guilds.settings} || ${JSON.stringify(patch)}::jsonb`;
+        let next = sql`${guilds.settings} || ${JSON.stringify(wellFormedJson(patch))}::jsonb`;
         for (const key of removeKeys) next = sql`(${next}) - ${key}::text`;
         await tx
           .update(guilds)

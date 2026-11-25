@@ -17,3 +17,4 @@ export * from './blockedWords.js';
 export * from './nameTemplate.js';
 export * from './stringTransforms.js';
 export * from './types.js';
+export * from './wellFormed.js';

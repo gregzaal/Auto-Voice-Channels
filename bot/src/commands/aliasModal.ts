@@ -5,6 +5,7 @@ import {
   TextInputStyle,
   type ModalSubmitFields,
 } from 'discord.js';
+import { cutWellFormed, wellFormed } from '@avc/core/template';
 
 /** Custom id of the `/alias` panel's Add modal. */
 export const ALIAS_MODAL_ID = 'avc:alias:add';
@@ -22,7 +23,9 @@ export function buildAliasModal(prefillGame?: string): ModalBuilder {
     .setStyle(TextInputStyle.Short)
     .setRequired(true)
     .setMaxLength(100);
-  if (prefillGame) game.setValue(prefillGame.slice(0, 100));
+  // Whole characters only: the game becomes the stored alias key, and half of a pair is
+  // refused there.
+  if (prefillGame) game.setValue(cutWellFormed(wellFormed(prefillGame), 100));
   const alias = new TextInputBuilder()
     .setCustomId('alias')
     .setLabel('Alias to show instead')

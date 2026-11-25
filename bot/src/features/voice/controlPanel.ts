@@ -12,6 +12,7 @@ import {
   type APIEmbed,
   type APIEmbedField,
 } from 'discord.js';
+import { cutWellFormed } from '@avc/core/template';
 import {
   CONTROL_PANEL_CONTROLS,
   CONTROL_PANEL_CREATOR_TOKEN,
@@ -570,7 +571,7 @@ export function buildMemberPicker(
             // Discord caps an option label at 100 characters and throws at
             // call time past it, which would take the whole picker down for
             // one long nickname.
-            .setLabel(m.displayName.slice(0, 100) || m.id),
+            .setLabel(cutWellFormed(m.displayName, 100) || m.id),
         ),
       ),
   );

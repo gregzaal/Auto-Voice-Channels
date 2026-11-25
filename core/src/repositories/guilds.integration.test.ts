@@ -75,6 +75,24 @@ describe('GuildRepository (integration)', () => {
     expect(after.settings).toMatchObject({ prefix: '!', limit: 10 });
   });
 
+  /**
+   * A game alias is keyed by the game's name as Discord reported it, which can hold half of a
+   * surrogate pair, and Postgres refuses that in jsonb (22P02), so the alias was never saved.
+   */
+  it('stores settings text holding half of a surrogate pair, with the half replaced', async () => {
+    await repo.ensure('g-sur');
+    await repo.updateSettings('g-sur', { aliases: { 'Game \uD83C': 'G' } });
+    await repo.fillSettingsGaps('g-sur', { general: 'Voice \uDC00' });
+    await repo.mergeSettings('g-sur', () => ({
+      patch: { aliases: { 'Game \uD83C': 'G', 'Other \uD83D': 'O' } },
+      result: null,
+    }));
+    expect((await repo.ensure('g-sur')).settings).toEqual({
+      aliases: { 'Game \uFFFD': 'G', 'Other \uFFFD': 'O' },
+      general: 'Voice \uFFFD',
+    });
+  });
+
   describe('mergeSettings key removal', () => {
     /**
      * Concat can add and overwrite and cannot DELETE, which matters because four

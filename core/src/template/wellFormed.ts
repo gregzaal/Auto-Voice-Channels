@@ -45,9 +45,11 @@ export function wellFormedJson<T>(value: T): T {
   if (typeof value === 'string') return wellFormed(value) as T;
   if (Array.isArray(value)) return value.map((v: unknown) => wellFormedJson(v)) as T;
   if (value !== null && typeof value === 'object' && !(value instanceof Date)) {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) out[wellFormed(k)] = wellFormedJson(v);
-    return out as T;
+    // `fromEntries` defines each key, where `out[k] =` would set the prototype for a key
+    // named `__proto__` and lose it.
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [wellFormed(k), wellFormedJson(v)]),
+    ) as T;
   }
   return value;
 }
