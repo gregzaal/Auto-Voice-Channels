@@ -232,14 +232,25 @@ describe('ChannelLimitTracker', () => {
     expect(h.calls).toEqual([]);
   });
 
-  it('does not end an incident for a guild this instance no longer serves', async () => {
+  /**
+   * `serves` is false for a lease that could not be refreshed, too. The incident is kept, not
+   * dropped, or nothing would ever clear the guild's problem entry, and the next sweep settles it.
+   */
+  it('keeps an incident while the guild cannot be proven served, and settles it later', async () => {
     let serving = true;
     const h = harness({ serves: () => serving });
     h.tracker.refused(GUILD, CREATOR, 'category');
     h.tracker.roomMade(CREATOR);
     serving = false;
     await vi.advanceTimersByTimeAsync(LIMIT_QUIET_MS);
+    h.advance(LIMIT_QUIET_MS);
+    h.tracker.expire();
     expect(h.settled).toEqual([]);
+    expect(h.tracker.snapshot()['creatorChannels']).toBe(1);
+
+    serving = true;
+    h.tracker.expire();
+    expect(h.settled).toEqual([CREATOR]);
     expect(h.tracker.snapshot()['creatorChannels']).toBe(0);
   });
 

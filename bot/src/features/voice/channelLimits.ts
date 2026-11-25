@@ -77,6 +77,8 @@ interface PostedMessage {
   id: string;
   /** Who the message names, pinged or not. */
   listedIds: ReadonlySet<string>;
+  /** When it was posted, by the tracker's clock. */
+  postedAt: number;
   timer?: ReturnType<typeof setTimeout>;
 }
 
@@ -182,8 +184,7 @@ export class ChannelLimitTracker {
     // Quiet for long enough after a room was made, and its timer has not run yet: that incident
     // is over, and this is a new one.
     if (entry?.madeSince && now - entry.refusedAt >= LIMIT_QUIET_MS) {
-      this.settle(creatorId, entry);
-      entry = undefined;
+      if (this.settle(creatorId, entry)) entry = undefined;
     }
     const news = !entry || entry.limit !== limit;
     if (entry) {
@@ -375,7 +376,7 @@ export class ChannelLimitTracker {
         return;
       }
       const previous = entry.message;
-      const message: PostedMessage = { id, listedIds: new Set(waiting) };
+      const message: PostedMessage = { id, listedIds: new Set(waiting), postedAt: now };
       entry.message = message;
       message.timer = setTimeout(() => {
         if (entry.message !== message) return;
@@ -407,18 +408,30 @@ export class ChannelLimitTracker {
     this.enqueue(creatorId, () => this.deleteMessage(creatorId, message.id));
   }
 
-  /** The incident is over: forget the creator channel and tell the owner. */
-  private settle(creatorId: string, entry: Entry): void {
+  /**
+   * The incident is over: forget the creator channel and tell the owner. Returns whether it did.
+   *
+   * Not while this instance cannot prove it serves the guild: `serves` is false for a lease it
+   * merely could not refresh as well as for a shard it gave up, and only {@link onSettled} clears
+   * the guild's problem entry, so forgetting the incident here would leave it listed for good.
+   * It is kept as it is instead, and the next sweep's {@link expire} tries again.
+   */
+  private settle(creatorId: string, entry: Entry): boolean {
+    try {
+      if (this.deps.serves && !this.deps.serves(entry.guildId)) return false;
+    } catch {
+      return false;
+    }
     clearTimeout(entry.settleTimer);
     this.dropMessage(creatorId, entry);
     this.entries.delete(creatorId);
     this.counters.settled += 1;
     try {
-      if (this.deps.serves && !this.deps.serves(entry.guildId)) return;
       this.onSettled?.(entry.guildId, creatorId);
     } catch {
       // Settling must not fail because the owner's hook did.
     }
+    return true;
   }
 
   /** Runs `work` after this creator channel's earlier chat work, never rejecting. */
@@ -447,12 +460,21 @@ export class ChannelLimitTracker {
   }
 
   /**
-   * Ends incidents nobody has been refused or told about for {@link LIMIT_TOLD_MS}, so the map
-   * is bounded by live incidents. One still being refused, by the sweep if nobody else, is kept,
-   * and so is said to `/logging` once.
+   * Ends incidents nobody has been refused or told about for {@link LIMIT_TOLD_MS}, and those
+   * whose quiet window after a room made is over (its timer may have found the guild's lease
+   * unproven), so the map is bounded by live incidents. One still being refused, by the sweep if
+   * nobody else, is kept, and so is said to `/logging` once.
    */
   private prune(now: number): void {
     for (const [creatorId, entry] of this.entries) {
+      if (entry.madeSince && now - entry.refusedAt >= LIMIT_QUIET_MS) {
+        this.settle(creatorId, entry);
+        continue;
+      }
+      // A message past its time is taken down here too, should its timer not have run.
+      if (entry.message && now - entry.message.postedAt >= LIMIT_MESSAGE_TTL_MS) {
+        this.dropMessage(creatorId, entry);
+      }
       if (entry.message) continue;
       const last = Math.max(entry.refusedAt, ...entry.told.values());
       if (now - last >= LIMIT_TOLD_MS) this.settle(creatorId, entry);

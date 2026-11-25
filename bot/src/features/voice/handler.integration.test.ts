@@ -23,7 +23,12 @@ import {
   VIEW_CHANNEL,
 } from './accessPlan.js';
 import { RecordingVoiceActions } from './actions.js';
-import { CHANNEL_LIMIT_COOLDOWN_MS, ChannelLimitTracker, LIMIT_QUIET_MS } from './channelLimits.js';
+import {
+  CHANNEL_LIMIT_COOLDOWN_MS,
+  ChannelLimitTracker,
+  LIMIT_QUIET_MS,
+  LIMIT_TOLD_MS,
+} from './channelLimits.js';
 import { CompanionTextService } from './companionText.js';
 import { ChannelObfuscatedError } from './discordAdapter.js';
 import { ControlPanelPoster } from './controlPanelPoster.js';
@@ -1169,16 +1174,42 @@ describe('VoiceFeature (integration)', () => {
     });
 
     it('stops making rooms there once the category is full again', async () => {
-      const h = harness();
+      let gateAsked = 0;
+      const h = harness({
+        gate: {
+          allowCreate: () => {
+            gateAsked += 1;
+            return Promise.resolve({ allowed: true });
+          },
+        },
+      });
       actions.channelLimit = 'category';
       await h.join('alice');
       await h.join('bob');
       await h.join('carol');
+      const before = gateAsked;
 
-      // Still full: the first try is refused, and the rest are not asked about.
+      // Still full: the first try is refused, and the rest are not even taken to the gate,
+      // which would spend a slot of the guild's creation throttle on each.
       await h.f.handleChannelDeleted(GUILD, 'some-other-channel', CATEGORY);
 
       expect(actions.createAttempts).toBe(2);
+      expect(gateAsked - before).toBe(1);
+    });
+
+    /** Nothing else may touch an incident again, so the sweep is what ends it. */
+    it('lets the sweep end an incident nobody has touched for an hour', async () => {
+      const h = harness();
+      actions.channelLimit = 'category';
+      await h.join('alice');
+      // Alice gives up and leaves, so nothing is refused again.
+      voice.drop(PRIMARY, 'alice');
+      h.advance(LIMIT_TOLD_MS);
+
+      await h.f.reconcileGuild(GUILD);
+
+      expect(h.resolved).toEqual([GUILD]);
+      expect(h.problems.recent(GUILD)).toEqual([]);
     });
 
     it('does not ask again for a channel gone from another category', async () => {
