@@ -492,6 +492,19 @@ describe('PermissionProblemNotifier channel limits', () => {
     expect(body).not.toContain('lost access');
   });
 
+  it('says the server is full in the headline, since every creator channel is stopped', async () => {
+    const h = harness();
+    h.break('creator-1', 'server_full');
+    h.break('creator-2', 'category_full');
+    await h.notifier.send(GUILD);
+
+    const body = h.sent[0]!.content;
+    expect(body).toContain(
+      "I can't create rooms because this server has reached Discord's limit of 500 channels.",
+    );
+    expect(body).not.toContain('some of your creator channels');
+  });
+
   it('still says it stopped working when something else stopped it too', async () => {
     const h = harness();
     h.break('creator-1', 'server_full');

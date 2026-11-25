@@ -435,7 +435,13 @@ describe('copy rules', () => {
       permissionProblemSummary([problem('a', 'category_full')]),
       1,
       'quiet',
-      'full',
+      'category_full',
+    ),
+    problemNoticeBody(
+      permissionProblemSummary([problem('a', 'server_full')]),
+      1,
+      'quiet',
+      'server_full',
     ),
     // The `/logging` panel and the reply it produces are read by the same
     // admin, in the same sitting, as everything above.

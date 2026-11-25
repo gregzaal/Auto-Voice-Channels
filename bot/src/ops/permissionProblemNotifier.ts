@@ -412,14 +412,19 @@ export class PermissionProblemNotifier {
         p.operation !== 'panel' &&
         p.operation !== 'access',
     );
-    // Only full categories or a full server: rooms still come from every other creator channel,
-    // so "stopped working here" would overstate it.
+    // Only Discord's channel limit: a full server stops every creator channel and says so, and
+    // full categories stop only theirs, so "stopped working here" would overstate either.
+    const limitOnly = blockers.every(
+      (p) => p.operation === 'category_full' || p.operation === 'server_full',
+    );
     const headline =
       blockers.length === 0
         ? false
-        : blockers.every((p) => p.operation === 'category_full' || p.operation === 'server_full')
-          ? 'full'
-          : true;
+        : !limitOnly
+          ? true
+          : blockers.some((p) => p.operation === 'server_full')
+            ? 'server_full'
+            : 'category_full';
     const body = problemNoticeBody(permissionProblemSummary(problems), sends, mode, headline);
 
     await this.takeSlot();
@@ -706,10 +711,11 @@ export function problemNoticeBody(
    * with "has stopped working here" in any of them is a false alarm that
    * contradicts the line printed directly under it.
    *
-   * `'full'` when what stops it is only Discord's channel limit, on some creator channels: the
-   * rest still make rooms, so the headline says which part stopped.
+   * `'category_full'` when what stops it is only full categories: the other creator channels
+   * still make rooms, so the headline says which part stopped. `'server_full'` when the server
+   * has reached Discord's limit, which stops every creator channel for a reason of its own.
    */
-  blocking: boolean | 'full' = true,
+  blocking: boolean | 'category_full' | 'server_full' = true,
 ): string {
   /**
    * There are `BACKOFF_MS.length + 1` notices in total: the first is
@@ -723,18 +729,20 @@ export function problemNoticeBody(
       ? 'Run `/setup` for the full picture, or `/logging` to change who I tell about this.'
       : 'Run `/setup` for the full picture.';
   const headline =
-    blocking === 'full'
-      ? "⚠️ **I can't create rooms from some of your creator channels.**"
-      : blocking
-        ? '⚠️ **Auto Voice Channels has stopped working here.**'
-        : // Covers every non-blocking failure without claiming any. A companion
-          // text channel that could not be made IS a room left half set up; a
-          // control panel that could not be posted is not, because the room is
-          // finished and only the shortcut is missing, and neither is an access
-          // change that did not apply, where the room is finished and only who may
-          // see or join it is not as asked. A headline that named room setup would
-          // be plainly false on every panel-only notice, and the lines below it
-          // would say so.
-          '⚠️ **Your rooms are working, but something else in this server is not.**';
+    blocking === 'server_full'
+      ? "⚠️ **I can't create rooms because this server has reached Discord's limit of 500 channels.**"
+      : blocking === 'category_full'
+        ? "⚠️ **I can't create rooms from some of your creator channels.**"
+        : blocking
+          ? '⚠️ **Auto Voice Channels has stopped working here.**'
+          : // Covers every non-blocking failure without claiming any. A companion
+            // text channel that could not be made IS a room left half set up; a
+            // control panel that could not be posted is not, because the room is
+            // finished and only the shortcut is missing, and neither is an access
+            // change that did not apply, where the room is finished and only who may
+            // see or join it is not as asked. A headline that named room setup would
+            // be plainly false on every panel-only notice, and the lines below it
+            // would say so.
+            '⚠️ **Your rooms are working, but something else in this server is not.**';
   return [headline, ...lines, tail].join('\n\n');
 }
