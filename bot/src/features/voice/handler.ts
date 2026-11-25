@@ -470,14 +470,15 @@ export interface ReconcileOptions {
   dryRun?: boolean;
   /**
    * What to do when the bot turns out to have *lost access* to the channel.
-   * Background callers (the re-render scheduler, reconcile) pass `abandon`:
-   * the row has to go or every sweep retries the same impossible edit
-   * forever. Interactive callers keep the default `report`, which rethrows
-   * and leaves the row alone, since an admin who just wrote a template must
-   * never have it binned for a problem they can fix by granting a permission.
-   * A confirmed *deleted* channel is dropped either way, since no template
-   * can outlive the channel it names. A room keeps its row under `abandon`:
-   * it is left alone for a while and asked about again, as the sweep does.
+   * Background callers (the re-render scheduler, reconcile) pass `abandon`, so
+   * the same impossible edit is not retried on every event and sweep: an
+   * adopted channel stops being managed (its row is dropped), and a room keeps
+   * its row and is left alone for a while, then asked about again. Interactive
+   * callers keep the default `report`, which rethrows and leaves the row alone,
+   * since an admin who just wrote a template must never have it binned for a
+   * problem they can fix by granting a permission. A confirmed *deleted*
+   * channel is dropped either way, since no template can outlive the channel
+   * it names.
    */
   onUnmanageable?: 'abandon' | 'report';
 }
@@ -2174,7 +2175,9 @@ export class VoiceFeature {
     // sweep does, and in the same record, so the two agree on when to ask again. Thrown, it
     // reached the guild's queue on every join, leave and game change while the sweep had
     // already left the room alone, logged as an error and counted against the guild.
-    if (opts.onUnmanageable === 'abandon') return this.rerenderInSweep(guildId, channelId, opts);
+    if (opts.onUnmanageable === 'abandon') {
+      return this.rerenderInSweep(guildId, channelId, opts, true);
+    }
     return this.rerenderSecondary(guildId, channelId, opts);
   }
 
@@ -2666,15 +2669,22 @@ export class VoiceFeature {
    * {@link LOST_ACCESS_RETRY_MS}: asking again each sweep would repeat the incident, and the
    * retry after it is how a restored permission is noticed. Anything that is not a permission
    * error still throws, as it always did.
+   *
+   * `endEarly` (the rename after an event) also ends the wait as soon as the cache says the
+   * bot can rename the room again, so an admin who restores a permission sees the room follow
+   * the next join or game change rather than hours later. From the cache only, so an event
+   * costs no request to find out. The sweep leaves it off and waits as it always has.
    */
   private async rerenderInSweep(
     guildId: string,
     channelId: string,
     opts: RerenderOptions,
+    endEarly = false,
   ): Promise<RerenderResult> {
     const gaveUp = this.unrenamable.get(channelId);
     if (gaveUp !== undefined && !opts.dryRun) {
-      if (Date.now() - gaveUp.at < LOST_ACCESS_RETRY_MS) return {};
+      const ableAgain = endEarly && this.deps.voice.botPermissionsIn?.(channelId)?.rename === true;
+      if (!ableAgain && Date.now() - gaveUp.at < LOST_ACCESS_RETRY_MS) return {};
       this.unrenamable.delete(channelId);
     }
     try {

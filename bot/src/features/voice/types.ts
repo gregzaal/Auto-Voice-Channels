@@ -54,6 +54,11 @@ export interface BotChannelPermissions {
    * Discord calls Manage Permissions at channel level), as the cache resolves it.
    */
   manageRoles: boolean;
+  /**
+   * Whether the bot can rename the channel: it can see it (Discord does not show it the
+   * obfuscated shell) and holds View Channel and Manage Channels there.
+   */
+  rename: boolean;
 }
 
 /** What {@link GuildVoiceView.botRoleAccess} says of a set of roles. */
@@ -161,8 +166,8 @@ export interface GuildVoiceView {
    */
   botRoleAccess?(guildId: string, roleIds: readonly string[]): BotRoleAccess | undefined;
   /**
-   * What the bot itself may do in a channel, from the cache: today only whether it can
-   * edit the channel's overwrites. `undefined` when the channel or the bot's own member
+   * What the bot itself may do in a channel, from the cache: whether it can edit the
+   * channel's overwrites, and whether it can rename it. `undefined` when the channel or the bot's own member
    * is not cached, which a caller reads as "cannot say" and so goes ahead.
    *
    * Optional and read like {@link memberFacts}. A refusal here is a preflight and not

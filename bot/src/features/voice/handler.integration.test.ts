@@ -1261,6 +1261,64 @@ describe('VoiceFeature (integration)', () => {
       expect(told).toHaveLength(1);
     });
 
+    /**
+     * An admin who gives the permission back is answered by the next event rather than after
+     * the long wait, judged from the cache so an event costs no request to find out.
+     */
+    describe('once the bot can act on it again', () => {
+      const event = () => feature.rerenderChannelName(GUILD, 'r1', { onUnmanageable: 'abandon' });
+
+      beforeEach(async () => {
+        failFirstRoom(() => new ChannelObfuscatedError('r1'));
+        await event();
+        expect(problems.recent(GUILD)).toHaveLength(1);
+        actions.renameChannel = rename;
+      });
+
+      it('is renamed by the next event, and the incident ends', async () => {
+        voice.setBotPermissions('r1', { manageRoles: false, rename: true });
+
+        await event();
+
+        expect(triedFirstRoom()).toBe(1);
+        expect((await secondaries.get('r1'))!.state.name).not.toBe('STALE');
+        expect(problems.recent(GUILD)).toEqual([]);
+      });
+
+      it('is still left alone while the cache says it cannot, or cannot say', async () => {
+        await event();
+        voice.setBotPermissions('r1', { manageRoles: true, rename: false });
+        await event();
+        expect(triedFirstRoom()).toBe(0);
+        expect(problems.recent(GUILD)).toHaveLength(1);
+      });
+
+      it('is still left alone by the sweep, which waits as it always has', async () => {
+        voice.setBotPermissions('r1', { manageRoles: false, rename: true });
+        await feature.reconcileGuild(GUILD);
+        expect(triedFirstRoom()).toBe(0);
+      });
+    });
+
+    it('records a Missing Access refusal on the event rename as a rename it could not make', async () => {
+      actions.failRenameForChannel = 'r1';
+
+      await expect(
+        feature.rerenderChannelName(GUILD, 'r1', { onUnmanageable: 'abandon' }),
+      ).resolves.toEqual({});
+
+      expect(problems.recent(GUILD)).toEqual([
+        expect.objectContaining({ channelId: 'r1', operation: 'rename' }),
+      ]);
+    });
+
+    it('still throws an error that is not a permission failure from the event rename', async () => {
+      failFirstRoom(() => new Error('boom'));
+      await expect(
+        feature.rerenderChannelName(GUILD, 'r1', { onUnmanageable: 'abandon' }),
+      ).rejects.toThrow('boom');
+    });
+
     it('still reports a lost room to an interactive caller', async () => {
       failFirstRoom(() => new ChannelObfuscatedError('r1'));
       await expect(feature.rerenderChannelName(GUILD, 'r1')).rejects.toBeInstanceOf(

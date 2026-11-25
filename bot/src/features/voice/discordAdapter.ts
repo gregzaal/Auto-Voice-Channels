@@ -2219,7 +2219,7 @@ export class DiscordVoiceView implements GuildVoiceView {
   }
 
   /**
-   * Whether the bot can edit a room's overwrites, from the channel and member caches:
+   * Whether the bot can edit a room's overwrites and rename it, from the channel and member caches:
    * the permissions Discord would judge a write by, the room's own overwrites and its
    * category's included. `undefined` when the room or the bot's own member is not
    * cached, or when the channel cannot answer, which is "cannot say" and not "no".
@@ -2239,6 +2239,10 @@ export class DiscordVoiceView implements GuildVoiceView {
         manageRoles:
           permissions.has(PermissionFlagsBits.ManageRoles) ||
           permissions.has(PermissionFlagsBits.Administrator),
+        rename:
+          !isObfuscated(channel) &&
+          (permissions.has(PermissionFlagsBits.Administrator) ||
+            permissions.has(PermissionFlagsBits.ViewChannel | PermissionFlagsBits.ManageChannels)),
       };
     } catch {
       return undefined;

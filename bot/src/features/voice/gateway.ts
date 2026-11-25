@@ -142,7 +142,7 @@ export function registerVoiceGateway(deps: VoiceGatewayDeps): () => void {
       return deps.dispatcher.dispatch(guildId, 'rerenderChannel', async () => {
         // Routes to the secondary or adopted-managed re-render as appropriate.
         // `abandon`: nobody is waiting on this, so a channel we can no longer act
-        // on must stop being tracked rather than be retried on every event.
+        // on is not retried on every event (see `ReconcileOptions.onUnmanageable`).
         await deps.feature.rerenderChannelName(guildId, channelId, {
           onUnmanageable: 'abandon',
         });

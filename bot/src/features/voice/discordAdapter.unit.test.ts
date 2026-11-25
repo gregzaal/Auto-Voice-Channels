@@ -1936,10 +1936,14 @@ describe('DiscordVoiceView.botRoleAccess', () => {
 describe('DiscordVoiceView.botPermissionsIn', () => {
   const me = { id: 'bot' };
   /** A room whose `permissionsFor` answers what the bot holds there, or null when it cannot. */
-  const viewWith = (bits: bigint | null, opts: { voice?: boolean; hasMe?: boolean } = {}) => {
+  const viewWith = (
+    bits: bigint | null,
+    opts: { voice?: boolean; hasMe?: boolean; obfuscated?: boolean } = {},
+  ) => {
     const room = {
       id: 'room',
       isVoiceBased: () => opts.voice ?? true,
+      ...(opts.obfuscated ? { flags: { bitfield: CHANNEL_OBFUSCATED } } : {}),
       guild: { members: { me: opts.hasMe === false ? null : me } },
       permissionsFor: (member: unknown) =>
         member === me && bits !== null ? new PermissionsBitField(bits) : null,
@@ -1950,14 +1954,25 @@ describe('DiscordVoiceView.botPermissionsIn', () => {
   };
 
   it('says whether the bot can edit the room overwrites, as the room resolves it', () => {
-    expect(viewWith(VIEW | MANAGE_ROLES).botPermissionsIn('room')).toEqual({ manageRoles: true });
-    expect(viewWith(VIEW | MANAGE).botPermissionsIn('room')).toEqual({ manageRoles: false });
+    expect(viewWith(VIEW | MANAGE_ROLES).botPermissionsIn('room')?.manageRoles).toBe(true);
+    expect(viewWith(VIEW | MANAGE).botPermissionsIn('room')?.manageRoles).toBe(false);
+  });
+
+  /** What a rename needs: to see the room and to manage it, and the room not to be a shell. */
+  it('says whether the bot can rename the room', () => {
+    expect(viewWith(VIEW | MANAGE).botPermissionsIn('room')?.rename).toBe(true);
+    expect(viewWith(VIEW).botPermissionsIn('room')?.rename).toBe(false);
+    expect(viewWith(MANAGE).botPermissionsIn('room')?.rename).toBe(false);
+    expect(viewWith(VIEW | MANAGE, { obfuscated: true }).botPermissionsIn('room')?.rename).toBe(
+      false,
+    );
   });
 
   /** Administrator holds every permission, so the check cannot hinge on the bit alone. */
   it('counts Administrator as able to', () => {
     expect(viewWith(PermissionFlagsBits.Administrator).botPermissionsIn('room')).toEqual({
       manageRoles: true,
+      rename: true,
     });
   });
 

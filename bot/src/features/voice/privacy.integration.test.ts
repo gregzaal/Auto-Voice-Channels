@@ -3551,7 +3551,7 @@ describe('PrivacyService (integration)', () => {
    * not the authority: "cannot say" goes ahead.
    */
   describe('the Manage Roles preflight', () => {
-    const noManageRoles = () => voice.setBotPermissions(SEC, { manageRoles: false });
+    const noManageRoles = () => voice.setBotPermissions(SEC, { manageRoles: false, rename: true });
 
     it('refuses a hide from a locked room with the Join channel and everything else untouched', async () => {
       await privacy.makePrivate(GUILD, SEC, 'alice');
@@ -3600,7 +3600,7 @@ describe('PrivacyService (integration)', () => {
       expect((await privacy.hide(GUILD, SEC, 'alice')).ok).toBe(true);
       await privacy.unhide(GUILD, SEC, 'alice');
       await privacy.makePublic(GUILD, SEC, 'alice');
-      voice.setBotPermissions(SEC, { manageRoles: true });
+      voice.setBotPermissions(SEC, { manageRoles: true, rename: true });
       expect((await privacy.hide(GUILD, SEC, 'alice')).ok).toBe(true);
     });
 

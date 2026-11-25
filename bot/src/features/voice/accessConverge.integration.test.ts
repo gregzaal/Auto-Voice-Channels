@@ -1327,7 +1327,7 @@ describe('the sweep keeps saved lists and hidden rooms in line (integration)', (
     it('is neither read nor written while the cache says the bot lacks Manage Roles, and is told once', async () => {
       await room('rA', 'alice');
       await lists.add(GUILD, 'alice', 'mallory', 'blocked');
-      voice.setBotPermissions('rA', { manageRoles: false });
+      voice.setBotPermissions('rA', { manageRoles: false, rename: true });
       const read = vi.spyOn(actions, 'readOverwrites');
       const recorded = vi.fn();
       problems.onRecord = recorded;
@@ -1344,7 +1344,7 @@ describe('the sweep keeps saved lists and hidden rooms in line (integration)', (
         expect.objectContaining({ channelId: 'rA', operation: 'access' }),
       ]);
 
-      voice.setBotPermissions('rA', { manageRoles: true });
+      voice.setBotPermissions('rA', { manageRoles: true, rename: true });
       await sweep();
 
       expect(bits(held('rA', 'mallory'))).toEqual({ allow: 0n, deny: VC });
