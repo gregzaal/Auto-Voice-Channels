@@ -914,6 +914,46 @@ describe('SecondaryChannelRepository access (integration)', () => {
     });
   });
 
+  /**
+   * Postgres refuses a jsonb string holding half of a surrogate pair (22P02), and room state
+   * carries text from Discord (display names, rendered names). One such string failed the write
+   * and, from the sweep, everything after it in the guild.
+   */
+  describe('text with half of a surrogate pair', () => {
+    it('is stored with the half replaced, by every state writer', async () => {
+      await make(ROOM, { state: { name: 'a\uD83C', originalCreatorName: 'b\uDC00' } });
+      expect((await repo.get(ROOM))?.state).toMatchObject({
+        name: 'a�',
+        originalCreatorName: 'b�',
+      });
+
+      await repo.mergeState(ROOM, { name: 'half \uD83C', status: '\uD83D', index: 1 });
+      expect((await repo.get(ROOM))?.state).toMatchObject({
+        name: 'half �',
+        status: '�',
+        index: 1,
+      });
+
+      await repo.updateState(ROOM, { ...(await repo.get(ROOM))!.state, name: 'c\uD83C' });
+      expect((await repo.get(ROOM))?.state.name).toBe('c�');
+
+      await repo.setOwnerAndCreator(ROOM, 'u2', 'd\uD83C');
+      expect((await repo.get(ROOM))?.state.originalCreatorName).toBe('d�');
+
+      await repo.transitionAccess(ROOM, {
+        statePatch: { name: 'e\uD83C' },
+        access: () => ({ hidden: true }),
+      });
+      expect((await repo.get(ROOM))?.state.name).toBe('e�');
+    });
+
+    it('keeps a whole pair as it is', async () => {
+      await make(ROOM, { state: { name: '😀 room' } });
+      await repo.mergeState(ROOM, { status: '🎮 x' });
+      expect((await repo.get(ROOM))?.state).toMatchObject({ name: '😀 room', status: '🎮 x' });
+    });
+  });
+
   describe('unknown fields', () => {
     it('reads a field a newer build wrote', async () => {
       await make();

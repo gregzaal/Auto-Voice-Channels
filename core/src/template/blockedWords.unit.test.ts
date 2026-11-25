@@ -421,3 +421,11 @@ describe('renderChannelName with blocked words', () => {
     expect(renderChannelName('bad', { index: 0, members: [], blockedWords: ['bad'] })).toBe('***');
   });
 });
+
+describe('maskBlockedWithin, at the length limit', () => {
+  it('never ends the cut on half of a surrogate pair', () => {
+    // `ab` masked to `***` pushes the emoji over the limit by one unit: its high half would stay.
+    const out = maskBlockedWithin(`ab ${'c'.repeat(5)}😀`, ['ab'], 10);
+    expect(out).toBe(`*** ${'c'.repeat(5)}`);
+  });
+});

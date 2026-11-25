@@ -1671,3 +1671,74 @@ describe('@@original_creator@@', () => {
     );
   });
 });
+
+/**
+ * A rendered name or status is stored in a jsonb column, and Postgres refuses a string that
+ * holds half of a surrogate pair, so one ill-formed render failed the write after every rename
+ * and the room asked to be renamed again on every sweep. Nothing the renderer returns may hold
+ * a lone surrogate, whatever it was given.
+ */
+describe('well-formed output', () => {
+  const LONE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  const playing = (game: string): RenderContext => {
+    const m = member({ id: 'a', playing: [game], activities: [{ kind: 'playing', name: game }] });
+    return { index: 0, members: [m], creator: m, creatorName: 'a' };
+  };
+
+  it('replaces a lone surrogate in a game name, the same way every time', () => {
+    const ctx = playing('Half \uD83C game');
+    const name = renderChannelName('🎮 @@game_name@@', ctx);
+    expect(name).not.toMatch(LONE);
+    expect(name).toBe('🎮 Half \uFFFD game');
+    expect(renderChannelName('🎮 @@game_name@@', ctx)).toBe(name);
+    expect(renderChannelName('@@game_name@@', playing('\uDC00 low first'))).toBe(
+      '\uFFFD low first',
+    );
+  });
+
+  it('never cuts a name in the middle of a pair at the 100-unit limit', () => {
+    // 99 units, then an emoji whose high half is unit 100: the cut backs off before it.
+    const name = renderChannelName(`${'a'.repeat(99)}😀`, { index: 0, members: [] });
+    expect(name).not.toMatch(LONE);
+    expect(name).toBe('a'.repeat(99));
+  });
+
+  it('never cuts a bold game name in the middle of a letter', () => {
+    // Every bold letter is two units, so a long one crosses the limit on an odd unit.
+    const ctx = playing('A'.repeat(80));
+    const name = renderChannelName('""bold:❬ 1 ❭🎮 @@game_name@@""', ctx);
+    expect(name).not.toMatch(LONE);
+    expect(name.length).toBeLessThanOrEqual(100);
+  });
+
+  it('never cuts a status in the middle of a pair at its limit', () => {
+    const status = renderChannelName(
+      `${'a'.repeat(9)}😀`,
+      { index: 0, members: [] },
+      { maxLength: 10, allowEmpty: true },
+    );
+    expect(status).toBe('a'.repeat(9));
+    const lone = renderChannelName('@@game_name@@', playing('x\uD83D'), {
+      maxLength: 500,
+      allowEmpty: true,
+    });
+    expect(lone).toBe('x\uFFFD');
+  });
+
+  it('never cuts in the middle of a pair after masking a blocked word', () => {
+    // Masking `ab` as `***` lengthens the text past the limit, and the cut then lands mid-pair.
+    const name = renderChannelName(`ab ${'c'.repeat(95)}😀`, {
+      index: 0,
+      members: [],
+      blockedWords: ['ab'],
+    });
+    expect(name).not.toMatch(LONE);
+    expect(name).toBe(`*** ${'c'.repeat(95)}`);
+  });
+
+  it('takes a whole first letter for an acronym', () => {
+    const name = renderChannelName('""acro:@@game_name@@""', playing('😀 Party 𝐁old'));
+    expect(name).not.toMatch(LONE);
+    expect(name).toBe('😀P𝐁');
+  });
+});

@@ -68,11 +68,12 @@ function removeShortWords(s: string): string {
     .join(' ');
 }
 
+/** The first character of each word: a code point, not a UTF-16 unit, which is half of an emoji or a styled letter. */
 function acronym(s: string): string {
   return s
     .split(' ')
     .filter(Boolean)
-    .map((w) => w[0])
+    .map((w) => String.fromCodePoint(w.codePointAt(0)!))
     .join('');
 }
 

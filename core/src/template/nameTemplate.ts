@@ -1,4 +1,5 @@
 import { maskBlocked, maskBlockedWithin } from './blockedWords.js';
+import { cutWellFormed, wellFormed } from './wellFormed.js';
 import { applyMode } from './stringTransforms.js';
 import type { VoiceMember } from './types.js';
 
@@ -1678,9 +1679,14 @@ export function renderChannelName(
   // Clamp to the platform limit (100 for names, ~500 for statuses). An empty
   // channel name isn't valid (fall back to "-"), but an empty status is — it
   // clears the status — so `allowEmpty` keeps it empty.
+  //
+  // Well-formed first, then cut so the cut never splits a pair: text a member or a game
+  // wrote can hold half of a surrogate pair, Postgres refuses one in the stored state,
+  // and a bold or emoji name crosses the limit on its second half as often as not. Both
+  // depend on the text alone, so the same input still renders the same name.
   const max = opts.maxLength ?? MAX_CHANNEL_NAME_LENGTH;
-  const trimmed = name.trim();
-  let clamped = trimmed.length > max ? trimmed.slice(0, max) : trimmed;
+  const trimmed = wellFormed(name).trim();
+  let clamped = cutWellFormed(trimmed, max);
   // 11. Blocked words, masked in the finished text and clamped again until neither
   //     changes anything (see `maskBlockedWithin` for why once is not enough). A
   //     masked name is never empty, so the fallback below is untouched.

@@ -103,3 +103,9 @@ describe('isKnownStyleMode', () => {
     }
   });
 });
+
+describe('applyMode — acro over letters outside the BMP', () => {
+  it('takes the whole first character of each word, not half of it', () => {
+    expect(applyMode('acro', '𝐁ig 😀 day')).toBe('𝐁😀d');
+  });
+});

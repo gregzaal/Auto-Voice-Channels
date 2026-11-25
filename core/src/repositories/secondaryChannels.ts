@@ -10,6 +10,7 @@ import {
   type RoomAccessRead,
 } from '../domain/roomAccess.js';
 import { secondaryChannels } from '../db/schema.js';
+import { wellFormed, wellFormedJson } from '../template/wellFormed.js';
 
 /**
  * **`passthrough` is load-bearing for expand/contract (golden rule 3), and this
@@ -278,7 +279,7 @@ export class SecondaryChannelRepository {
         ownerId: input.ownerId ?? null,
         // The creator is the first owner unless a specific one is given.
         originalCreator: input.originalCreator ?? input.ownerId ?? null,
-        state: input.state ?? {},
+        state: wellFormedJson(input.state ?? {}),
         ...(input.createdAt ? { createdAt: input.createdAt } : {}),
       })
       .onConflictDoNothing({ target: secondaryChannels.channelId })
@@ -432,7 +433,7 @@ export class SecondaryChannelRepository {
   async updateState(channelId: string, state: SecondaryState): Promise<void> {
     await this.db
       .update(secondaryChannels)
-      .set({ state, updatedAt: new Date() })
+      .set({ state: wellFormedJson(state), updatedAt: new Date() })
       .where(this.scoped(eq(secondaryChannels.channelId, channelId)));
   }
 
@@ -447,12 +448,17 @@ export class SecondaryChannelRepository {
    * roster. `||` merges in the database, so only these keys are touched. Unlike
    * {@link setControlPanelMessage} this does bump `updatedAt`: the rename paths read it,
    * and this is called for a rename.
+   *
+   * Every writer of `state` here passes it through `wellFormedJson` first. The state
+   * carries text from Discord (display names, names rendered from game titles), which can
+   * hold half of a surrogate pair, and Postgres refuses that in jsonb, so one such string
+   * failed the write and, from the sweep, the rest of the guild's pass.
    */
   async mergeState(channelId: string, patch: Partial<SecondaryState>): Promise<void> {
     await this.db
       .update(secondaryChannels)
       .set({
-        state: sql`coalesce(${secondaryChannels.state}, '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb`,
+        state: sql`coalesce(${secondaryChannels.state}, '{}'::jsonb) || ${JSON.stringify(wellFormedJson(patch))}::jsonb`,
         updatedAt: new Date(),
       })
       .where(this.scoped(eq(secondaryChannels.channelId, channelId)));
@@ -637,7 +643,7 @@ export class SecondaryChannelRepository {
     let state: SQL | undefined;
     if (merges || remove.length > 0) {
       state = sql`coalesce(${secondaryChannels.state}, '{}'::jsonb)`;
-      if (merges) state = sql`${state} || ${JSON.stringify(patch)}::jsonb`;
+      if (merges) state = sql`${state} || ${JSON.stringify(wellFormedJson(patch))}::jsonb`;
       // One `- key` per key, as `GuildRepository.mergeSettings` does: drizzle
       // expands a JS array into a tuple of placeholders, which Postgres reads as
       // a record and will not cast to `text[]`. Applied after the merge, so a key
@@ -717,7 +723,7 @@ export class SecondaryChannelRepository {
             ? {}
             : {
                 state: sql`coalesce(${secondaryChannels.state}, '{}'::jsonb) || ${JSON.stringify({
-                  originalCreatorName: displayName,
+                  originalCreatorName: wellFormed(displayName),
                 })}::jsonb`,
               }),
           ...(repointed ? { access: repointed } : {}),

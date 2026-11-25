@@ -1,3 +1,5 @@
+import { cutWellFormed } from './wellFormed.js';
+
 /**
  * A server's blocked words: the pure matcher behind `/blockedwords`, which refuses
  * typed room names that use one and masks every match in what the bot renders.
@@ -472,7 +474,7 @@ export function maskBlockedWithin(
   let out = text;
   for (let pass = 0; pass < 4; pass++) {
     const masked = matcher.mask(out).trim();
-    const cut = masked.length > maxLength ? masked.slice(0, maxLength) : masked;
+    const cut = cutWellFormed(masked, maxLength);
     if (cut === masked) return cut;
     out = cut;
   }
