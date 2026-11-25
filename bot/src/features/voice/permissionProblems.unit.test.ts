@@ -157,6 +157,27 @@ describe('permissionProblemMessage', () => {
     }
   });
 
+  /**
+   * Discord's own ceiling, not a permission: the fix is making space, and naming a permission
+   * would send an admin to check what the bot already holds.
+   */
+  it('says a full category is full and how to make space, with no permission named', () => {
+    const msg = permissionProblemMessage('123', 'category_full');
+    expect(msg).toContain("I can't create rooms from <#123> because its category is full.");
+    expect(msg).toContain('Discord allows 50 channels in a category.');
+    expect(msg).toContain('move the creator channel to another category');
+    expect(msg).not.toMatch(/lost access|Manage|permission/i);
+  });
+
+  it("says a full server has reached Discord's limit of 500 channels", () => {
+    const msg = permissionProblemMessage('123', 'server_full');
+    expect(msg).toContain(
+      "I can't create rooms from <#123> because this server has reached Discord's limit of 500 channels.",
+    );
+    expect(msg).toContain('Delete some channels to make space.');
+    expect(msg).not.toMatch(/lost access|Manage|permission/i);
+  });
+
   it('sends privacy failures to Manage Roles, not the general access advice', () => {
     const msg = permissionProblemMessage('123', 'privacy');
     expect(msg).toContain('made a room');
@@ -189,7 +210,14 @@ describe('permissionProblemMessage', () => {
 
 const problem = (
   channelId: string,
-  operation: 'create' | 'delete' | 'move' | 'privacy' | 'access' = 'delete',
+  operation:
+    | 'create'
+    | 'delete'
+    | 'move'
+    | 'privacy'
+    | 'access'
+    | 'category_full'
+    | 'server_full' = 'delete',
 ) => ({
   channelId,
   operation,
@@ -283,6 +311,33 @@ describe('permissionProblemSummary', () => {
     expect(lines[2]).toContain('Manage Roles');
   });
 
+  /**
+   * The catch-all is a negative filter, so an operation it does not name renders as "I lost
+   * access and stopped managing it", which is false for a creator channel that is merely full.
+   */
+  it('never describes a full category or server as lost access, and says each on its own line', () => {
+    const lines = permissionProblemSummary([
+      problem('a', 'category_full'),
+      problem('b', 'category_full'),
+      problem('c', 'server_full'),
+    ]);
+    expect(lines).toHaveLength(2);
+    expect(lines.join(' ')).not.toContain('lost access');
+    expect(lines[0]).toContain(
+      "I can't create rooms from <#a>, <#b> because their category is full.",
+    );
+    expect(lines[0]).toContain('or move the creator channels to another category');
+    expect(lines[1]).toContain(
+      "I can't create rooms from <#c> because this server has reached Discord's limit of 500 channels.",
+    );
+  });
+
+  it('says a single full category in the singular', () => {
+    const [line] = permissionProblemSummary([problem('a', 'category_full')]);
+    expect(line).toContain('<#a> because its category is full.');
+    expect(line).toContain('or move the creator channel to another category');
+  });
+
   it('emits only the line it has problems for', () => {
     expect(permissionProblemSummary([problem('a', 'create')])).toHaveLength(1);
     expect(permissionProblemSummary([problem('a')])).toHaveLength(1);
@@ -351,6 +406,15 @@ describe('copy rules', () => {
     permissionProblemMessage('123', 'companion'),
     permissionProblemMessage('123', 'companion_role'),
     permissionProblemMessage('123', 'access'),
+    permissionProblemMessage('123', 'category_full'),
+    permissionProblemMessage('123', 'server_full'),
+    ...permissionProblemSummary([problem('a', 'category_full')]),
+    ...permissionProblemSummary([
+      problem('a', 'category_full'),
+      problem('b', 'category_full'),
+      problem('c', 'server_full'),
+      problem('d', 'server_full'),
+    ]),
     ...permissionProblemSummary([
       problem('a', 'create'),
       problem('b'),

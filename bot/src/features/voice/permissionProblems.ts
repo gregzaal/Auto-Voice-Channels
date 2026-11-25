@@ -29,7 +29,19 @@ export type PermissionOperation =
    * that a role the bot cannot edit would defeat. An obfuscated channel IS lost
    * access, and is recorded as that.
    */
-  | 'access';
+  | 'access'
+  /**
+   * Discord refused a room because the creator channel's category already holds its 50
+   * channels (`category_full`), or the server its 500 (`server_full`). Not a permission at all,
+   * and the fix is making space, so each has its own copy. Recorded against the creator channel
+   * and cleared when a room is next made from it.
+   *
+   * Problems live only in this process's memory (the notice history persisted in
+   * `metadata.problems` holds a time and a count, never an operation), so an older build never
+   * reads one of these.
+   */
+  | 'category_full'
+  | 'server_full';
 
 export interface PermissionProblem {
   channelId: string;
@@ -228,6 +240,19 @@ export function permissionProblemMessage(
       'the category.'
     );
   }
+  if (operation === 'category_full') {
+    return (
+      `⚠️ I can't create rooms from <#${channelId}> because its category is full. ` +
+      'Discord allows 50 channels in a category. Delete some channels in it, or move the ' +
+      'creator channel to another category.'
+    );
+  }
+  if (operation === 'server_full') {
+    return (
+      `⚠️ I can't create rooms from <#${channelId}> because this server has reached ` +
+      "Discord's limit of 500 channels. Delete some channels to make space."
+    );
+  }
   if (operation === 'move') {
     return (
       `⚠️ I made a room from <#${channelId}> but could not move anyone into it, so I deleted ` +
@@ -354,6 +379,8 @@ export function permissionProblemSummary(problems: readonly ProblemLike[]): stri
   const companionRoles = problems.filter((p) => p.operation === 'companion_role');
   const panels = problems.filter((p) => p.operation === 'panel');
   const accessChanges = problems.filter((p) => p.operation === 'access');
+  const categoriesFull = problems.filter((p) => p.operation === 'category_full');
+  const serversFull = problems.filter((p) => p.operation === 'server_full');
   /**
    * The catch-all, and the reason every operation above has to be named here
    * too: this is a NEGATIVE filter, so an operation left out of it renders as
@@ -369,7 +396,9 @@ export function permissionProblemSummary(problems: readonly ProblemLike[]): stri
       p.operation !== 'companion' &&
       p.operation !== 'companion_role' &&
       p.operation !== 'panel' &&
-      p.operation !== 'access',
+      p.operation !== 'access' &&
+      p.operation !== 'category_full' &&
+      p.operation !== 'server_full',
   );
   const lines: string[] = [];
   if (creates.length > 0) {
@@ -379,6 +408,25 @@ export function permissionProblemSummary(problems: readonly ProblemLike[]): stri
         'takes it away again, because a channel override beats a server-wide role. ' +
         '**Manage Roles** too, if new rooms should inherit permissions rather than just match ' +
         'the category.',
+    );
+  }
+  /**
+   * Their own lines: Discord's ceiling, not a permission, so neither the create line (which names
+   * permissions) nor lost access is true, and the fix is making space.
+   */
+  if (categoriesFull.length > 0) {
+    const one = categoriesFull.length === 1;
+    lines.push(
+      `I can't create rooms from ${list(categoriesFull)} because ` +
+        `${one ? 'its category is' : 'their category is'} full. Discord allows 50 channels in a ` +
+        `category. Delete some channels in it, or move the creator ` +
+        `${one ? 'channel' : 'channels'} to another category.`,
+    );
+  }
+  if (serversFull.length > 0) {
+    lines.push(
+      `I can't create rooms from ${list(serversFull)} because this server has reached ` +
+        "Discord's limit of 500 channels. Delete some channels to make space.",
     );
   }
   /**

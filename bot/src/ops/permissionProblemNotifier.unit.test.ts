@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { AuthStatus } from '@avc/core';
 import { fakeLogger } from '../runtime/testUtils.js';
-import { PermissionProblemTracker } from '../features/voice/permissionProblems.js';
+import {
+  PermissionProblemTracker,
+  type PermissionOperation,
+} from '../features/voice/permissionProblems.js';
 import {
   PermissionProblemNotifier,
   readNoticeState,
@@ -146,7 +149,7 @@ function harness(
     advance: (ms: number) => {
       clock += ms;
     },
-    break: (channelId: string, operation: 'create' | 'delete' | 'access' = 'create') =>
+    break: (channelId: string, operation: PermissionOperation = 'create') =>
       problems.record(GUILD, { channelId, operation, at: clock }),
   };
 }
@@ -469,6 +472,20 @@ describe('PermissionProblemNotifier headline', () => {
     await h.notifier.send(GUILD);
 
     expect(h.sent[0]!.content).toContain('has stopped working here');
+  });
+});
+
+describe('PermissionProblemNotifier channel limits', () => {
+  /** No room can be made from that creator channel, so the headline is the true one. */
+  it('tells the guild a category is full in its own words, never as lost access', async () => {
+    const h = harness();
+    h.break('creator-1', 'category_full');
+    await h.notifier.send(GUILD);
+
+    const body = h.sent[0]!.content;
+    expect(body).toContain('has stopped working here');
+    expect(body).toContain("I can't create rooms from <#creator-1> because its category is full.");
+    expect(body).not.toContain('lost access');
   });
 });
 
