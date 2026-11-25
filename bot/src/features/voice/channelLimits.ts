@@ -29,7 +29,7 @@ export const LIMIT_TOLD_MS = 60 * MINUTE;
 
 /**
  * How long a creator channel must go without a refusal, after a room was made from it, before
- * the incident is over.
+ * the incident is over. Measured from the last refusal, not from the room made.
  *
  * A room made is not proof the category has space: a busy one hovers at its limit, because the
  * bot's own rooms come and go, and is refused and then not refused minutes apart all evening.
@@ -41,16 +41,16 @@ export const LIMIT_TOLD_MS = 60 * MINUTE;
  */
 export const LIMIT_QUIET_MS = 30 * MINUTE;
 
-/** Most members one message mentions. Discord caps a message's allowed users at 100. */
+/** Most members one message lists. Discord caps a message's allowed users at 100. */
 export const MAX_LIMIT_MENTIONS = 20;
 
 /** What the tracker needs from Discord, as two functions so they fake in a line each. */
 export interface LimitChat {
   /**
-   * Posts into a channel's chat, allowing exactly the user mentions in `mentionIds` and nothing
-   * else. Resolves to the message id.
+   * Posts into a channel's chat. Only the users in `pingIds` are notified, and nobody else,
+   * whoever the content mentions. Resolves to the message id.
    */
-  send(channelId: string, content: string, mentionIds: readonly string[]): Promise<string>;
+  send(channelId: string, content: string, pingIds: readonly string[]): Promise<string>;
   remove(channelId: string, messageId: string): Promise<void>;
 }
 
@@ -62,13 +62,21 @@ export interface ChannelLimitTrackerDeps {
    * Asked before every post. Absent means not disabled.
    */
   noticesDisabled?: () => Promise<boolean>;
+  /**
+   * Whether this instance still serves the guild (holds its shard). An incident that ends for a
+   * guild it no longer serves is forgotten without {@link ChannelLimitTracker.onSettled}, whose
+   * clear would reach the shared notice history of a guild another instance now speaks for.
+   * Absent means always.
+   */
+  serves?: (guildId: string) => boolean;
   logger: Logger;
   now?: () => number;
 }
 
 interface PostedMessage {
   id: string;
-  mentionedIds: ReadonlySet<string>;
+  /** Who the message names, pinged or not. */
+  listedIds: ReadonlySet<string>;
   timer?: ReturnType<typeof setTimeout>;
 }
 
@@ -81,6 +89,13 @@ interface Entry {
   refusedAt: number;
   /** Whether a room has been made from it since that refusal: the quiet window is running. */
   madeSince: boolean;
+  /**
+   * Whether a channel deleted where it could make space may make rooms here again. Set by each
+   * refusal and spent by the first such delete, so a room that is made and then discarded (its
+   * owner could not be moved in, or it could not be made private) cannot have its own delete
+   * start the next one, and that one's delete the next, for ever.
+   */
+  retryOnDelete: boolean;
   settleTimer?: ReturnType<typeof setTimeout>;
   message?: PostedMessage;
   /** When each member was last told. See {@link LIMIT_TOLD_MS}. */
@@ -176,6 +191,7 @@ export class ChannelLimitTracker {
       entry.coolUntil = now + CHANNEL_LIMIT_COOLDOWN_MS;
       entry.refusedAt = now;
       entry.madeSince = false;
+      entry.retryOnDelete = true;
       clearTimeout(entry.settleTimer);
       delete entry.settleTimer;
       trimTold(entry, now);
@@ -186,6 +202,7 @@ export class ChannelLimitTracker {
         coolUntil: now + CHANNEL_LIMIT_COOLDOWN_MS,
         refusedAt: now,
         madeSince: false,
+        retryOnDelete: true,
         told: new Map(),
         quietUntil: 0,
       });
@@ -207,12 +224,14 @@ export class ChannelLimitTracker {
 
   /**
    * Tells the members waiting in the creator channel why they have no room, in that channel's
-   * own chat. One message per creator channel at a time, mentioning everyone in `waitingIds`
-   * (the joining member first): a member it does not mention yet gets a new message, which
-   * replaces the old one, because an edit that adds a mention notifies nobody.
+   * own chat. One message per creator channel at a time, naming everyone in `waitingIds` (the
+   * joining member first): a member it does not name yet gets a new message, which replaces the
+   * old one, because an edit that adds a mention notifies nobody. Only those not told in the last
+   * {@link LIMIT_TOLD_MS} are pinged, so a category hovering at its limit does not ping the same
+   * people on every join.
    *
-   * `joined` is a fresh join. The sweep passes false, and tells only when someone waiting has
-   * not been told in the last {@link LIMIT_TOLD_MS}. Returns at once: the post is queued.
+   * `joined` is a fresh join. The sweep passes false, and posts only when someone waiting has
+   * not been told lately. Returns at once: the post is queued.
    */
   tellMember(
     creatorId: string,
@@ -233,7 +252,8 @@ export class ChannelLimitTracker {
     const entry = this.entries.get(creatorId);
     if (!entry) return;
     entry.coolUntil = 0;
-    entry.told.clear();
+    // `told` is kept: a member told a minute ago is not pinged again when the category fills up
+    // again a minute from now.
     this.dropMessage(creatorId, entry);
     entry.madeSince = true;
     const wait = entry.refusedAt + LIMIT_QUIET_MS - this.now();
@@ -256,7 +276,7 @@ export class ChannelLimitTracker {
    * A full server is waiting for any channel to go. A full category only for one of its own:
    * `parentId` is the deleted channel's category and `categoryOf` the creator channel's. Either
    * unknown counts as a match, because a create too many costs one refused request and a missed
-   * one leaves somebody waiting.
+   * one leaves somebody waiting. Once per refusal: see `retryOnDelete`.
    */
   release(
     guildId: string,
@@ -265,11 +285,12 @@ export class ChannelLimitTracker {
   ): string[] {
     const released: string[] = [];
     for (const [creatorId, entry] of this.entries) {
-      if (entry.guildId !== guildId) continue;
+      if (entry.guildId !== guildId || !entry.retryOnDelete) continue;
       if (entry.limit === 'category' && parentId !== undefined) {
         const category = categoryOf(creatorId);
         if (category !== undefined && category !== parentId) continue;
       }
+      entry.retryOnDelete = false;
       entry.coolUntil = 0;
       released.push(creatorId);
     }
@@ -283,6 +304,14 @@ export class ChannelLimitTracker {
     if (entry.message) clearTimeout(entry.message.timer);
     clearTimeout(entry.settleTimer);
     this.entries.delete(creatorId);
+  }
+
+  /**
+   * Ends incidents nobody has been refused or told about for an hour. Run by the sweep, so an
+   * incident nothing touches again does not stay listed under `/setup` for ever.
+   */
+  expire(): void {
+    this.prune(this.now());
   }
 
   /** Resolves once every queued post and delete has finished. For tests and shutdown. */
@@ -311,22 +340,19 @@ export class ChannelLimitTracker {
   ): Promise<void> {
     const entry = this.entries.get(creatorId);
     const chat = this.deps.chat;
-    if (!entry || !chat) return;
+    // A room was made while this waited its turn: there is nothing to tell anyone.
+    if (!entry || !chat || entry.madeSince) return;
     const now = this.now();
     trimTold(entry, now);
     const waiting = [memberId, ...waitingIds.filter((id) => id !== memberId)].slice(
       0,
       MAX_LIMIT_MENTIONS,
     );
-    // Everyone waiting is already mentioned: a member rejoining, or a sweep finding the same
+    // Everyone waiting is already named: a member rejoining, or a sweep finding the same
     // people. Nothing to say.
-    if (entry.message && waiting.every((id) => entry.message!.mentionedIds.has(id))) {
-      for (const id of waiting) entry.told.set(id, now);
-      return;
-    }
-    if (!joined && waiting.every((id) => now - (entry.told.get(id) ?? -Infinity) < LIMIT_TOLD_MS)) {
-      return;
-    }
+    if (entry.message && waiting.every((id) => entry.message!.listedIds.has(id))) return;
+    const untold = waiting.filter((id) => now - (entry.told.get(id) ?? -Infinity) >= LIMIT_TOLD_MS);
+    if (!joined && untold.length === 0) return;
     if (now < entry.quietUntil) return;
     try {
       if (await this.deps.noticesDisabled?.()) return;
@@ -334,12 +360,13 @@ export class ChannelLimitTracker {
       // Fail open, as the problem notifier does: a database blip must not silence it.
     }
     // Marked before the request, so nobody is asked about twice for one failure.
-    for (const id of waiting) entry.told.set(id, now);
+    for (const id of untold) entry.told.set(id, now);
     try {
+      // Names everyone waiting, and pings only those not told lately.
       const id = await chat.send(
         creatorId,
         channelLimitMemberMessage(waiting, entry.limit),
-        waiting,
+        untold,
       );
       this.counters.posted += 1;
       // The room may have been made while this was in flight. Then this message is stale too.
@@ -348,7 +375,7 @@ export class ChannelLimitTracker {
         return;
       }
       const previous = entry.message;
-      const message: PostedMessage = { id, mentionedIds: new Set(waiting) };
+      const message: PostedMessage = { id, listedIds: new Set(waiting) };
       entry.message = message;
       message.timer = setTimeout(() => {
         if (entry.message !== message) return;
@@ -387,6 +414,7 @@ export class ChannelLimitTracker {
     this.entries.delete(creatorId);
     this.counters.settled += 1;
     try {
+      if (this.deps.serves && !this.deps.serves(entry.guildId)) return;
       this.onSettled?.(entry.guildId, creatorId);
     } catch {
       // Settling must not fail because the owner's hook did.

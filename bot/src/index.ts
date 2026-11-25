@@ -473,19 +473,19 @@ async function main(): Promise<void> {
   /**
    * Creator channels Discord refused a room for because a category or the server is full: the
    * short cooldown that stops a refused create per join, and the one message in the creator
-   * channel's own chat that tells the waiting members why. Mentions exactly the members it names
-   * and nobody else, and is switched off with the problem notices (`problems.notify_disabled`).
+   * channel's own chat that tells the waiting members why. Pings only the members it names who
+   * were not told lately, and nobody else, and is switched off with the problem notices (`problems.notify_disabled`).
    */
   const channelLimits = new ChannelLimitTracker({
     chat: {
-      send: async (channelId, content, mentionIds) => {
+      send: async (channelId, content, pingIds) => {
         const channel = await client.channels.fetch(channelId);
         if (!channel?.isTextBased() || !('send' in channel)) {
           throw new Error(`channel ${channelId} has no chat`);
         }
         const message = await channel.send({
           content,
-          allowedMentions: { users: [...mentionIds] },
+          allowedMentions: { users: [...pingIds] },
         });
         return message.id;
       },
@@ -496,6 +496,9 @@ async function main(): Promise<void> {
       },
     },
     noticesDisabled: () => problemNotifier.noticesDisabled(),
+    // An incident that ends after this instance gave up the guild's shard must not clear the
+    // shared notice history of a guild another instance now speaks for.
+    serves: (guildId) => leaseManager.ownsGuild(guildId),
     logger: logger.child({ component: 'channel-limits' }),
   });
   // Private-channel "⇩ Join" mechanism. Wired into the feature's cleanup hook so

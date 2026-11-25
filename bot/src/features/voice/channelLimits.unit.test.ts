@@ -14,13 +14,16 @@ import {
 const GUILD = 'g1';
 const CREATOR = 'creator-1';
 
-function harness() {
+function harness(opts: { serves?: (guildId: string) => boolean } = {}) {
   let now = 1_000_000_000;
+  /** Each post as `send <channel> <pinged ids>`, and each delete. */
   const calls: string[] = [];
+  const contents: string[] = [];
   let seq = 0;
   const chat: LimitChat = {
-    send: (channelId, _content, mentionIds) => {
-      calls.push(`send ${channelId} ${mentionIds.join(',')}`);
+    send: (channelId, content, pingIds) => {
+      calls.push(`send ${channelId} ${pingIds.join(',')}`);
+      contents.push(content);
       return Promise.resolve(`m${++seq}`);
     },
     remove: (channelId, messageId) => {
@@ -28,12 +31,18 @@ function harness() {
       return Promise.resolve();
     },
   };
-  const tracker = new ChannelLimitTracker({ chat, logger: fakeLogger(), now: () => now });
+  const tracker = new ChannelLimitTracker({
+    chat,
+    logger: fakeLogger(),
+    now: () => now,
+    ...(opts.serves ? { serves: opts.serves } : {}),
+  });
   const settled: string[] = [];
   tracker.onSettled = (_g, creatorId) => settled.push(creatorId);
   return {
     tracker,
     calls,
+    contents,
     settled,
     advance: (ms: number) => {
       now += ms;
@@ -132,17 +141,33 @@ describe('ChannelLimitTracker', () => {
   });
 
   /** An edit that adds a mention notifies nobody, so a new member gets a new message. */
-  it('replaces the message for a new member, mentioning everyone still waiting', async () => {
+  it('replaces the message for a new member, naming everyone and pinging only the new one', async () => {
     const h = harness();
     h.tracker.refused(GUILD, CREATOR, 'category');
     await h.tell('alice', ['alice']);
     await h.tell('bob', ['alice', 'bob']);
     expect(h.calls).toEqual([
       `send ${CREATOR} alice`,
-      `send ${CREATOR} bob,alice`,
+      `send ${CREATOR} bob`,
       `remove ${CREATOR} m1`,
     ]);
+    expect(h.contents[1]).toMatch(/^<@bob> <@alice> I couldn't make your rooms /);
     expect(h.tracker.snapshot()['messages']).toBe(1);
+  });
+
+  /** A category hovering at its limit must not ping the same people on every join. */
+  it('does not ping a member again after a room is made and the category fills again', async () => {
+    const h = harness();
+    h.tracker.refused(GUILD, CREATOR, 'category');
+    await h.tell('alice', ['alice']);
+    h.tracker.roomMade(CREATOR);
+    h.advance(CHANNEL_LIMIT_COOLDOWN_MS);
+    h.tracker.refused(GUILD, CREATOR, 'category');
+    await h.tell('bob', ['alice', 'bob']);
+    expect(h.calls.filter((c) => c.startsWith('send'))).toEqual([
+      `send ${CREATOR} alice`,
+      `send ${CREATOR} bob`,
+    ]);
   });
 
   it('says nothing for a member the message already mentions', async () => {
@@ -174,7 +199,7 @@ describe('ChannelLimitTracker', () => {
     h.tracker.refused(GUILD, CREATOR, 'category');
     const waiting = Array.from({ length: 30 }, (_, i) => `m${i}`);
     await h.tell('m29', waiting);
-    const mentioned = h.calls[0]!.split(' ')[2]!.split(',');
+    const mentioned = h.contents[0]!.match(/<@m\d+>/g)!.map((m) => m.slice(2, -1));
     expect(mentioned).toHaveLength(MAX_LIMIT_MENTIONS);
     expect(mentioned[0]).toBe('m29');
   });
@@ -198,13 +223,34 @@ describe('ChannelLimitTracker', () => {
     expect(h.calls.filter((c) => c.startsWith('remove'))).toHaveLength(1);
   });
 
-  it('deletes a post that lands after the room was made', async () => {
+  it('posts nothing when the room is made before its turn comes', async () => {
     const h = harness();
     h.tracker.refused(GUILD, CREATOR, 'category');
     h.tracker.tellMember(CREATOR, 'alice', ['alice'], true);
     h.tracker.roomMade(CREATOR);
     await h.tracker.idle();
-    expect(h.calls).toEqual([`send ${CREATOR} alice`, `remove ${CREATOR} m1`]);
+    expect(h.calls).toEqual([]);
+  });
+
+  it('does not end an incident for a guild this instance no longer serves', async () => {
+    let serving = true;
+    const h = harness({ serves: () => serving });
+    h.tracker.refused(GUILD, CREATOR, 'category');
+    h.tracker.roomMade(CREATOR);
+    serving = false;
+    await vi.advanceTimersByTimeAsync(LIMIT_QUIET_MS);
+    expect(h.settled).toEqual([]);
+    expect(h.tracker.snapshot()['creatorChannels']).toBe(0);
+  });
+
+  it('ends an idle incident when the sweep asks, with nothing else happening', () => {
+    const h = harness();
+    h.tracker.refused(GUILD, CREATOR, 'category');
+    h.tracker.expire();
+    expect(h.settled).toEqual([]);
+    h.advance(LIMIT_TOLD_MS);
+    h.tracker.expire();
+    expect(h.settled).toEqual([CREATOR]);
   });
 
   describe('release', () => {
@@ -226,6 +272,16 @@ describe('ChannelLimitTracker', () => {
       h.tracker.refused('g2', 'creator-2', 'server');
       expect(h.tracker.release(GUILD, null, categoryOf)).toEqual([CREATOR]);
       expect(h.tracker.isCoolingDown('creator-2')).toBe(true);
+    });
+
+    /** A room made and discarded again deletes a channel too, which must not start the next. */
+    it('releases once per refusal', () => {
+      const h = harness();
+      h.tracker.refused(GUILD, CREATOR, 'category');
+      expect(h.tracker.release(GUILD, 'cat-a', categoryOf)).toEqual([CREATOR]);
+      expect(h.tracker.release(GUILD, 'cat-a', categoryOf)).toEqual([]);
+      h.tracker.refused(GUILD, CREATOR, 'category');
+      expect(h.tracker.release(GUILD, 'cat-a', categoryOf)).toEqual([CREATOR]);
     });
 
     it('releases a full category when either category is unknown', () => {

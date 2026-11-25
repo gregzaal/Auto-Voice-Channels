@@ -54,6 +54,11 @@ import { roomMode, type RoomMode } from './roomMode.js';
 import { restoreRemembered, standingOf } from './rememberedStart.js';
 import { savedListsInert, type CommandAccess, type CommandCaller } from './commandAccess.js';
 
+/** A Discord error's code, for a log line that carries ids only. */
+function errorCodeOf(err: unknown): unknown {
+  return typeof err === 'object' && err !== null && 'code' in err ? err.code : undefined;
+}
+
 /** A fresh 31-bit random seed for a channel's `[[random]]` picks. */
 function randomSeed(): number {
   return Math.floor(Math.random() * 0x7fffffff);
@@ -2239,7 +2244,23 @@ export class VoiceFeature {
     for (const creatorId of released) {
       if (creatorId === channelId) continue;
       const waiting = this.deps.voice.membersInChannel(creatorId).filter((m) => !m.bot);
-      for (const member of waiting) await this.maybeCreate(guildId, creatorId, member);
+      for (const member of waiting) {
+        // Full again: the rest wait for the next space, their next join or the sweep.
+        if (this.channelLimits.isCoolingDown(creatorId)) break;
+        /**
+         * Contained per member: this task is about the deleted channel, and a create that fails
+         * for some other reason is the join path's business on that member's next join or the
+         * sweep, not a failure of this one to count against the guild's breaker.
+         */
+        try {
+          await this.maybeCreate(guildId, creatorId, member);
+        } catch (err) {
+          this.deps.logger.warn(
+            { guildId, primaryId: creatorId, memberId: member.id, code: errorCodeOf(err) },
+            'could not make a room for a member waiting on a full category',
+          );
+        }
+      }
     }
   }
 
@@ -3811,6 +3832,8 @@ export class VoiceFeature {
    */
   async reconcileGuild(guildId: string, opts: ReconcileOptions = {}): Promise<GuildDrift> {
     const dryRun = opts.dryRun ?? false;
+    // Ends full-category incidents nothing has touched for an hour. In memory, and cheap.
+    if (!dryRun) this.channelLimits.expire();
     const drift: GuildDrift = {
       guildId,
       dryRun,

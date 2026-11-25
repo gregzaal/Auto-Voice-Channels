@@ -887,13 +887,13 @@ describe('VoiceFeature (integration)', () => {
     /** The creator channel's chat, as the tracker sees it. */
     function fakeChat() {
       const chat = {
-        sent: [] as { channelId: string; id: string; content: string; mentionIds: string[] }[],
+        sent: [] as { channelId: string; id: string; content: string; pingIds: string[] }[],
         removed: [] as { channelId: string; messageId: string }[],
         /** Discord's answer to a post in a chat the bot may not write in. */
         failSend: false,
         /** A post Discord holds back for as long as it likes, such as under a rate limit. */
         hang: false,
-        send(channelId: string, content: string, mentionIds: readonly string[]): Promise<string> {
+        send(channelId: string, content: string, pingIds: readonly string[]): Promise<string> {
           if (chat.hang) return new Promise<string>(() => undefined);
           if (chat.failSend) {
             return Promise.reject(
@@ -908,7 +908,7 @@ describe('VoiceFeature (integration)', () => {
             );
           }
           const id = `msg-${chat.sent.length + 1}`;
-          chat.sent.push({ channelId, id, content, mentionIds: [...mentionIds] });
+          chat.sent.push({ channelId, id, content, pingIds: [...pingIds] });
           return Promise.resolve(id);
         },
         remove(channelId: string, messageId: string) {
@@ -993,7 +993,7 @@ describe('VoiceFeature (integration)', () => {
         {
           channelId: PRIMARY,
           id: 'msg-1',
-          mentionIds: ['alice'],
+          pingIds: ['alice'],
           content:
             "<@alice> I couldn't make your room because this category is full. Discord allows 50 " +
             'channels in a category. Ask a moderator to make space.',
@@ -1001,8 +1001,11 @@ describe('VoiceFeature (integration)', () => {
       ]);
     });
 
-    /** An edit that adds a mention notifies nobody, and would drop the first member's. */
-    it('posts again for a second member, mentioning both, without asking Discord again', async () => {
+    /**
+     * An edit that adds a mention notifies nobody, so a second member gets a new message, which
+     * names both and pings only the one not told yet.
+     */
+    it('posts again for a second member, naming both, without asking Discord again', async () => {
       const h = harness();
       actions.channelLimit = 'category';
       await h.join('alice');
@@ -1011,7 +1014,7 @@ describe('VoiceFeature (integration)', () => {
 
       // Inside the cooldown: no second request.
       expect(actions.createAttempts).toBe(1);
-      expect(h.chat.sent.map((m) => m.mentionIds)).toEqual([['alice'], ['bob', 'alice']]);
+      expect(h.chat.sent.map((m) => m.pingIds)).toEqual([['alice'], ['bob']]);
       expect(h.chat.sent[1]!.content).toMatch(/^<@bob> <@alice> I couldn't make your rooms /);
       // One at a time: the first is gone.
       expect(h.chat.removed).toEqual([{ channelId: PRIMARY, messageId: 'msg-1' }]);
@@ -1117,6 +1120,67 @@ describe('VoiceFeature (integration)', () => {
       expect(actions.ofType('move')).toEqual([expect.objectContaining({ memberId: 'alice' })]);
     });
 
+    /**
+     * The room made for the waiting member is discarded at once (its owner cannot be moved in),
+     * and that delete is itself a channel gone from the category. It must not start the next
+     * room, whose delete would start the next, for ever.
+     */
+    it('makes at most one room per refusal when the room it makes is discarded', async () => {
+      const h = harness();
+      actions.channelLimit = 'category';
+      await h.join('alice');
+
+      actions.channelLimit = undefined;
+      actions.failMove = true;
+      await h.f.handleChannelDeleted(GUILD, 'some-other-channel', CATEGORY);
+      // Each discarded room's own delete event, as Discord would send it.
+      for (let i = 0; i < 3; i++) {
+        const discarded = actions.ofType('delete').at(-1)!.channelId;
+        await h.f.handleChannelDeleted(GUILD, discarded, CATEGORY);
+      }
+      actions.failMove = false;
+
+      expect(actions.createAttempts).toBe(2);
+      expect(actions.ofType('create')).toHaveLength(1);
+    });
+
+    it('carries on for the other members when one create fails, and fails nothing', async () => {
+      const h = harness();
+      actions.channelLimit = 'category';
+      await h.join('alice');
+      await h.join('bob');
+
+      // A fault of some other kind, which the create path rethrows.
+      let tried = 0;
+      const real = actions.createVoiceChannel.bind(actions);
+      actions.createVoiceChannel = () => {
+        tried += 1;
+        return Promise.reject(new Error('socket hang up'));
+      };
+      try {
+        await expect(
+          h.f.handleChannelDeleted(GUILD, 'some-other-channel', CATEGORY),
+        ).resolves.toBeUndefined();
+      } finally {
+        actions.createVoiceChannel = real;
+      }
+
+      expect(tried).toBe(2);
+    });
+
+    it('stops making rooms there once the category is full again', async () => {
+      const h = harness();
+      actions.channelLimit = 'category';
+      await h.join('alice');
+      await h.join('bob');
+      await h.join('carol');
+
+      // Still full: the first try is refused, and the rest are not asked about.
+      await h.f.handleChannelDeleted(GUILD, 'some-other-channel', CATEGORY);
+
+      expect(actions.createAttempts).toBe(2);
+    });
+
     it('does not ask again for a channel gone from another category', async () => {
       const h = harness();
       actions.channelLimit = 'category';
@@ -1191,7 +1255,7 @@ describe('VoiceFeature (integration)', () => {
       await h.f.reconcileGuild(GUILD);
       await h.limits.idle();
 
-      expect(h.chat.sent.map((m) => m.mentionIds)).toEqual([['alice']]);
+      expect(h.chat.sent.map((m) => m.pingIds)).toEqual([['alice']]);
     });
 
     it('swallows a chat the bot cannot post in, and does not try it on every join', async () => {
@@ -1264,7 +1328,7 @@ describe('VoiceFeature (integration)', () => {
       allowed = false;
       await h.join('bob');
 
-      expect(h.chat.sent.map((m) => m.mentionIds)).toEqual([['alice']]);
+      expect(h.chat.sent.map((m) => m.pingIds)).toEqual([['alice']]);
     });
 
     it('honours the notice switch for the member message, and still tells the mods', async () => {
