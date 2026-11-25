@@ -405,14 +405,22 @@ export class PermissionProblemNotifier {
     const mentionId = mode === 'contact' ? contactId.mentionable : null;
     // A NEGATIVE filter: an operation left out of it opens the notice with "has
     // stopped working here", which is false for every one the rooms survive.
-    const blocking = problems.some(
+    const blockers = problems.filter(
       (p) =>
         p.operation !== 'companion' &&
         p.operation !== 'companion_role' &&
         p.operation !== 'panel' &&
         p.operation !== 'access',
     );
-    const body = problemNoticeBody(permissionProblemSummary(problems), sends, mode, blocking);
+    // Only full categories or a full server: rooms still come from every other creator channel,
+    // so "stopped working here" would overstate it.
+    const headline =
+      blockers.length === 0
+        ? false
+        : blockers.every((p) => p.operation === 'category_full' || p.operation === 'server_full')
+          ? 'full'
+          : true;
+    const body = problemNoticeBody(permissionProblemSummary(problems), sends, mode, headline);
 
     await this.takeSlot();
 
@@ -697,8 +705,11 @@ export function problemNoticeBody(
    * posted, and a change to who can see or join a room that did not apply. Leading
    * with "has stopped working here" in any of them is a false alarm that
    * contradicts the line printed directly under it.
+   *
+   * `'full'` when what stops it is only Discord's channel limit, on some creator channels: the
+   * rest still make rooms, so the headline says which part stopped.
    */
-  blocking = true,
+  blocking: boolean | 'full' = true,
 ): string {
   /**
    * There are `BACKOFF_MS.length + 1` notices in total: the first is
@@ -711,16 +722,19 @@ export function problemNoticeBody(
     : mode === 'contact'
       ? 'Run `/setup` for the full picture, or `/logging` to change who I tell about this.'
       : 'Run `/setup` for the full picture.';
-  const headline = blocking
-    ? '⚠️ **Auto Voice Channels has stopped working here.**'
-    : // Covers every non-blocking failure without claiming any. A companion
-      // text channel that could not be made IS a room left half set up; a
-      // control panel that could not be posted is not, because the room is
-      // finished and only the shortcut is missing, and neither is an access
-      // change that did not apply, where the room is finished and only who may
-      // see or join it is not as asked. A headline that named room setup would
-      // be plainly false on every panel-only notice, and the lines below it
-      // would say so.
-      '⚠️ **Your rooms are working, but something else in this server is not.**';
+  const headline =
+    blocking === 'full'
+      ? "⚠️ **I can't create rooms from some of your creator channels.**"
+      : blocking
+        ? '⚠️ **Auto Voice Channels has stopped working here.**'
+        : // Covers every non-blocking failure without claiming any. A companion
+          // text channel that could not be made IS a room left half set up; a
+          // control panel that could not be posted is not, because the room is
+          // finished and only the shortcut is missing, and neither is an access
+          // change that did not apply, where the room is finished and only who may
+          // see or join it is not as asked. A headline that named room setup would
+          // be plainly false on every panel-only notice, and the lines below it
+          // would say so.
+          '⚠️ **Your rooms are working, but something else in this server is not.**';
   return [headline, ...lines, tail].join('\n\n');
 }

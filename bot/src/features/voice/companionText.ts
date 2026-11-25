@@ -222,8 +222,9 @@ export class CompanionTextService {
        *
        * The likeliest real failure of this feature is not a missing permission:
        * it is Discord's 50-channel category cap, which an opted-in creator
-       * channel roughly halves its way into, and which returns `30013` rather
-       * than a 403. Reporting only `isPermissionError` left that case with a
+       * channel roughly halves its way into, and which Discord answers with an
+       * Invalid Form Body (`50035`, `parent_id[CHANNEL_PARENT_MAX_CHANNELS]`)
+       * rather than a 403 (a full server answers `30013`). Reporting only `isPermissionError` left that case with a
        * log line and nothing an admin could ever see, which is the one outcome
        * a feature that silently stops working must not have. The message names
        * what to check and says the rooms themselves are fine, which is true

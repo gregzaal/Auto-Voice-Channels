@@ -34,7 +34,8 @@ export type PermissionOperation =
    * Discord refused a room because the creator channel's category already holds its 50
    * channels (`category_full`), or the server its 500 (`server_full`). Not a permission at all,
    * and the fix is making space, so each has its own copy. Recorded against the creator channel
-   * and cleared when a room is next made from it.
+   * and cleared once a room has been made from it and none refused for a while
+   * (`LIMIT_QUIET_MS`), never by the first room made: a busy category hovers at its limit.
    *
    * Problems live only in this process's memory (the notice history persisted in
    * `metadata.problems` holds a time and a count, never an operation), so an older build never
@@ -417,10 +418,14 @@ export function permissionProblemSummary(problems: readonly ProblemLike[]): stri
   if (categoriesFull.length > 0) {
     const one = categoriesFull.length === 1;
     lines.push(
+      // Plural says categories: several creator channels need not share one.
       `I can't create rooms from ${list(categoriesFull)} because ` +
-        `${one ? 'its category is' : 'their category is'} full. Discord allows 50 channels in a ` +
-        `category. Delete some channels in it, or move the creator ` +
-        `${one ? 'channel' : 'channels'} to another category.`,
+        `${one ? 'its category is' : 'their categories are'} full. Discord allows 50 channels in ` +
+        `a category. ${
+          one
+            ? 'Delete some channels in it, or move the creator channel to another category.'
+            : 'Delete some channels in them, or move the creator channels to other categories.'
+        }`,
     );
   }
   if (serversFull.length > 0) {

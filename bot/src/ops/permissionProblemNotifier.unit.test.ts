@@ -476,16 +476,29 @@ describe('PermissionProblemNotifier headline', () => {
 });
 
 describe('PermissionProblemNotifier channel limits', () => {
-  /** No room can be made from that creator channel, so the headline is the true one. */
+  /**
+   * Rooms still come from every other creator channel, so "stopped working here" overstates it:
+   * the headline names the part that stopped.
+   */
   it('tells the guild a category is full in its own words, never as lost access', async () => {
     const h = harness();
     h.break('creator-1', 'category_full');
     await h.notifier.send(GUILD);
 
     const body = h.sent[0]!.content;
-    expect(body).toContain('has stopped working here');
+    expect(body).toContain("I can't create rooms from some of your creator channels.");
+    expect(body).not.toContain('stopped working');
     expect(body).toContain("I can't create rooms from <#creator-1> because its category is full.");
     expect(body).not.toContain('lost access');
+  });
+
+  it('still says it stopped working when something else stopped it too', async () => {
+    const h = harness();
+    h.break('creator-1', 'server_full');
+    h.break('creator-2', 'create');
+    await h.notifier.send(GUILD);
+
+    expect(h.sent[0]!.content).toContain('has stopped working here');
   });
 });
 

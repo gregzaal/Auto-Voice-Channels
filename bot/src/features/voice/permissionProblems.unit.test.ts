@@ -324,9 +324,12 @@ describe('permissionProblemSummary', () => {
     expect(lines).toHaveLength(2);
     expect(lines.join(' ')).not.toContain('lost access');
     expect(lines[0]).toContain(
-      "I can't create rooms from <#a>, <#b> because their category is full.",
+      // Several creator channels need not share one category.
+      "I can't create rooms from <#a>, <#b> because their categories are full.",
     );
-    expect(lines[0]).toContain('or move the creator channels to another category');
+    expect(lines[0]).toContain(
+      'Delete some channels in them, or move the creator channels to other categories.',
+    );
     expect(lines[1]).toContain(
       "I can't create rooms from <#c> because this server has reached Discord's limit of 500 channels.",
     );
@@ -428,6 +431,12 @@ describe('copy rules', () => {
     problemNoticeBody(permissionProblemSummary([problem('a', 'create')]), 1, 'contact'),
     problemNoticeBody(permissionProblemSummary([problem('a')]), 1, 'quiet'),
     problemNoticeBody(permissionProblemSummary([problem('a')]), 4, 'contact'),
+    problemNoticeBody(
+      permissionProblemSummary([problem('a', 'category_full')]),
+      1,
+      'quiet',
+      'full',
+    ),
     // The `/logging` panel and the reply it produces are read by the same
     // admin, in the same sitting, as everything above.
     ...loggingModalStrings(),

@@ -216,6 +216,21 @@ describe('channelLimitOf', () => {
     expect(channelLimitOf(undefined)).toBe(undefined);
   });
 
+  /** discord.js flattens the field errors into the message, which is read when they are missing. */
+  it('reads a full category from the message when the field errors are missing', () => {
+    const flattened = new DiscordAPIError(
+      { code: 50035, message: 'Invalid Form Body' } as never,
+      50035,
+      400,
+      'POST',
+      'https://discord.test',
+      {} as never,
+    );
+    flattened.message =
+      'Invalid Form Body\nparent_id[CHANNEL_PARENT_MAX_CHANNELS]: Maximum number of channels in category reached (50)';
+    expect(channelLimitOf(flattened)).toBe('category');
+  });
+
   it('still finds the category when Discord also refused the name in the same answer', () => {
     const both = new DiscordAPIError(
       {
