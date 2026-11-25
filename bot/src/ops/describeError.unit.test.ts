@@ -1,7 +1,8 @@
 import { DiscordAPIError } from 'discord.js';
 import { describe, expect, it } from 'vitest';
+import { channelLimitError, nameRefusedError } from '../features/voice/actions.js';
 import { ChannelObfuscatedError, ChannelRefusedError } from '../features/voice/discordAdapter.js';
-import { categorizeError, describeError } from './describeError.js';
+import { categorizeError, channelLimitOf, describeError } from './describeError.js';
 
 function apiError(code: number, message: string, status = 403): DiscordAPIError {
   return new DiscordAPIError(
@@ -40,6 +41,13 @@ describe('describeError', () => {
       const out = describeError(apiError(code, 'x'));
       expect(out).not.toMatch(/[—–;‘’“”]/);
     }
+  });
+
+  it('says a full category in words, which the bare 50035 hint gets wrong', () => {
+    const out = describeError(channelLimitError('category'));
+    expect(out).toContain("that category has hit Discord's limit of 50 channels");
+    expect(out).toContain('CHANNEL_PARENT_MAX_CHANNELS');
+    expect(out).not.toMatch(/[—–;‘’“”]/);
   });
 
   it('falls back to the raw Discord detail for an unmapped code', () => {
@@ -95,6 +103,11 @@ describe('categorizeError', () => {
     expect(categorizeError(apiError(30013, 'Maximum number of channels reached'))).toBe(
       'channel_limit',
     );
+  });
+
+  it('names a full category as the same ceiling, not as an invalid request', () => {
+    expect(categorizeError(channelLimitError('category'))).toBe('channel_limit');
+    expect(categorizeError(channelLimitError('server'))).toBe('channel_limit');
   });
 
   it('folds the whole 10xxx family into one "it is gone" bucket', () => {
@@ -160,5 +173,70 @@ describe('categorizeError', () => {
     ]) {
       expect(allowed).toContain(categorizeError(err));
     }
+  });
+});
+
+/**
+ * Discord answers a create into a full category with an Invalid Form Body about `parent_id`, and
+ * a create into a full server with 30013. A refused NAME is also an Invalid Form Body, so the
+ * field decides, never the code alone.
+ */
+describe('channelLimitOf', () => {
+  it('reads a full category from the parent_id field error', () => {
+    expect(channelLimitOf(channelLimitError('category'))).toBe('category');
+  });
+
+  it('reads a full server from its own code', () => {
+    expect(channelLimitOf(channelLimitError('server'))).toBe('server');
+  });
+
+  it('is undefined for a refused name, another field, and every other error', () => {
+    expect(channelLimitOf(nameRefusedError('POST'))).toBe(undefined);
+    expect(
+      channelLimitOf(
+        new DiscordAPIError(
+          {
+            code: 50035,
+            message: 'Invalid Form Body',
+            errors: { parent_id: { _errors: [{ code: 'CHANNEL_PARENT_INVALID_TYPE', message: 'x' }] } },
+          } as never,
+          50035,
+          400,
+          'POST',
+          'https://discord.test',
+          {} as never,
+        ),
+      ),
+    ).toBe(undefined);
+    expect(channelLimitOf(apiError(50035, 'Invalid Form Body', 400))).toBe(undefined);
+    expect(channelLimitOf(apiError(50013, 'Missing Permissions'))).toBe(undefined);
+    expect(channelLimitOf(new Error('CHANNEL_PARENT_MAX_CHANNELS'))).toBe(undefined);
+    expect(channelLimitOf(undefined)).toBe(undefined);
+  });
+
+  it('still finds the category when Discord also refused the name in the same answer', () => {
+    const both = new DiscordAPIError(
+      {
+        code: 50035,
+        message: 'Invalid Form Body',
+        errors: {
+          name: { _errors: [{ code: 'INVALID_COMMUNITY_PROPERTY_NAME', message: 'x' }] },
+          parent_id: {
+            _errors: [
+              {
+                code: 'CHANNEL_PARENT_MAX_CHANNELS',
+                message: 'Maximum number of channels in category reached (50)',
+              },
+            ],
+          },
+        },
+      } as never,
+      50035,
+      400,
+      'POST',
+      'https://discord.test',
+      {} as never,
+    );
+    expect(channelLimitOf(both)).toBe('category');
   });
 });

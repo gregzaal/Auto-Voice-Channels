@@ -484,6 +484,45 @@ export function nameRefusedError(method: 'PATCH' | 'POST'): DiscordAPIError {
 }
 
 /**
+ * What Discord answers a channel create with when there is no room for one: an Invalid Form Body
+ * about `parent_id` for a category holding 50 channels, and 30013 for a server holding 500. Shaped
+ * as the live API answers, for the tests and the recording fake.
+ */
+export function channelLimitError(limit: 'category' | 'server'): DiscordAPIError {
+  if (limit === 'server') {
+    return new DiscordAPIError(
+      { code: 30013, message: 'Maximum number of guild channels reached (500)' } as never,
+      30013,
+      400,
+      'POST',
+      'https://discord.test',
+      {} as never,
+    );
+  }
+  return new DiscordAPIError(
+    {
+      code: 50035,
+      message: 'Invalid Form Body',
+      errors: {
+        parent_id: {
+          _errors: [
+            {
+              code: 'CHANNEL_PARENT_MAX_CHANNELS',
+              message: 'Maximum number of channels in category reached (50)',
+            },
+          ],
+        },
+      },
+    } as never,
+    50035,
+    400,
+    'POST',
+    'https://discord.test',
+    {} as never,
+  );
+}
+
+/**
  * In-memory recorder used by tests. Records every action and assigns synthetic
  * channel ids on create. Tolerates deleting unknown channels (idempotent).
  */

@@ -8,7 +8,7 @@ import {
 import type { Client, GuildMember, VoiceState } from 'discord.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ResolvedOverwrite } from './accessPlan.js';
-import { NAME_REFUSED_REASON, nameRefusedError } from './actions.js';
+import { channelLimitError, NAME_REFUSED_REASON, nameRefusedError } from './actions.js';
 import {
   CHANNEL_OBFUSCATED,
   ChannelObfuscatedError,
@@ -2097,6 +2097,23 @@ describe('DiscordVoiceActions.createVoiceChannel bitrate/region/video-quality/ns
     ).rejects.toThrow();
     expect(guild.channels.create).toHaveBeenCalledTimes(1);
   });
+
+  /** No copied property frees a slot in a full category or server, so a second try is wasted. */
+  it.each(['category', 'server'] as const)(
+    'does not retry without the copied properties when the %s is full',
+    async (limit) => {
+      const { client, guild } = makeClient();
+      guild.channels.create.mockReset().mockRejectedValueOnce(channelLimitError(limit));
+      await expect(
+        new DiscordVoiceActions(client).createVoiceChannel({
+          guildId: 'g1',
+          name: 'x',
+          rtcRegion: 'deprecated-region',
+        }),
+      ).rejects.toThrow();
+      expect(guild.channels.create).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('does not retry a permission error, and does not retry when nothing was copied', async () => {
     const { client: permClient, guild: permGuild } = makeClient();

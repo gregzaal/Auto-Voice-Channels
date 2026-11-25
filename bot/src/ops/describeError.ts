@@ -24,6 +24,42 @@ const DISCORD_CODE_HINTS: Record<number, string> = {
   50035: 'Discord rejected the request as invalid',
 };
 
+/** "Maximum number of guild channels reached": the server holds 500 channels. */
+const MAXIMUM_GUILD_CHANNELS = 30013;
+/** "Invalid Form Body", which is also how a create into a full category is answered. */
+const INVALID_FORM_BODY = 50035;
+/** The field error Discord puts on `parent_id` when the category holds 50 channels. */
+const CATEGORY_FULL = 'CHANNEL_PARENT_MAX_CHANNELS';
+
+/** Which of Discord's channel ceilings refused a create. */
+export type ChannelLimit = 'category' | 'server';
+
+/**
+ * Which of Discord's channel ceilings refused a create, or undefined for any other error.
+ *
+ * A server holding 500 channels answers 30013. A category holding 50 answers an Invalid Form
+ * Body whose `parent_id` field carries `CHANNEL_PARENT_MAX_CHANNELS`, which shares its code with
+ * a refused name (`nameRefusalOf`) and every other field error, so the field decides and the
+ * code alone never does. Read from the field errors as `nameRefusalOf` reads them, and from
+ * the message discord.js flattens them into when the field errors are missing.
+ *
+ * Here rather than beside `nameRefusalOf`, which re-exports it, because `categorizeError`
+ * needs it and this module does not import the voice feature.
+ */
+export function channelLimitOf(err: unknown): ChannelLimit | undefined {
+  if (!(err instanceof DiscordAPIError)) return undefined;
+  if (err.code === MAXIMUM_GUILD_CHANNELS) return 'server';
+  if (err.code !== INVALID_FORM_BODY) return undefined;
+  const errors = (err.rawError as { errors?: unknown }).errors;
+  if (typeof errors === 'object' && errors !== null && 'parent_id' in errors) {
+    const reasons = (errors.parent_id as { _errors?: { code?: unknown }[] } | null)?._errors;
+    if (Array.isArray(reasons) && reasons.some((r) => r?.code === CATEGORY_FULL)) {
+      return 'category';
+    }
+  }
+  return err.message.includes(`parent_id[${CATEGORY_FULL}]`) ? 'category' : undefined;
+}
+
 /** Keep replies well under Discord's 2000-char limit even when an error is huge. */
 const MAX_LEN = 500;
 
@@ -40,7 +76,11 @@ export function describeError(err: unknown): string {
 
 function detail(err: unknown): string {
   if (err instanceof DiscordAPIError) {
-    const hint = DISCORD_CODE_HINTS[Number(err.code)];
+    // Before the code's own hint: a full category is a 50035, whose hint calls it invalid.
+    const hint =
+      channelLimitOf(err) === 'category'
+        ? "that category has hit Discord's limit of 50 channels"
+        : DISCORD_CODE_HINTS[Number(err.code)];
     const technical = `Discord error ${err.code}: ${err.message}`;
     return hint ? `${hint} (${technical})` : technical;
   }
@@ -80,7 +120,7 @@ export function categorizeError(err: unknown): string {
   if (err instanceof DiscordAPIError) {
     const code = Number(err.code);
     if (code === 50001 || code === 50013) return 'permission';
-    if (code === 30013) return 'channel_limit';
+    if (channelLimitOf(err) !== undefined) return 'channel_limit';
     if (code >= 10000 && code < 11000) return 'gone';
     if (Number(err.status) === 429) return 'rate_limit';
     return 'discord';

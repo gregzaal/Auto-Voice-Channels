@@ -32,6 +32,7 @@ import type {
   SyncCompanionMembersInput,
   VoiceActions,
 } from './actions.js';
+import { channelLimitOf, type ChannelLimit } from '../../ops/describeError.js';
 import type { CommandCaller } from './commandAccess.js';
 import type {
   BotChannelPermissions,
@@ -166,6 +167,13 @@ export function nameRefusalOf(err: unknown): string | undefined {
   const message = Array.isArray(reasons) ? reasons[0]?.message : undefined;
   return typeof message === 'string' ? message : 'Discord did not accept the name.';
 }
+
+/**
+ * Which of Discord's channel ceilings refused a create (a category of 50, a server of 500), or
+ * undefined. Lives with `categorizeError`, which needs it too, and is re-exported here beside
+ * the other error helpers.
+ */
+export { channelLimitOf, type ChannelLimit };
 
 /**
  * Whether Discord says the thing is already gone.
@@ -635,6 +643,8 @@ export class DiscordVoiceActions implements VoiceActions {
         err instanceof DiscordAPIError &&
         !isPermissionError(err) &&
         nameRefusalOf(err) === undefined &&
+        // Nor for a full category or server: no property frees a slot.
+        channelLimitOf(err) === undefined &&
         Object.keys(copiedProps).length > 0;
       if (!retryWithoutCopiedProps) throw err;
       this.logger?.warn(
