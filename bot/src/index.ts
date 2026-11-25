@@ -473,28 +473,21 @@ async function main(): Promise<void> {
   /**
    * Creator channels Discord refused a room for because a category or the server is full: the
    * short cooldown that stops a refused create per join, and the one message in the creator
-   * channel's own chat that tells the waiting member why. Mentions exactly the member it names
+   * channel's own chat that tells the waiting members why. Mentions exactly the members it names
    * and nobody else, and is switched off with the problem notices (`problems.notify_disabled`).
    */
   const channelLimits = new ChannelLimitTracker({
     chat: {
-      send: async (channelId, content, mentionId) => {
+      send: async (channelId, content, mentionIds) => {
         const channel = await client.channels.fetch(channelId);
         if (!channel?.isTextBased() || !('send' in channel)) {
           throw new Error(`channel ${channelId} has no chat`);
         }
-        const message = await channel.send({ content, allowedMentions: { users: [mentionId] } });
-        return message.id;
-      },
-      edit: async (channelId, messageId, content, mentionId) => {
-        const channel = await client.channels.fetch(channelId);
-        if (!channel?.isTextBased() || !('messages' in channel)) {
-          throw new Error(`channel ${channelId} has no chat`);
-        }
-        await channel.messages.edit(messageId, {
+        const message = await channel.send({
           content,
-          allowedMentions: { users: [mentionId] },
+          allowedMentions: { users: [...mentionIds] },
         });
+        return message.id;
       },
       remove: async (channelId, messageId) => {
         const channel = await client.channels.fetch(channelId);
@@ -532,6 +525,8 @@ async function main(): Promise<void> {
     // Late-bound like `rerender`, for the same cycle.
     ownerName: (gid: string, member): Promise<string> => voiceFeature.nameFor(gid, member),
     permissionProblems,
+    // No Join channel asked for where a room was just refused for a full category or server.
+    channelLimitCooling: (creatorId) => channelLimits.isCoolingDown(creatorId),
     // For the plain name a "⇩ Join" channel takes when Discord refuses a rename it held back.
     dispatcher,
     serverLog: (gid, level, message) => serverLogger.log(gid, level, message),

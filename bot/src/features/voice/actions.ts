@@ -549,6 +549,8 @@ export class RecordingVoiceActions implements VoiceActions {
   joinChannelLimit?: 'category' | 'server';
   /** Every `createVoiceChannel` call, refused ones included: the requests Discord would see. */
   createAttempts = 0;
+  /** Every `createJoinChannel` call, refused ones included. */
+  joinCreateAttempts = 0;
   /** When true, `moveMember` throws Missing Permissions (tests the created-but-stranded path). */
   failMove = false;
   /** When true, `setPrivacy` throws Missing Permissions (tests the created-but-unlockable path). */
@@ -884,6 +886,7 @@ export class RecordingVoiceActions implements VoiceActions {
   }
 
   createJoinChannel(guildId: string, name: string, nearChannelId: string): Promise<string> {
+    this.joinCreateAttempts += 1;
     if (this.joinChannelLimit) return Promise.reject(channelLimitError(this.joinChannelLimit));
     if (this.refuseNamesMatching?.test(name)) return Promise.reject(nameRefusedError('POST'));
     const channelId = `${this.idPrefix}-join-${++this.seq}`;

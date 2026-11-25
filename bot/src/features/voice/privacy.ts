@@ -125,6 +125,12 @@ export interface PrivacyServiceDeps {
   /** Where an access change the bot lacks the permission for is recorded. */
   permissionProblems?: PermissionProblemTracker;
   /**
+   * Whether Discord refused a room from this creator channel moments ago because its category or
+   * the server is full (`ChannelLimitTracker.isCoolingDown`). The sweep does not ask for a Join
+   * channel there meanwhile. Absent means never.
+   */
+  channelLimitCooling?: (creatorChannelId: string) => boolean;
+  /**
    * The guild queue, for the rename a "⇩ Join" channel gets when Discord refuses a rename it
    * held back, minutes after the change that asked for it. Absent runs it inline, which only a
    * test does.
@@ -2625,6 +2631,9 @@ export class PrivacyService {
         return true;
       }
       if (joins.length === 1) return false;
+      // Discord has just refused a room from this creator channel for want of space, and would
+      // refuse the Join channel the same way, on every sweep.
+      if (this.deps.channelLimitCooling?.(row.primaryChannelId)) return false;
       const made = await this.ensureJoinChannel(
         guildId,
         row.channelId,

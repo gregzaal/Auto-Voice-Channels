@@ -242,7 +242,8 @@ export function registerVoiceGateway(deps: VoiceGatewayDeps): () => void {
     // channels Discord deleted while it was paused.
     void deps.dispatcher
       .dispatch(guildId, 'channelDelete', () =>
-        deps.feature.handleChannelDeleted(guildId, channel.id),
+        // Its category too, so only the creator channels it could have made space for retry.
+        deps.feature.handleChannelDeleted(guildId, channel.id, channel.parentId),
       )
       .catch((err: unknown) => {
         deps.logger.error({ err, guildId, channelId: channel.id }, 'channelDelete handling failed');

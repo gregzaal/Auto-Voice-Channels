@@ -802,6 +802,10 @@ export class VoiceFeature {
 
   constructor(private readonly deps: VoiceFeatureDeps) {
     this.channelLimits = deps.channelLimits ?? new ChannelLimitTracker({ logger: deps.logger });
+    // A full category or server is cleared here, after a quiet spell with no refusal, and never
+    // by the room made that starts it. See `LIMIT_QUIET_MS`.
+    this.channelLimits.onSettled = (guildId, creatorId) =>
+      this.deps.permissionProblems?.clear(guildId, creatorId, ['category_full', 'server_full']);
   }
 
   /**
@@ -942,11 +946,18 @@ export class VoiceFeature {
      * A creator channel Discord has just refused a room for, because its category or the server
      * is full, is not asked again for a couple of minutes (see `CHANNEL_LIMIT_COOLDOWN_MS`). The
      * member is still told, and nothing else here runs: no read, no reorder, no request. After
-     * the gates above, so a server that is paused or not entitled is told nothing.
+     * the gates above, so a server that is paused or not entitled is told nothing. The gate has
+     * spent a slot of the guild's creation throttle by now, as the refused create it stands in
+     * for did, which is accepted: it is a slot per join, as before.
      */
     const limited = this.channelLimits.coolingDown(channelId);
     if (limited !== undefined) {
-      await this.channelLimits.tellMember(channelId, member.id, opts.joined === true);
+      this.channelLimits.tellMember(
+        channelId,
+        member.id,
+        this.waitingIn(channelId),
+        opts.joined === true,
+      );
       this.deps.logger.debug(
         { guildId, primaryId: channelId, memberId: member.id, limit: limited },
         'skipping creation: the channel limit was reached moments ago',
@@ -1447,14 +1458,13 @@ export class VoiceFeature {
      * create, turning a four-notice ladder into one notice per room for any
      * guild that can make rooms but not their text channels.
      */
-    this.deps.permissionProblems?.clear(guildId, channelId, [
-      'create',
-      'move',
-      'privacy',
-      'category_full',
-      'server_full',
-    ]);
-    await this.channelLimits.resolved(channelId);
+    /**
+     * A full category or server is not cleared by this room: the category may be one slot short
+     * of full again a minute from now. The tracker clears it after a quiet spell instead, and
+     * takes the member message down at once.
+     */
+    this.deps.permissionProblems?.clear(guildId, channelId, ['create', 'move', 'privacy']);
+    this.channelLimits.roomMade(channelId);
 
     /**
      * The creator's saved trusted and blocked lists, applied to the room they just made.
@@ -2169,8 +2179,8 @@ export class VoiceFeature {
    * Handled like a missing permission, never thrown: nothing is wrong with the bot or the guild's
    * setup, so it must not fail the guild's task, count against its circuit breaker, or reach the
    * sweep as a reconcile failure. The server's mods are told through the problem list (deduped,
-   * backed off and cleared when a room is next made), `/logging` once per incident, and the
-   * member in the creator channel's chat. The cooldown it starts keeps the next joins from
+   * backed off, and cleared once rooms are made again with no refusal for a while), `/logging`
+   * once per incident, and the members waiting in the creator channel's chat. The cooldown it starts keeps the next joins from
    * asking Discord again.
    */
   private async channelLimitReached(
@@ -2189,7 +2199,15 @@ export class VoiceFeature {
       { guildId, primaryId: channelId, memberId, limit },
       'Discord refused a room: the channel limit is reached',
     );
-    await this.channelLimits.tellMember(channelId, memberId, joined);
+    this.channelLimits.tellMember(channelId, memberId, this.waitingIn(channelId), joined);
+  }
+
+  /** Who is waiting in a creator channel, by id, bots left out. */
+  private waitingIn(channelId: string): string[] {
+    return this.deps.voice
+      .membersInChannel(channelId)
+      .filter((m) => !m.bot)
+      .map((m) => m.id);
   }
 
   /**
@@ -2198,9 +2216,35 @@ export class VoiceFeature {
    * {@link rerenderManaged} covers deletions that happen while the shard is
    * disconnected, where this event is never delivered.
    */
-  async handleChannelDeleted(guildId: string, channelId: string): Promise<void> {
-    // Any channel gone may be the space a full category or server was waiting for.
-    this.channelLimits.releaseGuild(guildId);
+  async handleChannelDeleted(
+    guildId: string,
+    channelId: string,
+    /** The deleted channel's category, `null` at the server root, `undefined` when unknown. */
+    parentId?: string | null,
+  ): Promise<void> {
+    // The channel gone may be the space a full category or server was waiting for.
+    const released = this.channelLimits.release(guildId, parentId, (id) =>
+      this.deps.voice.categoryOf?.(id),
+    );
+    await this.dropDeletedChannel(guildId, channelId);
+    /**
+     * And the members waiting there get their rooms now, rather than on their next join or the
+     * next sweep, through the same create path and its gates. Called directly: this already runs
+     * in the guild's queue, and a dispatch from inside it would wait on itself.
+     *
+     * A channel moved out of a full category frees a slot too, and so does a creator channel
+     * moved into another one, but no channel update is handled here: the next join, or the sweep,
+     * asks again once the cooldown is over.
+     */
+    for (const creatorId of released) {
+      if (creatorId === channelId) continue;
+      const waiting = this.deps.voice.membersInChannel(creatorId).filter((m) => !m.bot);
+      for (const member of waiting) await this.maybeCreate(guildId, creatorId, member);
+    }
+  }
+
+  /** {@link handleChannelDeleted}'s bookkeeping for the channel itself. */
+  private async dropDeletedChannel(guildId: string, channelId: string): Promise<void> {
     const secondary = await this.deps.secondaries.get(channelId);
     if (secondary && secondary.guildId === guildId) {
       await this.deps.secondaries.remove(channelId);

@@ -4,6 +4,7 @@ import {
   GuildRepository,
   JoinChannelRepository,
   ManagedChannelRepository,
+  MemberAccessListRepository,
   MemberRoomPrefsRepository,
   SecondaryChannelRepository,
   db,
@@ -22,7 +23,7 @@ import {
   VIEW_CHANNEL,
 } from './accessPlan.js';
 import { RecordingVoiceActions } from './actions.js';
-import { CHANNEL_LIMIT_COOLDOWN_MS, ChannelLimitTracker } from './channelLimits.js';
+import { CHANNEL_LIMIT_COOLDOWN_MS, ChannelLimitTracker, LIMIT_QUIET_MS } from './channelLimits.js';
 import { CompanionTextService } from './companionText.js';
 import { ChannelObfuscatedError } from './discordAdapter.js';
 import { ControlPanelPoster } from './controlPanelPoster.js';
@@ -881,15 +882,19 @@ describe('VoiceFeature (integration)', () => {
    * failed against the guild's breaker, and every sweep failed again for the member still waiting.
    */
   describe('when a category or the server is full', () => {
+    const CATEGORY = 'category-1';
+
     /** The creator channel's chat, as the tracker sees it. */
     function fakeChat() {
       const chat = {
-        sent: [] as { channelId: string; id: string; content: string; mentionId: string }[],
-        edits: [] as { channelId: string; messageId: string; content: string; mentionId: string }[],
+        sent: [] as { channelId: string; id: string; content: string; mentionIds: string[] }[],
         removed: [] as { channelId: string; messageId: string }[],
         /** Discord's answer to a post in a chat the bot may not write in. */
         failSend: false,
-        send(channelId: string, content: string, mentionId: string): Promise<string> {
+        /** A post Discord holds back for as long as it likes, such as under a rate limit. */
+        hang: false,
+        send(channelId: string, content: string, mentionIds: readonly string[]): Promise<string> {
+          if (chat.hang) return new Promise<string>(() => undefined);
           if (chat.failSend) {
             return Promise.reject(
               new DiscordAPIError(
@@ -903,12 +908,8 @@ describe('VoiceFeature (integration)', () => {
             );
           }
           const id = `msg-${chat.sent.length + 1}`;
-          chat.sent.push({ channelId, id, content, mentionId });
+          chat.sent.push({ channelId, id, content, mentionIds: [...mentionIds] });
           return Promise.resolve(id);
-        },
-        edit(channelId: string, messageId: string, content: string, mentionId: string) {
-          chat.edits.push({ channelId, messageId, content, mentionId });
-          return Promise.resolve();
         },
         remove(channelId: string, messageId: string) {
           chat.removed.push({ channelId, messageId });
@@ -920,6 +921,8 @@ describe('VoiceFeature (integration)', () => {
 
     function harness(extra: Partial<VoiceFeatureDeps> = {}) {
       const problems = new PermissionProblemTracker();
+      const resolved: string[] = [];
+      problems.onResolved = (guildId) => resolved.push(guildId);
       const logs: { level: number; message: string }[] = [];
       const chat = fakeChat();
       let now = 1_000_000_000;
@@ -937,23 +940,35 @@ describe('VoiceFeature (integration)', () => {
         channelLimits: limits,
         ...extra,
       });
-      const join = (id: string) => {
+      /** A member joins the creator channel, and whatever the chat was asked to do is done. */
+      const join = async (id: string) => {
         const m = member(id);
         voice.put(PRIMARY, m);
-        return f.handleVoiceStateUpdate({ guildId: GUILD, member: m, afterChannelId: PRIMARY });
+        await f.handleVoiceStateUpdate({ guildId: GUILD, member: m, afterChannelId: PRIMARY });
+        await limits.idle();
       };
+      /** A room is made, and its member moves out of the creator channel. */
+      const leaveForRoom = (id: string) => voice.drop(PRIMARY, id);
       return {
         f,
         problems,
+        resolved,
         logs,
         chat,
         limits,
         join,
+        leaveForRoom,
+        /** The `/logging` lines about the limit, not the room-created lines beside them. */
+        logLines: () => logs.filter((l) => l.level === 1 && l.message.includes("I can't create")),
         advance: (ms: number) => {
           now += ms;
         },
       };
     }
+
+    beforeEach(() => {
+      voice.setParent(PRIMARY, CATEGORY);
+    });
 
     afterEach(() => {
       actions.channelLimit = undefined;
@@ -965,21 +980,20 @@ describe('VoiceFeature (integration)', () => {
       const h = harness();
       actions.channelLimit = 'category';
 
-      await expect(h.join('alice')).resolves.toBeDefined();
+      await expect(h.join('alice')).resolves.toBeUndefined();
 
       expect(actions.createAttempts).toBe(1);
       expect(actions.ofType('create')).toEqual([]);
       expect(h.problems.recent(GUILD)).toEqual([
         expect.objectContaining({ channelId: PRIMARY, operation: 'category_full' }),
       ]);
-      const lines = h.logs.filter((l) => l.level === 1);
-      expect(lines).toHaveLength(1);
-      expect(lines[0]!.message).toContain("I can't create rooms from <#primary-1>");
+      expect(h.logLines()).toHaveLength(1);
+      expect(h.logLines()[0]!.message).toContain("I can't create rooms from <#primary-1>");
       expect(h.chat.sent).toEqual([
         {
           channelId: PRIMARY,
           id: 'msg-1',
-          mentionId: 'alice',
+          mentionIds: ['alice'],
           content:
             "<@alice> I couldn't make your room because this category is full. Discord allows 50 " +
             'channels in a category. Ask a moderator to make space.',
@@ -987,28 +1001,36 @@ describe('VoiceFeature (integration)', () => {
       ]);
     });
 
-    it('edits the one message for a second member, without asking Discord again', async () => {
+    /** An edit that adds a mention notifies nobody, and would drop the first member's. */
+    it('posts again for a second member, mentioning both, without asking Discord again', async () => {
       const h = harness();
       actions.channelLimit = 'category';
       await h.join('alice');
       h.advance(30_000);
       await h.join('bob');
 
-      // Inside the cooldown: no second request, and no second message.
+      // Inside the cooldown: no second request.
       expect(actions.createAttempts).toBe(1);
-      expect(h.chat.sent).toHaveLength(1);
-      expect(h.chat.edits).toEqual([
-        expect.objectContaining({ channelId: PRIMARY, messageId: 'msg-1', mentionId: 'bob' }),
-      ]);
-      expect(h.chat.edits[0]!.content).toMatch(/^<@bob> /);
+      expect(h.chat.sent.map((m) => m.mentionIds)).toEqual([['alice'], ['bob', 'alice']]);
+      expect(h.chat.sent[1]!.content).toMatch(/^<@bob> <@alice> I couldn't make your rooms /);
+      // One at a time: the first is gone.
+      expect(h.chat.removed).toEqual([{ channelId: PRIMARY, messageId: 'msg-1' }]);
       expect(h.problems.recent(GUILD)).toHaveLength(1);
-      expect(h.logs.filter((l) => l.level === 1)).toHaveLength(1);
+      expect(h.logLines()).toHaveLength(1);
     });
 
-    it('clears the problem and deletes the message once a room is made', async () => {
+    it('says nothing new when a member already mentioned joins again', async () => {
       const h = harness();
-      const resolved: string[] = [];
-      h.problems.onResolved = (guildId) => resolved.push(guildId);
+      actions.channelLimit = 'category';
+      await h.join('alice');
+      await h.join('alice');
+
+      expect(h.chat.sent).toHaveLength(1);
+      expect(h.chat.removed).toEqual([]);
+    });
+
+    it('takes the message down at once when a room is made', async () => {
+      const h = harness();
       actions.channelLimit = 'category';
       await h.join('alice');
 
@@ -1016,24 +1038,119 @@ describe('VoiceFeature (integration)', () => {
       actions.channelLimit = undefined;
       h.advance(CHANNEL_LIMIT_COOLDOWN_MS);
       await h.join('bob');
+      await h.limits.idle();
 
       expect(actions.ofType('create')).toHaveLength(1);
-      expect(h.problems.recent(GUILD)).toEqual([]);
-      expect(resolved).toEqual([GUILD]);
       expect(h.chat.removed).toEqual([{ channelId: PRIMARY, messageId: 'msg-1' }]);
-      expect(h.limits.snapshot()['creatorChannels']).toBe(0);
     });
 
-    it('asks Discord again early once a channel in the server is deleted', async () => {
+    /**
+     * A busy category hovers at its limit as the bot's own rooms come and go. A room made between
+     * two refusals is not the end of it: clearing on it reset the notifier, so every refusal after
+     * it was a fresh first notice to the admins, and a fresh `/logging` line.
+     */
+    it('keeps one incident while the category hovers at its limit', async () => {
       const h = harness();
       actions.channelLimit = 'category';
       await h.join('alice');
-      await h.f.handleChannelDeleted(GUILD, 'some-other-channel');
+
       actions.channelLimit = undefined;
+      h.advance(CHANNEL_LIMIT_COOLDOWN_MS);
+      await h.join('bob');
+      expect(actions.ofType('create')).toHaveLength(1);
+
+      actions.channelLimit = 'category';
+      h.advance(LIMIT_QUIET_MS - CHANNEL_LIMIT_COOLDOWN_MS - 1);
+      await h.join('carol');
+
+      // The notifier was never told it was resolved, so its backoff stands, and one line.
+      expect(h.resolved).toEqual([]);
+      expect(h.problems.recent(GUILD)).toEqual([
+        expect.objectContaining({ channelId: PRIMARY, operation: 'category_full' }),
+      ]);
+      expect(h.logLines()).toHaveLength(1);
+    });
+
+    it('starts a new incident after a quiet spell with no refusal', async () => {
+      const h = harness();
+      actions.channelLimit = 'category';
+      await h.join('alice');
+
+      actions.channelLimit = undefined;
+      h.advance(CHANNEL_LIMIT_COOLDOWN_MS);
+      await h.join('bob');
+      h.leaveForRoom('alice');
+
+      actions.channelLimit = 'category';
+      h.advance(LIMIT_QUIET_MS);
+      await h.join('carol');
+
+      expect(h.resolved).toEqual([GUILD]);
+      expect(h.problems.recent(GUILD)).toEqual([
+        expect.objectContaining({ channelId: PRIMARY, operation: 'category_full' }),
+      ]);
+      expect(h.logLines()).toHaveLength(2);
+    });
+
+    it('other problems on the creator channel still clear on the room made', async () => {
+      const h = harness();
+      h.problems.record(GUILD, { channelId: PRIMARY, operation: 'create', at: 1 });
+      actions.channelLimit = 'category';
+      await h.join('alice');
+      actions.channelLimit = undefined;
+      h.advance(CHANNEL_LIMIT_COOLDOWN_MS);
       await h.join('bob');
 
+      expect(h.problems.recent(GUILD).map((p) => p.operation)).toEqual(['category_full']);
+    });
+
+    /** Making space has to make the room, not wait for the member to rejoin or the sweep. */
+    it('makes the waiting member a room as soon as a channel in that category goes', async () => {
+      const h = harness();
+      actions.channelLimit = 'category';
+      await h.join('alice');
+
+      actions.channelLimit = undefined;
+      await h.f.handleChannelDeleted(GUILD, 'some-other-channel', CATEGORY);
+
       expect(actions.createAttempts).toBe(2);
-      expect(actions.ofType('create')).toHaveLength(1);
+      expect(actions.ofType('move')).toEqual([expect.objectContaining({ memberId: 'alice' })]);
+    });
+
+    it('does not ask again for a channel gone from another category', async () => {
+      const h = harness();
+      actions.channelLimit = 'category';
+      await h.join('alice');
+
+      actions.channelLimit = undefined;
+      await h.f.handleChannelDeleted(GUILD, 'some-other-channel', 'another-category');
+      await h.join('bob');
+
+      expect(actions.createAttempts).toBe(1);
+      expect(actions.ofType('create')).toEqual([]);
+    });
+
+    it('asks again for any channel gone when the server is full', async () => {
+      const h = harness();
+      actions.channelLimit = 'server';
+      await h.join('alice');
+
+      actions.channelLimit = undefined;
+      await h.f.handleChannelDeleted(GUILD, 'some-other-channel', null);
+
+      expect(actions.ofType('move')).toEqual([expect.objectContaining({ memberId: 'alice' })]);
+    });
+
+    /** A post Discord holds back must not hold back the guild's queue with it. */
+    it('does not wait on the chat to finish the join', async () => {
+      const h = harness();
+      actions.channelLimit = 'category';
+      h.chat.hang = true;
+      const member1 = member('alice');
+      voice.put(PRIMARY, member1);
+      await expect(
+        h.f.handleVoiceStateUpdate({ guildId: GUILD, member: member1, afterChannelId: PRIMARY }),
+      ).resolves.toEqual([]);
     });
 
     it('is not a reconcile failure, and the sweep does not mention the member again', async () => {
@@ -1058,12 +1175,12 @@ describe('VoiceFeature (integration)', () => {
       await reconciler.reconcileGuilds([GUILD]);
       // And inside the next one, so it does not ask at all.
       await reconciler.reconcileGuilds([GUILD]);
+      await h.limits.idle();
 
       expect(reported).toEqual([]);
       expect(actions.createAttempts).toBe(2);
       expect(h.chat.sent).toHaveLength(1);
-      expect(h.chat.edits).toEqual([]);
-      expect(h.logs.filter((l) => l.level === 1)).toHaveLength(1);
+      expect(h.logLines()).toHaveLength(1);
     });
 
     it('tells a member the sweep finds waiting who was never told', async () => {
@@ -1072,17 +1189,18 @@ describe('VoiceFeature (integration)', () => {
       // Joined while the bot was away: no event, only the sweep.
       voice.put(PRIMARY, member('alice'));
       await h.f.reconcileGuild(GUILD);
+      await h.limits.idle();
 
-      expect(h.chat.sent.map((m) => m.mentionId)).toEqual(['alice']);
+      expect(h.chat.sent.map((m) => m.mentionIds)).toEqual([['alice']]);
     });
 
     it('swallows a chat the bot cannot post in, and does not try it on every join', async () => {
       const h = harness();
       actions.channelLimit = 'category';
       h.chat.failSend = true;
-      await expect(h.join('alice')).resolves.toBeDefined();
+      await expect(h.join('alice')).resolves.toBeUndefined();
       h.advance(CHANNEL_LIMIT_COOLDOWN_MS);
-      await expect(h.join('bob')).resolves.toBeDefined();
+      await expect(h.join('bob')).resolves.toBeUndefined();
 
       expect(h.chat.sent).toEqual([]);
       expect(h.limits.snapshot()['failed']).toBe(1);
@@ -1093,12 +1211,12 @@ describe('VoiceFeature (integration)', () => {
     it('says a full server in its own words', async () => {
       const h = harness();
       actions.channelLimit = 'server';
-      await expect(h.join('alice')).resolves.toBeDefined();
+      await expect(h.join('alice')).resolves.toBeUndefined();
 
       expect(h.problems.recent(GUILD)).toEqual([
         expect.objectContaining({ channelId: PRIMARY, operation: 'server_full' }),
       ]);
-      expect(h.logs.filter((l) => l.level === 1)[0]!.message).toContain(
+      expect(h.logLines()[0]!.message).toContain(
         "this server has reached Discord's limit of 500 channels",
       );
       expect(h.chat.sent[0]!.content).toBe(
@@ -1146,13 +1264,17 @@ describe('VoiceFeature (integration)', () => {
       allowed = false;
       await h.join('bob');
 
-      expect(h.chat.sent.map((m) => m.mentionId)).toEqual(['alice']);
-      expect(h.chat.edits).toEqual([]);
+      expect(h.chat.sent.map((m) => m.mentionIds)).toEqual([['alice']]);
     });
 
     it('honours the notice switch for the member message, and still tells the mods', async () => {
       const chat = fakeChat();
       const problems = new PermissionProblemTracker();
+      const limits = new ChannelLimitTracker({
+        chat,
+        noticesDisabled: () => Promise.resolve(true),
+        logger: fakeLogger(),
+      });
       const f = new VoiceFeature({
         autoChannels,
         secondaries,
@@ -1162,16 +1284,13 @@ describe('VoiceFeature (integration)', () => {
         selfHosted: true,
         logger: fakeLogger(),
         permissionProblems: problems,
-        channelLimits: new ChannelLimitTracker({
-          chat,
-          noticesDisabled: () => Promise.resolve(true),
-          logger: fakeLogger(),
-        }),
+        channelLimits: limits,
       });
       actions.channelLimit = 'category';
       const alice = member('alice');
       voice.put(PRIMARY, alice);
       await f.handleVoiceStateUpdate({ guildId: GUILD, member: alice, afterChannelId: PRIMARY });
+      await limits.idle();
 
       expect(chat.sent).toEqual([]);
       expect(problems.recent(GUILD)).toHaveLength(1);
@@ -1199,7 +1318,7 @@ describe('VoiceFeature (integration)', () => {
       await autoChannels.upsert(GUILD, PRIMARY, { name: 'room', defaultPrivate: true });
       actions.joinChannelLimit = 'category';
 
-      await expect(h.join('alice')).resolves.toBeDefined();
+      await expect(h.join('alice')).resolves.toBeUndefined();
 
       const roomId = actions.ofType('create')[0]!.channelId;
       expect(actions.ofType('move')).toEqual([
@@ -1207,6 +1326,45 @@ describe('VoiceFeature (integration)', () => {
       ]);
       expect((await secondaries.get(roomId))!.state.private).toBe(true);
       expect(actions.ofType('joinChannel')).toEqual([]);
+    });
+
+    /** Discord would refuse it the same way, so the sweep does not ask on every pass. */
+    it('does not ask for a Join channel while the creator channel is cooling down', async () => {
+      await env.handle.db.delete(db.schema.joinChannels);
+      // Late-bound: the tracker is made by the harness, after the service it is wired into.
+      const wired: { limits?: ChannelLimitTracker } = {};
+      const privacy = new PrivacyService({
+        secondaries,
+        joinChannels: new JoinChannelRepository(env.handle.db),
+        actions,
+        voice,
+        logger: fakeLogger(),
+        botUserId: () => 'bot',
+        // The sweep's pass over closed rooms runs only with saved lists to read.
+        memberAccessLists: new MemberAccessListRepository(env.handle.db),
+        channelLimitCooling: (id) => wired.limits!.isCoolingDown(id),
+      });
+      const h = harness({
+        makePrivateOnCreate: (g, c, ownerId, ownerName) =>
+          privacy.makePrivateForCreation(g, c, ownerId, ownerName),
+        roomAccess: privacy,
+      });
+      wired.limits = h.limits;
+      await guilds.transitionAuth({ guildId: GUILD, toStatus: 'trial' });
+      await autoChannels.upsert(GUILD, PRIMARY, { name: 'room', defaultPrivate: true });
+      // A locked room made without its Join channel, and then a full category.
+      actions.joinChannelLimit = 'category';
+      await h.join('alice');
+      const roomId = actions.ofType('create')[0]!.channelId;
+      h.leaveForRoom('alice');
+      voice.put(roomId, member('alice'));
+      actions.channelLimit = 'category';
+      await h.join('bob');
+      const asked = actions.joinCreateAttempts;
+
+      await h.f.reconcileGuild(GUILD);
+
+      expect(actions.joinCreateAttempts).toBe(asked);
     });
   });
 

@@ -5,25 +5,23 @@ import {
   ChannelLimitTracker,
   channelLimitMemberMessage,
   LIMIT_MESSAGE_TTL_MS,
+  LIMIT_QUIET_MS,
   LIMIT_TOLD_MS,
+  MAX_LIMIT_MENTIONS,
   type LimitChat,
 } from './channelLimits.js';
 
 const GUILD = 'g1';
 const CREATOR = 'creator-1';
 
-function harness(opts: { failEdit?: boolean } = {}) {
+function harness() {
   let now = 1_000_000_000;
   const calls: string[] = [];
   let seq = 0;
   const chat: LimitChat = {
-    send: (channelId, _content, mentionId) => {
-      calls.push(`send ${channelId} ${mentionId}`);
+    send: (channelId, _content, mentionIds) => {
+      calls.push(`send ${channelId} ${mentionIds.join(',')}`);
       return Promise.resolve(`m${++seq}`);
-    },
-    edit: (channelId, messageId, _content, mentionId) => {
-      calls.push(`edit ${channelId} ${messageId} ${mentionId}`);
-      return opts.failEdit ? Promise.reject(new Error('Unknown Message')) : Promise.resolve();
     },
     remove: (channelId, messageId) => {
       calls.push(`remove ${channelId} ${messageId}`);
@@ -31,11 +29,18 @@ function harness(opts: { failEdit?: boolean } = {}) {
     },
   };
   const tracker = new ChannelLimitTracker({ chat, logger: fakeLogger(), now: () => now });
+  const settled: string[] = [];
+  tracker.onSettled = (_g, creatorId) => settled.push(creatorId);
   return {
     tracker,
     calls,
+    settled,
     advance: (ms: number) => {
       now += ms;
+    },
+    tell: async (memberId: string, waiting: string[], joined = true) => {
+      tracker.tellMember(CREATOR, memberId, waiting, joined);
+      await tracker.idle();
     },
   };
 }
@@ -52,11 +57,14 @@ describe('ChannelLimitTracker', () => {
     const h = harness();
     expect(h.tracker.refused(GUILD, CREATOR, 'category')).toBe(true);
     expect(h.tracker.coolingDown(CREATOR)).toBe('category');
+    expect(h.tracker.isCoolingDown(CREATOR)).toBe(true);
     h.advance(CHANNEL_LIMIT_COOLDOWN_MS - 1);
     expect(h.tracker.coolingDown(CREATOR)).toBe('category');
     h.advance(1);
     expect(h.tracker.coolingDown(CREATOR)).toBe(undefined);
     expect(h.tracker.coolingDown('another')).toBe(undefined);
+    // Only the skips the create path counts, not the sweep's look.
+    expect(h.tracker.snapshot()['skipped']).toBe(2);
   });
 
   it('says a refusal is news once per incident, and again for the other limit', () => {
@@ -67,89 +75,166 @@ describe('ChannelLimitTracker', () => {
     expect(h.tracker.refused(GUILD, CREATOR, 'server')).toBe(true);
   });
 
+  /**
+   * A busy category hovers at its limit as rooms come and go. A room made between two refusals
+   * must not end the incident, or each refusal is a fresh first notice.
+   */
+  it('keeps one incident across a room made and a refusal inside the quiet window', () => {
+    const h = harness();
+    h.tracker.refused(GUILD, CREATOR, 'category');
+    h.tracker.roomMade(CREATOR);
+    expect(h.tracker.isCoolingDown(CREATOR)).toBe(false);
+    h.advance(LIMIT_QUIET_MS - 1);
+    expect(h.tracker.refused(GUILD, CREATOR, 'category')).toBe(false);
+    expect(h.settled).toEqual([]);
+  });
+
+  it('ends the incident after the quiet window, on its timer', async () => {
+    const h = harness();
+    h.tracker.refused(GUILD, CREATOR, 'category');
+    h.advance(60_000);
+    h.tracker.roomMade(CREATOR);
+    await vi.advanceTimersByTimeAsync(LIMIT_QUIET_MS - 60_000 - 1);
+    expect(h.settled).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.settled).toEqual([CREATOR]);
+    expect(h.tracker.refused(GUILD, CREATOR, 'category')).toBe(true);
+  });
+
+  it('ends the incident when the next refusal comes after the quiet window', () => {
+    const h = harness();
+    h.tracker.refused(GUILD, CREATOR, 'category');
+    h.tracker.roomMade(CREATOR);
+    h.advance(LIMIT_QUIET_MS);
+    expect(h.tracker.refused(GUILD, CREATOR, 'category')).toBe(true);
+    expect(h.settled).toEqual([CREATOR]);
+  });
+
+  it('a refusal stops the quiet window, so its timer ends nothing', async () => {
+    const h = harness();
+    h.tracker.refused(GUILD, CREATOR, 'category');
+    h.tracker.roomMade(CREATOR);
+    h.tracker.refused(GUILD, CREATOR, 'category');
+    await vi.advanceTimersByTimeAsync(LIMIT_QUIET_MS * 2);
+    expect(h.settled).toEqual([]);
+  });
+
   it('deletes the message on its own once it has been up long enough', async () => {
     const h = harness();
     h.tracker.refused(GUILD, CREATOR, 'category');
-    await h.tracker.tellMember(CREATOR, 'alice', true);
+    await h.tell('alice', ['alice']);
     expect(h.calls).toEqual([`send ${CREATOR} alice`]);
 
     await vi.advanceTimersByTimeAsync(LIMIT_MESSAGE_TTL_MS);
+    await h.tracker.idle();
     expect(h.calls).toEqual([`send ${CREATOR} alice`, `remove ${CREATOR} m1`]);
     expect(h.tracker.snapshot()['messages']).toBe(0);
   });
 
-  it('keeps the message up for its full time again when it is edited', async () => {
+  /** An edit that adds a mention notifies nobody, so a new member gets a new message. */
+  it('replaces the message for a new member, mentioning everyone still waiting', async () => {
     const h = harness();
     h.tracker.refused(GUILD, CREATOR, 'category');
-    await h.tracker.tellMember(CREATOR, 'alice', true);
-    await vi.advanceTimersByTimeAsync(LIMIT_MESSAGE_TTL_MS - 1000);
-    await h.tracker.tellMember(CREATOR, 'bob', true);
-    await vi.advanceTimersByTimeAsync(2000);
-    expect(h.calls).not.toContain(`remove ${CREATOR} m1`);
-    await vi.advanceTimersByTimeAsync(LIMIT_MESSAGE_TTL_MS);
-    expect(h.calls).toContain(`remove ${CREATOR} m1`);
-  });
-
-  it('does not edit for the member it already mentions', async () => {
-    const h = harness();
-    h.tracker.refused(GUILD, CREATOR, 'category');
-    await h.tracker.tellMember(CREATOR, 'alice', true);
-    await h.tracker.tellMember(CREATOR, 'alice', true);
-    expect(h.calls).toEqual([`send ${CREATOR} alice`]);
-  });
-
-  it('lets the sweep tell a member again only once they have been told a while ago', async () => {
-    const h = harness();
-    h.tracker.refused(GUILD, CREATOR, 'category');
-    await h.tracker.tellMember(CREATOR, 'alice', true);
-    await h.tracker.tellMember(CREATOR, 'bob', true);
-    await h.tracker.tellMember(CREATOR, 'alice', false);
-    expect(h.calls).toHaveLength(2);
-
-    h.advance(LIMIT_TOLD_MS);
-    await h.tracker.tellMember(CREATOR, 'alice', false);
-    expect(h.calls).toHaveLength(3);
-  });
-
-  it('posts again when the message it would edit was deleted by somebody', async () => {
-    const h = harness({ failEdit: true });
-    h.tracker.refused(GUILD, CREATOR, 'category');
-    await h.tracker.tellMember(CREATOR, 'alice', true);
-    await h.tracker.tellMember(CREATOR, 'bob', true);
+    await h.tell('alice', ['alice']);
+    await h.tell('bob', ['alice', 'bob']);
     expect(h.calls).toEqual([
       `send ${CREATOR} alice`,
-      `edit ${CREATOR} m1 bob`,
-      `send ${CREATOR} bob`,
+      `send ${CREATOR} bob,alice`,
+      `remove ${CREATOR} m1`,
     ]);
     expect(h.tracker.snapshot()['messages']).toBe(1);
   });
 
+  it('says nothing for a member the message already mentions', async () => {
+    const h = harness();
+    h.tracker.refused(GUILD, CREATOR, 'category');
+    await h.tell('alice', ['alice']);
+    await h.tell('alice', ['alice']);
+    await h.tell('alice', ['alice'], false);
+    expect(h.calls).toEqual([`send ${CREATOR} alice`]);
+  });
+
+  it('lets the sweep post again only for someone not told lately', async () => {
+    const h = harness();
+    h.tracker.refused(GUILD, CREATOR, 'category');
+    await h.tell('alice', ['alice']);
+    await vi.advanceTimersByTimeAsync(LIMIT_MESSAGE_TTL_MS);
+    await h.tracker.idle();
+    // The message has expired, and alice was told a few minutes ago.
+    await h.tell('alice', ['alice'], false);
+    expect(h.calls).toHaveLength(2);
+
+    h.advance(LIMIT_TOLD_MS);
+    await h.tell('alice', ['alice'], false);
+    expect(h.calls).toHaveLength(3);
+  });
+
+  it('caps how many members one message mentions, the joining member first', async () => {
+    const h = harness();
+    h.tracker.refused(GUILD, CREATOR, 'category');
+    const waiting = Array.from({ length: 30 }, (_, i) => `m${i}`);
+    await h.tell('m29', waiting);
+    const mentioned = h.calls[0]!.split(' ')[2]!.split(',');
+    expect(mentioned).toHaveLength(MAX_LIMIT_MENTIONS);
+    expect(mentioned[0]).toBe('m29');
+  });
+
   it('posts nothing for a creator channel it has no refusal for', async () => {
     const h = harness();
-    await h.tracker.tellMember(CREATOR, 'alice', true);
+    await h.tell('alice', ['alice']);
     expect(h.calls).toEqual([]);
   });
 
-  it('ends the cooldowns of one server only when a channel there is deleted', () => {
+  it('takes the message down at once when a room is made', async () => {
     const h = harness();
     h.tracker.refused(GUILD, CREATOR, 'category');
-    h.tracker.refused('g2', 'creator-2', 'server');
-    h.tracker.releaseGuild(GUILD);
-    expect(h.tracker.coolingDown(CREATOR)).toBe(undefined);
-    expect(h.tracker.coolingDown('creator-2')).toBe('server');
-  });
-
-  it('deletes the message and forgets the channel once a room is made', async () => {
-    const h = harness();
-    h.tracker.refused(GUILD, CREATOR, 'category');
-    await h.tracker.tellMember(CREATOR, 'alice', true);
-    await h.tracker.resolved(CREATOR);
+    await h.tell('alice', ['alice']);
+    h.tracker.roomMade(CREATOR);
+    await h.tracker.idle();
     expect(h.calls).toEqual([`send ${CREATOR} alice`, `remove ${CREATOR} m1`]);
-    expect(h.tracker.coolingDown(CREATOR)).toBe(undefined);
-    expect(h.tracker.refused(GUILD, CREATOR, 'category')).toBe(true);
     // The expiry timer was cancelled, so nothing is deleted twice.
     await vi.advanceTimersByTimeAsync(LIMIT_MESSAGE_TTL_MS);
+    await h.tracker.idle();
     expect(h.calls.filter((c) => c.startsWith('remove'))).toHaveLength(1);
+  });
+
+  it('deletes a post that lands after the room was made', async () => {
+    const h = harness();
+    h.tracker.refused(GUILD, CREATOR, 'category');
+    h.tracker.tellMember(CREATOR, 'alice', ['alice'], true);
+    h.tracker.roomMade(CREATOR);
+    await h.tracker.idle();
+    expect(h.calls).toEqual([`send ${CREATOR} alice`, `remove ${CREATOR} m1`]);
+  });
+
+  describe('release', () => {
+    const categories: Record<string, string> = { [CREATOR]: 'cat-a', 'creator-2': 'cat-b' };
+    const categoryOf = (id: string) => categories[id];
+
+    it('ends a full category only for a channel deleted from that category', () => {
+      const h = harness();
+      h.tracker.refused(GUILD, CREATOR, 'category');
+      h.tracker.refused(GUILD, 'creator-2', 'category');
+      expect(h.tracker.release(GUILD, 'cat-b', categoryOf)).toEqual(['creator-2']);
+      expect(h.tracker.isCoolingDown(CREATOR)).toBe(true);
+      expect(h.tracker.isCoolingDown('creator-2')).toBe(false);
+    });
+
+    it('ends a full server for any channel deleted there, and only there', () => {
+      const h = harness();
+      h.tracker.refused(GUILD, CREATOR, 'server');
+      h.tracker.refused('g2', 'creator-2', 'server');
+      expect(h.tracker.release(GUILD, null, categoryOf)).toEqual([CREATOR]);
+      expect(h.tracker.isCoolingDown('creator-2')).toBe(true);
+    });
+
+    it('releases a full category when either category is unknown', () => {
+      const h = harness();
+      h.tracker.refused(GUILD, CREATOR, 'category');
+      expect(h.tracker.release(GUILD, undefined, categoryOf)).toEqual([CREATOR]);
+      h.tracker.refused(GUILD, 'creator-3', 'category');
+      expect(h.tracker.release(GUILD, 'cat-z', categoryOf)).toEqual(['creator-3']);
+    });
   });
 
   it('forgets a creator channel nobody has been refused or told about for a while', () => {
@@ -158,41 +243,64 @@ describe('ChannelLimitTracker', () => {
     h.advance(LIMIT_TOLD_MS);
     h.tracker.refused(GUILD, 'creator-2', 'category');
     expect(h.tracker.snapshot()['creatorChannels']).toBe(1);
+    expect(h.settled).toEqual([CREATOR]);
   });
 
-  it('never throws when the chat refuses everything', async () => {
+  it('trims members told long ago while refusals go on', async () => {
+    const h = harness();
+    h.tracker.refused(GUILD, CREATOR, 'category');
+    await h.tell('alice', ['alice']);
+    await vi.advanceTimersByTimeAsync(LIMIT_MESSAGE_TTL_MS);
+    await h.tracker.idle();
+    h.advance(LIMIT_TOLD_MS);
+    h.tracker.refused(GUILD, CREATOR, 'category');
+    // Alice was trimmed, so the sweep finding her waiting tells her again.
+    await h.tell('alice', ['alice'], false);
+    expect(h.calls.filter((c) => c.startsWith('send'))).toHaveLength(2);
+  });
+
+  it('never throws, and never rejects, when the chat refuses everything', async () => {
     const tracker = new ChannelLimitTracker({
       chat: {
         send: () => Promise.reject(new Error('Missing Permissions')),
-        edit: () => Promise.reject(new Error('x')),
         remove: () => Promise.reject(new Error('x')),
       },
       noticesDisabled: () => Promise.reject(new Error('db down')),
       logger: fakeLogger(),
     });
+    tracker.onSettled = () => {
+      throw new Error('hook');
+    };
     tracker.refused(GUILD, CREATOR, 'server');
-    await expect(tracker.tellMember(CREATOR, 'alice', true)).resolves.toBeUndefined();
-    await expect(tracker.resolved(CREATOR)).resolves.toBeUndefined();
+    expect(() => tracker.tellMember(CREATOR, 'alice', ['alice'], true)).not.toThrow();
+    await expect(tracker.idle()).resolves.toBeUndefined();
+    expect(tracker.snapshot()['failed']).toBe(1);
+    expect(() => tracker.roomMade(CREATOR)).not.toThrow();
+    await expect(tracker.idle()).resolves.toBeUndefined();
   });
 });
 
 /** The project's copy rules, over every string this module renders. */
 describe('channel limit copy rules', () => {
   const every = [
-    channelLimitMemberMessage('123', 'category'),
-    channelLimitMemberMessage('123', 'server'),
+    channelLimitMemberMessage(['123'], 'category'),
+    channelLimitMemberMessage(['123'], 'server'),
+    channelLimitMemberMessage(['123', '456'], 'category'),
+    channelLimitMemberMessage(['123', '456'], 'server'),
   ];
 
-  it('mentions only the member, first', () => {
-    for (const msg of every) expect(msg.startsWith('<@123> ')).toBe(true);
-    for (const msg of every) expect(msg.match(/<[@#&]/g)).toHaveLength(1);
+  it('opens with the mentions and mentions nobody else', () => {
+    expect(every[0]!.startsWith('<@123> I ')).toBe(true);
+    expect(every[2]!.startsWith('<@123> <@456> I ')).toBe(true);
+    for (const msg of every) expect(msg).not.toMatch(/<[#&]|@everyone|@here/);
   });
 
   it('uses no em or en dashes, curly quotes or semicolons', () => {
     for (const msg of every) expect(msg).not.toMatch(/[—–‘’“”;]/);
   });
 
-  it('says room, not channel, for what the member was waiting for', () => {
-    for (const msg of every) expect(msg).toContain("I couldn't make your room");
+  it('says room, or rooms for several members', () => {
+    expect(every[0]).toContain("I couldn't make your room because");
+    expect(every[2]).toContain("I couldn't make your rooms because");
   });
 });
